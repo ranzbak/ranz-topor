@@ -86,3 +86,23 @@ fn without_via_cuts_the_plan_misses_the_gap() {
     assert!(lp.contains("predicted 0 violations"), "{lp}");
     assert!(!rep.violations.is_empty(), "the old model must draw into the gap: {lp}");
 }
+
+/// tw4 T2: with via cuts every refinement ends with stored via prices equal to a fresh pricing
+/// (`CapModel::via_check`). The qmtech USB corner (4 layers, planned vias, many rejected moves
+/// in the loop-local judge's serial refinement) is the case: a rejected move must restore its
+/// wires' via points with their prices (tw4t2-ae57e35: 383+ stale entries per run before).
+#[test]
+fn via_prices_stay_fresh_through_rejected_moves() {
+    use std::sync::atomic::Ordering;
+    use topor_engine::topo::refine::viacheck;
+    let path = format!("{}/tests/fixtures/qmtech-usb-crop.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses");
+    let o = Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "via_cuts": true}"#).expect("options parse");
+    viacheck::ON.store(true, Ordering::Relaxed);
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let _ = route_with(&m, &o, &ctl);
+    let (bad, n) = (viacheck::BAD.load(Ordering::Relaxed), viacheck::CHECKED.load(Ordering::Relaxed));
+    assert!(n > 0, "no priced via entry was checked: the case does not show");
+    assert_eq!(bad, 0, "{bad} stale via prices of {n}");
+}

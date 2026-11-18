@@ -82,6 +82,17 @@ pub(crate) fn keep_rule(new_wc: f64, old_wc: f64, d_oc: f64, add_vias: bool) -> 
 /// labels and panics unless labels, model arrays, end-site memo, evaluations, stream and kept
 /// moves are equal bit for bit (a refinement a stop cut is not compared). Process-wide; a test
 /// binary sets it for itself. Off = one relaxed load per refinement.
+/// CM1 check counters (tw4 T2): with [`viacheck::ON`] (or `TOPO_VIACHECK` set) every refinement
+/// with `[capacity] via_cuts` ends with [`CapModel::via_check`] and adds its result here (tests).
+#[doc(hidden)]
+pub mod viacheck {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    pub static ON: AtomicBool = AtomicBool::new(false);
+    /// Via entries whose stored price differs from a fresh pricing, and the priced entries.
+    pub static BAD: AtomicUsize = AtomicUsize::new(0);
+    pub static CHECKED: AtomicUsize = AtomicUsize::new(0);
+}
+
 pub mod shadow {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
     pub static ON: AtomicBool = AtomicBool::new(false);
@@ -410,6 +421,12 @@ pub mod meter {
     /// build (hits) and those packed again (misses).
     pub static MEMO_HIT: AtomicU64 = AtomicU64::new(0);
     pub static MEMO_MISS: AtomicU64 = AtomicU64::new(0);
+    /// tw4 T2 cycle cost: time and calls of the via-cut pricing (CM1: `reprice_vias` and the
+    /// build's via prices) and of the model builds (every `CapModel` build, the judge's included).
+    pub static VIACUT_NS: AtomicU64 = AtomicU64::new(0);
+    pub static VIACUT: AtomicU64 = AtomicU64::new(0);
+    pub static BUILD_NS: AtomicU64 = AtomicU64::new(0);
+    pub static BUILDS: AtomicU64 = AtomicU64::new(0);
     thread_local! {
         static OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -437,6 +454,11 @@ pub mod meter {
         let (mn, m) = (MOVE_NS.load(Ordering::Relaxed), MOVES.load(Ordering::Relaxed));
         let (vn, v) = (VIAPOS_NS.load(Ordering::Relaxed), VIAPOS.load(Ordering::Relaxed));
         (m, mn as f64 / 1e3 / m.max(1) as f64, v, vn as f64 / 1e3 / v.max(1) as f64)
+    }
+    /// tw4 T2: `(via-cut pricings, ms in them, model builds, ms in them)`.
+    pub fn read_cm1() -> (u64, f64, u64, f64) {
+        let ms = |a: &AtomicU64| a.load(Ordering::Relaxed) as f64 / 1e6;
+        (VIACUT.load(Ordering::Relaxed), ms(&VIACUT_NS), BUILDS.load(Ordering::Relaxed), ms(&BUILD_NS))
     }
     /// Cut model split: `(wire flushes, ms stretches, parts walked, ms walks, cuts priced, ms install)`.
     pub fn read_split() -> (u64, f64, u64, f64, u64, f64) {
@@ -919,7 +941,7 @@ impl<'a> Frame<'a> {
     /// Set the pass layers and via discs of `w` for via traversals `ks` (no pricing); appends the
     /// passes whose layer or disc changed, with their layer and disc before, to `changed`.
     /// O(passes of the wire).
-    fn apply<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], ks: &[usize], changed: &mut Vec<Changed>) {
+    fn apply<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], ks: &[usize], changed: &mut Vec<Changed>) -> Option<WireId> {
         let wi = &self.st.wires[w];
         let n = wi.passes.len();
         let d = self.wire_d[w];
@@ -952,6 +974,7 @@ impl<'a> Frame<'a> {
         };
         m.set_nosite(w, ns);
         m.set_via_k(w, ks);
+        let mut moved = false;
         if self.packer.via_cuts.is_some() && d > 0.0 {
             let pts: Vec<ViaPt> = ks
                 .iter()
@@ -967,9 +990,15 @@ impl<'a> Frame<'a> {
                     Some((t, self.packer.via_point_cached(t, wi.net, d, wi.s)))
                 })
                 .collect();
-            m.set_vpts(w, &pts);
+            moved = m.vpts(w) != pts.as_slice();
+            if moved {
+                m.set_vpts(w, &pts);
+            }
         }
         m.applied(w, ev);
+        // CM1: `w` when its via points changed (its via prices must be repriced even when no pass
+        // of it changed layer, e.g. an end site that moved or a wire without passes).
+        moved.then_some(w)
     }
 
     /// Price again the edge-layers of the passes `changed`; returns the change of the total.
@@ -978,7 +1007,7 @@ impl<'a> Frame<'a> {
     /// whose items are the same would price the same, log nothing and add nothing to the
     /// change, so leaving it out is exact (par-refine §3). Edges ascending, layers ascending, as
     /// before. O(changed passes x layers x passes of an edge).
-    fn reprice<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed]) -> f64 {
+    fn reprice<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed], moved: Option<WireId>) -> f64 {
         let nl = self.nl;
         let mut es = LAY_SCRATCH.with(|sc| std::mem::take(&mut sc.borrow_mut().es));
         es.clear();
@@ -1005,7 +1034,7 @@ impl<'a> Frame<'a> {
             }
         }
         LAY_SCRATCH.with(|sc| sc.borrow_mut().es = es);
-        delta += self.reprice_vias(m, changed);
+        delta += self.reprice_vias(m, changed, moved);
         delta + m.flush(self)
     }
 
@@ -1031,12 +1060,13 @@ impl<'a> Frame<'a> {
     /// their triangles (a gap cut's crossers, a via-to-via partner and a pair's crossers all lie
     /// in the via triangle's vertex star, and that relation is symmetric). Returns the change of
     /// the total (weight 1). O(owners x their vias x cuts x crossers).
-    fn reprice_vias<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed]) -> f64 {
-        if self.packer.via_cuts.is_none() || changed.is_empty() {
+    fn reprice_vias<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed], moved: Option<WireId>) -> f64 {
+        if self.packer.via_cuts.is_none() || (changed.is_empty() && moved.is_none()) {
             return 0.0;
         }
+        let t0 = std::time::Instant::now();
         let st = self.st;
-        let mut ws: Vec<WireId> = changed.iter().map(|&(p, _, _)| st.passes[p].wire).collect();
+        let mut ws: Vec<WireId> = changed.iter().map(|&(p, _, _)| st.passes[p].wire).chain(moved).collect();
         ws.sort_unstable();
         ws.dedup();
         let mut owners: Vec<WireId> = Vec::new();
@@ -1057,6 +1087,7 @@ impl<'a> Frame<'a> {
                 m.set_cost(i, c, 0.0);
             }
         }
+        meter::add(&meter::VIACUT_NS, &meter::VIACUT, t0);
         delta
     }
 
@@ -1110,10 +1141,8 @@ impl<'a> Frame<'a> {
             tot.count += o.count;
             tot.graded += o.graded;
             // Via-to-via cuts: the partners in the via triangle's vertex star.
-            let mut us: Vec<WireId> = g.tris.iter().flat_map(|&tt| st.tri_trav[tt].iter().map(|x| x.0)).filter(|&u| u > w).collect();
-            us.sort_unstable();
-            us.dedup();
-            for u in us {
+            // (Every partner of another net traverses the star, so it is a chord wire.)
+            for &u in &g.wires[g.wires.partition_point(|&u| u <= w)..] {
                 let ui = &st.wires[u];
                 let du = self.wire_d[u];
                 if !ui.alive || du <= 0.0 || ui.net == wi.net {
@@ -1159,8 +1188,8 @@ impl<'a> Frame<'a> {
                 let t0 = std::time::Instant::now();
                 ks[i] = k;
                 ch.clear();
-                self.apply(m, w, ev, &ks, &mut ch);
-                run += self.reprice(m, &ch);
+                let mv = self.apply(m, w, ev, &ks, &mut ch);
+                run += self.reprice(m, &ch, mv);
                 m.viapos(t0);
                 let r = self.rank(&*m, w, k);
                 let key = (r.0, (run * 1e3).round() as i64, r.1, r.2, r.3);
@@ -1171,8 +1200,8 @@ impl<'a> Frame<'a> {
             let k = best.map_or(cur, |b| b.1);
             ks[i] = k;
             ch.clear();
-            self.apply(m, w, ev, &ks, &mut ch);
-            self.reprice(m, &ch);
+            let mv = self.apply(m, w, ev, &ks, &mut ch);
+            self.reprice(m, &ch, mv);
         }
     }
 
@@ -1186,8 +1215,8 @@ impl<'a> Frame<'a> {
         let moved: Vec<usize> = (0..iv.len()).filter(|&i| oiv.get(i) != Some(&iv[i])).collect();
         m.set_via_iv(w, iv);
         let mut ch = Vec::new();
-        self.apply(m, w, ev, &ks, &mut ch);
-        self.reprice(m, &ch);
+        let mv = self.apply(m, w, ev, &ks, &mut ch);
+        self.reprice(m, &ch, mv);
         self.optimise(m, w, ev, &moved);
     }
 
@@ -1427,6 +1456,7 @@ impl<'a> CapModel<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool, only: Option<&[bool]>) -> Self {
+        let tb = std::time::Instant::now();
         let used = |w: WireId| only.is_none_or(|o| o.get(w).copied().unwrap_or(false));
         let nl = st.proj.n_layers;
         let nw = st.wires.len();
@@ -1460,15 +1490,17 @@ impl<'a> CapModel<'a> {
                 let ks = fx.default_ks(&mut ms, w, ev, &iv, None);
                 ms.set_via_iv(w, iv);
                 ch.clear();
-                fx.apply(&mut ms, w, ev, &ks, &mut ch);
+                let _ = fx.apply(&mut ms, w, ev, &ks, &mut ch);
             }
         }
         m.price_all();
         if packer.via_cuts.is_some() {
+            let t0 = std::time::Instant::now();
             for w in (0..nw).filter(|&w| st.wires[w].alive && used(w)) {
                 let c = m.fx.price * m.fx.via_over(&m.a, w).graded;
                 m.a.cost[m.fx.vbase + w] = c;
             }
+            meter::add(&meter::VIACUT_NS, &meter::VIACUT, t0);
         }
         {
             let (fx, mut ms) = m.master();
@@ -1481,6 +1513,7 @@ impl<'a> CapModel<'a> {
                 fx.optimise(&mut ms, w, ev, &all);
             }
         }
+        meter::add(&meter::BUILD_NS, &meter::BUILDS, tb);
         m
     }
 
@@ -1833,9 +1866,14 @@ pub fn refine_only(
         super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
     }
     stats.after = cm.overfull();
-    if cm.fx.packer.via_cuts.is_some() && std::env::var_os("TOPO_VIACHECK").is_some() {
+    let vc_env = std::env::var_os("TOPO_VIACHECK").is_some();
+    if cm.fx.packer.via_cuts.is_some() && (vc_env || viacheck::ON.load(std::sync::atomic::Ordering::Relaxed)) {
         let (bad, n) = cm.via_check();
-        eprintln!("VIACHECK refine: {bad} mismatches of {n} priced via entries");
+        viacheck::BAD.fetch_add(bad, std::sync::atomic::Ordering::Relaxed);
+        viacheck::CHECKED.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        if vc_env {
+            eprintln!("VIACHECK refine: {bad} mismatches of {n} priced via entries");
+        }
     }
     stats.memo = memo_hash(&cm.a.end_sites);
     if cm.cut.is_none() && only.is_none() {
@@ -2018,6 +2056,9 @@ fn try_move_in(
         iv: Vec<(usize, usize)>,
         ks: Vec<usize>,
         nosite: usize,
+        // CM1: the via points (Frame::apply sets them; a rejected move restores them with the
+        // via prices, or the stored prices no longer match the points: tw4 T2 VIACHECK).
+        pts: Vec<ViaPt>,
     }
     let snaps: Vec<Snap> = wires
         .iter()
@@ -2028,6 +2069,7 @@ fn try_move_in(
             iv: cm.via_iv[w].clone(),
             ks: cm.via_k[w].clone(),
             nosite: cm.nosite[w],
+            pts: cm.vpts[w].clone(),
         })
         .collect();
     let old_ns: usize = wires.iter().map(|&w| cm.nosite[w]).sum();
@@ -2086,6 +2128,7 @@ fn try_move_in(
         cm.via_iv[s.w] = s.iv;
         cm.via_k[s.w] = s.ks;
         cm.nosite[s.w] = s.nosite;
+        cm.vpts[s.w] = s.pts;
     }
     for (&((w, i), _), &l) in mv.iter().zip(&old_lab) {
         evl[w][i].2 = l;

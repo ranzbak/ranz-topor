@@ -72,7 +72,14 @@ case ${1:-} in
     u t2-qr 4 "r16s0:qmtech:2" "r16s0v:qmtech:2"
     u t2-s 4 "JK:esp JK:wiccon JK:eprom" "JKv:esp JKv:wiccon JKv:eprom" "JKv:esp:4" "r16s0:wiccon r16s0v:wiccon"
     u t2-e 4 "r16s0:esp r16s1:esp" "r16s0v:esp r16s1v:esp" "r16s2:esp" "r16s2v:esp"
-    wait; note "all done" ;;
+    wait
+    # mutant: a rejected move that keeps its trial via points must fail the freshness test
+    sed -i 's/^        cm.vpts\[s.w\] = s.pts;$/        \/\/ mutant/' engine/src/topo/refine.rs
+    if grep -q "// mutant" engine/src/topo/refine.rs; then
+      ( cd engine && cargo test --release --test topo_cm1_room via_prices 9>&- > $R/mutant.log 2>&1; note "mutant (expect != 0) rc $?" )
+    else note "mutant not applied"; fi
+    git checkout engine/src/topo/refine.rs
+    note "all done" ;;
   hooks)
     # TW4 unit 1 (meter hooks): targeted tests, then rounds=1 copper (must equal the tw4b base) + the new compass items
     ( cd engine && cargo test --release --test topo_compass --test topo_exits 9>&- > $R/cargo.log 2>&1; note "cargo rc $?" )

@@ -3798,7 +3798,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             // tw4 T2: with the via cuts, every wire their changed terms involve (both states).
             let or = |a: &mut Vec<bool>, b: Vec<bool>| a.iter_mut().zip(b).for_each(|(x, y)| *x |= y);
             if opts.via_cuts {
-                or(&mut w_after, layers::via_neighbourhood(st, &free));
+                or(&mut w_after, layers::via_neighbourhood(st, &free, &lr.events));
             }
             let after = st.take_topology();
             st.restore(saved.clone());
@@ -3806,7 +3806,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let free_b: Vec<bool> = (0..nb).map(|w| free.get(w).copied().unwrap_or(false) || gone.contains(&w)).collect();
             let mut w_before = layers::neighbourhood(st, &free_b);
             if opts.via_cuts {
-                or(&mut w_before, layers::via_neighbourhood(st, &free_b));
+                or(&mut w_before, layers::via_neighbourhood(st, &free_b, &prev.events));
             }
             let wm: Vec<bool> = (0..nw.max(nb)).map(|w| w_after.get(w).copied().unwrap_or(false) || w_before.get(w).copied().unwrap_or(false)).collect();
             let cap_of = |st: &State, evl: &[Vec<(usize, f64, i32)>], only: &[bool]| -> (usize, f64) {
@@ -5345,6 +5345,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // Cost per move (shopping list 3.1 measurement; process-wide sums so far).
         let (mv_n, mv_us, vp_n, vp_us) = super::refine::meter::read();
         m["move_cost"] = serde_json::json!({"moves": mv_n, "us_per_move": (mv_us * 10.0).round() / 10.0, "via_positions": vp_n, "us_per_via_position": (vp_us * 10.0).round() / 10.0});
+        let (vc_n, vc_ms, bd_n, bd_ms) = super::refine::meter::read_cm1();
+        m["move_cost"]["via_cut"] = serde_json::json!({"calls": vc_n, "ms_in": vc_ms.round(), "builds": bd_n, "ms_builds": bd_ms.round()});
         // par-refine: the lane executor's epochs, lane-epochs, candidates evaluated past a kept one
         // (wasted) and again for an end-site fill (redone); the build memo's hits and misses.
         {
