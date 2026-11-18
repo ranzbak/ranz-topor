@@ -55,7 +55,9 @@ def test_drcloop_matches_run_bench_on_fixture(fixture_board, tmp_path, monkeypat
         "by_type_preexisting": {}, "track_dangling": 2, "via_dangling": 1, "unconnected_items": 1}
     assert r["drc_loop"] == {"rounds": 1, "pinned": {}, "spots": [], "budget_exhausted": False}
     assert r["zero_slack"] == {"status": "not run", "wires": []}
-    assert (len(rep["items"]), r["routed_items"], r["unchanged_items"], r["replaced"]) == (7, 7, 0, 0)
+    # 8 items, not 7, since realise = "erbs" is the default (TW2): one wire ends in an octilinear tail, one more
+    # segment and +0.14 mm; not a defect (lead, verify V1 2026-11-18).
+    assert (len(rep["items"]), r["routed_items"], r["unchanged_items"], r["replaced"]) == (8, 8, 0, 0)
     # golden digest carries the engine (IPC) net codes: GND 1, SIG 2, VCC 3 (pcbnew file order was VCC 1, SIG 2, GND 3)
     assert _digest(rep["items"]) == "418d48958e66ab45f7c8b7f5e494d45280aef5c39451dfa928a55d80d1f9d0ff"
 
