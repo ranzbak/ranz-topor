@@ -180,6 +180,10 @@ pub struct NetRouteReport {
 #[derive(Clone, Debug, Serialize)]
 pub struct RouteResult {
     pub items: Vec<Item>,
+    /// Uuids of existing (kept) tracks the new copper replaces: the tidy merged each into the new
+    /// segment that continues it straight on (`[output] cleanup_safe`, as KiCad's Cleanup "merge
+    /// co-linear tracks" would). The caller removes them in the same commit as it writes `items`.
+    pub remove_uuids: Vec<String>,
     pub connections: Vec<ConnReport>,
     pub nets: Vec<NetRouteReport>,
     pub connections_total: usize,
@@ -706,6 +710,7 @@ fn finish_copper(model: &BoardModel, opts: &Options, r: &mut RouteResult) {
             r.item_conn.resize(r.items.len(), usize::MAX);
         }
         let st = crate::topo::tidy::tidy(model, &mut r.items, &mut r.item_conn);
+        r.remove_uuids.extend(st.replaced_kept.iter().cloned());
         if st.changed() {
             r.warnings.push(st.line());
         }
@@ -810,6 +815,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
     let failed = reports.len();
     RouteResult {
         items: Vec::new(),
+        remove_uuids: Vec::new(),
         connections_total: reports.len(),
         connections: reports,
         nets,

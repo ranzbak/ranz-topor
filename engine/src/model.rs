@@ -1169,6 +1169,19 @@ pub struct Options {
     /// closer than this (mm) to a pad of the copper it joins is not used; the pad is the junction.
     /// 0 (default) = no such distance: the `junction_angle` factor prices a T next to a pad.
     pub junction_pad_mm: f64,
+    /// Topological core (exist-term, `topor.toml [search] dangling_lead_mm`): the length (mm) of
+    /// the lead that continues a dangling end along its direction (`dangling_ends = "continue"`),
+    /// planned before the topology and shortened to the room ahead; 0 = one pitch (the
+    /// connection's width + clearance).
+    pub dangling_lead_mm: f64,
+    /// Topological core (exist-term r4, `topor.toml [search] dangling_lead_via`): where the plan
+    /// changes layer at a continued dangling end's lead end, the lead ends at the via, placed where
+    /// it fits on the lead with every clearance, the hole clearance and the edge clearance: the
+    /// net class via first, a smaller Board Setup size (pi x drill >= the trace width) only where
+    /// the net class via fits nowhere on the lead (`topo::board::KeptEndOut::via_end`). Leads that need no via keep their
+    /// track-only length. Default on; off = the via goes to the plan's site, the lead keeps its
+    /// track-only length.
+    pub dangling_lead_via: bool,
     /// Topological core (D6b, `topor.toml [search] fuse_branches`): after the drawing, a trace
     /// that leaves a junction or a pad beside another trace of its net leaves that trace's copper
     /// where the two part instead (one copper, a T there), when that is cheaper by length and the
@@ -1556,6 +1569,8 @@ impl Default for Options {
             loop_crossing: 0.25,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
+            dangling_lead_mm: 0.0,
+            dangling_lead_via: true,
             fuse_branches: true,
             fuse_pour_check: true,
             topo_rounds: 30,

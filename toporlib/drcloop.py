@@ -47,6 +47,9 @@ class LoopResult:
     zero_slack: dict
     budget_exhausted: bool
     router_s: float
+    # hand copper the last round's items replace (the router's "remove_uuids": a kept track merged into the new
+    # segment that continues it, exist-term r2); the caller removes it with the same commit
+    remove_uuids: list = field(default_factory=list)
 
 
 def _zero_slack_names(report: dict | None) -> list[str]:
@@ -252,4 +255,5 @@ def route_with_drc_loop(
         pinned.update(more)
     return LoopResult(router_report=router_report, items=items, created=created,
                       routed_drc=routed_drc, rounds=rounds, pinned=pinned, spots=spots,
-                      zero_slack=zero_slack, budget_exhausted=budget_exhausted, router_s=router_s)
+                      zero_slack=zero_slack, budget_exhausted=budget_exhausted, router_s=router_s,
+                      remove_uuids=remove_uuids)

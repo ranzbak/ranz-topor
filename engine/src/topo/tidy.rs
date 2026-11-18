@@ -56,6 +56,9 @@ pub struct TidyStats {
     pub t_split: usize,
     pub t_moved: usize,
     pub merged: usize,
+    /// Uuids of the kept (hand) tracks a new collinear segment took over (step 4a): the caller
+    /// removes them with the same commit (`RouteResult::remove_uuids`).
+    pub replaced_kept: Vec<String>,
 }
 
 impl TidyStats {
@@ -66,8 +69,8 @@ impl TidyStats {
     /// One report line.
     pub fn line(&self) -> String {
         format!(
-            "cleanup-safe output (KiCad's Cleanup Tracks & Vias leaves it unchanged): {} null and {} duplicate segments dropped, {} segments a pad of their net makes redundant dropped, {} T junctions made exact vertices ({} track ends moved onto the trunk), {} collinear segments merged",
-            self.null, self.duplicate, self.in_pad, self.t_split, self.t_moved, self.merged
+            "cleanup-safe output (KiCad's Cleanup Tracks & Vias leaves it unchanged): {} null and {} duplicate segments dropped, {} segments a pad of their net makes redundant dropped, {} T junctions made exact vertices ({} track ends moved onto the trunk), {} collinear segments merged, {} existing tracks merged into the new segment that continues them straight on (replaced in the same step)",
+            self.null, self.duplicate, self.in_pad, self.t_split, self.t_moved, self.merged, self.replaced_kept.len()
         )
     }
 }
@@ -516,6 +519,91 @@ pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) ->
         }
     }
 
+    // 4a. a new segment that continues a kept (hand) track straight on, e.g. the lead of a
+    // continued dangling end (exist-term): KiCad's cleaner merges the two
+    // (`mergeCollinearSegments`: same width, `ApproxCollinear`, the shared end touching nothing
+    // else, neither locked), so the output does it already: the new segment takes the kept
+    // track's far end and the kept track is listed in `replaced_kept` (the caller removes it in
+    // the same undo step). Before step 4, so a lead merged here joins its collinear run there.
+    // Straight unlocked kept tracks only; one merge per kept track (a second continuation at its
+    // other end meets the merged segment, a new-new joint for step 4).
+    let mut gone: HashSet<usize> = HashSet::new();
+    {
+        let kseg = |k: &crate::model::KeptItem| -> Option<(P, P)> {
+            match k.prim {
+                TrackPrim::Seg { a, b } => Some(((i64::from(a.x), -i64::from(a.y)), (i64::from(b.x), -i64::from(b.y)))),
+                TrackPrim::Arc { .. } => None,
+            }
+        };
+        let kends = |k: &crate::model::KeptItem| -> [P; 2] {
+            let (a, b) = match k.prim {
+                TrackPrim::Seg { a, b } => (a, b),
+                TrackPrim::Arc { start, end, .. } => (start, end),
+            };
+            [(i64::from(a.x), -i64::from(a.y)), (i64::from(b.x), -i64::from(b.y))]
+        };
+        // does copper other than new item `i` and kept track `ki` of (net, layer) touch point `j`
+        // (an end there, or its body within half its width: KiCad's connectivity at the joint)?
+        let touched = |pairs: &[(Item, usize)], gone: &HashSet<usize>, net: i32, layer: u32, j: P, i: usize, ki: usize| -> bool {
+            let jp = Vec2 { x: j.0 as f64, y: j.1 as f64 };
+            let near = |a: P, b: P, w: i64| {
+                let (fa, fb) = (Vec2 { x: a.0 as f64, y: a.1 as f64 }, Vec2 { x: b.0 as f64, y: b.1 as f64 });
+                crate::topo::draw::seg_seg_dist(jp, jp, fa, fb) <= 0.5 * w as f64
+            };
+            pairs.iter().enumerate().any(|(x, (it, _))| {
+                x != i && matches!(it, Item::Track(t) if t.net == net && t.layer == layer && match t.prim {
+                    TrackPrim::Seg { a, b } => near(p_of(a), p_of(b), t.width),
+                    TrackPrim::Arc { start, end, .. } => p_of(start) == j || p_of(end) == j,
+                })
+            }) || model.kept.iter().enumerate().any(|(x, k)| {
+                x != ki && !gone.contains(&x) && k.net == net && k.layer == layer && match kseg(k) {
+                    Some((a, b)) => near(a, b, k.width),
+                    None => kends(k).contains(&j),
+                }
+            })
+        };
+        for (ki, k) in model.kept.iter().enumerate() {
+            let Some((ka, kb)) = kseg(k) else { continue };
+            if k.locked || ka == kb {
+                continue;
+            }
+            for (j, kfar) in [(ka, kb), (kb, ka)] {
+                // the one new segment of the net, layer and width that ends at `j`
+                let at_j: Vec<usize> = pairs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (it, _))| matches!(it, Item::Track(t) if t.net == k.net && t.layer == k.layer))
+                    .filter(|(_, (it, _))| match it {
+                        Item::Track(TrackItem { prim: TrackPrim::Seg { a, b }, .. }) => p_of(*a) == j || p_of(*b) == j,
+                        Item::Track(TrackItem { prim: TrackPrim::Arc { start, end, .. }, .. }) => p_of(*start) == j || p_of(*end) == j,
+                        _ => false,
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let [i] = at_j[..] else { continue };
+                let (Item::Track(t), Some(si)) = (&pairs[i].0, seg_of(&pairs[i].0)) else { continue };
+                if t.width != k.width || si.0 == si.1 {
+                    continue;
+                }
+                if via_pts.get(&k.net).is_some_and(|vs| vs.iter().any(|(p, ls)| *p == j && via_on(ls, k.layer, &cu))) || in_own_pad(k.net, k.layer, j, &mut pad_sk) {
+                    continue;
+                }
+                if !approx_collinear(si, (ka, kb)) || touched(&pairs, &gone, k.net, k.layer, j, i, ki) {
+                    continue;
+                }
+                let ifar = if si.0 == j { si.1 } else { si.0 };
+                let (d1, d2) = ((kfar.0 - j.0, kfar.1 - j.1), (ifar.0 - j.0, ifar.1 - j.1));
+                if i128::from(d1.0) * i128::from(d2.0) + i128::from(d1.1) * i128::from(d2.1) >= 0 {
+                    continue; // a fold-back is no continuation
+                }
+                set_seg(&mut pairs[i].0, kfar, ifar);
+                gone.insert(ki);
+                st.replaced_kept.push(k.uuid.clone());
+                break;
+            }
+        }
+    }
+
     // 4. collinear consecutive segments: merge chains through joints that touch nothing else
     loop {
         let mut joint: HashMap<(i32, u32, P), Vec<usize>> = HashMap::new();
@@ -550,8 +638,8 @@ pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) ->
             if via_pts.get(&net).is_some_and(|vs| vs.iter().any(|(p, ls)| *p == j && via_on(ls, layer, &cu))) {
                 continue;
             }
-            if model.kept.iter().any(|k| {
-                k.net == net && k.layer == layer && {
+            if model.kept.iter().enumerate().any(|(ki, k)| {
+                !gone.contains(&ki) && k.net == net && k.layer == layer && {
                     let (a, b) = match k.prim {
                         TrackPrim::Seg { a, b } => (a, b),
                         TrackPrim::Arc { start, end, .. } => (start, end),
@@ -774,6 +862,73 @@ mod tests {
         // a bend is no merge
         let (_, st) = run(&m, vec![seg(1, (0, 0), (1_000_000, 0)), seg(1, (1_000_000, 0), (2_000_000, 1_000_000))]);
         assert_eq!(st.merged, 0);
+    }
+
+    /// `m` with kept tracks `(uuid, KiCad-frame a, b, width, locked)` of net 1 on layer 0.
+    fn with_kept(mut m: BoardModel, kept: &[(&str, P, P, i64, bool)]) -> BoardModel {
+        let k = |p: P| IVec2 { x: p.0 as i32, y: -p.1 as i32 };
+        m.kept = kept.iter().map(|&(u, a, b, w, locked)| crate::model::KeptItem { uuid: u.into(), net: 1, layer: 0, width: w, prim: TrackPrim::Seg { a: k(a), b: k(b) }, locked }).collect();
+        m
+    }
+
+    #[test]
+    fn a_lead_that_continues_a_kept_track_replaces_it() {
+        // exist-term r2 (verifier F5: KiCad's Cleanup "merge co-linear tracks" found 18 leads
+        // continuing their hand tracks): the new segment takes the kept track's far end and the
+        // kept track is listed for removal; a collinear run after the lead joins it in step 4.
+        let w = 250_000;
+        let m = with_kept(BoardModel::default(), &[("k", (0, 0), (1_000_000, 0), w, false)]);
+        let (out, st) = run(&m, vec![seg(1, (1_000_000, 0), (1_450_000, 0)), seg(1, (1_450_000, 0), (3_000_000, 0)), seg(1, (3_000_000, 0), (3_000_000, 1_000_000))]);
+        assert_eq!(st.replaced_kept, vec!["k".to_string()]);
+        assert_eq!(st.merged, 1, "the run after the lead");
+        assert_eq!(segs(&out), vec![((0, 0), (3_000_000, 0)), ((3_000_000, 0), (3_000_000, 1_000_000))]);
+        // a vertical kept track (KiCad frame y down), the lead going on down
+        let m = with_kept(BoardModel::default(), &[("v", (0, 0), (0, 1_000_000), w, false)]);
+        let (out, st) = run(&m, vec![seg(1, (0, 1_000_000), (0, 1_200_000))]);
+        assert_eq!(st.replaced_kept, vec!["v".to_string()]);
+        assert_eq!(segs(&out), vec![((0, 0), (0, 1_200_000))]);
+        // continued at both ends: one segment over all three, one replacement
+        let m = with_kept(BoardModel::default(), &[("k", (0, 0), (1_000_000, 0), w, false)]);
+        let (out, st) = run(&m, vec![seg(1, (1_000_000, 0), (1_400_000, 0)), seg(1, (-300_000, 0), (0, 0))]);
+        assert_eq!(st.replaced_kept, vec!["k".to_string()]);
+        assert_eq!(segs(&out), vec![((-300_000, 0), (1_400_000, 0))]);
+    }
+
+    #[test]
+    fn a_kept_track_stays_where_kicad_would_not_merge_it() {
+        // every condition of mergeCollinearSegments that keeps the two apart keeps the kept track
+        let w = 250_000;
+        let lead = || seg(1, (1_000_000, 0), (1_400_000, 0));
+        let kept = |locked: bool, width: i64| with_kept(BoardModel::default(), &[("k", (0, 0), (1_000_000, 0), width, locked)]);
+        let none = |m: &BoardModel, items: Vec<Item>, why: &str| {
+            let (_, st) = run(m, items);
+            assert!(st.replaced_kept.is_empty(), "{why}: {st:?}");
+        };
+        none(&kept(true, w), vec![lead()], "locked");
+        none(&kept(false, 200_000), vec![lead()], "another width");
+        none(&kept(false, w), vec![seg(1, (1_000_000, 0), (1_400_000, 300_000))], "a bend");
+        none(&kept(false, w), vec![seg(1, (1_000_000, 0), (600_000, 0))], "a fold-back");
+        none(&kept(false, w), vec![lead(), seg(1, (1_000_000, 0), (1_000_000, 900_000))], "a third track end at the joint");
+        none(&kept(false, w), vec![lead(), seg(1, (1_000_000, -500_000), (1_000_000, 500_000))], "a track body through the joint");
+        let mut m = kept(false, w);
+        m.kept.push(crate::model::KeptItem { uuid: "k2".into(), net: 1, layer: 0, width: w, prim: TrackPrim::Seg { a: IVec2 { x: 1_000_000, y: 0 }, b: IVec2 { x: 1_000_000, y: -700_000 } }, locked: false });
+        none(&m, vec![lead()], "another kept track at the joint");
+        let mut m = kept(false, w);
+        m.vias.push(crate::model::Via { uuid: "v".into(), net: 1, at: crate::model::Pt { x: 1_000_000, y: 0 }, d: 600_000, drill: 300_000, layers: vec![0, 2], free: false, locked: false });
+        none(&m, vec![lead()], "a via at the joint");
+        let mut other = seg(1, (1_000_000, 0), (1_400_000, 0));
+        if let Item::Track(t) = &mut other {
+            t.net = 2;
+        }
+        none(&kept(false, w), vec![other], "another net");
+        let mut arc = kept(false, w);
+        arc.kept[0].prim = TrackPrim::Arc { start: IVec2 { x: 0, y: 0 }, mid: IVec2 { x: 500_000, y: 100_000 }, end: IVec2 { x: 1_000_000, y: 0 } };
+        none(&arc, vec![lead()], "a kept arc");
+        let pad = with_kept(model_with_pad(1, (1_000_000, 0), 600_000, 600_000), &[("k", (0, 0), (1_000_000, 0), w, false)]);
+        // a lead that leaves the pad's reach (a shorter one is dropped by step 2 before 4a sees it)
+        let (out, st) = run(&pad, vec![seg(1, (1_000_000, 0), (2_000_000, 0))]);
+        assert!(st.replaced_kept.is_empty(), "the joint in an own pad: {st:?}");
+        assert_eq!(segs(&out), vec![((1_000_000, 0), (2_000_000, 0))], "the lead stays as it is");
     }
 
     #[test]

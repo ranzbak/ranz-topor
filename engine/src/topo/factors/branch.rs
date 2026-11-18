@@ -128,6 +128,55 @@ impl Factor for JunctionAngle {
     }
 }
 
+/// exist-term: the shape of [`DanglingTurn`] at `deg` degrees off the asked direction:
+/// `1 - cos(deg)` (0 straight on, 0.29 at 45°, 1 at 90°, 2 straight back). Smooth, monotone on
+/// [0°, 180°], no cutoff.
+pub fn dangling_turn_shape(deg: f64) -> f64 {
+    1.0 - deg.to_radians().cos()
+}
+
+/// Dangling turn (exist-term, `[search] dangling_ends = "continue"`): the new copper continues a
+/// hand-started track that ends at nothing; the planned lead of `[search] dangling_lead_mm`
+/// already leaves the end along the track, and a trace that leaves the lead (or the bare end,
+/// where no lead fits) at an angle off that direction pays `weight x (width + clearance) x (1 -
+/// cos angle)`: a graded price (lead 2026-11-17: "a cost that grows with the angle off d, not a
+/// hard rule"), so the plan turns where going on straight costs more than the turn. Opt-in
+/// (default weight 0): the search takes the angle toward its first crossed edge, which for a
+/// lead lies on the lead's own copper, so the price barely steers the plan yet.
+pub struct DanglingTurn;
+
+impl Factor for DanglingTurn {
+    fn name(&self) -> &'static str {
+        "dangling_turn"
+    }
+    fn doc(&self) -> &'static str {
+        "A trace that continues a hand-started track ending at nothing ([search] dangling_ends = \"continue\") and leaves its end (or the lead of [search] dangling_lead_mm) at an angle a off the track's direction: weight x (width + clearance) x (1 - cos a): 0 straight on, 0.29 at 45°, 1 at 90°, 2 straight back."
+    }
+    fn unit(&self) -> &'static str {
+        "per mm of width + clearance at 90°"
+    }
+    fn default_weight(&self) -> f64 {
+        // Opt-in until the plan measures the turn where the trace really leaves the lead (the
+        // first crossings lie on the lead's own copper): 0 = off; the lead gives the tangent.
+        0.0
+    }
+    fn default_report(&self) -> Report {
+        Report::Off
+    }
+    fn amount(&self, ev: &Event) -> f64 {
+        match *ev {
+            Event::DanglingTurn { deg, ws_mm, .. } => ws_mm * dangling_turn_shape(deg),
+            _ => 0.0,
+        }
+    }
+    fn describe(&self, ev: &Event) -> String {
+        match *ev {
+            Event::DanglingTurn { at, deg, .. } => format!("trace leaves a continued dangling end at {deg:.0}° off its direction at ({:.3}, {:.3}) mm", at.x / 1e6, -at.y / 1e6),
+            _ => String::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::junction_psi;

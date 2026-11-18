@@ -11,7 +11,7 @@
 
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::route::route;
-use topor_engine::topo::core::{fuse_line, CYCLES_MEMORY, FEEDBACK_IGNORED};
+use topor_engine::topo::core::{fuse_line, polish_line, CYCLES_MEMORY, FEEDBACK_IGNORED};
 
 fn gap() -> BoardModel {
     BoardModel::from_json(include_str!("fixtures/fx-narrow-gap.json")).expect("fixture parses")
@@ -61,6 +61,11 @@ fn fuse_line_keeps_length_and_angle_price_apart() {
     assert!(l.contains(": 0.3 mm added in length, junction-angle price ([factors] junction_angle) lower by 1281556.0"), "{l}");
     assert!(fuse_line(&[(0.5 - 2.0, 0.5)]).contains("0.5 mm saved in length, junction-angle price ([factors] junction_angle) higher by 2.0"));
     assert!(fuse_line(&[]).starts_with("fuse after drawing: 0 trace ends moved onto their trunk's copper where the two part: 0.0 mm saved in length, junction-angle price ([factors] junction_angle) lower by 0.0"));
+    // The polish line says the length its elbows and Zs changed, "added" (never shorter) or
+    // "saved" by its sign.
+    assert!(polish_line(34, 3.013).ends_with(": 34 segments not at 0/45/90 degrees (fused branch ends) redrawn as an elbow or Z: 3.0 mm added in length"));
+    assert!(polish_line(0, 0.0).ends_with(": 0.0 mm added in length"));
+    assert!(polish_line(1, -0.26).ends_with(": 0.3 mm saved in length"));
 }
 
 #[test]
@@ -78,25 +83,36 @@ fn the_cycles_memory_is_kept_with_the_cycles_loop_only() {
 #[test]
 fn the_fuse_line_of_a_routed_board_reports_the_length_the_fuse_saved() {
     // V-2 (verify 2026-11-18): the fuse line as the route writes it, not only `fuse_line` alone.
-    // The esp USB crop fuses 15 trace ends: the mm the line reports saved are the copper the fuse
-    // took away, so they match the routed length with `fuse_branches` off minus on (the steps
-    // after the fuse move a little copper too: 7.7 mm reported, 6.6 mm measured, 2026-11-18), and
-    // the junction-angle price part is the rest of the price gain, not 0.
+    // The esp USB crop fuses 14 trace ends: the mm the line reports saved are the copper the fuse
+    // took away, and the octilinear polish after it gives part of it back (a fused end at a free
+    // angle becomes a longer elbow or Z: 7.1 mm saved, 1.0 mm added; with 48 fuses 8.5 and 3.0,
+    // hotfix-main 2026-11-18). So the fuse's saving minus the polish's addition matches the routed
+    // length with `fuse_branches` off minus on (rounding of the 0.1 mm lines only), and the
+    // junction-angle price part is the rest of the price gain, not 0.
     let m = BoardModel::from_json(include_str!("fixtures/esp-rust-board-usb-crop.json")).expect("fixture parses");
     let wall = if cfg!(debug_assertions) { 900.0 } else { 120.0 };
     let on = route(&m, &opts(&format!(r#"{{"runs": 1, "wall_clock_s": {wall}}}"#)));
     let off = route(&m, &opts(&format!(r#"{{"runs": 1, "wall_clock_s": {wall}, "fuse_branches": false}}"#)));
-    let l = on.warnings.iter().find(|w| w.starts_with("fuse after drawing: ")).expect("fuse line").clone();
-    let num = |after: &str| -> f64 {
+    let line = |r: &topor_engine::route::RouteResult, start: &str| -> String { r.warnings.iter().find(|w| w.starts_with(start)).unwrap_or_else(|| panic!("{start}: {:?}", r.warnings)).clone() };
+    let num = |l: &str, after: &str| -> f64 {
         let t = l.split(after).nth(1).unwrap_or_else(|| panic!("{after}: {l}"));
         t.trim_start().split(|c: char| c != '.' && !c.is_ascii_digit()).next().and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("{after}: {l}"))
     };
-    let n = num("fuse after drawing: ");
-    let saved = num("where the two part: ");
-    let angle = num(") lower by ");
+    let l = line(&on, "fuse after drawing: ");
+    let n = num(&l, "fuse after drawing: ");
+    let saved = num(&l, "where the two part: ");
+    let angle = num(&l, ") lower by ");
     assert!(n >= 1.0 && l.contains(" mm saved in length"), "{l}");
+    // the polish only lengthens: "added" on both routes
+    let polished = |r| {
+        let p = line(r, "octilinear polish after drawing: ");
+        assert!(p.ends_with(" mm added in length"), "{p}");
+        num(&p, "elbow or Z: ")
+    };
+    let (pol_on, pol_off) = (polished(&on), polished(&off));
     let measured = (off.total_length_nm - on.total_length_nm) as f64 / 1e6;
     assert!(measured > 0.0, "fuse on {} nm, off {} nm", on.total_length_nm, off.total_length_nm);
-    assert!((saved - measured).abs() <= 0.25 * measured + 0.5, "reported {saved} mm saved, measured {measured:.2} mm: {l}");
+    let net = saved - pol_on + pol_off;
+    assert!((net - measured).abs() <= 0.2 + 0.02 * measured, "reported {saved} mm saved by the fuse, {pol_on} mm added by the polish (off: {pol_off}), measured {measured:.2} mm: {l}");
     assert!(angle > 0.0, "{l}");
 }

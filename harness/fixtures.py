@@ -56,6 +56,8 @@ def make_fixture_board(
     b_pads=False,
     pour_gap_pad=False,
     dangling_trace=False,
+    fp_clearance_mm=None,
+    pad_clearance_mm=None,
 ) -> Path:
     """Synthetic board. `b_pads`: SIG pads "2"/"3" are SMD on B.Cu (SIG then needs a via to reach
     the F.Cu pads). `pour_gap_pad`: GND SMD pad "9" on F.Cu at (10, 30) that the B.Cu GND pour
@@ -109,6 +111,8 @@ def make_fixture_board(
         fp.SetReference("U1")
         fp.SetValue("U1")
         fp.SetPosition(_v(0, 0))
+        if fp_clearance_mm is not None:
+            fp.SetLocalClearance(int(round(fp_clearance_mm * 1e6)))  # footprint-level override (KiCad inherits it into every pad without its own)
         b.Add(fp)
         spec = [
             ("1", pcbnew.PAD_SHAPE_CIRCLE, (1.6, 1.6), (20, 20), "VCC", dict(drill=(0.8, 0.8))),
@@ -124,6 +128,8 @@ def make_fixture_board(
             if b_pads and num in ("2", "3"):
                 kw = {**kw, "back": True}
             p = _add_pad(fp, num, shp, size, pos, nets[net], **kw)
+            if pad_clearance_mm is not None and num == "3":
+                p.SetLocalClearance(int(round(pad_clearance_mm * 1e6)))  # pad override wins over the footprint's
             if shp == pcbnew.PAD_SHAPE_ROUNDRECT:
                 p.SetRoundRectRadiusRatio(0.25)  # 0.25 mm on the 1.0 mm short side
             if shp == pcbnew.PAD_SHAPE_TRAPEZOID:

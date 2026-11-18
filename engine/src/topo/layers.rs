@@ -881,6 +881,58 @@ pub fn partner_faults(st: &State, rep: &LayerReport) -> Vec<(WireId, usize, (Wir
     out
 }
 
+/// loop-local (debug, tests): the different-net crossings of `st` that `rep` neither layers as an
+/// event pair nor counts unlayerable while both traversals sit on one equal layer (an unpriced
+/// short), as (all of them, those between two wires `free` holds). After an exact local layering
+/// both are 0: a crossing a move changed is priced as a pair or as unlayerable (after the
+/// loop-local-verify `TOPO_LLV` count, 2026-11-18). O(crossings x log).
+pub fn unpriced_crossings(st: &State, rep: &LayerReport, bottom: i32, free: Option<&[bool]>) -> (usize, usize) {
+    let mut pairs: std::collections::BTreeSet<(usize, usize, usize, usize)> = std::collections::BTreeSet::new();
+    for (w, pl) in rep.partner.iter().enumerate() {
+        for (i, p) in pl.iter().enumerate() {
+            if let Some((w2, i2)) = *p {
+                if let (Some(a), Some(b)) = (rep.events.get(w).and_then(|e| e.get(i)), rep.events.get(w2).and_then(|e| e.get(i2))) {
+                    pairs.insert((w, a.0, w2, b.0));
+                }
+            }
+        }
+    }
+    let unl: std::collections::BTreeSet<(usize, usize)> = rep.unlayerable_w.iter().map(|&(a, b)| (a.min(b), a.max(b))).collect();
+    let ln = super::optimise::layers_now(st, &rep.events, bottom);
+    let held = |w: usize| free.is_some_and(|f| !f.get(w).copied().unwrap_or(true));
+    let (mut all, mut hh) = (0, 0);
+    for w in 0..st.wires.len() {
+        if !st.wires[w].alive {
+            continue;
+        }
+        for x in st.crossings(w) {
+            let o = x.other;
+            if o <= w || st.wires[o].net == st.wires[w].net || pairs.contains(&(w, x.k, o, x.other_k)) || unl.contains(&(w, o)) {
+                continue;
+            }
+            let (a, b) = (ln[w].get(x.k).copied().unwrap_or(0), ln[o].get(x.other_k).copied().unwrap_or(0));
+            if a.count_ones() == 1 && a == b {
+                all += 1;
+                hh += usize::from(held(w) && held(o));
+            }
+        }
+    }
+    (all, hh)
+}
+
+/// loop-local (debug, tests): the events a local layering would keep stale: an event of a wire
+/// `free` holds whose crossing partner in `prev` is dead in `st` (or gone past its end). The
+/// crossing no longer exists, so the held wire would keep a layer change (a via) for nothing;
+/// a judge that lays out again every wire a move killed frees those partners, so this is 0.
+/// O(events of the held wires).
+pub fn stale_held_events(st: &State, prev: &LayerReport, free: &[bool]) -> usize {
+    let dead = |t: usize| st.wires.get(t).is_none_or(|x| !x.alive);
+    (0..st.wires.len().min(prev.partner.len()))
+        .filter(|&w| st.wires[w].alive && !free.get(w).copied().unwrap_or(true))
+        .map(|w| prev.partner[w].iter().filter(|x| x.is_some_and(|(t, _)| dead(t))).count())
+        .sum()
+}
+
 /// loop-local: the free wires and every wire with a pass on an edge one of them passes (the
 /// wires whose packing a free wire's layers can change; [`assign_local`]'s capacity model).
 /// O(passes of the free wires x passes per edge).

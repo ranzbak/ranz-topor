@@ -79,3 +79,26 @@ def test_wall_clock_zero_gives_the_drc_loop_no_budget_cut():
     assert bench._drc_budget_s({"wall_clock_s": 0}) == bench.NO_BUDGET_S
     assert bench._drc_budget_s({"wall_clock_s": 600}) == 600.0
     assert bench._drc_budget_s({}) == float(bench.ENGINE_WALL_CLOCK_S)
+
+
+def test_router_remove_uuids_reach_drc_fn_and_the_loop_result():
+    """exist-term r2: hand tracks the engine's tidy merged into a new collinear segment come back as
+    the router's "remove_uuids"; the loop hands them to drc_fn (the board judged without them) and
+    returns them, so the commit removes them in the same undo step (an empty list: plain drc_fn call)."""
+    from pathlib import Path
+
+    from toporlib.drc import DrcReport
+    from toporlib.drcloop import DrcJudgement, route_with_drc_loop
+
+    empty = DrcReport(Path("x"), 0, 0.0, [], [], {})
+    for rem in (["k1", "k2"], []):
+        seen = []
+
+        def drc_fn(items, **kw):
+            seen.append(kw)
+            return DrcJudgement(empty, {})
+
+        loop = route_with_drc_loop({"nets": []}, {}, route_fn=lambda m, o: {"items": [], "remove_uuids": rem, "report": None},
+                                   drc_fn=drc_fn, base_drc=empty, orig_drc=None, budget_s=60.0, loop_cap=0)
+        assert loop.remove_uuids == rem
+        assert seen == ([{"remove_uuids": rem}] if rem else [{}])

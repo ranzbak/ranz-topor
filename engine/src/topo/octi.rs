@@ -551,6 +551,28 @@ impl Drawer<'_> {
         // Last leg of the state: unit direction and length.
         let mut last: Vec<[(Vec2, f64); ND]> = vec![[(Vec2::default(), f64::INFINITY); ND]; n];
         dist[0][8] = 0.0;
+        // exist-term r4 (the r3 I2C_SDA fold-back): a run that starts at a continued dangling
+        // end's lead end goes on from the hand track, so it arrives there along the lead: a first
+        // leg back along it is a full reversal (never), a sharp turn pays the bend and
+        // `acute_bend` prices like any other. Likewise a run that ends at a lead end goes on into
+        // the lead. (Both ends of the hand copper are one wire: Popov & Popov 2012 pp. 117-122,
+        // the wire's length and bends count from its terminal, here the hand track's end.)
+        let lead_dir = |end: usize, p: Vec2| -> Option<Vec2> {
+            let ob = if end == 0 { wi.pa } else { wi.pb };
+            let k = self.b.kept_ends.iter().find(|k| k.obs == ob && ob != NO_OBS)?;
+            let (q, _) = k.lead?;
+            if (p - q).len() < 1.0 {
+                (q - k.at).unit()
+            } else {
+                None
+            }
+        };
+        let n_pass = wi.passes.len();
+        let lead_in = if k0 == 0 { lead_dir(0, taut[0]) } else { None };
+        let lead_out = if k1 == n_pass { lead_dir(1, taut[taut.len() - 1]) } else { None };
+        if let Some(u) = lead_in {
+            last[0][8] = (u, f64::INFINITY);
+        }
         let bend = |u: Vec2, l_in: f64, v: Vec2| -> f64 {
             if u.len2() < 1e-18 {
                 return 0.0;
@@ -669,6 +691,10 @@ impl Drawer<'_> {
                             }
                             if j == n - 1 && k == s.len() - 1 {
                                 c += axis_price(&exits[1], v, len);
+                                if let Some(ul) = lead_out {
+                                    // on into the lead (from its end back to the hand track)
+                                    c += bend(v, len, -ul);
+                                }
                             }
                             u = v;
                             l = len;

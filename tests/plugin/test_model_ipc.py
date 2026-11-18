@@ -582,3 +582,30 @@ def test_custom_pad_polygon_of_flattened_circles_is_grown_by_max_error():
         q = (r * _m.cos(_m.pi * k / 360), r * _m.sin(_m.pi * k / 360))
         assert geom.point_in_ring(q, ring), k
     assert max(_m.hypot(*q) for q in ring) <= r + err + 600
+
+
+def test_footprint_clearance_override_inherited_by_pads():
+    """Same per-pad values as harness/model.py (tests/test_model_export.py): pad own override, else the footprint's
+    (KiCad PAD::GetClearanceOverrides, pcbnew/pad.cpp:1675-1681), through export_model_ipc."""
+    own = mk_pad("3", (5 * MM, 5 * MM), uid="pa", clearance=300_000)
+    inh = mk_pad("1", (9 * MM, 5 * MM), uid="pb")
+    fp = mk_fp("U1", [own, inh])
+    fp.overrides.copper_clearance = 127_000
+    pd, _ = conv(inh, fp_clearance=127_000)
+    assert pd["local_clearance"] == 127_000
+    assert conv(own, fp_clearance=127_000)[0]["local_clearance"] == 300_000
+    assert conv(inh)[0]["local_clearance"] is None
+    board = StubBoard([FCU, BCU], ["GND"], [fp, mk_fp("U2", [mk_pad("1", (20 * MM, 5 * MM), uid="pc")])], [], [], [], [])
+    rules = R.resolve_rules_from_project({}, None, netclass_of={"": "Default", "GND": "Default"}, classes={},
+                                         widths_before={})
+    m = M.export_model_ipc(board, StubProject(), LAYERS_4.replace("power", "signal").replace(
+        '(6 "In2.Cu" signal) ', "").replace('(4 "In1.Cu" signal) ', ""), rules, name="stub.kicad_pcb", layer_roles={})
+    lc = {(p["ref"], p["number"]): p["local_clearance"] for p in m["pads"]}
+    assert lc == {("U1", "3"): 300_000, ("U1", "1"): 127_000, ("U2", "1"): None}
+
+
+def test_footprint_clearance_pad_explicit_zero_wins():
+    """Same as tests/test_model_export.py: the pad's own explicit 0 is an override, not unset."""
+    zero = mk_pad("3", (5 * MM, 5 * MM), uid="pz", clearance=0)
+    assert conv(zero, fp_clearance=127_000)[0]["local_clearance"] == 0
+    assert conv(mk_pad("1", uid="py"), fp_clearance=0)[0]["local_clearance"] == 0

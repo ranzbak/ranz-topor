@@ -93,6 +93,7 @@ class RunOutcome:
     cancelled: bool = False
     items: list = field(default_factory=list)  # the routed items (committed on Accept), group set
     ripped: list = field(default_factory=list)  # uuids removed on Accept
+    replaced: list = field(default_factory=list)  # kept tracks the routed items merge in (removed on Accept too)
     model: dict | None = None  # the model as read from the port (before rip filtering)
     drc: dict | None = None  # toporlib.drc.classify of the final routed copy
     base_drc: object = None  # DrcReport of the ripped, unrouted copy
@@ -1064,7 +1065,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if geometry == "segments":
             items = preview_mod.arcs_to_segments(items, max_err)
             res["items"] = items
-        state["last_result"] = {"items": items, "remove_uuids": [], "report": res}
+        # exist-term r2: hand tracks the engine's tidy merged into a new collinear segment (KiCad's Cleanup "merge
+        # co-linear tracks"); drc_fn and the commit remove them with the new copper
+        state["last_result"] = {"items": items, "remove_uuids": list(res.get("remove_uuids") or []), "report": res}
         return state["last_result"]
 
     def drc_fn(items, remove_uuids=()):
@@ -1096,6 +1099,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         reach_nm=_zone_reach(model), clearance_nm=clearance)
     rr = loop.router_report or {}
     out.items = [{**it, "group": it.get("group") or "topor"} for it in loop.items]
+    out.replaced = list(loop.remove_uuids)
     out.routed, out.total = int(rr.get("routed", 0)), int(rr.get("connections_total", 0))
     out.stop_reason = rr.get("stop_reason")
     out.router_cpu_s = state["router_cpu_s"]
@@ -1264,7 +1268,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     # run.refill_after_accept; cleanup / teardrops opt-in) and a failure there keeps "accepted" (ruling C30).
     n_partial = sum(1 for it in out.items if it.get("group") == "topor-partial")
     fills, fills_skip = _routed_fills(cfg, out, state, log)
-    req = CommitRequest(remove_uuids=list(ripped), items=out.items,
+    req = CommitRequest(remove_uuids=list(ripped) + [u for u in out.replaced if u not in set(ripped)], items=out.items,
                         message=f"Topor: routed {out.routed}/{out.total}", group=True, zone_fills=fills)
     out.commit = port.commit(req)
     status = "accepted"

@@ -104,6 +104,16 @@ pub fn via_reach(rules: &Rules, net: i32, sz: ViaSize) -> f64 {
     via_need_copper(rules, net, sz, 0.0, 0.0) - net_clear(rules, net)
 }
 
+/// The via sizes a continued dangling end's lead tries for its via end (exist-term r5, lead
+/// decision from the power via rules): [`via_sizes`]'s order, the net class via (or the board's
+/// fallback) first and the smaller Board Setup sizes after it, so the tightest is the last
+/// fallback (the lead may end a little shorter for the net class via). A smaller size only where
+/// its drill carries the trace, `pi x drill >= width` (memory "power via rules"). O(sizes).
+pub fn lead_via_sizes(rules: &Rules, net: i32, opts: &Options, width: i64) -> Vec<ViaSize> {
+    let v = via_sizes(rules, net, opts);
+    v.iter().enumerate().filter(|&(i, z)| i == 0 || std::f64::consts::PI * z.drill as f64 >= width as f64).map(|(_, z)| *z).collect()
+}
+
 /// Centre distance (nm) two vias need: `a` of net `na` and `b` of net `nb`. Foreign nets: each
 /// disc keeps the clearance to the other's disc and each drill the hole clearance to the other's
 /// disc; any nets: the two drills keep `hole_to_hole`; the same net: the discs may touch. Plus
