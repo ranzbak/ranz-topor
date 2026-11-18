@@ -121,6 +121,34 @@ case ${1:-} in
       unit t6-$n 5 t6-$n $src $s 5 --clock wall --timeout 600 --set optimize.loop_stable_window=1000 --set optimize.runs=5 --set optimize.rounds=100000 --set optimize.loop_relays=$b
     done
     wait; note "all done" ;;
+  t600auto)  # t600auto BASE_RUN_DIR: the tests now; wait for the b600 job on this VM, take main's re-lays
+             # per run (the applied run's loop line: reroutes tried + via-rose laid again) as the budget
+    B=$2; mkdir -p $R/lad
+    ( hzq run --threads 4 --name tw3-tests -- bash $SELF tests-in > $R/hzq-tests.log 2>&1 9>&-; note "unit tests rc $?" ) & sleep 1
+    until grep -q "all done" $B/rc.txt 2>/dev/null; do sleep 30; done
+    ARGS=$(python3 - "$B" <<'PY'
+import glob, json, re, sys
+out = []
+for d in sorted(glob.glob(sys.argv[1] + "/lad/b6-*")):
+    n = d.rsplit("/b6-", 1)[1]
+    r = sorted(glob.glob(d + "/*/s*/reports/*/*/result.json"))
+    if not r:
+        continue
+    w = json.load(open(r[-1]))["route"]["warnings"]
+    l = next((x for x in w if x.startswith("TopoR loop (")), "")
+    m = re.search(r"reroutes kept \d+/(\d+), via-rose laid again \d+/(\d+)", l)
+    if m:
+        out.append(f"{n}={int(m[1]) + int(m[2])}")
+print(" ".join(out))
+PY
+)
+    note "budgets from $B: $ARGS"
+    for x in $ARGS; do
+      n=${x%%=*}; b=${x#*=}
+      case $n in qmtech) src=$Q; s=0;; esp-s*) src=$E; s=${n#esp-s};; wiccon) src=wiccon-2023; s=0;; eprom) src=eprom-to-kernal; s=0;; esac
+      unit t6-$n 5 t6-$n $src $s 5 --clock wall --timeout 600 --set optimize.loop_stable_window=1000 --set optimize.runs=5 --set optimize.rounds=100000 --set optimize.loop_relays=$b
+    done
+    wait; note "all done" ;;
   base)
     mkdir -p $R/lad
     ladder
