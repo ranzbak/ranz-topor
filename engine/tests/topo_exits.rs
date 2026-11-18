@@ -133,3 +133,41 @@ fn the_option_adds_stubs_through_the_core_only_when_on() {
 fn tb_lone() -> topor_engine::model::BoardModel {
     topo_d6b::board(20.0, 16.0, 2, &[("A", 1, 10.0, 4.0, 1.6, 0.3, 0), ("B", 1, 3.0, 4.0, 0.6, 0.6, 0), ("C", 2, 10.0, 12.0, 1.6, 0.3, 0), ("D", 2, 3.0, 12.0, 0.6, 0.6, 0)])
 }
+
+/// TW4 meter: an exit that needs a stub but gets none because the rectangle would break a
+/// clearance is recorded (`Board::exit_blocked`, the compass predicts it as `pad_exit`); a pad that
+/// needs no stub is not. The pad X of another net 0.45 mm past R3's west tip blocks the stub
+/// (needs s + w = 0.45 past the tip plus s to X); the east tip is free; a lone pad needs none.
+#[test]
+fn a_needed_exit_without_a_legal_stub_is_recorded_as_blocked() {
+    let m = row(&[("X", 7, 8.6, 10.0, 0.3, 1.0, 0)]);
+    let b = tb::build_full(&m, &opts(), &[], &[exit(&m, "R3", (3.0, 10.0))]).unwrap();
+    assert!(b.exit_stubs.is_empty());
+    assert_eq!(b.exit_blocked.len(), 1, "{:?}", b.exit_blocked);
+    assert_eq!(m.pads[b.exit_blocked[0].1].ref_, "R3");
+    assert_eq!(b.exit_blocked[0].0, ob(&m, &b, "R3"), "the pad's obstacle");
+    let b = tb::build_full(&m, &opts(), &[], &[exit(&m, "R3", (18.0, 10.0))]).unwrap();
+    assert!(b.exit_blocked.is_empty() && b.exit_stubs.len() == 1, "east tip free");
+    let m = board(20.0, 16.0, 3, &[("P", 1, 10.0, 8.0, 1.6, 0.3, 0), ("Q", 2, 10.0, 10.0, 1.6, 0.3, 0)]);
+    let b = tb::build_full(&m, &opts(), &[], &[exit(&m, "P", (3.0, 8.0))]).unwrap();
+    assert!(b.exit_blocked.is_empty() && b.exit_stubs.is_empty(), "lone pad: not needed");
+}
+
+/// End to end: with `[search] pad_exit_stubs` on the compass has a pad-exit plan object (its
+/// `pad_exit` is predicted, the stubs are located `pad_exit_stub` items with their connections);
+/// off it stays "not predicted".
+#[test]
+fn the_compass_sees_the_planned_exits_only_with_the_option_on() {
+    use topor_engine::model::Options;
+    let off = Options::from_json(r#"{"wall_clock_s": 60.0, "topo_rounds": 1}"#).unwrap();
+    let on = Options { pad_exit_stubs: true, ..off.clone() };
+    let m = row(&[("T1", 1, 3.0, 3.0, 0.6, 0.6, 0), ("T2", 2, 3.0, 6.0, 0.6, 0.6, 0), ("T3", 3, 3.0, 9.0, 0.6, 0.6, 0), ("T4", 4, 3.0, 12.0, 0.6, 0.6, 0), ("T5", 5, 3.0, 15.0, 0.6, 0.6, 0)]);
+    let c_off = topor_engine::route::route(&m, &off).compass.expect("compass");
+    assert_eq!(c_off.predicted.get("pad_exit"), None, "off: not predicted");
+    let c_on = topor_engine::route::route(&m, &on).compass.expect("compass");
+    assert!(c_on.predicted.contains_key("pad_exit"), "on: predicted {:?}", c_on.predicted);
+    let stubs: Vec<_> = c_on.items.iter().filter(|i| i.class == "pad_exit_stub").collect();
+    assert!(!stubs.is_empty(), "on: the planned stubs are located");
+    assert!(stubs.iter().all(|i| i.conns.len() == 1 && i.segs.len() == 4 && i.layers.len() == 1), "{stubs:?}");
+    assert_eq!(c_on.predicted["pad_exit"], c_on.items.iter().filter(|i| i.class == "pad_exit").count());
+}

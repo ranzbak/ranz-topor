@@ -22,8 +22,9 @@ max(``reach_mm``, 4 x its width, about two pitches) + half the stretch's length)
   finds over-full and the per-edge packer fits: docs/dev/inflated-sketch.md §6.1), over-full nearby (an over-full or
   model-gap bottleneck of other wires within r: a plan error, not a drawing loss), forced path (c was placed without a
   legal path), pad exit (a pad exit of c within r the plan predicts as violating; 5.10), pad exit at a planned exit
-  stub (its class is pad_exit and a planned stub of c lies within r; 5.10), at a planned neck (a cut of c on L within r
-  that fits only necked), per-edge over-predicted (an edge-layer of c on L within r that the per-edge packer finds
+  stub (its class is pad_exit and a planned stub of c lies within r; 5.10), at a planned neck (a necked stretch of the
+  plan's wire of c on L within r, or a cut of c that fits only necked; a pad_exit violation there stays pad exit, sub-class
+  "at a planned neck"), per-edge over-predicted (an edge-layer of c on L within r that the per-edge packer finds
   over-full and the cut test fits), pad exit not predicted (its class is pad_exit), else drawing loss (sub-class: the
   engine's own class). The violation rows add up to the drawn violations; the shrinkage row compares the plan's necked
   stretches with the drawn ones (a shrinkage is no violation, TopoR 6.3 manual p. 72). A predicted item is drawn clean
@@ -117,6 +118,8 @@ def classify_violation(v: dict, mine: list, others: list, reach_nm: float) -> tu
     if vc == "pad_exit" and (i := first("pad_exit_stub")) is not None:
         return "pad_exit", "at a planned exit stub (the drawing left the stub)", i
     if (i := first("shrinkage")) is not None:
+        if vc == "pad_exit":  # the pad exit stays its own row; the planned neck is its sub-class (TW4 meter)
+            return "pad_exit", "not predicted, at a planned neck (neck from the pad)", i
         return "neck_loss", "the cut fits only necked: neck width planned too wide, or not drawn as planned", i
     if (i := first("edge_overpredict")) is not None:
         return "edge_overpredict", "the drawing's per-edge packer: over-full; the cut test: fits", i

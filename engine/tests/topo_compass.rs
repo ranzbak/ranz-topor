@@ -137,3 +137,32 @@ fn the_compass_is_the_same_plan_on_two_runs_and_with_stop_after_plan() {
     assert_eq!(ca.items, cp.items);
     assert_eq!(cp.drawn_shrinkages, 0);
 }
+
+/// TW4 meter: the plan's necked stretches are located items (`compass::neck_items`) in both
+/// capacity models, so a drawn violation on a planned neck can be classified `neck_loss`.
+/// `neck_fit` (harness/fit_patterns.py): the 0.8 mm VBUS wire must pass N1 (J1.1-J1.2, 0.84 mm,
+/// KiCad (2.30..3.14, 4.00)); at the nominal width it needs 1.20, so the plan necks it, at most to
+/// the 0.40 floor (the custom rule) and at least to 0.44 (gap - 2 s): the item's `over_nm` lies in
+/// 0.36..=0.40 mm, one of its chords passes within 0.5 mm of N1's middle (2.72, 4.00), on F.Cu
+/// (B.Cu is a rule area), and it carries the VBUS connection.
+#[test]
+fn neck_fit_locates_its_planned_neck_at_n1() {
+    for model in ["edges", "cuts"] {
+        let r = run("neck_fit", &format!(r#", "capacity_model": "{model}", "compass_cut_check": true"#));
+        let c = r.compass.as_ref().expect("compass");
+        let necks: Vec<_> = c.items.iter().filter(|i| i.class == "shrinkage" && !i.conns.is_empty()).collect();
+        assert!(pred(&r, "shrinkage").unwrap_or(0) >= 1, "{model}: {:?}", c.predicted);
+        let mid = (2.72e6, 4.0e6);
+        let d = |s: &[[i64; 2]; 2]| {
+            let (a, b) = ((s[0][0] as f64, s[0][1] as f64), (s[1][0] as f64, s[1][1] as f64));
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let l2 = dx * dx + dy * dy;
+            let t = if l2 > 0.0 { (((mid.0 - a.0) * dx + (mid.1 - a.1) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            ((mid.0 - a.0 - t * dx).powi(2) + (mid.1 - a.1 - t * dy).powi(2)).sqrt()
+        };
+        let at_n1 = necks.iter().find(|i| i.segs.iter().any(|s| d(s) <= 0.5e6)).unwrap_or_else(|| panic!("{model}: no located neck at N1: {necks:?}"));
+        assert!(at_n1.over_nm >= 360_000 && at_n1.over_nm <= 400_001, "{model}: neck depth {}", at_n1.over_nm);
+        assert!(at_n1.layers.is_empty() || at_n1.layers == vec!["F.Cu".to_string()], "{model}: {:?}", at_n1.layers);
+        assert_eq!(at_n1.conns.len(), 1, "{model}: the VBUS connection");
+    }
+}

@@ -33,8 +33,8 @@ import re
 import sys
 
 PRED = ("planner_overfull", "via_site", "unlayerable", "foreign_copper", "forced_path")
-UNSEEN_PLAN = ("pad_exit", "drawing_loss", "model_gap")
-DL = ("drawing_loss", "model_gap")
+UNSEEN_PLAN = ("pad_exit", "drawing_loss", "model_gap", "neck_loss")  # neck_loss: located necks (TW4 meter), was inside drawing_loss
+DL = ("drawing_loss", "model_gap", "neck_loss")
 
 
 def load_runs(root):

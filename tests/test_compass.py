@@ -188,3 +188,16 @@ def test_pad_exit_with_the_510_slot_stub_items_locate_and_do_not_count():
     assert [x["sub"] for x in cp["violations"]] == ["at a planned exit stub (the drawing left the stub)",
                                                      "not predicted (no planned exit of the connection there)"]
     assert not any("missing method step" in f for f in cp["flags"])
+
+
+def test_pad_exit_at_a_planned_neck_stays_a_pad_exit_and_other_classes_become_neck_loss():
+    # TW4 meter: the engine locates the plan's necked stretches (compass.rs neck_items) for every capacity model. A
+    # pad_exit violation on a neck of its connection keeps its own row (sub-class: at a planned neck); a static
+    # violation there is neck_loss; one far from the neck stays a drawing loss.
+    neck = {"class": "shrinkage", "layers": ["F.Cu"], "conns": [0], "segs": [seg((1, 1), (2, 1))], "over_nm": 160000}
+    v = [viol(0, (1.1, 1.05), cls="pad_exit"), viol(0, (1.8, 1.0), cls="static"), viol(0, (9, 9), cls="static")]
+    cp = compass.build(route(v, [neck], [conn(0)], {"planner_overfull": 0, "shrinkage": 1}), None, None)
+    assert row(cp, "pad_exit")["drawn"] == 1 and row(cp, "neck_loss")["drawn"] == 1
+    assert row(cp, "drawing_loss")["drawn"] == 1
+    cls, sub, i = compass.classify_violation(v[0], [neck], [], 0.5e6)
+    assert (cls, i) == ("pad_exit", 0) and "planned neck" in sub

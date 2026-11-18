@@ -5341,8 +5341,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let fset = forced.borrow().clone();
             // `[capacity] compass_cut_check` (model = "edges"): the read-only cut test runs after the
             // drawing (end of this round), outside the time limit.
-            // `pad_exits`: shopping list 5.10 fills it from `b.exit_stubs` (see compass::pad_exit_items).
-            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
+            // `pad_exits`: with 5.10's stubs on, the planned stubs and the needed exits no legal stub
+            // realises (compass::exit_stub_items); off: no pad-exit plan object (not predicted).
+            let px = opts.pad_exit_stubs.then(|| super::compass::exit_stub_items(b, &st, &wc, &lname));
+            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: px.as_deref() };
             let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
             compass_plan = Some(cp);

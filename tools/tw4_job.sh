@@ -59,5 +59,13 @@ case ${1:-} in
     u small 4 "JK:esp JF:esp" "JPK:esp JPF:esp" "JK:wiccon JF:wiccon JPK:wiccon JPF:wiccon" \
       "JK:eprom JF:eprom JPK:eprom JPF:eprom"
     wait; note "all done" ;;
+  hooks)
+    # TW4 unit 1 (meter hooks): targeted tests, then rounds=1 copper (must equal the tw4b base) + the new compass items
+    ( cd engine && cargo test --release --test topo_compass --test topo_exits 9>&- > $R/cargo.log 2>&1; note "cargo rc $?" )
+    ( cargo test --release --manifest-path engine/Cargo.toml --lib compass 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $?" )
+    ( python -m pytest -q tests/test_compass.py > $R/pytest.log 2>&1; note "pytest rc $?" )
+    u h-q 4 "JK:qmtech:2" "JPK:qmtech:2"
+    u h-s 4 "JK:esp" "JPK:esp" "JK:wiccon JK:eprom" "JPK:wiccon"
+    wait; note "all done" ;;
   *) echo "usage: tw4_job.sh base | lane <cfg:board[:threads]>... | one <cfg:board[:threads]>" >&2; exit 2 ;;
 esac

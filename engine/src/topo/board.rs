@@ -147,6 +147,10 @@ pub struct Board {
     pub notes: Vec<String>,
     /// 5.10: the exit stubs of the build (`Extra::Exit`): `(obstacle, pad index)`.
     pub exit_stubs: Vec<(ObsId, usize)>,
+    /// 5.10 / TW4 meter: the exits that needed a stub (fine pitch towards the target) but got
+    /// none, because the rectangle would break a clearance: `(pad obstacle, pad index)`, once per
+    /// pad. The compass predicts each as a `pad_exit`.
+    pub exit_blocked: Vec<(ObsId, usize)>,
     /// exist-term: the obstacle of each existing via (index into `BoardModel::vias`).
     pub via_obs: BTreeMap<usize, ObsId>,
     /// exist-term: the terminals on existing copper (`Extra::KeptEnd`), in `extra` order.
@@ -396,12 +400,21 @@ fn poly_poly_dist(p: &[Vec2], q: &[Vec2]) -> f64 {
 /// O(obstacles x polygon sizes) per call.
 /// `more`: copper that is no obstacle of the build yet but must keep the stub's clearance too (the
 /// kept tracks, exist-term r2: they are added after the stubs; none on a board without them).
+/// Why [`exit_stub`] gave no stub (TW4 meter: the compass predicts the second as a `pad_exit`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StubNo {
+    /// No planned exit needed (no elongated SMD pad, or no other net's copper beside it).
+    NotNeeded,
+    /// Needed (fine pitch towards the target) but the rectangle would break a clearance.
+    Illegal,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, toward: Vec2, w: f64, s: f64, outline: &[(Vec2, Vec2)], edge_clear: f64) -> Option<(Vec<Vec2>, bool)> {
+fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, toward: Vec2, w: f64, s: f64, outline: &[(Vec2, Vec2)], edge_clear: f64) -> Result<(Vec<Vec2>, bool), StubNo> {
     let ob = &obstacles[oi];
-    let net = ob.net?;
+    let Some(net) = ob.net else { return Err(StubNo::NotNeeded) };
     if ob.drilled || ob.layers.0.count_ones() != 1 || ob.poly.len() < 3 || w <= 0.0 {
-        return None;
+        return Err(StubNo::NotNeeded);
     }
     let c = ob.center;
     let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
@@ -418,7 +431,7 @@ fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, 
     let ext = |v: Vec2| ob.poly.iter().map(|&p| (p - c).dot(v)).fold(f64::MIN, f64::max);
     let (lu, lv) = (ext(u0) + ext(-u0), ext(u0.perp()) + ext(-u0.perp()));
     if lu < 1.2 * lv {
-        return None;
+        return Err(StubNo::NotNeeded);
     }
     let plus = (toward - c).dot(u0) >= 0.0;
     let u = if plus { u0 } else { -u0 };
@@ -459,7 +472,7 @@ fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, 
         near(plo, phi, &o.poly, gap) && poly_poly_dist(&ob.poly, &o.poly) - o.sag < gap
     });
     if !fine {
-        return None;
+        return Err(StubNo::NotNeeded);
     }
     // From where the whole width has left the pad to `s + width` past its tip.
     let nrm = u.perp() * (0.5 * ws);
@@ -472,7 +485,7 @@ fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, 
     }
     let t1 = tip + s + ws;
     if t1 - t <= step {
-        return None;
+        return Err(StubNo::Illegal);
     }
     let (a, b) = (c + u * t, c + u * t1);
     // Legal: the clearance to every other net's copper, rule area and the board edge.
@@ -483,13 +496,13 @@ fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, 
         }
         let req = need(j, o) + 0.5 * ws + o.sag;
         if near(slo, shi, &o.poly, req) && seg_poly_dist(a, b, &o.poly) < req - 1.0 {
-            return None;
+            return Err(StubNo::Illegal);
         }
     }
     if outline.iter().any(|&(p, q)| super::draw::seg_seg_dist(a, b, p, q) < edge_clear + 0.5 * ws - 1.0) {
-        return None;
+        return Err(StubNo::Illegal);
     }
-    Some((vec![a - nrm, b - nrm, b + nrm, a + nrm], plus))
+    Ok((vec![a - nrm, b - nrm, b + nrm, a + nrm], plus))
 }
 
 /// The board outline as segments (arcs split to 0.05 mm sagitta).
@@ -1010,6 +1023,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     // 5.10: the exit stubs, after every other obstacle (each keeps its clearance to all of them
     // and to the stubs placed before it); one per pad and tip.
     let mut exit_stubs: Vec<(ObsId, usize)> = Vec::new();
+    let mut exit_blocked: Vec<(ObsId, usize)> = Vec::new();
     if extra.iter().any(|x| matches!(x, Extra::Exit { .. })) {
         let osegs = outline_segments(m);
         let obs_of: BTreeMap<usize, usize> = pad_of.iter().enumerate().filter(|(_, &p)| p != usize::MAX).map(|(o, &p)| (p, o)).collect();
@@ -1017,7 +1031,16 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
         for x in extra {
             let Extra::Exit { pad, toward, w, s } = *x else { continue };
             let Some(&oi) = obs_of.get(&pad) else { continue };
-            let Some((poly, plus)) = exit_stub(&obstacles, &kept_obs, &src, oi, toward, w, s, &osegs, m.rules.edge_clearance as f64) else { continue };
+            let (poly, plus) = match exit_stub(&obstacles, &kept_obs, &src, oi, toward, w, s, &osegs, m.rules.edge_clearance as f64) {
+                Ok(x) => x,
+                Err(StubNo::NotNeeded) => continue,
+                Err(StubNo::Illegal) => {
+                    if !exit_blocked.contains(&(oi, pad)) {
+                        exit_blocked.push((oi, pad));
+                    }
+                    continue;
+                }
+            };
             if !done.insert((pad, plus)) {
                 continue;
             }
@@ -1200,7 +1223,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     }
     let poured = m.pours.iter().map(|p| p.net).collect();
     notes.extend(kept_ends.iter().filter_map(|k| k.note.clone()));
-    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured, notes, exit_stubs, via_obs, kept_ends, kept_bodies })
+    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured, notes, exit_stubs, exit_blocked, via_obs, kept_ends, kept_bodies })
 }
 
 impl Board {
