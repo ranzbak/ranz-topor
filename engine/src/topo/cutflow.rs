@@ -559,21 +559,31 @@ pub fn measure(plan: &Plan, outline: &[(Vec2, Vec2)], o: &MeasureOpts, layers: &
     let pr = plan.st.proj;
     let (mut sts, vias, junc, terms) = stretches(plan);
     let vf: Vec<ViaFeat> = vias.iter().map(|v| v.1).collect();
-    let mut out = Vec::new();
-    for &l in layers {
+    // par-draw phase A: a layer's sheet and the bands of its stretches depend only on the plan
+    // (pure units, [`super::par::map`]); the bands are written back in layer order, then every
+    // layer's flows (they read the bands of that layer's stretches only) run as units again.
+    let (stv, termv) = (&sts, &terms);
+    type Built = (LayerSheet, Vec<usize>, Vec<Result<(Vec<Vec2>, Vec<Option<(usize, bool)>>), String>>);
+    let built: Vec<Result<Built, String>> = super::par::map(layers, |_, &l| {
         // A junction is copper on the layers of the stretches that end there.
         let jl: Vec<JunctionFeat> = junc
             .iter()
-            .filter(|j| sts.iter().any(|s| s.layer == l && (s.curve.first() == Some(&j.at) || s.curve.last() == Some(&j.at))))
+            .filter(|j| stv.iter().any(|s| s.layer == l && (s.curve.first() == Some(&j.at) || s.curve.last() == Some(&j.at))))
             .copied()
             .collect();
-        let inp = SheetInput { proj: pr, outline, vias: &vf, junctions: &jl, terminals: &terms };
+        let inp = SheetInput { proj: pr, outline, vias: &vf, junctions: &jl, terminals: termv };
         let sheet = LayerSheet::build(&inp, l, &o.sheet)?;
-        let mine: Vec<usize> = (0..sts.len()).filter(|&i| sts[i].layer == l).collect();
+        let mine: Vec<usize> = (0..stv.len()).filter(|&i| stv[i].layer == l).collect();
+        let bands = mine.iter().map(|&i| band(&sheet, &stv[i].curve)).collect();
+        Ok((sheet, mine, bands))
+    });
+    let mut per: Vec<(LayerSheet, Vec<usize>, usize, Vec<String>)> = Vec::with_capacity(layers.len());
+    for b in built {
+        let (sheet, mine, bands) = b?;
         let mut walk_failed = 0;
         let mut why: Vec<String> = Vec::new();
-        for &i in &mine {
-            match band(&sheet, &sts[i].curve) {
+        for (&i, r) in mine.iter().zip(bands) {
+            match r {
                 Ok((b, w)) => {
                     sts[i].band = b;
                     sts[i].wraps = w;
@@ -587,9 +597,11 @@ pub fn measure(plan: &Plan, outline: &[(Vec2, Vec2)], o: &MeasureOpts, layers: &
                 }
             }
         }
-        let flows = flows(&sheet, &sts, &mine, pr, plan.st, o);
-        out.push(LayerFlows { sheet, stretches: mine, flows, walk_failed, why });
+        per.push((sheet, mine, walk_failed, why));
     }
+    let stv = &sts;
+    let fl: Vec<Vec<CutFlow>> = super::par::map(&per, |_, (sheet, mine, _, _)| flows(sheet, stv, mine, pr, plan.st, o));
+    let out: Vec<LayerFlows> = per.into_iter().zip(fl).map(|((sheet, stretches, walk_failed, why), flows)| LayerFlows { sheet, stretches, flows, walk_failed, why }).collect();
     Ok(Measure { layers: out, stretches: sts, vias, opts: *o, seconds: t0.elapsed().as_secs_f64() })
 }
 

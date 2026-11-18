@@ -63,7 +63,7 @@ def coerce(s: Setting, raw):
         if word in ("auto", "none"):
             return ("auto" if word == "auto" else 0.0), None
         return s.default, 'must be a number of seconds, "auto" or "none"'
-    if s.key == "refine_lanes" and isinstance(raw, str):  # par-refine: "auto" (the default) or a lane count
+    if s.key in ("refine_lanes", "draw_lanes") and isinstance(raw, str):  # par-refine / par-draw: "auto" (the default) or a lane count
         if raw.strip().lower() == "auto":
             return "auto", None
         return s.default, 'must be a lane count (1 .. 256) or "auto"'
@@ -196,7 +196,7 @@ class Config:
                 continue
             v = self.values[(s.section, s.key)]
             f = s.engine_field
-            if f == "refine_lanes" and v == "auto":
+            if f in ("refine_lanes", "draw_lanes") and v == "auto":
                 v = 0  # the engine's "auto"
             if f in _ENGINE_AUTO:
                 v = v if isinstance(v, bool) else _ENGINE_AUTO[f](self.values) if v == "auto" else v == "on"

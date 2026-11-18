@@ -1484,20 +1484,38 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
     let none = Vec::new();
     let no_skip = BTreeSet::new();
     let time = std::env::var_os("TOPO_ERBS_TIME").is_some();
-    let mut out = LayerErbs::default();
-    for si in own.into_iter().filter(|&si| sts[si].band.len() >= 2) {
+    let ids: Vec<usize> = own.into_iter().filter(|&si| sts[si].band.len() >= 2).collect();
+    // par-draw phase A: every stretch is a pure unit (its obstacles come from the plan, never from
+    // another ERBS) and may run on its own lane ([`super::par::map`]); the fold below takes the
+    // results in stretch order. A stretch that starts after the limit is cut (`None`); from the
+    // first cut one in stretch order on, every later stretch counts as cut too, as when they ran
+    // one after the other (the limit only moves forward).
+    type Unit = Result<(Result<Erbs, String>, f64), ErbsStop>;
+    let res: Vec<Unit> = super::par::map(&ids, |k, &si| {
         if let Some(why) = opts.expired() {
-            out.timed_out += 1;
-            out.stopped.get_or_insert(why);
-            continue;
+            return Err(why);
         }
         let t = std::time::Instant::now();
-        let s = &sts[si];
-        let r = if opts.fail_first && out.es.is_empty() && out.failed.is_empty() {
+        let r = if opts.fail_first && k == 0 {
             Err("injected sleeve failure (test hook)".to_string())
         } else {
-            erbs_stretch(sh, &fg, fclear, s, si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts)
+            erbs_stretch(sh, &fg, fclear, &sts[si], si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts)
         };
+        Ok((r, t.elapsed().as_secs_f64()))
+    });
+    let mut out = LayerErbs::default();
+    for (&si, x) in ids.iter().zip(res) {
+        let (r, secs) = match x {
+            Ok(v) if out.stopped.is_none() => v,
+            other => {
+                out.timed_out += 1;
+                if let Err(why) = other {
+                    out.stopped.get_or_insert(why);
+                }
+                continue;
+            }
+        };
+        let s = &sts[si];
         // Debug: `TOPO_ERBS_SLEEVE=bad` prints the sleeve of a failed stretch or one longer
         // than 1.3 x its band (run again with the print on).
         if std::env::var_os("TOPO_ERBS_SLEEVE").is_some_and(|v| v == "bad") && r.as_ref().map_or(true, |e| e.len > 1.3 * e.band_len) {
@@ -1508,8 +1526,8 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         }
         if time {
             match &r {
-                Ok(e) => eprintln!("ERBS time st {si} wire {} points {} portals {} conflicts {} len/band {:.4} {:.2} ms", s.wire, e.points, e.portals, e.conflicts, e.len / e.band_len.max(1.0), t.elapsed().as_secs_f64() * 1e3),
-                Err(m) => eprintln!("ERBS time st {si} wire {} FAILED {m} {:.2} ms", s.wire, t.elapsed().as_secs_f64() * 1e3),
+                Ok(e) => eprintln!("ERBS time st {si} wire {} points {} portals {} conflicts {} len/band {:.4} {:.2} ms", s.wire, e.points, e.portals, e.conflicts, e.len / e.band_len.max(1.0), secs * 1e3),
+                Err(m) => eprintln!("ERBS time st {si} wire {} FAILED {m} {:.2} ms", s.wire, secs * 1e3),
             }
         }
         match r {
