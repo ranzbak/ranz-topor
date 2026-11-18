@@ -6461,7 +6461,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                                 // Where the copper changed: the stretch taken away and the new link.
                                 let mut path = cut.to_vec();
                                 path.push(q);
-                                moves.push((super::fusepour::Move { w, onto: u, path }, sv));
+                                moves.push((super::fusepour::Move { w, onto: u, path: vec![path] }, sv));
                             }
                             fused.push((gain, len_gain));
                             fused_at.insert((w, end));
@@ -6489,11 +6489,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         for w in ids {
             let mut wo = drawn.remove(&w).expect("drawn wire");
             let len0 = wo.length_nm;
+            let ci = conn_of[wire_conn[w]];
+            let saved: Option<Saved> = pour_check.then(|| (wo.clone(), out[ci].clone(), necking.iter().filter(|(c, _)| *c == ci).cloned().collect()));
             let k = dr.octi_polish(&mut wo);
             if k > 0 {
+                if let Some(sv) = saved {
+                    let path = super::fusepour::changed(&sv.0.runs, &wo.runs);
+                    moves.push((super::fusepour::Move { w, onto: super::fusepour::NO_WIRE, path }, sv));
+                }
                 n_pol += k;
                 pol_nm += wo.length_nm - len0;
-                let ci = conn_of[wire_conn[w]];
                 necking.retain(|(c, _)| *c != ci);
                 settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
             }
@@ -6561,15 +6566,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let (m, (wo, o, nk)) = &moves[i];
                 let ci = conn_of[wire_conn[m.w]];
                 let now = drawn.remove(&m.w).expect("fused wire is drawn");
-                let mut back = dr.restore_wire(&now, wo);
+                let back = dr.restore_wire(&now, wo);
                 out[ci] = o.clone();
                 necking.retain(|(c, _)| *c != ci);
                 necking.extend(nk.iter().cloned());
-                // The wire as without the fuse: the octilinear polish acts on it as it would there.
-                if octi_on && dr.octi_polish(&mut back) > 0 {
-                    necking.retain(|(c, _)| *c != ci);
-                    settle(octi_on, &mut out, &mut necking, ci, m.w, &back, b, &st);
-                }
                 drawn.insert(m.w, back);
                 undone_nets.insert(model.nets.iter().find(|n| n.code == st.wires[m.w].net).map_or_else(|| st.wires[m.w].net.to_string(), |n| n.name.clone()));
             }
@@ -6581,21 +6581,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             cur = left_of(&out);
         }
         let n_undone = live.iter().filter(|l| !**l).count();
+        let n_fuse = mv.iter().filter(|m| m.onto != fusepour::NO_WIRE).count();
+        let fuse_undone = mv.iter().zip(&live).filter(|(m, l)| m.onto != fusepour::NO_WIRE && !**l).count();
         // Self-check: the undone wires' tracks are back in the drawing's index.
         let stale = moves.iter().enumerate().filter(|(i, (m, _))| !live[*i] && drawn.get(&m.w).is_some_and(|wo| !dr.handles_hold(wo))).count();
         if stale > 0 {
-            warnings.push(format!("fuse pour check: {stale} undone fuse moves left wires whose tracks are not in the drawing's index (engine bug)"));
+            warnings.push(format!("fuse pour check: {stale} undone moves left wires whose tracks are not in the drawing's index (engine bug)"));
         }
         if n_undone > 0 {
-            // The fuse line counts the moves kept (`fused` and `moves`: one entry per applied
-            // move, in the same order).
-            let mut it = live.iter();
-            fused.retain(|_| *it.next().unwrap_or(&true));
+            // The fuse line counts the fuse moves kept (`fused` holds one entry per fuse move, in
+            // the order of the fuse moves in `moves`).
+            let mut it = mv.iter().zip(&live).filter(|(m, _)| m.onto != fusepour::NO_WIRE).map(|(_, l)| *l);
+            fused.retain(|_| it.next().unwrap_or(true));
         }
         warnings.push(format!(
-            "fuse pour check: the stitching leaves {first} pour pieces cut off in the fused copper, {} without the fuse; {n_undone} of {} fuse moves undone{}, now {} ({:.2} s; the fuse never adds a cut-off pour piece, errors first, TopoR 6.3 p. 72)",
+            "fuse pour check: the stitching leaves {first} pour pieces cut off in the copper after the fuse and the octilinear polish, {} without their moves; {n_undone} of {} moves undone (fuse {fuse_undone} of {n_fuse}, polish {} of {}){}, now {} ({:.2} s; these steps never add a cut-off pour piece, errors first, TopoR 6.3 p. 72)",
             base.len(),
             mv.len(),
+            n_undone - fuse_undone,
+            mv.len() - n_fuse,
             if undone_nets.is_empty() { String::new() } else { format!(" ({})", undone_nets.iter().cloned().collect::<Vec<_>>().join(", ")) },
             cur.len(),
             t_pc.elapsed().as_secs_f64()

@@ -111,6 +111,7 @@ fpcheck() {  # the fuse pour check (TW2, qmtech 43 vs 44 forensics)
   sub '                    out[ci] = o.clone();
                     necking.retain' '                    necking.retain' | mut fp4_outcome $C --test tw2_fuse_pour
   sub 'let pour_check = opts.fuse_pour_check &&' 'let pour_check = false && opts.fuse_pour_check &&' | mut fp5_off $C --test tw2_fuse_pour
+  sub 'moves.push((super::fusepour::Move { w, onto: super::fusepour::NO_WIRE, path }, sv));' 'drop((path, sv));' | mut fp6_polish $C --test tw2_fuse_pour
   note "fpcheck done"
 }
 flake() {  # the fuse pour tests repeated: alone (1 and default test threads) and next to the lib tests

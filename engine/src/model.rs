@@ -1187,11 +1187,12 @@ pub struct Options {
     /// where the two part instead (one copper, a T there), when that is cheaper by length and the
     /// `junction_angle` factor and the new track keeps every clearance. Default on.
     pub fuse_branches: bool,
-    /// Topological core (TW2, `topor.toml [search] fuse_pour_check`): the fuse judges its moves
-    /// by the pour stitching too. The copper with and without the fuse moves is stitched; when
-    /// the fused copper leaves more pour pieces cut off (each an error: KiCad's DRC lists it as
-    /// unconnected), the moves nearest the new pieces are undone, then all of them. Costs two
-    /// or more stitching passes on a board with pours. Default on.
+    /// Topological core (TW2, `topor.toml [search] fuse_pour_check`): the fuse and the
+    /// octilinear polish after drawing are judged by the pour stitching too. The copper with and
+    /// without their moves is stitched; when the moved copper leaves more pour pieces cut off
+    /// (each an error: KiCad's DRC lists it as unconnected), the moves nearest the new pieces
+    /// are undone, then all of them. Costs two or more stitching passes on a board with pours.
+    /// Default on.
     pub fuse_pour_check: bool,
     /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route cycles per run (the
     /// first included). Since M-B0 a safety cap: a run ends at "Routes stable" (`stable_*`) or at

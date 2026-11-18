@@ -1,16 +1,17 @@
-//! Fuse pour check (TW2, qmtech MAX_I2S0 forensics 2026-11-18): the fuse after drawing (D6b,
-//! [`super::draw::fuse_candidates`]) moves a branch end onto its trunk's copper where that is
-//! shorter and legal. It never saw the pour pieces its new copper cuts off: on qmtech two moves
-//! of 0.4 mm length gain each narrowed a GND pour piece beside the ADV7511 (4.80 -> 1.59 mm²)
-//! and cut a capacitor pad off its piece, the stitching found no site for either, and the fused
-//! variant counted one error more than the copper as drawn (43 vs 44: the variant table then
-//! picked the variant without the via reduction, +49 mm and +3 vias).
+//! Pour check of the steps after drawing (TW2, qmtech MAX_I2S0 forensics 2026-11-18): the fuse
+//! (D6b, [`super::draw::fuse_candidates`]) moves a branch end onto its trunk's copper where that
+//! is shorter and legal, and the octilinear polish ([`super::draw::Drawer::octi_polish`]) redraws
+//! the segments not at 0/45/90 degrees as an elbow or Z. Neither saw the pour pieces its new
+//! copper cuts off: on qmtech the reduced, fused and polished copper left 21 GND pieces the
+//! stitching could not join against 20 of the copper as drawn (the fuse alone left 19, the
+//! polish after it 21; pieces beside the ADV7511 and at C9.2), so that variant counted 44 errors
+//! against 43 and the variant table picked the one without the via reduction (+49 mm, +3 vias).
 //!
-//! The check judges the fuse as a whole by the variant table's first criterion (errors;
+//! The check judges these moves as a whole by the variant table's first criterion (errors;
 //! "a design-rule violation cannot be compensated by any reduction of wire length", Polubasov
 //! 2010; TopoR 6.3 manual p. 72: variants sorted by violations, then by length): the copper with
 //! and without the fuse moves is stitched ([`super::stitch::stitch_until`], the same pass the
-//! variant table runs), and when the fused copper leaves more pieces cut off, the moves nearest
+//! variant table runs), and when the moved copper leaves more pieces cut off, the moves nearest
 //! the pieces only it leaves are undone (with the moves that depend on them), at most
 //! [`ROUNDS`] times; still worse, every move is undone. Length gain stays the tie-break: a fuse
 //! that leaves no more pieces cut off is kept whole. The pure parts live here (unit tests); the
@@ -27,13 +28,32 @@ pub const ROUNDS: usize = 2;
 /// Two pads, vias or pad-less centroids closer than this (nm) are the same place.
 const SAME_NM: f64 = 1_000_000.0;
 
-/// One fuse move: wire `w` fused one end onto wire `onto`; `path` = the points of its run before
-/// and after the move (math frame), where its copper changed.
+/// No wire: the `onto` of a move that joins no other wire (a polish).
+pub const NO_WIRE: usize = usize::MAX;
+
+/// One move after drawing: wire `w` fused one end onto wire `onto` (a polish: [`NO_WIRE`]);
+/// `path` = polylines (math frame) where its copper changed.
 #[derive(Clone, Debug, Default)]
 pub struct Move {
     pub w: usize,
     pub onto: usize,
-    pub path: Vec<Vec2>,
+    pub path: Vec<Vec<Vec2>>,
+}
+
+/// The new copper of a redrawn wire: the segments of `new` runs with an end that is no vertex of
+/// the `old` run on the same index (2-point polylines). O(points log points).
+pub fn changed(old: &[(usize, Vec<Vec2>)], new: &[(usize, Vec<Vec2>)]) -> Vec<Vec<Vec2>> {
+    let key = |p: &Vec2| (p.x.to_bits(), p.y.to_bits());
+    let mut out = Vec::new();
+    for (r, (_, pts)) in new.iter().enumerate() {
+        let had: BTreeSet<(u64, u64)> = old.get(r).map(|(_, o)| o.iter().map(key).collect()).unwrap_or_default();
+        for x in pts.windows(2) {
+            if !had.contains(&key(&x[0])) || !had.contains(&key(&x[1])) {
+                out.push(vec![x[0], x[1]]);
+            }
+        }
+    }
+    out
 }
 
 /// `a` and `b` are the same cut-off piece in two stitchings of slightly different copper: one
@@ -81,7 +101,7 @@ fn dist_path(p: Vec2, path: &[Vec2]) -> f64 {
 pub fn nearest_move(moves: &[Move], live: &[bool], pts: &[Vec2]) -> Option<usize> {
     let mut best: Option<(f64, usize)> = None;
     for (i, m) in moves.iter().enumerate().filter(|(i, _)| live[*i]) {
-        let d = pts.iter().map(|&p| dist_path(p, &m.path)).fold(f64::INFINITY, f64::min);
+        let d = pts.iter().flat_map(|&p| m.path.iter().map(move |q| dist_path(p, q))).fold(f64::INFINITY, f64::min);
         if d.is_finite() && best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, i));
         }
@@ -111,8 +131,8 @@ pub fn with_dependents(moves: &[Move], seed: &BTreeSet<usize>) -> BTreeSet<usize
     }
 }
 
-/// The fused copper is kept as it is when it leaves no more pieces cut off than the copper
-/// without the fuse (the errors criterion first; length decides the rest). O(1).
+/// The moved copper is kept as it is when it leaves no more pieces cut off than the copper
+/// without the moves (the errors criterion first; length decides the rest). O(1).
 pub fn fused_ok(fused_left: usize, unfused_left: usize) -> bool {
     fused_left <= unfused_left
 }
@@ -156,15 +176,23 @@ mod tests {
     #[test]
     fn the_move_nearest_the_new_piece_is_undone_first() {
         let moves = [
-            Move { w: 1, onto: 9, path: vec![v(0.0, 0.0), v(10.0, 0.0)] },
-            Move { w: 2, onto: 9, path: vec![v(0.0, 5.0), v(10.0, 5.0)] },
-            Move { w: 3, onto: 9, path: vec![v(0.0, 2.0), v(10.0, 2.0)] },
+            Move { w: 1, onto: 9, path: vec![vec![v(0.0, 0.0), v(10.0, 0.0)]] },
+            Move { w: 2, onto: NO_WIRE, path: vec![vec![v(0.0, 9.0)], vec![v(0.0, 5.0), v(10.0, 5.0)]] },
+            Move { w: 3, onto: 9, path: vec![vec![v(0.0, 2.0), v(10.0, 2.0)]] },
         ];
         let pts = [v(5.0, 4.0)];
         assert_eq!(nearest_move(&moves, &[true, true, true], &pts), Some(1));
         assert_eq!(nearest_move(&moves, &[true, false, true], &pts), Some(2), "an undone move is not a candidate");
         assert_eq!(nearest_move(&moves, &[false, false, false], &pts), None);
         assert_eq!(nearest_move(&moves, &[true, true, true], &[]), None);
+    }
+
+    #[test]
+    fn a_polish_moves_only_the_segments_it_redrew() {
+        let old = vec![(0usize, vec![v(0.0, 0.0), v(4.0, 3.0), v(10.0, 3.0)])];
+        let new = vec![(0usize, vec![v(0.0, 0.0), v(1.0, 0.0), v(4.0, 3.0), v(10.0, 3.0)])];
+        assert_eq!(changed(&old, &new), vec![vec![v(0.0, 0.0), v(1.0, 0.0)], vec![v(1.0, 0.0), v(4.0, 3.0)]]);
+        assert!(changed(&old, &old).is_empty());
     }
 
     #[test]
@@ -175,9 +203,10 @@ mod tests {
             Move { w: 1, onto: 8, ..Move::default() }, // wire 1's other end, saved after move 0
             Move { w: 3, onto: 2, ..Move::default() }, // onto wire 2: depends on move 1
             Move { w: 4, onto: 9, ..Move::default() },
+            Move { w: 3, onto: NO_WIRE, ..Move::default() }, // wire 3's polish: depends on move 3
         ];
         let got = with_dependents(&moves, &BTreeSet::from([0]));
-        assert_eq!(got, BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(got, BTreeSet::from([0, 1, 2, 3, 5]));
         // A move made before the seed does not depend on it.
         assert_eq!(with_dependents(&moves, &BTreeSet::from([2])), BTreeSet::from([2]));
     }

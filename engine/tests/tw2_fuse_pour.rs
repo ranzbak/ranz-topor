@@ -1,7 +1,7 @@
-//! TW2 fuse pour check ([`topor_engine::topo::fusepour`]): the fuse after drawing is judged by the
-//! pour stitching too, so it never leaves more pour pieces cut off than the copper without it
-//! (qmtech 2026-11-18: two fuse moves of 0.4 mm gain each left a GND piece beside the ADV7511
-//! and a capacitor pad cut off, one error more than the copper as drawn).
+//! TW2 fuse pour check ([`topor_engine::topo::fusepour`]): the fuse and the octilinear polish after
+//! drawing are judged by the pour stitching too, so they never leave more pour pieces cut off
+//! than the copper without their moves (qmtech 2026-11-18: the reduced, fused and polished copper
+//! left 21 GND pieces against 20 as drawn, one error more, so the table dropped the via reduction).
 //!
 //! Fixture: the esp USB crop (`fixtures/esp-rust-board-usb-crop.json`) with a GND pour over the
 //! whole board on both layers added in code (the crop has no pours), so the fuse moves of its
@@ -50,9 +50,9 @@ fn line<'a>(r: &'a RouteResult, start: &str) -> Option<&'a String> {
     r.warnings.iter().find(|w| w.starts_with(start))
 }
 
-/// `(of the line "<n> of <k> fuse moves undone")`.
+/// `(n, k)` of the line's "<n> of <k> moves undone".
 fn undone(l: &str) -> (usize, usize) {
-    let t = l.split(" fuse moves undone").next().unwrap();
+    let t = l.split(" moves undone").next().unwrap();
     let mut w = t.rsplit(' ');
     let k = w.next().unwrap().parse().unwrap();
     let _ = w.next();
@@ -82,10 +82,14 @@ fn the_fuse_never_leaves_more_pour_pieces_cut_off() {
     let r = route(&m, &[], &[]);
     let l = line(&r, "fuse pour check: ").unwrap_or_else(|| panic!("no fuse pour check line; {:?}", r.warnings.iter().filter(|w| w.starts_with("fuse")).collect::<Vec<_>>()));
     let num = |after: &str| -> usize { l.split(after).nth(1).and_then(|t| t.split(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("{after}: {l}")) };
-    let (without, now) = (num(" cut off in the fused copper, "), num(", now "));
+    let (without, now) = (num(" and the octilinear polish, "), num(", now "));
     assert!(now <= without, "{l}");
     let (_, k) = undone(l);
     assert!(k >= 1, "the crop fuses trace ends: {l}");
+    // Every polished wire is a move of the check too.
+    let pol: usize = line(&r, "octilinear polish after drawing: ").and_then(|p| p.split("drawing: ").nth(1)?.split(' ').next()?.parse().ok()).expect("polish line");
+    let pol_moves: usize = l.split(", polish ").nth(1).and_then(|t| t.split(" of ").nth(1)?.split(')').next()?.parse().ok()).unwrap_or_else(|| panic!("{l}"));
+    assert_eq!(pol == 0, pol_moves == 0, "{pol} polished segments: {l}");
     // Off: no check, the fuse as before.
     let off = route(&m, &[("fuse_pour_check", serde_json::json!(false))], &[]);
     assert!(line(&off, "fuse pour check: ").is_none());
@@ -93,18 +97,20 @@ fn the_fuse_never_leaves_more_pour_pieces_cut_off() {
 
 /// Hook "fuse pour undo all": every move is undone, so the copper is the copper with the fuse
 /// off: the drawn wires, their outcomes and the drawing's index all come back (the steps after
-/// the fuse, the octilinear polish among them, see the same copper as without it).
+/// the check see the same copper as without the fuse). Style smooth: no polish, whose moves a
+/// run with the fuse off would make too.
 #[test]
 fn undoing_every_fuse_move_gives_the_copper_without_the_fuse() {
     let m = crop_with_gnd_pour();
-    let all = route(&m, &[], &["fuse pour undo all"]);
+    let smooth = ("draw_style", serde_json::json!("smooth"));
+    let all = route(&m, std::slice::from_ref(&smooth), &["fuse pour undo all"]);
     let l = line(&all, "fuse pour check: ").expect("fuse pour check line");
     let (n, k) = undone(l);
     assert!(k >= 1 && n == k, "{l}");
     let f = line(&all, "fuse after drawing: ").expect("fuse line");
     assert!(f.starts_with("fuse after drawing: 0 trace ends moved"), "the fuse line counts the moves kept: {f}");
     assert!(!all.warnings.iter().any(|w| w.contains("not in the drawing's index")), "{:?}", all.warnings.iter().filter(|w| w.starts_with("fuse")).collect::<Vec<_>>());
-    let off = route(&m, &[("fuse_branches", serde_json::json!(false))], &[]);
+    let off = route(&m, &[smooth, ("fuse_branches", serde_json::json!(false))], &[]);
     let diag = |r: &RouteResult| -> Vec<String> { r.warnings.iter().filter(|w| w.starts_with("fuse") || w.starts_with("via reduction") || w.starts_with("octilinear polish") || w.starts_with("TopoR loop (") || w.starts_with("pour stitching")).map(|w| w.chars().take(300).collect()).collect() };
     assert_eq!(all.total_length_nm, off.total_length_nm, "undo all:\n{:#?}\nfuse off:\n{:#?}", diag(&all), diag(&off));
     assert_eq!(copper(&all), copper(&off));
