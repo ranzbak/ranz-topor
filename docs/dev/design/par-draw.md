@@ -234,3 +234,20 @@ from `OCTI_CREW_MIN_NODES` = 24 nodes; below either the calling thread does it a
 Mutants: M1 the results in completion order (par::map and the crew's slots); M2 the overlays merged in another order
 (equivalent by design: pure values; survives); M3 the prune against the row as the node found it; M4 a node's results
 applied to its successors in reverse order.
+
+## 15. Measured (exclusive ccx43; base main 01e85fce paosb-01e85fc, tip par-octi 5a4c0926 paost3-5a4c092; rounds 1)
+Drawing seconds ("drawing + feedback"); `l1` = `draw_lanes = 1` on the same VM as the tip.
+
+| board / realise | base r1 t1 | base r1 t8 | base r4 t8 | tip r1 t1 | tip r1 t8 | tip r4 t8 | tip r4 t8 l1 |
+|---|---|---|---|---|---|---|---|
+| qmtech erbs | 18.84 | 18.81 | 15.84 | 19.26 | 12.94 | 11.50 | 17.98 |
+| qmtech sequential | 10.36 | 10.44 | 9.24 | 10.65 | 8.22 | 7.49 | 9.72 |
+| esp erbs | 5.62 | 5.67 | 5.52 | 6.49 | 3.65 | 3.56 | 5.50 |
+| esp sequential | 4.30 | 4.37 | 3.36 | 4.87 | 3.20 | 2.44 | 3.72 |
+
+Same-VM ratios (robust): tip t8 / t1 drawing 0.56-0.77 (base 1.00-1.02); runs=4 at 8 threads, lanes on vs
+`draw_lanes = 1`: -23 % to -36 %. The two VMs differ: at 1 thread the tip's non-drawing part was 10-29 % slower
+with unchanged code there, so cross-VM whole-run seconds are not comparable. Whole run on the tip VM, lanes on vs
+l1 at runs=4: esp -1.2 / -1.7 s, qmtech sequential -1.9 s, qmtech erbs +4.0 s (one sample; CPU +25 s: waiting
+lanes spin, `CREW_SPIN` and the caller's yield loop, a follow-up to check). Copper: all 16 configs equal between
+base and tip, l1 and auto equal.
