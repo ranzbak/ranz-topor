@@ -61,9 +61,14 @@ fn counters_do_not_touch_the_copper_and_add_up() {
         for k in ["topo_setup", "st_sweep", "st_uncross_reopt", "st_viarose", "st_float", "st_cross", "st_pairrelay", "st_pairmove"] {
             assert!(calls(k) > 0 && calls(k) <= calls("cycle"), "{f}: lap {k} has {} calls for {} cycles", calls(k), calls("cycle"));
         }
-        // the loop-local judge (the default) is counted as a layering: one call per local layering at least
-        // as many as the judged re-lays' price calls
-        assert!(calls("assign_with") >= calls("rr_viol_after"), "{f}: assign_with {} < rr_viol_after {} (local layering not counted?)", calls("assign_with"), calls("rr_viol_after"));
+        // the loop-local judge (the default) is counted as a layering: the judge line's per-cycle
+        // whole-board + local layerings (x cycles, rounded to 0.1 per cycle) all went through assign_with
+        let line = on.warnings.iter().find(|w| w.starts_with("TopoR loop judge")).expect("judge line");
+        let num = |key: &str| -> f64 { line[..line.find(key).unwrap()].trim_end().rsplit(' ').next().unwrap().parse().unwrap() };
+        let (glob, loc) = (num(" whole-board layerings"), num(" local layerings"));
+        let n = cycles.len() as f64;
+        assert!(loc > 0.0, "{f}: the local judge ran: {line}");
+        assert!(calls("assign_with") as f64 >= (glob + loc - 0.1) * n, "{f}: assign_with {} calls < layerings {} ({line})", calls("assign_with"), (glob + loc) * n);
         // the closing mark("finish") of report() is in the tail window
         let tail = stages.iter().find(|s| s["stage"] == "tail").unwrap();
         assert!(tail["labels"].as_array().unwrap().iter().any(|l| l == "finish"), "{f}: tail labels {:?}", tail["labels"]);
