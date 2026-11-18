@@ -93,7 +93,7 @@ fn the_fuse_never_leaves_more_pour_pieces_cut_off() {
     assert!(k >= 1, "the crop fuses trace ends: {l}");
     // Every polished wire is a move of the check too.
     let pol: usize = line(&r, "octilinear polish after drawing: ").and_then(|p| p.split("drawing: ").nth(1)?.split(' ').next()?.parse().ok()).expect("polish line");
-    let pol_moves: usize = l.split(", polish ").nth(1).and_then(|t| t.split(" of ").nth(1)?.split(')').next()?.parse().ok()).unwrap_or_else(|| panic!("{l}"));
+    let pol_moves: usize = l.split(", polish ").nth(1).and_then(|t| t.split(" of ").nth(1)?.split([';', ')']).next()?.parse().ok()).unwrap_or_else(|| panic!("{l}"));
     assert_eq!(pol == 0, pol_moves == 0, "{pol} polished segments: {l}");
     // Off: no check, the fuse as before.
     let off = route(&m, &[("fuse_pour_check", serde_json::json!(false))], &[]);
