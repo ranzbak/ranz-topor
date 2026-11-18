@@ -140,6 +140,19 @@ fn a_band_that_misses_any_angle_keeps_its_octilinear_form() {
     assert_eq!((e.cut_back, e.forced, viol), (0, 0, 0), "{e:?}");
 }
 
+/// Hook "joint conflict": every two bands next in the order conflict in the joint check, so the
+/// selector rejects bands whose copper is legal. Each rejected band whose octilinear form is legal
+/// against the kept bands is kept in that form (`octi_rescued`, best key first) instead of being
+/// cut back.
+#[test]
+fn rejected_bands_keep_their_octilinear_form_where_legal() {
+    let r = route("erbs", "river_wrap", "octilinear", &[], &["joint conflict"]);
+    let e = erbs(&r);
+    partition_holds(&e);
+    assert!(e.octi_rescued >= 1, "{e:?}");
+    assert!(e.kept > e.bands - e.octi_rescued, "a rescued band counts as kept, not rejected: {e:?}");
+}
+
 /// Every approved fixture in both styles: the partition holds and nothing is lost to another wire.
 #[test]
 #[ignore]

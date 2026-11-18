@@ -945,6 +945,10 @@ pub struct Drawer<'a> {
     /// before its first run, so its reserved bands are still in the index (TW2:
     /// [`Drawer::draw_wire`] releases them). Always false in real runs.
     pub test_fail_via_wire: bool,
+    /// Test-only (hook "joint conflict"): the joint check sees a conflict between every two bands
+    /// next in the draw order ([`Drawer::reserve_bands`]), so bands it rejects reach the octilinear
+    /// rescue against the kept ones. Always false in real runs.
+    pub test_joint_conflict: bool,
     /// Round i: the class test's reference paths, built at the first competitor.
     class_ref: Option<ClassRef>,
     /// M3 length factor: every legal ERBS a sequential run was drawn against (wire, layer, ERBS
@@ -1043,6 +1047,7 @@ impl<'a> Drawer<'a> {
             test_no_class_keep: false,
             test_straight_seq: false,
             test_fail_via_wire: false,
+            test_joint_conflict: false,
             class_ref: None,
             erbs_long: Vec::new(),
             force: false,

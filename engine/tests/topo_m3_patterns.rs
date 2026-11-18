@@ -47,6 +47,19 @@ fn route_wound(p: &str, extra: &[(&str, serde_json::Value)]) -> (Vec<(String, f6
     route_hooked(p, extra, &["wind erbs"])
 }
 
+/// Engine violations of pattern `p` with `realise = "erbs"` and the test hooks `hooks` on.
+fn viols(p: &str, hooks: &'static [&'static str]) -> usize {
+    let path = format!("{}/tests/fixtures/m3/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut val = serde_json::to_value(Options::default()).unwrap();
+    val["runs"] = serde_json::json!(1);
+    val["realise"] = serde_json::json!("erbs");
+    let o: Options = serde_json::from_value(val).unwrap();
+    let mut ctl = RunControl::new();
+    ctl.set_test_hook(move |q| hooks.contains(&q));
+    topor_engine::route::route_with(&m, &o, &ctl).connections.iter().map(|c| c.violations).sum()
+}
+
 /// As `route_wound` with the test hook answering true at the named points `hooks`.
 fn route_hooked(p: &str, extra: &[(&str, serde_json::Value)], hooks: &'static [&'static str]) -> (Vec<(String, f64)>, Vec<String>) {
     let path = format!("{}/tests/fixtures/m3/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
@@ -72,13 +85,20 @@ fn route_hooked(p: &str, extra: &[(&str, serde_json::Value)], hooks: &'static [&
 fn wound_erbs_gives_way_to_the_sequential_run() {
     let (got, warn) = route_wound("channel_fit", &[]);
     let seq = route("channel_fit", "sequential");
+    let el = warn.iter().find(|w| w.starts_with("erbs_long: ")).unwrap_or_else(|| panic!("no erbs_long line in {warn:?}"));
+    assert!(!el.starts_with("erbs_long: 0 "), "{el}");
+    // TW2 joint commit: a sequential competitor must be legal against every kept band, not only
+    // against the wires drawn before it (before TW2 S2, drawn first, met an empty board). S2 meets
+    // the kept bands of S1 and S3 at the exact pitch, where the exact path finds no legal run (a
+    // near-miss, TW2b list), so it keeps its wound ERBS, legal, and ERBS_LONG says so. S1 and S3
+    // come out at their sequential length.
     for (n, l) in &got {
         let s = seq.iter().find(|c| &c.0 == n).unwrap().1;
-        assert!(*l <= s * 1.01 + 0.01, "{n}: {l} mm drawn, the sequential run is {s} mm ({got:?})");
+        if *l > s * 1.01 + 0.01 {
+            assert!(n == "S2" && el.contains("ERBS kept (no legal sequential run)"), "{n}: {l} mm drawn, the sequential run is {s} mm ({got:?}); {el}");
+        }
     }
-    let el = warn.iter().find(|w| w.starts_with("erbs_long: ")).unwrap_or_else(|| panic!("no erbs_long line in {warn:?}"));
-    assert!(el.contains("replaced by a cheaper sequential run") && el.contains("drawn sequential"), "{el}");
-    assert!(!el.starts_with("erbs_long: 0 "), "{el}");
+    assert!(viols("channel_fit", &["wind erbs"]) == 0, "the kept wound ERBS is legal");
     // a run the length factor gave to a sequential run is no check fallback (the ERBS was legal)
     let line = warn.iter().find(|w| w.contains("ERBS priced past their band")).unwrap_or_else(|| panic!("no ERBS line in {warn:?}"));
     assert!(line.contains(" 0 by the sequential attempts after the check rejected the ERBS"), "{line}");
@@ -90,10 +110,11 @@ fn wound_erbs_gives_way_to_the_sequential_run() {
     let line = warn.iter().find(|w| w.contains("ERBS priced past their band")).unwrap_or_else(|| panic!("no ERBS line in {warn:?}"));
     assert!(line.contains(" 0 ERBS priced past their band"), "{line}");
     // weight 100, margin 1: priced 3 x (1 + 100 x 4) past 2 x the band, the sequential run (priced
-    // at 2 x its length) is cheaper: replaced
+    // at 2 x its length) is cheaper: replaced where one is legal; S2 has none between the kept
+    // bands (TW2, above), so it is kept only for that reason
     let (_, warn) = route_wound("channel_fit", &[("erbs_margin", serde_json::json!(1.0)), ("erbs_length_weight", serde_json::json!(100.0))]);
     let el = warn.iter().find(|w| w.starts_with("erbs_long: ")).unwrap_or_else(|| panic!("no erbs_long line in {warn:?}"));
-    assert!(el.contains(", 0 kept"), "{el}");
+    assert!(el.contains(", 0 kept") || (el.contains(", 1 kept") && el.contains("wire 1 layer 0") && el.contains("ERBS kept (no legal sequential run)")), "{el}");
 }
 
 /// The last step of the length factor: a wound (long) ERBS whose sequential attempts are all

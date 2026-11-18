@@ -253,6 +253,15 @@ impl<'a> Drawer<'a> {
         // A band that breaks a static rule only together with the others (cannot happen: the
         // static check saw the same static items) is rejected as static; it takes part in no conflict.
         deep.retain(|&(a, b), _| !stat[a] && !stat[b]);
+        if self.test_joint_conflict {
+            // test-only fault: every two bands next in the order conflict (an overlap far past
+            // any gap bound), so the selector rejects bands whose copper is in fact legal.
+            for a in 0..bands.len().saturating_sub(1) {
+                if !stat[a] && !stat[a + 1] {
+                    deep.entry((a, a + 1)).or_insert((i64::MAX / 4, (0, 0), 0));
+                }
+            }
+        }
         // A model gap of the ERBS (`RunBand::gap`: no over-full cut predicts it; Dayan 1997 PDF
         // p. 26: bands of a routable class keep the spacing) up to `[drawing]
         // erbs_gap_keep_max_mm` keeps both bands; the gap stays as a counted violation of the band

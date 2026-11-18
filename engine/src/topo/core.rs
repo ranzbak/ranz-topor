@@ -5442,6 +5442,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 dr.test_no_class_keep = ctl.test_point("erbs class keep off");
                 dr.test_straight_seq = ctl.test_point("straight sequential run");
                 dr.test_fail_via_wire = ctl.test_point("fail via wire");
+                dr.test_joint_conflict = ctl.test_point("joint conflict");
                 if ctl.test_point("wind erbs") {
                     // test-only fault: every ERBS runs its path three times (a wound band of the
                     // same copper, legal and three times its band), for the length factor
