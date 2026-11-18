@@ -7051,6 +7051,21 @@ mod tests {
             (g.free, g.first, g.waiting)
         };
         slots.acquire_first(); // run 1 computes
+        // the guards alone, without the thread timing: free slots, but a run waits for its first
+        // slot / to go on
+        for (first, waiting) in [(1, 0), (0, 1)] {
+            {
+                let mut g = slots.st.lock().expect("slots");
+                (g.first, g.waiting) = (first, waiting);
+            }
+            let lent = slots.try_take(8);
+            slots.give(lent);
+            {
+                let mut g = slots.st.lock().expect("slots");
+                (g.first, g.waiting) = (0, 0);
+            }
+            assert_eq!(lent, 0, "free slots while a run waits (first {first}, waiting {waiting}): no lane borrows");
+        }
         assert_eq!(slots.try_take(8), 2, "nobody waits: the lanes borrow both free slots");
         let (begun, done) = (AtomicUsize::new(0), AtomicBool::new(false));
         std::thread::scope(|s| {
