@@ -276,11 +276,13 @@ def test_erbs_fallback_and_timeout_are_loud():
     res = {"connections": [_c("A", "routed")], "warnings": [
         "erbs_fallback: 2 run(s) drawn by the sequential attempts after the check rejected their ERBS, 1 stretch(es) "
         "without a sleeve to the end: wire 7: sleeve: start has no portal",
-        "erbs_timeout: the time limit passed (or the run was cancelled) before 3 stretch(es) had their ERBS; those runs "
+        "erbs_timeout: the time limit passed ([run] timeout_mode = hard) before 3 stretch(es) had their ERBS; those runs "
         "are drawn the sequential way"]}
     fs = {f.code: f for f in postrun.route_findings(res)}
     assert fs["ERBS_FALLBACK"].severity == "warning" and "wire 7" in fs["ERBS_FALLBACK"].message
     assert fs["ERBS_TIMEOUT"].severity == "warning" and "3 stretch(es)" in fs["ERBS_TIMEOUT"].message
+    # soft mode: the bound that cuts ERBS is run.drawing_grace_s, the finding's text and fix must name it
+    assert "drawing_grace_s" in fs["ERBS_TIMEOUT"].fix and "drawing_grace_s" in MESSAGES["ERBS_TIMEOUT"].cause
     quiet = {f.code for f in postrun.route_findings({"connections": [_c("A", "routed")], "warnings": [
         "ERBS drawing ([drawing] realise = \"erbs\"; ...): 4 stretches; drawn: 4 runs from their ERBS"]})}
     assert not quiet & {"ERBS_FALLBACK", "ERBS_TIMEOUT", "ERBS_LONG"}
@@ -294,3 +296,18 @@ def test_erbs_long_is_a_warning():
         "8.000 mm (x3.00), drawn sequential (8.000 mm)"]}
     fs = {f.code: f for f in postrun.route_findings(res)}
     assert fs["ERBS_LONG"].severity == "warning" and "wire 4" in fs["ERBS_LONG"].message and "x3.00" in fs["ERBS_LONG"].message
+
+
+def test_the_wait_line_is_a_time_limit_wait_finding():
+    """TIME_LIMIT_WAIT: the engine's 'time limit wait:' line (engine/src/topo/core.rs wait_line) becomes the finding,
+    capitalised, with the catalogue's fix; soft and hard lines alike."""
+    for line in ("time limit wait: the limit was reached during TopoR loop on the topology (part of the TopoR loop); waited 30.2 s "
+                 "([run] limit_grace_s = 30 s ran out: the step was stopped at its next check, the cycle it was in was dropped, "
+                 "the best variant so far was drawn; raise limit_grace_s to let a cycle finish)",
+                 "time limit wait: the limit was reached during drawing the traces (part of the drawing); that step stopped after "
+                 "0.004 s ([run] timeout_mode = hard: the limit cut this step at its next check (cut: the drawing of the traces))"):
+        fs = {f.code: f for f in postrun.route_findings({"connections": [_c("SIG", "routed")], "warnings": [line]})}
+        f = fs["TIME_LIMIT_WAIT"]
+        assert f.severity == "warning" and f.message.startswith("The limit was reached during ") and f.message.endswith(").")
+        assert f.fix == MESSAGES["TIME_LIMIT_WAIT"].fix and "drawing_grace_s" in f.fix
+    assert "TIME_LIMIT_WAIT" in postrun.POSTRUN_CODES

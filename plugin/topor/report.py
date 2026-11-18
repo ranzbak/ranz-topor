@@ -33,6 +33,65 @@ def limit_text(seconds) -> str:
     return f"{seconds:.0f} s" if seconds >= 10 else f"{seconds:.3g} s"
 
 
+def _num(v, default: float = 0.0) -> float:
+    """A number from the engine's limit report; anything else (None, text) = `default`. O(1)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return default
+    return x if math.isfinite(x) else default
+
+
+def grace_text(g, key: str = "limit_grace_s") -> str:
+    """A grace setting as the reports write it: `run.<key> = 30 s`, or unbounded for None / a negative
+    value / anything that is no number (the engine's None = no bound). Never raises. O(1)."""
+    try:
+        x = float(g)
+    except (TypeError, ValueError):
+        return f"run.{key} unbounded"
+    if not math.isfinite(x) or x < 0:
+        return f"run.{key} unbounded"
+    return f"run.{key} = {x:g} s"
+
+
+def wait_cause(tl: dict) -> str:
+    """Why the soft step the limit fell in was cut, true for the mode: the grace ran out (only then
+    limit_grace_s is named as the cause), the hard limit, or the overrun cap. O(1)."""
+    if tl.get("grace_hit"):
+        return f"{grace_text(tl.get('grace_s'))} ran out, the step was stopped at its next check"
+    if tl.get("mode") == "hard":
+        return "run.timeout_mode = hard cut the step at its next check"
+    if tl.get("cap_hit"):
+        return "the overrun cap (run.timeout_overrun_s, or the CPU-clock cap) cut the step at its next check"
+    return "the step was cut at its next check"
+
+
+def draw_grace_text(tl: dict) -> str:
+    """run.drawing_grace_s ran out: the drawing's optional passes stopped; every wire drawn, unless the limit,
+    acting as hard (the overrun cap), then cut the drawing of the traces (cut_steps "drawing"; a record without
+    cut_steps: cut == "drawing"). O(1)."""
+    n = int(_num(tl.get("draw_grace_erbs")))
+    steps = tl.get("cut_steps")
+    traces_cut = "drawing" in steps if isinstance(steps, (list, tuple)) and steps else tl.get("cut") == "drawing"
+    return (f"{grace_text(tl.get('draw_grace_s'), 'drawing_grace_s')} ran out: the drawing's optional passes stopped "
+            f"(the via reduction{f'; {n} ERBS stretch(es) drawn the sequential way' if n else ''}), "
+            + ("then the limit, acting as hard, cut the drawing of the traces (wires it had not drawn stay unrouted)"
+               if traces_cut else "every wire was drawn"))
+
+
+def wait_log_text(tl: dict) -> str:
+    """The log line after `time limit wait: ` (run.py): the step, the seconds it ran past the limit and why,
+    for any value the schema accepts (a None grace = unbounded). O(1)."""
+    txt = f"{tl.get('step') or 'the step that ran'} ran {_num(tl.get('wait_s')):.3g} s past the limit"
+    if tl.get("cycle_dropped"):
+        txt += f" ({wait_cause(tl)}; the cycle it was in was dropped, the best variant so far was drawn)"
+    else:
+        txt += " (no cycle was dropped)"
+    if tl.get("draw_grace_hit"):
+        txt += f"; {draw_grace_text(tl)}"
+    return txt
+
+
 def time_limit_text(tl: dict | None) -> str:
     """The run's time limit in one phrase (log and report): the final limit and its clock, and how the user changed
     it during the run (from which start value, how many changes). '' without a record. O(1)."""
@@ -47,6 +106,12 @@ def time_limit_text(tl: dict | None) -> str:
     if tl.get("reached"):  # M2.TL: where the limit was reached and how far the run went past it
         txt += (f", reached during {tl.get('step') or 'the run'} ({tl.get('mode', 'soft')}), "
                 f"{float(tl.get('overrun_s') or 0.0):.1f} s past it")
+    if tl.get("wait_s") or tl.get("cycle_dropped") or tl.get("draw_grace_hit"):  # the soft step the limit fell in ran on past it
+        txt += f", that step ran {_num(tl.get('wait_s')):.3g} s past it"
+        if tl.get("cycle_dropped"):
+            txt += f" (a TopoR loop cycle was dropped: {wait_cause(tl)})"
+        if tl.get("draw_grace_hit"):
+            txt += f" ({draw_grace_text(tl)})"
     if tl.get("cap_hit"):  # F3: the overrun cap fired, the soft limit then acted as the hard one
         txt += (f", WARNING: overrun cap of {limit_text(tl.get('cap_s') or 0.0)} reached (as with the hard limit: "
                 f"{CUT_TEXT.get(tl.get('cut') or 'plan', CUT_TEXT['plan'])})")

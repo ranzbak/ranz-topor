@@ -95,6 +95,17 @@ pub struct ErbsOpts {
     /// drawing passes it only while a Cancel may still stop the drawing (not in the TopoR loop's
     /// one drawing, which runs through, core.rs `draw_through`).
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The run's time limit, read live: its overrun cap firing (from `floor` on, on the wall clock and on the
+    /// plugin's CPU clock via `harden` alike) stops ERBS even after `deadline` was taken as
+    /// a snapshot, and so does the drawing bound from `draw_start` (soft limit).
+    pub limit: Option<std::sync::Arc<crate::control::TimeLimit>>,
+    /// Soft limit: the drawing's start, from which `[run] drawing_grace_s` bounds ERBS
+    /// ([`crate::control::TimeLimit::draw_bound`], read live at every stretch: a limit the plugin's
+    /// CPU clock reaches while ERBS runs moves it). `None`: no drawing bound (hard: `deadline`).
+    pub draw_start: Option<std::time::Instant>,
+    /// The round's 1 s floor (core.rs `floor`): the overrun cap (wall clock or the CPU clock's
+    /// `harden`) cuts ERBS only from then on, as it cuts the drawing (lead 2026-11-17).
+    pub floor: Option<std::time::Instant>,
     /// Test-only: the first stretch of the layer fails ("injected sleeve failure"), to see its
     /// reason reach `failed` and the ERBS_FALLBACK line. [`realise`] sets it on the first layer
     /// that has a stretch only, so a run has exactly one injected failure whatever its layering.
@@ -109,15 +120,48 @@ pub struct ErbsOpts {
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, fail_first: false, margin: 0.0 }
+        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, limit: None, draw_start: None, floor: None, fail_first: false, margin: 0.0 }
     }
 }
 
 impl ErbsOpts {
-    /// The time limit has passed or the run was cancelled. O(1).
-    fn expired(&self) -> bool {
-        self.deadline.is_some_and(|d| std::time::Instant::now() >= d) || self.stop.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    /// What stops ERBS now, if anything: the Cancel flag, the hard deadline, the overrun cap or the
+    /// drawing bound (both read live). With the cap and the bound both passed, the earlier one
+    /// (a CPU-clock `harden` has no instant: the bound, when it passed, came first). O(1).
+    pub fn expired(&self) -> Option<ErbsStop> {
+        let now = std::time::Instant::now();
+        if self.stop.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Some(ErbsStop::Cancel);
+        }
+        if self.deadline.is_some_and(|d| now >= d) {
+            return Some(ErbsStop::Deadline);
+        }
+        let l = self.limit.as_ref()?;
+        let bound = self.draw_start.and_then(|s| l.draw_bound(s)).filter(|&b| now >= b);
+        // the cap's instant (the wall clock's, or the moment of the CPU clock's harden), not before the floor
+        let wall_cap = l.cap_instant().map(|c| self.floor.map_or(c, |f| c.max(f)));
+        let cap = wall_cap.is_some_and(|c| now >= c);
+        match (bound, cap) {
+            (Some(b), true) if wall_cap.is_some_and(|c| b <= c) => Some(ErbsStop::Bound),
+            (_, true) => Some(ErbsStop::Cap),
+            (Some(_), false) => Some(ErbsStop::Bound),
+            (None, false) => None,
+        }
     }
+}
+
+/// What stopped ERBS ([`ErbsOpts::expired`]): the stretches not started then are drawn the
+/// sequential way (`timed_out`), and the erbs_timeout warning names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErbsStop {
+    /// The run's Cancel flag ([`ErbsOpts::stop`]).
+    Cancel,
+    /// The hard limit ([`ErbsOpts::deadline`]).
+    Deadline,
+    /// The overrun cap (wall clock) or the plugin's CPU-clock cap (`harden`), both from the round's floor on.
+    Cap,
+    /// `[run] drawing_grace_s` past the later of the limit and the drawing's start.
+    Bound,
 }
 
 /// Where an obstacle point comes from.
@@ -230,6 +274,8 @@ pub struct LayerErbs {
     pub es: Vec<Erbs>,
     pub failed: Vec<(usize, String)>,
     pub timed_out: usize,
+    /// What stopped ERBS first (with `timed_out > 0`).
+    pub stopped: Option<ErbsStop>,
 }
 
 /// Clockwise angle from `a` to `b` in `[0, 2 pi)`.
@@ -1320,8 +1366,9 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
     let time = std::env::var_os("TOPO_ERBS_TIME").is_some();
     let mut out = LayerErbs::default();
     for si in own.into_iter().filter(|&si| sts[si].band.len() >= 2) {
-        if opts.expired() {
+        if let Some(why) = opts.expired() {
             out.timed_out += 1;
+            out.stopped.get_or_insert(why);
             continue;
         }
         let t = std::time::Instant::now();
@@ -1853,6 +1900,8 @@ pub struct Realised {
     /// Stretches without an ERBS because the run's time limit passed ([`ErbsOpts::deadline`]):
     /// drawn the sequential way.
     pub timed_out: usize,
+    /// What stopped ERBS first ([`LayerErbs::stopped`] of the first layer it stopped).
+    pub stopped: Option<ErbsStop>,
     /// Stretches whose sleeve did not reach the end (the first few reasons with their wire):
     /// drawn the sequential way.
     pub failed: Vec<(usize, String)>,
@@ -1946,7 +1995,7 @@ pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec
 /// radii (steps a, b), the ERBS per layer and their check, and the precedes order of `given`.
 /// `ends`: the pad ends off their pad centre (`Drawer::pad_end`, edge-clear): the stretches end there.
 #[allow(clippy::too_many_arguments)]
-pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, ends: &BTreeMap<(usize, usize), Vec2>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], deadline: Option<std::time::Instant>, stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, fail_first: bool) -> Result<Realised, String> {
+pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], packer: &super::pack::Packer, bottom: i32, conn: &dyn Fn(usize) -> Option<usize>, placed: &BTreeMap<usize, Vec<(usize, Vec2)>>, ends: &BTreeMap<(usize, usize), Vec2>, outline: &[(Vec2, Vec2)], mo: &super::cutflow::MeasureOpts, layers: &[usize], given: &[usize], stops: ErbsOpts) -> Result<Realised, String> {
     let t0 = std::time::Instant::now();
     let none: Vec<Vec<usize>> = Vec::new();
     let plan = super::cutflow::Plan { st, events, via_k: &none, bottom, packer, conn, placed: Some(placed), ends: Some(ends) };
@@ -1957,15 +2006,18 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     // The test hook fails one stretch of the run (the first of the first layer with one), not
     // one per layer: the count it leaves does not depend on how the plan spreads the wires over
     // the layers.
-    let mut inject = fail_first;
+    let mut inject = stops.fail_first;
     for (lf, o) in m.layers.iter().zip(&ords) {
         out.unbanded += lf.walk_failed;
-        let eo = ErbsOpts { deadline, stop: stop.clone(), fail_first: inject, margin: m.opts.margin, ..ErbsOpts::default() };
+        let eo = ErbsOpts { fail_first: inject, margin: m.opts.margin, ..stops.clone() };
         let le = erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
         if !le.es.is_empty() || !le.failed.is_empty() {
             inject = false;
         }
         out.timed_out += le.timed_out;
+        if out.stopped.is_none() {
+            out.stopped = le.stopped;
+        }
         let vs = check_layer(&lf.sheet, &m.stretches, o, &le.es);
         // Debug: the drawing's ERBS per layer (harness/erbs_accept.py reads `realise-L<n>.json`).
         if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {

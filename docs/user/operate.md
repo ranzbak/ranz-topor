@@ -363,6 +363,25 @@ runs still computing when the limit was reached (a run waiting for the others' p
 TopoR loop cycle plus the drawing can take minutes (qmtech, 2026-11-13: about 4 minutes on the clock past the limit);
 press Cancel to stop at once.
 
+**The wait for the TopoR loop is bounded** (`[run] limit_grace_s`, default 30 s): the loop checks its stop
+between rerouted connections, layer re-optimisations, label moves and crossing passes, not only between cycles. After the
+limit the step that runs may go on for at most `limit_grace_s` seconds (`0` = stop at the next check, any negative
+value = no bound); then it stops at the next check, the cycle it was in is dropped (a cycle cut short is never kept) and
+the best variant kept so far is drawn. This holds in the KiCad dialog too, where the overrun cap is off.
+
+**The drawing's optional passes are bounded too** (`[run] drawing_grace_s`, default 60 s, counted from the later of
+the limit and the drawing's start): every wire is always drawn and the pour stitching always finishes (never drop), but
+past the bound the via reduction stops (it keeps the vias it removed so far) and, with `[drawing] realise = "erbs"`, the
+stretches not yet banded are drawn the sequential way (counted in the report). `0` = they stop at their first check
+past the limit, any negative value = no bound. Measured: qmtech draws its wires in about 50 s and reduces vias in
+about 5 s; a bornhack via reduction that runs to its end took 110-760 s. The initial routing is never cut by either bound.
+
+[`TIME_LIMIT_WAIT`](troubleshoot.md#time_limit_wait) names the step the limit fell in (the stage, and the whole step it
+belongs to: the initial routing, the TopoR loop, the drawing; with `loop = "cycles"` the whole-route cycle), the seconds
+that step ran past the limit and why, in soft and in hard mode (log.txt, the findings, report.md, `result.json`
+`time_limit.wait_s`, `cycle_dropped`, `grace_hit`, `draw_grace_hit`, `draw_grace_erbs`). Runs that do not reach the
+limit are not affected.
+
 **The overrun has a cap** (`[run] timeout_overrun_s`): seconds past `timeout_s`, on the same clock, that the step
 running at the limit may still take. Past it the run acts as with `hard` (below): the step that runs is cut and the
 kept plan (the best variant so far, or the initial plan) is drawn in full; when the drawing itself is the step that
