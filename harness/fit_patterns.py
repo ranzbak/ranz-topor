@@ -1030,7 +1030,7 @@ def build_board(pat: Pattern, *, copper: bool) -> pcbnew.BOARD:
         ol.SetClosed(True)
         z.AddPolygon(ol)
         b.Add(z)
-    for t in pat.kept_tracks:
+    for t in getattr(pat, "kept_tracks", ()):  # diffpair / via patterns reuse build_board without the field
         for a, c in zip(t.pts, t.pts[1:]):
             tr = pcbnew.PCB_TRACK(b)
             tr.SetStart(_v(*a))

@@ -81,7 +81,7 @@ def _frame(ax, pat, layers, title):
 
 def _kept(ax, pat, layers):
     """Existing copper of the problem (a hand-started track, tw4 T3), hatched, on both panels."""
-    for t in pat.kept_tracks:
+    for t in getattr(pat, "kept_tracks", ()):
         if t.layer not in layers:
             continue
         poly = LineString(t.pts).buffer(t.width / 2, cap_style="round", join_style="round", quad_segs=16)
