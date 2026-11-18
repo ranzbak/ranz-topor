@@ -390,9 +390,9 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** [drawing] realise = "erbs" did not draw every trace from its extended rubber band: for some (or all) of them the band had no path to its end or its check found a violation, so they were drawn the sequential way instead. The finding counts them and names the first wires with the reason; the result is valid, but those traces do not have the band's shape.
+**Cause.** [drawing] realise = "erbs" (the default) did not draw every trace from its extended rubber band. All bands are checked together: a band that breaks a rule against a pad, via, hole, the board edge or existing copper is rejected (static); where two bands conflict, one is kept by [drawing] erbs_conflict_keep (tier = the higher priority tier first, then the most bands) and the other is rejected (predicted: an over-full place of the plan; gap: a model gap of the bands). A band can also be missing (no path to its end, the time limit, a branch ending on its trunk). Those traces were drawn the sequential way instead, around the kept bands, so one rejected band never pushes another one out. The finding counts them per reason and names the first wires; the result is valid, but those traces do not have the band's shape.
 
-**Fix.** Accept the result, or route again with drawing.realise = "sequential" (the default; topor.toml [drawing] realise) for one drawing method throughout; report the board and the listed wires if this repeats.
+**Fix.** Accept the result, or route again with drawing.realise = "sequential" (topor.toml [drawing] realise) for one drawing method throughout; try drawing.erbs_conflict_keep = "count" to keep the most bands regardless of priority; report the board and the listed wires if many are rejected.
 
 ### ERBS_LONG
 
@@ -400,7 +400,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** [drawing] realise = "erbs": some extended rubber bands were longer than their band by more than [drawing] erbs_margin. Such a band is priced by its length factor (length x (1 + erbs_length_weight x (length / band - 1)^2), graded, no cutoff) and a sequential run of the trace was drawn to compare: the cheaper one was drawn (the sequential run's length counts erbs_margin more, for the room the band keeps for the others). The finding counts both outcomes and names the longest bands with their factor; a band many times its band's length means a wrong topology class in the band (report the board).
 
-**Fix.** Accept the result, or route again with drawing.realise = "sequential" (the default); raise [drawing] erbs_length_weight to replace long bands sooner, lower it (0 = no length price) to keep them.
+**Fix.** Accept the result, or route again with drawing.realise = "sequential"; raise [drawing] erbs_length_weight to replace long bands sooner, lower it (0 = no length price) to keep them.
 
 ### ERBS_TIMEOUT
 
@@ -408,7 +408,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** [drawing] realise = "erbs" ran out of time: before every trace had its extended rubber band the run's time limit passed (timeout_mode = hard), or with the soft limit run.drawing_grace_s past it (default 60 s) or the overrun cap run.timeout_overrun_s, or you pressed Cancel; the rest were drawn the sequential way. The bands cost time on large boards (several seconds to minutes per layer).
 
-**Fix.** Raise run.drawing_grace_s (soft limit; negative = no bound) or run.timeout_s and route again, or use drawing.realise = "sequential" (the default; topor.toml [drawing] realise) on large boards.
+**Fix.** Raise run.drawing_grace_s (soft limit; negative = no bound) or run.timeout_s and route again, or use drawing.realise = "sequential" (topor.toml [drawing] realise) on large boards.
 
 ### GROUPS_UNAVAILABLE
 

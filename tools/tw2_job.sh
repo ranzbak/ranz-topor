@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# tw2_job.sh (branch tw2-metric, docs/dev/design/tw2-metric.md): board ladder, tests and mutants on the VM.
+#   tw2_job.sh ladder CFG...   per CFG one hzq unit for qmtech (4 threads, started first) and one for esp + eprom +
+#                              wiccon (1 thread; <= 4 waiting units per job: 2 CFGs per job), then wait
+#   tw2_job.sh tests           one hzq unit (4 threads): cargo test --release, clippy, targeted pytest, TW2 mutants
+#   tw2_job.sh both CFG...     ladder CFG... and tests in one job
+#   tw2_job.sh retest          one hzq unit (4 threads): clippy (log kept), the TW2 tests, mutants j3 and d1
+#   tw2_job.sh fpcheck         one hzq unit (4 threads): the fuse pour check tests, clippy, config pytest, mutants fp1-fp5
+#   tw2_job.sh ladder-fp CFG...  ladder CFG... and fpcheck in one job
+#   tw2_job.sh final CFG...    ladder CFG..., tests and fpcheck in one job
+#   tw2_job.sh end CFG...      bornhack J (4 threads, started first), ladder CFG..., tests and fpcheck in one job
+#   tw2_job.sh r2 CFG...       fix round 2: bornhack J + tiled DRC (4 threads, started first), ladder CFG..., the whole
+#                              suite + clippy + FULL pytest + drcloop pin check, the mutants in their own tree
+#   tw2_job.sh r2m CFG...      the merge check of fix round 2: ladder CFG... and the r2 suite (no bornhack, no mutants)
+#   tw2_job.sh task CFG BOARD  one run (inside a unit)
+# CFG: D (the tree's defaults; main = sequential, tw2-metric = erbs joint), J (realise erbs), S (realise sequential),
+#      JF / SF (J / S with optimize.allow_violations = false: no never-drop forcing), JD (J + TOPO_ERBS_DEBUG=1: per-run trace).
+# Runs: seed 0, optimize.rounds=1 (one fixed TopoR loop cycle), runs=1, --clock cpu --timeout 2400, TOPO_TIMES=1.
+# Out: $HZ_RUN_DIR/<CFG>/<board>/ (route_board.sh layout; tools ladder_diff.py <tag>/S <tag>/J).
+# bornhack is not in the ladder here (lead 2026-11-18: once, at the end).
+set -u
+R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
+note() { echo "$*" >> $R/rc.txt; }
+E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
+Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
+board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo bornhack2026;; esac; }
+cfg() {
+  SETS=(); ENVS=()
+  case $1 in
+    D) ;;
+    JD) SETS=(--set 'drawing.realise="erbs"'); ENVS=(TOPO_ERBS_DEBUG=1 TOPO_FUSEDBG=1) ;;
+    JN) SETS=(--set 'drawing.realise="erbs"'); ENVS=(TOPO_NOREDUCE=1 TOPO_FUSEDBG=1) ;;
+    J) SETS=(--set 'drawing.realise="erbs"') ;;
+    S) SETS=(--set 'drawing.realise="sequential"') ;;
+    JF) SETS=(--set 'drawing.realise="erbs"' --set optimize.allow_violations=false) ;;
+    SF) SETS=(--set 'drawing.realise="sequential"' --set optimize.allow_violations=false) ;;
+    *) echo "tw2_job: unknown config $1" >&2; exit 2 ;;
+  esac
+}
+task() {
+  local c=$1 n=$2 th=${3:-1}; cfg $c
+  local o=$R/$c/$n; mkdir -p $o
+  local t0=$(date +%s)
+  env RAYON_NUM_THREADS=$th TOPO_TIMES=1 "${ENVS[@]}" tools/route_board.sh "$(board_path $n)" $o --clock cpu --timeout 2400 --no-png \
+    --set optimize.rounds=1 --set optimize.runs=1 "${SETS[@]}" > $R/$c-$n.log 2>&1
+  note "task $c $n rc $? wall $(( $(date +%s) - t0 )) s"
+  rm -rf $o/work $o/*/work 2>/dev/null
+}
+ladder() {
+  for c in "$@"; do
+    ( hzq run --threads 4 --name "$c-qmtech" -- bash $ROOT/tools/tw2_job.sh task $c qmtech 4; ) & sleep 1
+  done
+  for c in "$@"; do
+    ( hzq run --threads 1 --name "$c-rest" -- bash $ROOT/tools/tw2_job.sh small $c ) & sleep 1
+  done
+}
+# Mutants never run in the tree the suite or the ladder use (verify V2: a mutant binary built in the shared tree
+# was run by the concurrent suite): each job's mutants run serially in their own copy /root/mt/<tag> with their
+# own target dir. Paths given to mut are relative to the tree root.
+mt_tree() {
+  MT=/root/mt/$(basename $R)
+  if [ ! -d $MT ]; then
+    mkdir -p $MT; rsync -a --exclude target --exclude .git --exclude scratch $ROOT/ $MT/
+    note "mutant tree $MT"
+  fi
+  export CARGO_TARGET_DIR=$MT/target
+}
+mut() {  # name file(relative) test-args... ; the python snippet on stdin edits the file in the mutant tree
+  local n=$1 f=$MT/$2; shift 2
+  cp $f $f.orig; python3 - $f; local pr=$?
+  if [ $pr -ne 0 ] || cmp -s $f $f.orig; then note "mutant $n: patch did not apply"; mv $f.orig $f; return; fi
+  touch $f
+  ( cd $MT/engine && cargo test --release "$@" > $R/mut-$n.log 2>&1 9>&- ); local rc=$?
+  mv $f.orig $f; touch $f
+  if [ $rc -ne 0 ]; then note "mutant $n: killed"; else note "mutant $n: SURVIVED"; fi
+}
+sub() { cat <<EOF
+import sys; p = sys.argv[1]; s = open(p).read(); a = '''$1'''; b = '''$2'''
+assert s.count(a) == 1, a; open(p, 'w').write(s.replace(a, b))
+EOF
+}
+tests() {
+  cd $ROOT/engine
+  { timeout 5400 cargo test --release --no-fail-fast 2>&1 9>&-; echo "cargo test rc $?"
+    rustup component add clippy > $R/clippy-install.log 2>&1 9>&-
+    cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; echo "clippy rc $?"; grep -E "^ +--> |^error" $R/clippy.log | sort | uniq
+  } > $R/tests.log
+  grep -E "test result|rc |FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
+  cd $ROOT; CI=1 python -m pytest -q tests/plugin/test_postrun.py tests/plugin/test_config.py tests/plugin/test_config_docs.py \
+    tests/plugin/test_messages.py > $R/pytest.log 2>&1
+  note "pytest rc $?: $(tail -1 $R/pytest.log)"
+  mt_tree; local J=engine/src/topo/joint.rs D=engine/src/topo/draw.rs M=engine/src/model.rs
+  sub 'if self.cur != Some(o) {' 'if self.cur == Some(o) {' | mut j1_lost_other $J --lib topo::joint
+  sub 'if (bands[a].gap || bands[c].gap) && d <= gap_max {' 'if false && d <= gap_max {' | mut j2_gap_keep $J --test tw2_metric
+  sub 'if !stat[bi] && !b.octi {' 'if false {' | mut j3_octi_rescue $J --test tw2_metric
+  sub 'r.forced_erbs += 1;' '' | mut j4_tally_forced $J --lib topo::joint
+  sub '            self.release_bands(w);' '' | mut d1_release $D --test tw2_metric
+  sub 'out.viol.extend(gv);' 'drop(gv);' | mut d2_gap_viol $D --test tw2_metric
+  sub 'let adopted = if attempt < 0 { res.take() } else { None };' 'let adopted = if false { res.take() } else { None };' | mut d3_adopt $D --test tw2_metric
+  sub 'realise: "erbs".into(),' 'realise: "sequential".into(),' | mut m1_default $M --test tw2_metric
+  note "tests done"
+}
+retest() {  # targeted: the tests and mutants a fix round touched, clippy with its log
+  cd $ROOT/engine
+  rustup component add clippy > $R/clippy-install.log 2>&1 9>&-  # the VM image has no clippy (tw2l-retest 2026-11-18)
+  cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; note "clippy rc $?: $(grep -cE '^(warning|error)' $R/clippy.log) warning/error lines"
+  { cargo test --release --lib topo::joint 9>&-; cargo test --release --test tw2_metric --test topo_m3_patterns --test topo_m3_class_keep 9>&-; } > $R/retest.log 2>&1
+  note "retest rc $?"; grep -E "test result|FAILED|panicked" $R/retest.log | while read -r l; do note "retest: $l"; done
+  mt_tree; local J=engine/src/topo/joint.rs D=engine/src/topo/draw.rs
+  sub 'if !stat[bi] && !b.octi {' 'if false {' | mut j3_octi_rescue $J --test tw2_metric
+  sub '            self.release_bands(w);' '' | mut d1_release $D --test tw2_metric
+  note "retest done"
+}
+fpcheck() {  # the fuse pour check (TW2, qmtech 43 vs 44 forensics)
+  cd $ROOT/engine
+  rustup component add clippy > $R/clippy-install.log 2>&1 9>&-
+  cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; note "clippy rc $?: $(grep -cE '^(warning|error)' $R/clippy.log) warning/error lines"
+  { cargo test --release --lib topo::fusepour 9>&-; cargo test --release --test tw2_fuse_pour --test topo_m6 --test topo_d4 --test tw2_metric 9>&-; } > $R/fpcheck.log 2>&1
+  note "fpcheck rc $?"; grep -E "test result|FAILED|panicked" $R/fpcheck.log | while read -r l; do note "fpcheck: $l"; done
+  cd $ROOT; CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py > $R/pytest.log 2>&1
+  note "pytest rc $?: $(tail -1 $R/pytest.log)"
+  mt_tree; local F=engine/src/topo/fusepour.rs C=engine/src/topo/core.rs
+  sub 'fused_left <= unfused_left' 'fused_left < unfused_left' | mut fp1_fused_ok $F --lib topo::fusepour
+  sub '(moves[j].w == moves[i].w || moves[j].onto == moves[i].w)' '(moves[j].onto == moves[i].w)' | mut fp2_dependents $F --lib topo::fusepour
+  sub 'let back = dr.restore_wire(&now, wo);' 'let back = { let _ = &now; wo.clone() };' | mut fp3_index $C --test tw2_fuse_pour
+  sub '                out[ci] = o.clone();
+                necking.retain' '                necking.retain' | mut fp4_outcome $C --test tw2_fuse_pour
+  sub 'let pour_check = opts.fuse_pour_check &&' 'let pour_check = false && opts.fuse_pour_check &&' | mut fp5_off $C --test tw2_fuse_pour
+  sub 'moves.push((super::fusepour::Move { w, onto: super::fusepour::NO_WIRE, path }, sv));' 'drop((path, sv));' | mut fp6_polish $C --test tw2_fuse_pour
+  note "fpcheck done"
+}
+flake() {  # the fuse pour tests repeated: alone (1 and default test threads) and next to the lib tests
+  cd $ROOT/engine; cargo test --release --no-run > $R/flake-build.log 2>&1 9>&-
+  for i in 1 2 3 4 5 6; do cargo test --release --test tw2_fuse_pour > $R/flake-a$i.log 2>&1 9>&-; note "flake alone $i rc $?"; done
+  for i in 1 2 3; do cargo test --release --test tw2_fuse_pour -- --test-threads 1 > $R/flake-s$i.log 2>&1 9>&-; note "flake serial $i rc $?"; done
+  for i in 1 2 3; do { cargo test --release --test tw2_metric > /dev/null 2>&1 & cargo test --release --test tw2_fuse_pour > $R/flake-l$i.log 2>&1; r=$?; wait; } 9>&-; note "flake loaded $i rc $r"; done
+  note "flake done"
+}
+r2suite() {  # fix round 2 (verify 20261118-1804): the whole release suite, clippy, the FULL pytest, the drcloop pin
+  cd $ROOT/engine
+  { cargo test --release --no-fail-fast 2>&1 9>&-; echo "cargo test rc $?"; } > $R/tests.log
+  grep -E "test result|rc |FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
+  rustup component add clippy > $R/clippy-install.log 2>&1 9>&-
+  cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; note "clippy rc $?: $(grep -cE '^(warning|error)' $R/clippy.log) warning/error lines"
+  cd $ROOT; CI=1 python -m pytest -q > $R/pytest.log 2>&1
+  note "pytest FULL rc $?: $(tail -1 $R/pytest.log)"
+  # V1: the drcloop digest pinned from this run's own value, checked by a second run of that test alone.
+  local dg; dg=$(sed -n '/test_drcloop_matches_run_bench_on_fixture/,$p' $R/pytest.log | grep -oE "[0-9a-f]{64}" | grep -v '^418d48958e66' | head -1)
+  note "drcloop digest now: ${dg:-unchanged or not found}"
+  if [ -n "$dg" ]; then
+    sed "s/418d48958e66ab45f7c8b7f5e494d45280aef5c39451dfa928a55d80d1f9d0ff/$dg/" tests/test_drcloop.py > tests/test_drcloop_pincheck.py
+    CI=1 python -m pytest -q tests/test_drcloop_pincheck.py > $R/pytest-pin.log 2>&1; note "drcloop pin check rc $?: $(tail -1 $R/pytest-pin.log)"
+    rm -f tests/test_drcloop_pincheck.py
+  fi
+  note "r2suite done"
+}
+r2mut() {  # fix round 2 mutants: this round's lines (V3 re-check, V5 polish count, V6 cut) and the fuse pour check's
+  mt_tree; local F=engine/src/topo/fusepour.rs C=engine/src/topo/core.rs D=engine/src/topo/draw.rs
+  ( cd $MT/engine && cargo test --release --no-run > $R/mt-build.log 2>&1 9>&- ); note "mutant tree build rc $?"
+  # The unmutated tree first: a test that fails without a mutant kills every mutant (tw2r2-b92ac74: a parser
+  # of the new line format failed, so the tw2_fuse_pour kills meant nothing). Stop when it is red.
+  ( cd $MT/engine && cargo test --release --lib topo::fusepour > $R/mut-base.log 2>&1 9>&- && cargo test --release --test tw2_fuse_pour >> $R/mut-base.log 2>&1 9>&- ); local br=$?  # one filter per call: a filter applies to every binary
+  note "mutant base (unmutated) rc $br"; [ $br -ne 0 ] && { note "r2mut stopped: the unmutated tests fail"; return; }
+  sub 'while !all && live.iter().any(|l| *l) {' 'while false && !all && live.iter().any(|l| *l) {' | mut fp7_recheck_off $C --test tw2_fuse_pour
+  sub 'self.checker.check_against(&self.idx, &wo.items[..n], &skip).violations.len()' '{ let _ = (n, skip); 0 }' | mut fp8_wire_viols $D --test tw2_fuse_pour
+  sub 'first.entry(m.w).or_insert(i);' 'first.insert(m.w, i);' | mut fp9_clash_latest $F --lib topo::fusepour
+  sub '                        *n -= k;
+                        *len -= d;' '                        let _ = (k, d, &n, &len);' | mut fp10_polish_count $C --test tw2_fuse_pour
+  sub '                pc_cut.set(true);' '' | mut fp11_cut $C --test tw2_fuse_pour
+  sub 'fused_left <= unfused_left' 'fused_left < unfused_left' | mut fp1_fused_ok $F --lib topo::fusepour
+  sub '(moves[j].w == moves[i].w || moves[j].onto == moves[i].w)' '(moves[j].onto == moves[i].w)' | mut fp2_dependents $F --lib topo::fusepour
+  sub 'let back = dr.restore_wire(&now, wo);' 'let back = { let _ = &now; wo.clone() };' | mut fp3_index $C --test tw2_fuse_pour
+  sub '                out[ci] = o.clone();
+                necking.retain' '                necking.retain' | mut fp4_outcome $C --test tw2_fuse_pour
+  sub 'let pour_check = opts.fuse_pour_check &&' 'let pour_check = false && opts.fuse_pour_check &&' | mut fp5_off $C --test tw2_fuse_pour
+  sub 'moves.push((super::fusepour::Move { w, onto: super::fusepour::NO_WIRE, path }, sv));' 'drop((path, sv));' | mut fp6_polish $C --test tw2_fuse_pour
+  rm -rf $MT; note "r2mut done"
+}
+bhtiles() {  # bornhack J once (4 threads), then the tiled DRC of its routed board (tools/drc_tiles.py, area U6)
+  task J bornhack 4
+  local pcb; pcb=$(ls $R/J/bornhack/*-topor/*.kicad_pcb 2>/dev/null | head -1)
+  note "bornhack pcb: ${pcb:-none}"
+  [ -n "$pcb" ] && { /usr/bin/python3 tools/drc_tiles.py run "$pcb" $R/tiles-bh --jobs 4 --area U6 --depth 4 > $R/tiles-bh.log 2>$R/tiles-bh.err; note "tiles rc $?: $(tr '\n' ' ' < $R/tiles-bh.log)"; }
+  note "bhtiles done"
+}
+case ${1:-} in
+  task) shift; task "$@" ;;
+  small) for n in esp eprom wiccon; do task $2 $n; done ;;
+  ladder) shift; ladder "$@"; wait; note "all done" ;;
+  one) shift; hzq run --threads ${3:-1} --name "$1-$2" -- bash $ROOT/tools/tw2_job.sh task "$@"; note "all done" ;;
+  tests) hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in; note "all done" ;;
+  tests-in) tests ;;
+  retest) hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in; note "all done" ;;
+  retest-in) retest ;;
+  fpcheck) hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in; note "all done" ;;
+  fpcheck-in) fpcheck ;;
+  flake) hzq run --threads 4 --name tw2-flake -- bash $ROOT/tools/tw2_job.sh flake-in; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ); note "all done" ;;
+  flake-in) flake ;;
+  end) shift; ( hzq run --threads 4 --name J-bornhack -- bash $ROOT/tools/tw2_job.sh task J bornhack 4 ) & sleep 2
+    ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1
+    ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
+  final) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1
+    ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
+  ladder-fp) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
+  both) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1; wait; note "all done" ;;
+  ladder-retest) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in ) & sleep 1; wait; note "all done" ;;
+  r2-in) r2suite ;;
+  r2mut-in) r2mut ;;
+  bhtiles-in) bhtiles ;;
+  r2t-in) cd $ROOT/engine; { cargo test --release --lib topo::fusepour 9>&- && cargo test --release --test tw2_fuse_pour 9>&-; } > $R/r2t.log 2>&1; note "r2t fuse pour tests rc $?: $(grep -E 'test result' $R/r2t.log | tr '\n' ' ')"
+    cd $ROOT; CI=1 python -m pytest -q tests/test_drcloop.py > $R/pytest-drcloop.log 2>&1; note "pytest drcloop rc $?: $(tail -1 $R/pytest-drcloop.log)" ;;
+  r2t) ( hzq run --threads 4 --name tw2-r2t -- bash $ROOT/tools/tw2_job.sh r2t-in ) & sleep 1
+    ( hzq run --threads 4 --name tw2-r2mut -- bash $ROOT/tools/tw2_job.sh r2mut-in ) & sleep 1; wait; note "all done" ;;
+  r2m) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-r2suite -- bash $ROOT/tools/tw2_job.sh r2-in ) & sleep 1; wait; note "all done" ;;
+  r2) shift; ( hzq run --threads 4 --name J-bornhack -- bash $ROOT/tools/tw2_job.sh bhtiles-in ) & sleep 2
+    ladder "$@"; ( hzq run --threads 4 --name tw2-r2suite -- bash $ROOT/tools/tw2_job.sh r2-in ) & sleep 1
+    ( hzq run --threads 4 --name tw2-r2mut -- bash $ROOT/tools/tw2_job.sh r2mut-in ) & sleep 1; wait; note "all done" ;;
+  *) sed -n 2,14p "$0"; exit 2 ;;
+esac

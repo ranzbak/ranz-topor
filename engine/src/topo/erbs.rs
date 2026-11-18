@@ -18,6 +18,12 @@
 //!    - every cut item: its two spoke tips, `a` (end of the spoke `p a`) on `p`'s side and `b`
 //!      (end of `b q`) on `q`'s side of the band's crossing (the tips hold half the width, the
 //!      clearance and the items between, [`super::radii::tip_point`]).
+//!    - every passed corner (TW2 addendum A, `corner_points`): two crossings in a row of cuts that
+//!      end at one vertex on the same side, the band passing the vertex without wrapping it. The
+//!      arc round the vertex at the smaller tip radius, as the polygon circumscribed about the
+//!      sector between the two cuts (Dayan PDF p. 32: the spokes of a point follow the final
+//!      geometry; PDF p. 33, Fig. 11: they approximate the arc). Without it the funnel's chord
+//!      between the two tips sagged into the inner wires' room.
 //!    - every wrap: its arc at the stack radius, sampled inside the wrap's wedge (the octagon's
 //!      vertices in the octagonal norm, a circumscribed polygon of `arc_step_deg` otherwise), on the
 //!      wrapped vertex's side.
@@ -310,6 +316,77 @@ fn norm_dirs(norm: Norm, arc_step_deg: f64) -> (Vec<Vec2>, f64) {
             ((0..n).map(|k| Vec2 { x: (k as f64 * st).cos(), y: (k as f64 * st).sin() }).collect(), 1.0 / (0.5 * st).cos())
         }
     }
+}
+
+/// A vertex end of a cut (addendum A): vertex, position, feature, the tip on its side, its label.
+type CutEnd = (usize, Vec2, usize, Vec2, bool);
+
+/// TW2 addendum A: the arc points of a stretch that passes sheet vertex `v` between two
+/// consecutive cut crossings (directions `ua`, `ub` from `v`, its spoke tips at radius `rho` in the
+/// norm there), inside the sector that holds `um` (the direction from `v` to the band between the
+/// two crossings). Dayan 1997 PDF p. 32: "The number of spokes required at each point is related
+/// to the final geometry"; PDF p. 33, Fig. 11: for any-angle routing the spokes approximate the
+/// arc. The tips alone leave the sector open, and the funnel's chord between them sags
+/// `rho (1 - cos(alpha / 2))` into the inner wires' room (serpentine_bundle: 0.135 mm).
+/// - Euclidean: the polygon circumscribed about the sector's own arc. The sector is split into
+///   `m = ceil(alpha / step)` parts of `d = alpha / m`, with vertices at `ua + (i + 1/2) d`, radius
+///   `rho / cos(d / 2)`. The tips are the tangent points of its first and last edges, so the chain
+///   tip, vertices, tip lies on tangents of the circle (no sag). Its length exceeds the arc by about
+///   `d^2 / 12` of it.
+/// - Octagonal: the octagon's own vertices strictly inside the sector (as a wrap's arc). The tips lie
+///   on the octagon, so the chain runs on its sides.
+///
+/// Empty for a sector of pi or more, or of less than 1e-9 rad. O(alpha / step).
+fn corner_points(v: Vec2, ua: Vec2, ub: Vec2, um: Vec2, rho: f64, norm: Norm, arc_step_deg: f64) -> Vec<Vec2> {
+    let ang = |u: Vec2| u.y.atan2(u.x);
+    let md = |x: f64| x.rem_euclid(TAU);
+    let (aa, am, ab) = (ang(ua), ang(um), ang(ub));
+    let (dm, db) = (md(am - aa), md(ab - aa));
+    // The signed sweep from `ua` to `ub` through `um`.
+    let sweep = if dm < db { db } else { db - TAU };
+    if sweep.abs() >= std::f64::consts::PI - 1e-9 || sweep.abs() < 1e-9 || rho <= 0.0 {
+        return Vec::new();
+    }
+    let dir = |a: f64| Vec2 { x: a.cos(), y: a.sin() };
+    match norm {
+        Norm::Euclid => {
+            let st = arc_step_deg.clamp(1.0, 45.0).to_radians();
+            let m = (sweep.abs() / st).ceil().max(1.0);
+            let d = sweep / m;
+            let r = rho / (0.5 * d).cos();
+            (0..m as usize).map(|i| v + dir(aa + (i as f64 + 0.5) * d) * r).collect()
+        }
+        Norm::Octagonal => {
+            let (dirs, grow) = norm_dirs(norm, arc_step_deg);
+            let inside = |u: Vec2| {
+                let du = md(ang(u) - aa);
+                if sweep > 0.0 {
+                    du > 1e-9 && du < sweep - 1e-9
+                } else {
+                    du < TAU - 1e-9 && du > TAU + sweep + 1e-9
+                }
+            };
+            // In sweep order from `ua` (the chain tip A, points, tip B).
+            let along = |u: Vec2| if sweep > 0.0 { md(ang(u) - aa) } else { TAU - md(ang(u) - aa) };
+            let mut us: Vec<Vec2> = dirs.into_iter().filter(|&u| inside(u)).collect();
+            us.sort_by(|&x, &y| along(x).total_cmp(&along(y)));
+            us.into_iter().map(|u| v + u * (rho * grow)).collect()
+        }
+    }
+}
+
+/// Position of `x` along the polyline `band` (segment index plus share), by its nearest segment. O(band).
+fn band_pos(band: &[Vec2], x: Vec2) -> f64 {
+    let mut best = (f64::INFINITY, 0.0);
+    for (j, w) in band.windows(2).enumerate() {
+        let ab = w[1] - w[0];
+        let u = ((x - w[0]).dot(ab) / ab.len2().max(1e-18)).clamp(0.0, 1.0);
+        let d = (w[0] + ab * u - x).len2();
+        if d < best.0 {
+            best = (d, j as f64 + u);
+        }
+    }
+    best.1
 }
 
 /// Side of point `x` against the polyline `band` (`true`: left of its direction of travel) and
@@ -1109,6 +1186,9 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     let no_push = |f: usize| skip.contains(&f) || exit_set.contains(&f);
 
     // 1a. Cut items, grouped per cut in their order from p: the sides alternate along the cut.
+    // TW2 addendum A: every crossing's band position, cut, tips and side, for the passed corners
+    // below: (band position, cut, a, b, a_left, its band crossing, tip width).
+    let mut crossings: Vec<(f64, usize, Vec2, Vec2, bool, Vec2, f64)> = Vec::new();
     let mut per_cut: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for &(ci, ii) in items {
         per_cut.entry(ci).or_default().push(ii);
@@ -1147,6 +1227,9 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             let at = x.t_band.clamp(0.0, 1.0) * c.cap;
             let da = if at < lo - ON && !no_push(c.fp) { Detour::From(xb) } else { Detour::Never };
             let db = if at > hi + ON && !no_push(c.fq) { Detour::From(xb) } else { Detour::Never };
+            if x.kind == 0 {
+                crossings.push((band_pos(band, xb), cu.cut, a, b, a_left, xb, x.w_tip));
+            }
             // A tip at its cut's end on one of the stretch's own terminal pads holds no room (no
             // item before it, no clearance to its own copper): the wire may pass over that pad.
             if !((a - c.p).len() < 1.0 && in_pad(c.p)) {
@@ -1154,6 +1237,43 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             }
             if !((c.q - b).len() < 1.0 && in_pad(c.q)) {
                 cand.push((b, !a_left, gi, x.w_tip, db, c.q));
+            }
+        }
+    }
+
+    // 1a2. TW2 addendum A, passed corners: two crossings in a row along the band whose cuts end
+    // at one sheet vertex `v` on the same side of the band (the band passes `v` without wrapping
+    // it). The stretch's arc round `v` at the smaller of its two tip radii there, inside the sector
+    // between the cuts (`corner_points`), on `v`'s side; a point the band passes on the wrong side
+    // is gone round from the nearest band point (`Detour::Auto`). Not at a vertex the stretch
+    // wraps (1b holds that arc), at its own terminal pad or via end, or at a feature that pushes
+    // nothing here (over-full cut, pad exit: `no_push`).
+    crossings.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let wrapped_v: BTreeSet<usize> = s.wraps.iter().flatten().map(|&(v, _)| v).collect();
+    for pair in crossings.windows(2) {
+        let (x, y) = (&pair[0], &pair[1]);
+        let (ca, cb) = (&sh.cuts[x.1], &sh.cuts[y.1]);
+        // The vertex ends of a cut: (vertex, its position, its feature, tip on its side, its label).
+        let ends = |c: &super::sheet::Cut, a: Vec2, b: Vec2, a_left: bool| -> [Option<CutEnd>; 2] { [Some((c.vp, c.p, c.fp, a, a_left)), c.vq.map(|vq| (vq, c.q, c.fq, b, !a_left))] };
+        for ea in ends(ca, x.2, x.3, x.4).into_iter().flatten() {
+            for eb in ends(cb, y.2, y.3, y.4).into_iter().flatten() {
+                let (v, at, f, ta, la) = ea;
+                let (vb, _, _, tb, lb) = eb;
+                if v != vb || la != lb || wrapped_v.contains(&v) || no_push(f) || in_pad(at) || (at - c0).len() < 1.0 || (at - c1).len() < 1.0 {
+                    continue;
+                }
+                let (ra, rb) = (sh.norm.len(ta - at), sh.norm.len(tb - at));
+                let rho = ra.min(rb);
+                if rho < 1.0 {
+                    continue;
+                }
+                let mid = (x.5 + y.5) * 0.5;
+                let w = x.6.min(y.6);
+                for a in corner_points(at, ta - at, tb - at, mid - at, rho, sh.norm, opts.arc_step_deg) {
+                    let gi = gates.len();
+                    gates.push(Gate { a, b: a, w, src: GateSrc::Arc(v), p: at, q: at, p_left: la });
+                    cand.push((a, la, gi, w, Detour::Auto, at));
+                }
             }
         }
     }
@@ -1956,6 +2076,162 @@ pub fn precedes(es: &[Erbs], sts: &[Stretch], o: &LayerOrder, before: &mut BTree
     }
 }
 
+/// TW2 (`[drawing] erbs_conflict_keep`): which bands of a conflict component are kept when the
+/// joint check finds two bands of different nets too close.
+/// - `Tier`: the most kept bands of the highest priority tier, then of the next one.
+/// - `Count`: the most kept bands over all tiers.
+///
+/// Ties go by the yield rank: route order, the user rule "priority tier, then thick to thin, then
+/// short to long". D12: in the ERBS drawing the sort only says who yields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeepMode {
+    Tier,
+    Count,
+}
+
+impl KeepMode {
+    /// The option's value (`"tier"`, `"count"`); `None` for anything else.
+    pub fn parse(s: &str) -> Option<KeepMode> {
+        match s {
+            "tier" => Some(KeepMode::Tier),
+            "count" => Some(KeepMode::Count),
+            _ => None,
+        }
+    }
+}
+
+/// The selector's result ([`keep_bands`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// Per band: kept.
+    pub keep: Vec<bool>,
+    /// Conflict components solved exactly, and the larger ones solved greedily (the work cap).
+    pub exact: usize,
+    pub greedy: usize,
+}
+
+/// Components up to this many bands are solved exactly (an independent set, enumerated). Larger
+/// ones go greedily in priority order. This is a work cap, not a judgement rule, and the run counts them.
+pub const KEEP_EXACT_CAP: usize = 20;
+
+/// TW2: the bands kept from a conflict graph, independent of the input order. Each band has a key
+/// `(tier, rank)`, lower first. Bands without a conflict are kept. In each connected component the
+/// kept set is a maximum independent set under `mode`, ties by rank: the set that keeps the
+/// best-ranked band where two sets differ. Exact up to `cap` bands, greedy above. Greedy goes per
+/// tier in `Tier` mode, the fewest open neighbours first, ties by rank. O(2^cap) per exact
+/// component, O(n^2) greedy.
+pub fn keep_bands(keys: &[(u8, usize)], edges: &[(usize, usize)], mode: KeepMode, cap: usize) -> Kept {
+    let n = keys.len();
+    let mut adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    for &(a, b) in edges {
+        if a != b && a < n && b < n {
+            adj[a].insert(b);
+            adj[b].insert(a);
+        }
+    }
+    let mut out = Kept { keep: vec![true; n], ..Kept::default() };
+    let mut seen = vec![false; n];
+    // Components in the order of their best key, nodes in key order (input order does not matter).
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (keys[i], i));
+    for &s in &order {
+        if seen[s] || adj[s].is_empty() {
+            continue;
+        }
+        let mut comp = vec![s];
+        seen[s] = true;
+        let mut k = 0;
+        while k < comp.len() {
+            for &j in &adj[comp[k]] {
+                if !seen[j] {
+                    seen[j] = true;
+                    comp.push(j);
+                }
+            }
+            k += 1;
+        }
+        comp.sort_by_key(|&i| (keys[i], i));
+        let chosen = if comp.len() <= cap {
+            out.exact += 1;
+            exact_keep(&comp, keys, &adj, mode)
+        } else {
+            out.greedy += 1;
+            greedy_keep(&comp, keys, &adj, mode)
+        };
+        for (&i, &c) in comp.iter().zip(&chosen) {
+            out.keep[i] = c;
+        }
+    }
+    out
+}
+
+/// The score of a kept set of a component (`comp` in key order): per tier the kept count (`Tier`)
+/// or the total (`Count`), then the kept flags in key order. Larger is better.
+fn keep_score(comp: &[usize], keys: &[(u8, usize)], sel: &[bool], mode: KeepMode) -> (Vec<usize>, Vec<bool>) {
+    let mut counts: Vec<usize> = Vec::new();
+    match mode {
+        KeepMode::Count => counts.push(sel.iter().filter(|&&b| b).count()),
+        KeepMode::Tier => {
+            let mut tiers: Vec<u8> = comp.iter().map(|&i| keys[i].0).collect();
+            tiers.dedup();
+            for t in tiers {
+                counts.push(comp.iter().zip(sel).filter(|(&i, &b)| b && keys[i].0 == t).count());
+            }
+        }
+    }
+    (counts, sel.to_vec())
+}
+
+/// A kept set's score ([`keep_score`]) and the set.
+type Scored = Option<((Vec<usize>, Vec<bool>), Vec<bool>)>;
+
+fn exact_keep(comp: &[usize], keys: &[(u8, usize)], adj: &[BTreeSet<usize>], mode: KeepMode) -> Vec<bool> {
+    let pos: BTreeMap<usize, usize> = comp.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let nb: Vec<Vec<usize>> = comp.iter().map(|&i| adj[i].iter().filter_map(|j| pos.get(j).copied()).collect()).collect();
+    let mut best: Scored = None;
+    let mut sel = vec![false; comp.len()];
+    fn rec(k: usize, sel: &mut Vec<bool>, nb: &[Vec<usize>], comp: &[usize], keys: &[(u8, usize)], mode: KeepMode, best: &mut Scored) {
+        if k == sel.len() {
+            let sc = keep_score(comp, keys, sel, mode);
+            if best.as_ref().is_none_or(|b| sc > b.0) {
+                *best = Some((sc, sel.clone()));
+            }
+            return;
+        }
+        if nb[k].iter().all(|&j| !(j < k && sel[j])) {
+            sel[k] = true;
+            rec(k + 1, sel, nb, comp, keys, mode, best);
+            sel[k] = false;
+        }
+        rec(k + 1, sel, nb, comp, keys, mode, best);
+    }
+    rec(0, &mut sel, &nb, comp, keys, mode, &mut best);
+    best.map(|b| b.1).unwrap_or_else(|| vec![false; comp.len()])
+}
+
+fn greedy_keep(comp: &[usize], keys: &[(u8, usize)], adj: &[BTreeSet<usize>], mode: KeepMode) -> Vec<bool> {
+    let pos: BTreeMap<usize, usize> = comp.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let mut open = vec![true; comp.len()];
+    let mut sel = vec![false; comp.len()];
+    loop {
+        // Among the open bands of the best open tier (`Tier`) or all (`Count`): the fewest open
+        // neighbours, ties by key order.
+        let tier = comp.iter().zip(&open).filter(|(_, &o)| o).map(|(&i, _)| keys[i].0).min();
+        let Some(tier) = tier else { break };
+        let deg = |k: usize| adj[comp[k]].iter().filter(|j| pos.get(j).is_some_and(|&q| open[q])).count();
+        let pick = (0..comp.len()).filter(|&k| open[k] && (mode == KeepMode::Count || keys[comp[k]].0 == tier)).min_by_key(|&k| (deg(k), k));
+        let Some(k) = pick else { break };
+        sel[k] = true;
+        open[k] = false;
+        for j in &adj[comp[k]] {
+            if let Some(&q) = pos.get(j) {
+                open[q] = false;
+            }
+        }
+    }
+    sel
+}
+
 /// Topological order of `given` under `before` (pairs of wires), the given order as tie-break.
 pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec<usize> {
     let pos: BTreeMap<usize, usize> = given.iter().enumerate().map(|(i, &w)| (w, i)).collect();
@@ -2103,6 +2379,245 @@ mod tests {
         ports.extend(por.iter().map(|&(l, r)| (pp.pts[l], pp.pts[r])));
         ports.push((e, e));
         Ok(simplify(&pull(&ports).into_iter().map(|c| c.0).collect::<Vec<_>>(), 0.5))
+    }
+
+    /// Distance in `norm` from `c` to the segment `a b` (ternary search: the norm is convex along
+    /// the segment). Test helper.
+    fn norm_seg_dist(norm: Norm, c: Vec2, a: Vec2, b: Vec2) -> f64 {
+        let f = |t: f64| norm.len(a + (b - a) * t - c);
+        let (mut lo, mut hi) = (0.0, 1.0);
+        for _ in 0..200 {
+            let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if f(m1) <= f(m2) {
+                hi = m2;
+            } else {
+                lo = m1;
+            }
+        }
+        f(lo).min(f(0.0)).min(f(1.0))
+    }
+
+    /// TW2 addendum A: the chain tip A, corner points, tip B never comes closer to the vertex
+    /// than the tip radius, in both norms, for sectors of 5 to 175 degrees either way round. Every
+    /// point lies strictly inside the sector that holds the band's direction. Without the points
+    /// the chord between the tips sags `rho (1 - cos(alpha / 2))` (checked, so the test sees the bug).
+    #[test]
+    fn corner_points_keep_the_tip_radius_along_the_chain() {
+        let c = v(3.0, -2.0);
+        let rho = 0.775e6;
+        let dir = |deg: f64| Vec2 { x: deg.to_radians().cos(), y: deg.to_radians().sin() };
+        for norm in [Norm::Euclid, Norm::Octagonal] {
+            for a0 in [0.0, 13.0, 21.4, 90.0, 200.0] {
+                for sweep in [5.0, 22.5, 45.0, 68.6, 90.0, 120.0, 175.0, -30.0, -68.6, -150.0] {
+                    let (ua, ub, um) = (dir(a0), dir(a0 + sweep), dir(a0 + 0.5 * sweep));
+                    // the tips at the norm's radius on their cut directions
+                    let (ta, tb) = (c + ua * (rho / norm.len(ua)), c + ub * (rho / norm.len(ub)));
+                    let pts = corner_points(c, ua * 7.0, ub * 3.0, um, rho, norm, 22.5);
+                    let mut chain = vec![ta];
+                    chain.extend(pts.iter().copied());
+                    chain.push(tb);
+                    let d = chain.windows(2).map(|w| norm_seg_dist(norm, c, w[0], w[1])).fold(f64::INFINITY, f64::min);
+                    assert!(d >= rho - 1.0, "{norm:?} a0 {a0} sweep {sweep}: chain {:.1} nm inside the radius: {:?}", rho - d, chain.iter().map(|p| ((p.x - c.x) / 1e6, (p.y - c.y) / 1e6)).collect::<Vec<_>>());
+                    for &p in &pts {
+                        let s = (p - c).y.atan2((p - c).x).to_degrees();
+                        let rel = (s - a0).rem_euclid(360.0);
+                        let ok = if sweep > 0.0 { rel > 0.0 && rel < sweep } else { rel > 360.0 + sweep && rel < 360.0 };
+                        assert!(ok, "{norm:?} a0 {a0} sweep {sweep}: point at {s:.2} deg outside the sector");
+                    }
+                    let chord = norm_seg_dist(norm, c, ta, tb);
+                    if norm == Norm::Euclid && sweep.abs() >= 22.5 {
+                        assert!(rho - chord > 0.01 * rho, "a0 {a0} sweep {sweep}: the bare chord does not sag ({chord})");
+                        assert!(!pts.is_empty());
+                    }
+                }
+            }
+        }
+        // the extra length over the arc is about d^2 / 12 of it (d <= 22.5 deg: < 1.3 %)
+        let (ua, ub) = (dir(21.4), dir(90.0));
+        let pts = corner_points(c, ua, ub, dir(50.0), rho, Norm::Euclid, 22.5);
+        let mut chain = vec![c + ua * rho];
+        chain.extend(pts);
+        chain.push(c + ub * rho);
+        let len: f64 = chain.windows(2).map(|w| (w[1] - w[0]).len()).sum();
+        let arc = rho * 68.6f64.to_radians();
+        assert!(len > arc && len < arc * 1.013, "length {len} vs arc {arc}");
+        // a half turn or more, or nothing to sweep: no points
+        assert!(corner_points(c, dir(0.0), dir(180.0), dir(90.0), rho, Norm::Euclid, 22.5).is_empty());
+        assert!(corner_points(c, dir(10.0), dir(10.0), dir(10.0), rho, Norm::Euclid, 22.5).is_empty());
+    }
+
+    /// TW2 addendum A on the funnel: a band passing a vertex across two of its cuts 68.6 degrees
+    /// apart, its spoke tips there at the stack radius 0.775 mm (an inner wire runs round the
+    /// vertex): with the corner points the path keeps >= 0.775 mm - 1 nm from the vertex along
+    /// its whole polyline; with the tips alone it takes the chord, 0.135 mm closer
+    /// (serpentine_bundle smooth, M2 on main 27c36203).
+    #[test]
+    fn passed_corner_path_keeps_the_stack_radius() {
+        let c = v(10.0, 0.0);
+        let rho = 0.775e6;
+        let dir = |deg: f64| Vec2 { x: deg.to_radians().cos(), y: deg.to_radians().sin() };
+        // the band runs left to right just above the vertex: the vertex is right of it (label 3)
+        let band = [v(4.0, 0.3), v(16.0, 0.3)];
+        let (ua, ub) = (dir(124.3), dir(55.7));
+        let (ta, tb) = (c + ua * rho, c + ub * rho);
+        let xa = Vec2 { x: c.x - 0.3e6 / 124.3f64.to_radians().tan().abs(), y: 0.3e6 };
+        let xb = Vec2 { x: c.x + 0.3e6 / 55.7f64.to_radians().tan(), y: 0.3e6 };
+        let tips = [(ta, 3u8, Detour::From(xa)), (tb, 3u8, Detour::From(xb))];
+        let bare = path_band(&band, &tips).unwrap();
+        let mut pts: Vec<(Vec2, u8, Detour)> = tips.to_vec();
+        for p in corner_points(c, ua, ub, dir(90.0), rho, Norm::Euclid, 22.5) {
+            pts.push((p, 3, Detour::Auto));
+        }
+        let full = path_band(&band, &pts).unwrap();
+        let dmin = |p: &[Vec2]| p.windows(2).map(|w| norm_seg_dist(Norm::Euclid, c, w[0], w[1])).fold(f64::INFINITY, f64::min);
+        assert!(dmin(&full) >= rho - 1.0, "with corner points: {:.1} nm inside, path {full:?}", rho - dmin(&full));
+        let sag = rho * (1.0 - (0.5 * 68.6f64.to_radians()).cos());
+        assert!(rho - dmin(&bare) > 0.9 * sag, "tips alone: the chord should sag ~{sag:.0} nm, got {:.0} ({bare:?})", rho - dmin(&bare));
+    }
+
+    /// TW2 selector: bands without a conflict are kept; a conflict pair keeps the better-ranked
+    /// band; `Tier` keeps a tier-2 band against two tier-3 bands, `Count` keeps the two.
+    #[test]
+    fn keep_bands_tier_count_and_rank() {
+        // 0 alone, 1-2 a pair (2 ranks better), 3 (tier 2) against 4 and 5 (tier 3, no conflict between them)
+        let keys = [(3, 0), (3, 5), (3, 1), (2, 9), (3, 2), (3, 3)];
+        let edges = [(1, 2), (3, 4), (3, 5)];
+        let t = keep_bands(&keys, &edges, KeepMode::Tier, KEEP_EXACT_CAP);
+        assert_eq!(t.keep, vec![true, false, true, true, false, false]);
+        assert_eq!((t.exact, t.greedy), (2, 0));
+        let c = keep_bands(&keys, &edges, KeepMode::Count, KEEP_EXACT_CAP);
+        assert_eq!(c.keep, vec![true, false, true, false, true, true]);
+        // no conflicts: everything kept, nothing solved
+        let n = keep_bands(&keys, &[], KeepMode::Tier, KEEP_EXACT_CAP);
+        assert_eq!((n.keep, n.exact, n.greedy), (vec![true; 6], 0, 0));
+        assert_eq!(KeepMode::parse("tier"), Some(KeepMode::Tier));
+        assert_eq!(KeepMode::parse("count"), Some(KeepMode::Count));
+        assert_eq!(KeepMode::parse("Tier"), None);
+    }
+
+    /// The exact selector against brute force over all subsets (random graphs of up to 12 bands,
+    /// both modes), every kept set independent, and the result independent of the input order
+    /// (the bands permuted, keys and edges with them).
+    #[test]
+    fn keep_bands_exact_matches_brute_force_and_ignores_input_order() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        for case in 0..400 {
+            let n = rng.gen_range(1..=12);
+            let keys: Vec<(u8, usize)> = (0..n).map(|i| (rng.gen_range(2..=3u8), (i * 7919 + case) % 1000)).collect();
+            let mut edges = Vec::new();
+            for a in 0..n {
+                for b in a + 1..n {
+                    if rng.gen_bool(0.3) {
+                        edges.push((a, b));
+                    }
+                }
+            }
+            for mode in [KeepMode::Tier, KeepMode::Count] {
+                let got = keep_bands(&keys, &edges, mode, KEEP_EXACT_CAP);
+                for &(a, b) in &edges {
+                    assert!(!(got.keep[a] && got.keep[b]), "case {case}: {a}-{b} both kept");
+                }
+                // brute force per component: the best independent set by the same score
+                let isolated: Vec<bool> = (0..n).map(|i| !edges.iter().any(|&(a, b)| a == i || b == i)).collect();
+                let mut comps: Vec<Vec<usize>> = Vec::new();
+                let mut seen = vec![false; n];
+                for s in 0..n {
+                    if seen[s] || isolated[s] {
+                        continue;
+                    }
+                    let mut c = vec![s];
+                    seen[s] = true;
+                    let mut k = 0;
+                    while k < c.len() {
+                        for &(a, b) in &edges {
+                            for (x, y) in [(a, b), (b, a)] {
+                                if x == c[k] && !seen[y] {
+                                    seen[y] = true;
+                                    c.push(y);
+                                }
+                            }
+                        }
+                        k += 1;
+                    }
+                    c.sort_by_key(|&i| (keys[i], i));
+                    comps.push(c);
+                }
+                for c in &comps {
+                    let mut best: Scored = None;
+                    for m in 0u32..(1 << c.len()) {
+                        let sel: Vec<bool> = (0..c.len()).map(|k| m >> k & 1 == 1).collect();
+                        let ok = edges.iter().all(|&(a, b)| {
+                            let (pa, pb) = (c.iter().position(|&x| x == a), c.iter().position(|&x| x == b));
+                            !matches!((pa, pb), (Some(x), Some(y)) if sel[x] && sel[y])
+                        });
+                        if ok {
+                            let sc = keep_score(c, &keys, &sel, mode);
+                            if best.as_ref().is_none_or(|b| sc > b.0) {
+                                best = Some((sc, sel));
+                            }
+                        }
+                    }
+                    let want = best.unwrap().1;
+                    let have: Vec<bool> = c.iter().map(|&i| got.keep[i]).collect();
+                    assert_eq!(have, want, "case {case} {mode:?}: component {c:?}");
+                }
+                assert!(isolated.iter().enumerate().all(|(i, &iso)| !iso || got.keep[i]));
+                // input order: reverse the band ids
+                let perm: Vec<usize> = (0..n).rev().collect();
+                let pk: Vec<(u8, usize)> = perm.iter().map(|&i| keys[i]).collect();
+                let inv = |i: usize| n - 1 - i;
+                let pe: Vec<(usize, usize)> = edges.iter().map(|&(a, b)| (inv(a), inv(b))).collect();
+                let pg = keep_bands(&pk, &pe, mode, KEEP_EXACT_CAP);
+                for i in 0..n {
+                    assert_eq!(pg.keep[inv(i)], got.keep[i], "case {case} {mode:?}: order changed band {i}");
+                }
+            }
+        }
+    }
+
+    /// Above the cap the selector is greedy: still independent, still order-free, counted.
+    /// A path of 6 bands with cap 4 keeps the 3 alternate bands starting at the end with the fewest
+    /// open neighbours.
+    #[test]
+    fn keep_bands_greedy_above_the_cap() {
+        let keys: Vec<(u8, usize)> = (0..6).map(|i| (3, i)).collect();
+        let edges: Vec<(usize, usize)> = (0..5).map(|i| (i, i + 1)).collect();
+        let g = keep_bands(&keys, &edges, KeepMode::Count, 4);
+        assert_eq!((g.exact, g.greedy), (0, 1));
+        assert_eq!(g.keep, vec![true, false, true, false, true, false]);
+        let e = keep_bands(&keys, &edges, KeepMode::Count, 6);
+        assert_eq!((e.exact, e.greedy), (1, 0));
+        assert_eq!(e.keep, vec![true, false, true, false, true, false]);
+        // tier greedy: the tier-2 middle band first, then the tier-3 ones it leaves open
+        let keys2 = [(3, 0), (3, 1), (2, 2), (3, 3), (3, 4)];
+        let edges2 = [(0, 1), (1, 2), (2, 3), (3, 4)];
+        let t = keep_bands(&keys2, &edges2, KeepMode::Tier, 2);
+        assert_eq!(t.keep, vec![true, false, true, false, true]);
+    }
+
+    /// TW2 addendum A, lead condition: a wrap's arc samples (global directions of the
+    /// circumscribed polygon inside the wrap's wedge, step 1b) keep the path at the stack radius
+    /// along its whole polyline, also where the band's legs are steep or nearly straight (the
+    /// tangent points near a wedge end).
+    #[test]
+    fn wrap_arc_path_keeps_the_stack_radius() {
+        let c = v(10.0, 0.0);
+        let rho = 0.775e6;
+        let (dirs, grow) = norm_dirs(Norm::Euclid, 22.5);
+        for (l0, l1) in [(1.0, 1.0), (3.0, 0.2), (0.05, 0.05), (8.0, 8.0), (0.3, 6.0)] {
+            // the band wraps the vertex from above: the vertex lies right of it (label 3)
+            let band = [v(0.0, l0), c, v(20.0, l1)];
+            let mut pts: Vec<(Vec2, u8, Detour)> = Vec::new();
+            for &u in &dirs {
+                if wedge_share(band[1] - band[0], band[2] - band[1], false, u).is_some() {
+                    pts.push((c + u * (rho * grow), 3, Detour::From(c)));
+                }
+            }
+            let path = path_band(&band, &pts).unwrap();
+            let d = path.windows(2).map(|w| norm_seg_dist(Norm::Euclid, c, w[0], w[1])).fold(f64::INFINITY, f64::min);
+            assert!(d >= rho - 1.0, "legs {l0} / {l1}: {:.1} nm inside the stack radius, path {path:?}", rho - d);
+        }
     }
 
     /// A detour from the band's start (a tip whose spoke the band crosses at its first point):
