@@ -426,7 +426,14 @@ pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> 
     let edge_over = edge_items(v, v.cm_edge, "planner_overfull");
     let cut_over = v.cm_cut.map(|c| cut_items(v, c, true, "planner_overfull")).unwrap_or_default();
     let over_items = if v.cut_is_plan && v.cm_cut.is_some() { cut_over.clone() } else { edge_over.clone() };
-    let g = bottlenecks(over_items);
+    let mut g = bottlenecks(over_items);
+    // CM1 (tw4 T2, `[capacity] via_cuts`): the planned vias with an over-full gap or via-to-via
+    // cut, located at the via (any layer), with the via's connection and its cuts' crossers.
+    let xs: BTreeMap<WireId, Vec<WireId>> = auth.via_cut_list().into_iter().collect();
+    for (w, p) in auth.via_cut_points() {
+        let ws = std::iter::once(w).chain(xs.get(&w).into_iter().flatten().copied());
+        g.push(CompassItem { class: "planner_overfull".into(), layers: Vec::new(), conns: conns_of(v, ws), segs: vec![seg(p, p)], over_nm: 0, members: 1 });
+    }
     bn.insert("planner_overfull".to_string(), g.len());
     items.extend(g);
     if v.cut_is_plan {

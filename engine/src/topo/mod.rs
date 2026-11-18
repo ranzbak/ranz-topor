@@ -52,6 +52,7 @@ pub mod fusepour;
 pub mod tidy;
 pub mod stats;
 pub mod tree;
+pub mod viacut;
 pub mod viaopt;
 pub mod xrules;
 pub mod witness;

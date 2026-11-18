@@ -20,21 +20,25 @@ board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023
 one() {
   local c=${1%%:*} rest=${1#*:}; local b=${rest%%:*} th=1
   [ "$rest" != "$b" ] && th=${rest#*:}
-  local SETS=(--set 'drawing.realise="erbs"' --set optimize.runs=1) ENVS=() only=0
+  local SETS=(--set 'drawing.realise="erbs"' --set optimize.runs=1) ENVS=() only=0 cc=$c
+  # suffix v: [capacity] via_cuts = true (tw4 T2), with TOPO_VIACHECK (stored vs fresh via prices)
+  if [ "${c%v}" != "$c" ]; then SETS+=(--set capacity.via_cuts=true); ENVS+=(TOPO_VIACHECK=1); c=${c%v}; fi
   case $c in
-    JK) SETS+=(--set optimize.rounds=1); ENVS=(TOPO_ERBS_DEBUG=1) ;;
+    JK) SETS+=(--set optimize.rounds=1); ENVS+=(TOPO_ERBS_DEBUG=1) ;;
     JF) SETS+=(--set optimize.rounds=1 --set optimize.allow_violations=false) ;;
-    JPK) SETS+=(--set optimize.rounds=1 --set search.pad_exit_stubs=true); ENVS=(TOPO_ERBS_DEBUG=1) ;;
+    JPK) SETS+=(--set optimize.rounds=1 --set search.pad_exit_stubs=true); ENVS+=(TOPO_ERBS_DEBUG=1) ;;
     JPF) SETS+=(--set optimize.rounds=1 --set search.pad_exit_stubs=true --set optimize.allow_violations=false) ;;
     r*s*) local n=${c#r}; n=${n%%s*}; only=${c##*s}
           SETS+=(--set optimize.rounds=$n --set optimize.stable_patience=$n) ;;
     *) note "unknown cfg $c"; return ;;
   esac
-  local o=$R/$c/$b; mkdir -p $o
+  c=$cc
+  local bt=$b; [ "$th" -ge 4 ] && [ "$c" != "${c#J}" ] && bt=$b-t$th   # J* runs at 4+ threads: own dir (thread check)
+  local o=$R/$c/$bt; mkdir -p $o
   local t0=$(date +%s)
   env "${ENVS[@]}" python -m harness.score_runs $o "$(board_path $b)" --only $only --no-png --threads $th "${SETS[@]}" \
-    > $R/$c-$b.log 2>&1 9>&-
-  note "run $c $b th $th rc $? wall $(( $(date +%s) - t0 )) s"
+    > $R/$c-$bt.log 2>&1 9>&-
+  note "run $c $bt th $th rc $? wall $(( $(date +%s) - t0 )) s"
   rm -rf $o/*/s*/work 2>/dev/null
 }
 lane() { for x in "$@"; do one "$x"; done; }
@@ -58,6 +62,16 @@ case ${1:-} in
     u e-seeds 4 "r1s3:esp r1s4:esp" "r16s1:esp" "r16s2:esp" "r16s3:esp r16s4:esp"
     u small 4 "JK:esp JF:esp" "JPK:esp JPF:esp" "JK:wiccon JF:wiccon JPK:wiccon JPF:wiccon" \
       "JK:eprom JF:eprom JPK:eprom JPF:eprom"
+    wait; note "all done" ;;
+  t2)
+    # TW4 T2 (CM1 on the incremental measure): targeted tests; off = main copper (JK vs the tw4b base);
+    # on: VIACHECK, thread independence (esp th 1 vs 4), cycle cost r16 off/on (esp s0-s2, qmtech, wiccon)
+    ( cd engine && cargo test --release --test topo_cm1_room --test topo_compass --test topo_exits --test par_refine --test loop_local 9>&- > $R/cargo.log 2>&1; note "cargo rc $?" )
+    ( cd engine && cargo test --release --lib viacut 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $?" )
+    u t2-q 4 "JK:qmtech:2" "JKv:qmtech:2"
+    u t2-qr 4 "r16s0:qmtech:2" "r16s0v:qmtech:2"
+    u t2-s 4 "JK:esp JK:wiccon JK:eprom" "JKv:esp JKv:wiccon JKv:eprom" "JKv:esp:4" "r16s0:wiccon r16s0v:wiccon"
+    u t2-e 4 "r16s0:esp r16s1:esp" "r16s0v:esp r16s1v:esp" "r16s2:esp" "r16s2v:esp"
     wait; note "all done" ;;
   hooks)
     # TW4 unit 1 (meter hooks): targeted tests, then rounds=1 copper (must equal the tw4b base) + the new compass items

@@ -40,7 +40,7 @@
 //! in-place serial loop.
 
 use super::pack::Disc;
-use super::refine::{meter, Around, Arrays, CapModel, EndKey, Frame, LEv, Mem, MemRead, RefineStats};
+use super::refine::{meter, Around, Arrays, CapModel, EndKey, Frame, LEv, Mem, MemRead, RefineStats, ViaPt};
 use super::state::WireId;
 use crate::fxhash::FxHashMap;
 use crate::geom::Vec2;
@@ -184,7 +184,7 @@ impl Cursor {
             }
             self.started = true;
             self.improved = false;
-            self.list = Arc::new((0..a.cost.len()).filter(|&i| a.cost[i] > 0.0).map(|i| (i / nl, i % nl)).collect());
+            self.list = Arc::new((0..a.n_edge_layers()).filter(|&i| a.cost[i] > 0.0).map(|i| (i / nl, i % nl)).collect());
             self.li = 0;
         }
     }
@@ -212,6 +212,8 @@ pub(crate) struct Overlay {
     wiv: Vec<Vec<(usize, usize)>>,
     wks: Vec<Vec<usize>>,
     wns: Vec<usize>,
+    /// CM1: the via points of a touched wire.
+    wpts: Vec<Vec<ViaPt>>,
     cstamp: Vec<u32>,
     cval: Vec<(f64, f64)>,
     /// What the candidate wrote, in first-write order.
@@ -239,6 +241,7 @@ impl Overlay {
             self.wiv.resize_with(nw, Vec::new);
             self.wks.resize_with(nw, Vec::new);
             self.wns.resize(nw, 0);
+            self.wpts.resize_with(nw, Vec::new);
         }
         if self.cstamp.len() < nc {
             self.cstamp.resize(nc, 0);
@@ -279,6 +282,8 @@ impl View<'_> {
             ov.wks[w].clear();
             ov.wks[w].extend_from_slice(self.base.via_k(w));
             ov.wns[w] = self.base.nosite(w);
+            ov.wpts[w].clear();
+            ov.wpts[w].extend_from_slice(self.base.vpts(w));
             ov.wires.push(w);
         }
     }
@@ -325,6 +330,13 @@ impl MemRead for View<'_> {
             self.ov.cval[i]
         } else {
             self.base.cost(i)
+        }
+    }
+    fn vpts(&self, w: WireId) -> &[ViaPt] {
+        if self.ov.wstamp.get(w) == Some(&self.ov.epoch) {
+            &self.ov.wpts[w]
+        } else {
+            self.base.vpts(w)
         }
     }
     fn end_site(&self, key: &EndKey) -> Option<Site> {
@@ -374,6 +386,12 @@ impl Mem for View<'_> {
         self.ov.sites.insert(key, v);
         self.ov.fresh.push((key, v));
     }
+    fn set_vpts(&mut self, w: WireId, pts: &[ViaPt]) {
+        self.touch_wire(w);
+        let v = &mut self.ov.wpts[w];
+        v.clear();
+        v.extend_from_slice(pts);
+    }
     fn viapos(&mut self, t0: std::time::Instant) {
         self.ov.vp_n += 1;
         self.ov.vp_ns += t0.elapsed().as_nanos() as u64;
@@ -383,8 +401,9 @@ impl Mem for View<'_> {
     }
 }
 
-/// A wire's via layout as a kept candidate left it: `(wire, intervals, traversals, vias without a site)`.
-type WireWrite = (WireId, Vec<(usize, usize)>, Vec<usize>, usize);
+/// A wire's via layout as a kept candidate left it: `(wire, intervals, traversals, vias without a
+/// site, via points)`.
+type WireWrite = (WireId, Vec<(usize, usize)>, Vec<usize>, usize, Vec<ViaPt>);
 
 /// What a kept candidate writes into the master (copied from its overlay).
 struct Writes {
@@ -448,7 +467,7 @@ fn evaluate(fx: &Frame, base: &Arrays, ov: &mut Overlay, mid: Option<&FxHashMap<
     let keep = super::refine::keep_rule(new_wc, old_wc, d_oc, ctx.add_vias);
     let writes = keep.then(|| Writes {
         passes: ov.passes.iter().map(|&p| (p, ov.play[p], ov.pdisc[p])).collect(),
-        wires: ov.wires.iter().map(|&w| (w, ov.wiv[w].clone(), ov.wks[w].clone(), ov.wns[w])).collect(),
+        wires: ov.wires.iter().map(|&w| (w, ov.wiv[w].clone(), ov.wks[w].clone(), ov.wns[w], ov.wpts[w].clone())).collect(),
         costs: ov.costs.iter().map(|&i| (i, ov.cval[i].0, ov.cval[i].1)).collect(),
     });
     Some(CandOut { keep, delta: (new_wc - old_wc) + d_oc, fresh: std::mem::take(&mut ov.fresh), writes, move_ns: t0.elapsed().as_nanos() as u64, vp_n: ov.vp_n, vp_ns: ov.vp_ns })
@@ -460,10 +479,11 @@ fn commit(a: &mut Arrays, evl: &mut [Vec<LEv>], w: Writes, mv: &[((WireId, usize
         a.pass_layer[p] = l;
         a.pass_disc[p] = d;
     }
-    for (wi, iv, ks, ns) in w.wires {
+    for (wi, iv, ks, ns, pts) in w.wires {
         a.via_iv[wi] = iv;
         a.via_k[wi] = ks;
         a.nosite[wi] = ns;
+        a.vpts[wi] = pts;
     }
     for (i, c, q) in w.costs {
         a.cost[i] = c;

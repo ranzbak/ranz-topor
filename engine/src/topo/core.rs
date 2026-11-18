@@ -3313,7 +3313,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let bad_cuts: Vec<(usize, usize, f64)> = cm.cut.as_ref().map(|c| c.overfull_list()).unwrap_or_default();
         let bad = if cm.cut.is_some() { Vec::new() } else { cm.overfull_list() };
         let nosite = cm.nosite_wires();
-        if bad.is_empty() && bad_cuts.is_empty() && nosite.is_empty() {
+        // CM1: vias whose gap / via-to-via cuts are over-full, with the wires crossing them.
+        let bad_vias = cm.via_cut_list();
+        if bad.is_empty() && bad_cuts.is_empty() && nosite.is_empty() && bad_vias.is_empty() {
             break;
         }
         let mut bad_edges: Vec<usize> = bad.iter().map(|x| x.0).collect();
@@ -3341,6 +3343,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 for kk in ka.saturating_sub(1)..(kb + 1).min(n) {
                     history[st.passes[st.wires[w].passes[kk]].edge] += 1.0;
                 }
+            }
+        }
+        // CM1: an over-full via cut rips the via's wire and, routed last first, one crosser
+        // (the cut's room is the via's neighbourhood; the next round prices the rest again),
+        // with history on the edges of the via's traversals.
+        for (w, xs) in &bad_vias {
+            victims.insert(*w);
+            for &k in &cm.via_k[*w] {
+                let ps = &st.wires[*w].passes;
+                for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < ps.len()) {
+                    history[st.passes[ps[j]].edge] += 1.0;
+                }
+            }
+            if let Some(&x) = xs.iter().filter(|&&x| st.wires[x].alive && wire_conn.get(x).is_some_and(|&c| c != usize::MAX)).max_by_key(|&&x| (rank[wire_conn[x]], x)) {
+                victims.insert(x);
             }
         }
         // First P4 round: the wires whose planned via count rose against the cycle before are
@@ -3777,12 +3794,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let held = layers::Held { prev, free: &free };
             let lr = assign_l(st, ties, &held);
             // The model's wires W, after and before.
-            let w_after = layers::neighbourhood(st, &free);
+            let mut w_after = layers::neighbourhood(st, &free);
+            // tw4 T2: with the via cuts, every wire their changed terms involve (both states).
+            let or = |a: &mut Vec<bool>, b: Vec<bool>| a.iter_mut().zip(b).for_each(|(x, y)| *x |= y);
+            if opts.via_cuts {
+                or(&mut w_after, layers::via_neighbourhood(st, &free));
+            }
             let after = st.take_topology();
             st.restore(saved.clone());
             let nb = st.wires.len();
             let free_b: Vec<bool> = (0..nb).map(|w| free.get(w).copied().unwrap_or(false) || gone.contains(&w)).collect();
-            let w_before = layers::neighbourhood(st, &free_b);
+            let mut w_before = layers::neighbourhood(st, &free_b);
+            if opts.via_cuts {
+                or(&mut w_before, layers::via_neighbourhood(st, &free_b));
+            }
             let wm: Vec<bool> = (0..nw.max(nb)).map(|w| w_after.get(w).copied().unwrap_or(false) || w_before.get(w).copied().unwrap_or(false)).collect();
             let cap_of = |st: &State, evl: &[Vec<(usize, f64, i32)>], only: &[bool]| -> (usize, f64) {
                 let only = &only[..st.wires.len().min(only.len())];
@@ -7621,6 +7646,14 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
         })
         .collect();
     let mut violations = Vec::new();
+    // cm1-room: the exit pins of every connection's terminal pads (`route::exit_pins`), for the
+    // violation class; computed once per connection with a violation.
+    let pad_keys: Vec<(&str, &str, Vec2)> = model.pads.iter().map(|p| (p.ref_.as_str(), p.number.as_str(), p.center.to_vec2())).collect();
+    let term_pad = |t: &crate::decompose::TermRef| match t.kind {
+        crate::decompose::TermKind::Pad(i) => Some(i),
+        _ => None,
+    };
+    let mut exits_of: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for (ci, ev) in viol_events(model, dec, out) {
         let Event::Violation { kind, at, layer, depth_nm, len_nm, against, cause } = &ev else { continue };
         let c = &dec.connections[ci];
@@ -7639,7 +7672,12 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
             against: against.clone(),
             cause: cause.clone(),
             price_mm: (reg.price(&ev, &WireCtx { net: c.net, tier: c.tier }) * 10.0).round() / 10.0,
-            class: crate::route::violation_class(against, cause, &r.from.label, &r.to.label).into(),
+            class: crate::route::violation_class(
+                against,
+                cause,
+                exits_of.entry(ci).or_insert_with(|| [&c.from, &c.to].into_iter().filter_map(&term_pad).flat_map(|i| crate::route::exit_pins(&pad_keys, i)).collect()),
+            )
+            .into(),
         });
     }
     let mut diff_pairs = Vec::new();

@@ -192,6 +192,14 @@ pub struct Packer<'a> {
     edge_clear: f64,
     cache: Mutex<FxHashMap<MarginKey, f64>>,
     taut_cache: Mutex<FxHashMap<TautKey, Arc<Taut>>>,
+    /// CM1: [`super::cutflow::via_point`] per (triangle, net, radius bits, clearance bits); static
+    /// board only, so it lives as long as the packer (every CapModel built on it shares it).
+    pub via_pt: Mutex<FxHashMap<(usize, i32, u64, u64), Vec2>>,
+    /// tw4 T2: the static part of a planned via's gap cuts ([`super::viacut::via_static`]) per
+    /// (triangle, net, point bits): a function of the projection and the static board, so it is
+    /// shared by every capacity model built on this packer (the CM1 cost was its rebuild per
+    /// model). Filled only for the packer's own projection ([`Packer::same_proj`]).
+    pub(crate) via_static: super::viacut::GeoCache,
     /// Reach diameter of the first via size of every net (nm, [`crate::vias::via_reach`] x 2:
     /// the copper disc, or larger where the drill's hole clearance reaches further; 5.4 task 1);
     /// nets not listed use `via_d0`. 0 = the planner gives vias no room (a packer built without
@@ -211,6 +219,9 @@ pub struct Packer<'a> {
     /// 5.4 `[vias] between_crossings`: via intervals exclude the triangles of their events
     /// ([`super::refine::via_ranges`]).
     pub via_between: bool,
+    /// CM1 (`[capacity] via_cuts`): the planned vias are features of the capacity test (their
+    /// gap cuts, [`super::viacut`]), measured in this planning norm; `None` = off.
+    pub via_cuts: Option<super::sheet::Norm>,
     /// M-45: the drawing is octilinear; a pass's oblique factor is the octilinear one
     /// ([`super::demand::octi_stretch`]).
     pub octi: bool,
@@ -260,12 +271,15 @@ impl<'a> Packer<'a> {
             edge_clear,
             cache: Mutex::new(fxmap()),
             taut_cache: Mutex::new(fxmap()),
+            via_pt: Mutex::new(fxmap()),
+            via_static: Mutex::new(fxmap()),
             via_d: fxmap(),
             via_d0: 0.0,
             free_cache: Mutex::new(fxmap()),
             via_squeeze: 0.0,
             reserve_sites: false,
             via_between: false,
+            via_cuts: None,
             octi: false,
             cuts: None,
             edge_memo: std::sync::Mutex::new(Default::default()),
@@ -330,6 +344,7 @@ impl<'a> Packer<'a> {
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
         p.via_between = opts.via_between;
+        p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.octi = opts.draw_style == "octilinear" && opts.octi_room;
         if opts.capacity_model == "cuts" {
             p.cuts = Some(super::cutmodel::CutCtx::new(super::cutmodel::CutOpts::from_options(opts), opts.cut_vias, p.outline.clone()));
@@ -343,6 +358,39 @@ impl<'a> Packer<'a> {
 
     pub fn edge_clear(&self) -> f64 {
         self.edge_clear
+    }
+
+    /// The board outline's segments (math frame, nm).
+    pub fn outline_segs(&self) -> &[(Vec2, Vec2)] {
+        &self.outline
+    }
+
+    /// CM1: [`super::cutflow::via_point`] of a via of `net` (diameter `d`, clearance `s`) in
+    /// triangle `t`, cached per (triangle, net, radius, clearance) ([`Packer::via_pt`]). O(1)
+    /// after the first call.
+    pub fn via_point_cached(&self, t: usize, net: i32, d: f64, s: f64) -> Vec2 {
+        let key = (t, net, (0.5 * d).to_bits(), s.to_bits());
+        if let Some(&p) = self.via_pt.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+            return p;
+        }
+        let p = super::cutflow::via_point(self.pr, self, t, net, 0.5 * d, s).0;
+        self.via_pt.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p);
+        p
+    }
+
+    /// tw4 T2: the static gap cuts of a via of `net` at `at` in triangle `t` of the projection
+    /// `pr` ([`super::viacut::via_static`]), cached for the packer's own projection. O(1) after
+    /// the first call.
+    pub(crate) fn via_static_of(&self, pr: &Projection, t: usize, net: i32, at: Vec2, norm: super::sheet::Norm) -> Arc<super::viacut::ViaGeom> {
+        if !self.same_proj(pr) {
+            return Arc::new(super::viacut::via_static(pr, self, t, net, at, norm));
+        }
+        let key = (t, net, at.x.to_bits(), at.y.to_bits());
+        if let Some(g) = self.via_static.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+            return g.clone();
+        }
+        let g = Arc::new(super::viacut::via_static(pr, self, t, net, at, norm));
+        self.via_static.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(key).or_insert(g).clone()
     }
 
     /// Clearance a wire with clearance `s` needs to the obstacle `ob` on edge `e` (nm).

@@ -18,7 +18,8 @@
 use super::factors::squeeze_amount;
 use super::pack::{infl_dir, layer_items, Disc, PackItem, Packer};
 use super::cutmodel::CutPrice;
-use super::state::{State, WireId};
+use super::state::{State, TriId, WireId};
+use super::viacut::{self, ViaGeom};
 use crate::geom::Vec2;
 
 const EPS: f64 = 1e-9;
@@ -541,7 +542,30 @@ pub struct Frame<'a> {
     /// The values are those of the packer's (pure) cache, so an entry read here equals the
     /// packer's answer bit for bit, whichever lane filled it.
     margins: Vec<std::sync::atomic::AtomicU64>,
+    /// CM1 (tw4 T2, `[capacity] via_cuts`): `cost[vbase + w]` is the over-full price of the gap
+    /// and via-to-via cuts of wire `w`'s planned vias (weight 1 in both capacity models; the undo
+    /// log and a lane's overlay cover it like an edge-layer). `vbase` = edges x layers.
+    pub(crate) vbase: usize,
+    /// CM1: the gap cuts of a via with their crossers per (triangle, net, point bits): the static
+    /// part from the packer's run-wide cache ([`Packer::via_static_of`]), the crossers from the
+    /// state, fixed for the model's life. A memo (a pure function of its key), so the order lanes
+    /// fill it in changes nothing.
+    vgeo: viacut::GeoCache,
+    /// CM1: per wire, the triangles that share a vertex with one of its triangles and the other
+    /// wires that traverse them ([`Frame::nstar`]); static for the model's life.
+    nstar: Vec<std::sync::OnceLock<std::sync::Arc<NStar>>>,
 }
+
+/// CM1: the neighbourhood of a wire's path ([`Frame::nstar`]).
+struct NStar {
+    /// Triangles that share a vertex with a triangle of the wire, ascending.
+    tris: Vec<TriId>,
+    /// The other live wires that traverse one of them, ascending.
+    wires: Vec<WireId>,
+}
+
+/// CM1: a planned via's point and its triangle (`None`: no point, the wire has no via size).
+pub(crate) type ViaPt = Option<(usize, Vec2)>;
 
 /// The labelling-dependent arrays of a [`CapModel`] (its "master" in the parallel refinement:
 /// the lanes read it, only the run thread writes it, between the lanes' epochs).
@@ -567,6 +591,17 @@ pub struct Arrays {
     pub(crate) sq: Vec<f64>,
     /// Undo log of `cost` / `sq` entries while a move is tried in place.
     log: Option<Vec<(usize, f64, f64)>>,
+    /// CM1: per wire, the point of each planned via (the 5.2 end site of an interval without a
+    /// traversal between its events, else the drawing's first site of its triangle); empty
+    /// without `[capacity] via_cuts`.
+    pub(crate) vpts: Vec<Vec<ViaPt>>,
+}
+
+impl Arrays {
+    /// The edge-layer entries of `cost` / `sq` (the CM1 via entries follow them, one per wire).
+    pub(crate) fn n_edge_layers(&self) -> usize {
+        self.cost.len() - self.vpts.len()
+    }
 }
 
 /// Key of [`Arrays::end_sites`].
@@ -581,6 +616,8 @@ pub(crate) trait MemRead {
     fn nosite(&self, w: WireId) -> usize;
     fn cost(&self, i: usize) -> (f64, f64);
     fn end_site(&self, key: &EndKey) -> Option<Option<(usize, Vec2)>>;
+    /// CM1: the via points of `w` ([`Arrays::vpts`]).
+    fn vpts(&self, w: WireId) -> &[ViaPt];
 }
 
 /// Reads and writes of the labelling-dependent arrays, with the hooks of the in-place model (the
@@ -593,6 +630,8 @@ pub(crate) trait Mem: MemRead {
     /// Set the price of edge-layer `i` (called only when it changes).
     fn set_cost(&mut self, i: usize, c: f64, q: f64);
     fn put_end_site(&mut self, key: EndKey, v: Option<(usize, Vec2)>);
+    /// CM1: set the via points of `w`.
+    fn set_vpts(&mut self, w: WireId, pts: &[ViaPt]);
     /// Weight of the per-edge overflow price in the total: 0 when the cut model prices (the
     /// per-edge cost is then only kept for the reports).
     fn edge_w(&self) -> f64 {
@@ -635,6 +674,9 @@ impl MemRead for Arrays {
     fn end_site(&self, key: &EndKey) -> Option<Option<(usize, Vec2)>> {
         self.end_sites.get(key).copied()
     }
+    fn vpts(&self, w: WireId) -> &[ViaPt] {
+        self.vpts.get(w).map_or(&[], |v| v.as_slice())
+    }
 }
 
 /// The model's own arrays, written in place (the build, the in-place moves of [`try_move`] and
@@ -668,6 +710,9 @@ impl MemRead for Master<'_, '_> {
     fn end_site(&self, key: &EndKey) -> Option<Option<(usize, Vec2)>> {
         self.a.end_site(key)
     }
+    fn vpts(&self, w: WireId) -> &[ViaPt] {
+        self.a.vpts(w)
+    }
 }
 
 impl Mem for Master<'_, '_> {
@@ -696,6 +741,11 @@ impl Mem for Master<'_, '_> {
     }
     fn put_end_site(&mut self, key: EndKey, v: Option<(usize, Vec2)>) {
         self.a.end_sites.insert(key, v);
+    }
+    fn set_vpts(&mut self, w: WireId, pts: &[ViaPt]) {
+        let v = &mut self.a.vpts[w];
+        v.clear();
+        v.extend_from_slice(pts);
     }
     fn edge_w(&self) -> f64 {
         if self.cut.is_some() {
@@ -760,7 +810,9 @@ impl<'a> Frame<'a> {
         }
         let wire_d: Vec<f64> = st.wires.iter().map(|wi| packer.via_d(wi.net)).collect();
         let margins = (0..st.passes.len() * margin_slots(nl)).map(|_| std::sync::atomic::AtomicU64::new(MARGIN_UNSET)).collect();
-        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins }
+        let vbase = pr.edges.len() * nl;
+        let nstar = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
+        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins, vbase, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar }
     }
 
     /// The price of one over-full edge-layer (mm).
@@ -900,6 +952,23 @@ impl<'a> Frame<'a> {
         };
         m.set_nosite(w, ns);
         m.set_via_k(w, ks);
+        if self.packer.via_cuts.is_some() && d > 0.0 {
+            let pts: Vec<ViaPt> = ks
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| {
+                    let tl = wi.tris.len().checked_sub(1)?;
+                    if between.get(i) == Some(&false) {
+                        if let Some((ke, p)) = self.end_site_of(m, w, ev, i) {
+                            return Some((wi.tris[ke.min(tl)], p));
+                        }
+                    }
+                    let t = wi.tris[k.min(tl)];
+                    Some((t, self.packer.via_point_cached(t, wi.net, d, wi.s)))
+                })
+                .collect();
+            m.set_vpts(w, &pts);
+        }
         m.applied(w, ev);
     }
 
@@ -936,7 +1005,134 @@ impl<'a> Frame<'a> {
             }
         }
         LAY_SCRATCH.with(|sc| sc.borrow_mut().es = es);
+        delta += self.reprice_vias(m, changed);
         delta + m.flush(self)
+    }
+
+    /// CM1: the neighbourhood of wire `x`'s path ([`NStar`]). Memo per wire. O(its triangles x
+    /// their vertex stars x traversals) on the first call.
+    fn nstar(&self, x: WireId) -> std::sync::Arc<NStar> {
+        self.nstar[x]
+            .get_or_init(|| {
+                let (st, pr) = (self.st, self.st.proj);
+                let mut tris: Vec<TriId> = st.wires[x].tris.iter().flat_map(|&t| pr.tris[t].iter().flat_map(|&v| pr.vert_tris[v].iter().copied())).collect();
+                tris.sort_unstable();
+                tris.dedup();
+                let mut wires: Vec<WireId> = tris.iter().flat_map(|&t| st.tri_trav[t].iter().map(|x| x.0)).filter(|&u| u != x && st.wires[u].alive).collect();
+                wires.sort_unstable();
+                wires.dedup();
+                std::sync::Arc::new(NStar { tris, wires })
+            })
+            .clone()
+    }
+
+    /// CM1: price again the via cuts the passes `changed` can change: those of the vias of their
+    /// wires and of every other wire with a planned via whose triangle shares a vertex with one of
+    /// their triangles (a gap cut's crossers, a via-to-via partner and a pair's crossers all lie
+    /// in the via triangle's vertex star, and that relation is symmetric). Returns the change of
+    /// the total (weight 1). O(owners x their vias x cuts x crossers).
+    fn reprice_vias<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed]) -> f64 {
+        if self.packer.via_cuts.is_none() || changed.is_empty() {
+            return 0.0;
+        }
+        let st = self.st;
+        let mut ws: Vec<WireId> = changed.iter().map(|&(p, _, _)| st.passes[p].wire).collect();
+        ws.sort_unstable();
+        ws.dedup();
+        let mut owners: Vec<WireId> = Vec::new();
+        for &x in &ws {
+            owners.push(x);
+            let ns = self.nstar(x);
+            owners.extend(ns.wires.iter().copied().filter(|&u| m.vpts(u).iter().flatten().any(|&(t, _)| ns.tris.binary_search(&t).is_ok())));
+        }
+        owners.sort_unstable();
+        owners.dedup();
+        let mut delta = 0.0;
+        for u in owners {
+            let i = self.vbase + u;
+            let c = self.price * self.via_over(&*m, u).graded;
+            let (oc, _) = m.cost(i);
+            if c != oc {
+                delta += c - oc;
+                m.set_cost(i, c, 0.0);
+            }
+        }
+        delta
+    }
+
+    /// CM1: the gap cuts of a via of `net` at `p` in triangle `t`, with their crossers. Memo.
+    fn geo(&self, t: usize, net: i32, p: Vec2, norm: super::sheet::Norm) -> std::sync::Arc<ViaGeom> {
+        let key = (t, net, p.x.to_bits(), p.y.to_bits());
+        if let Some(g) = self.vgeo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+            return g.clone();
+        }
+        let s = self.packer.via_static_of(self.st.proj, t, net, p, norm);
+        let g = std::sync::Arc::new(viacut::with_crossers(self.st, self.packer, &s, net));
+        self.vgeo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(key).or_insert(g).clone()
+    }
+
+    /// CM1: the over-full amount of the gap cuts of `w`'s planned vias ([`viacut::over`]) and of
+    /// the via-to-via cuts to the planned vias of other nets whose triangle shares a vertex with
+    /// the via's triangle ([`viacut::pair_over`], counted at the lower `(wire, via)` of the pair),
+    /// under the pass layers of `m`. Zero without `[capacity] via_cuts`.
+    /// O(vias x (cuts x crossers + partners x chords)).
+    pub(crate) fn via_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> viacut::Over {
+        let mut tot = viacut::Over::default();
+        let Some(norm) = self.packer.via_cuts else { return tot };
+        let st = self.st;
+        let wi = &st.wires[w];
+        let d = self.wire_d[w];
+        if !wi.alive || d <= 0.0 || m.vpts(w).is_empty() {
+            return tot;
+        }
+        let via = super::demand::Item { net: wi.net, w: d, s: wi.s };
+        let on = |x: WireId, k: usize, l: usize| {
+            let ps = &st.wires[x].passes;
+            let mut any = false;
+            let mut hit = false;
+            for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < ps.len()) {
+                any = true;
+                hit |= m.layer(ps[j]) == l as i32;
+            }
+            hit || (!any && self.bottom == l as i32)
+        };
+        let item = |x: WireId, k: usize| {
+            let xi = &st.wires[x];
+            let j = k.min(xi.passes.len().saturating_sub(1));
+            let wd = xi.passes.get(j).and_then(|&p| st.pass_w.get(p).copied()).unwrap_or(xi.w);
+            super::demand::Item { net: xi.net, w: wd, s: xi.s }
+        };
+        let on1 = |x: WireId, k: usize| (0..self.nl).find(|&l| on(x, k, l));
+        for (i, &vp) in m.vpts(w).iter().enumerate() {
+            let Some((t, p)) = vp else { continue };
+            let g = self.geo(t, wi.net, p, norm);
+            let o = viacut::over(&g, via, &on, &item);
+            tot.count += o.count;
+            tot.graded += o.graded;
+            // Via-to-via cuts: the partners in the via triangle's vertex star.
+            let mut us: Vec<WireId> = g.tris.iter().flat_map(|&tt| st.tri_trav[tt].iter().map(|x| x.0)).filter(|&u| u > w).collect();
+            us.sort_unstable();
+            us.dedup();
+            for u in us {
+                let ui = &st.wires[u];
+                let du = self.wire_d[u];
+                if !ui.alive || du <= 0.0 || ui.net == wi.net {
+                    continue;
+                }
+                let b = super::demand::Item { net: ui.net, w: du, s: ui.s };
+                for (j, &vq) in m.vpts(u).iter().enumerate() {
+                    let Some((tu, q)) = vq else { continue };
+                    if (u, j) <= (w, i) || g.tris.binary_search(&tu).is_err() {
+                        continue;
+                    }
+                    if let Some(f) = viacut::pair_over(&g, via, q, b, norm, &on1, &item) {
+                        tot.count += 1;
+                        tot.graded += f;
+                    }
+                }
+            }
+        }
+        tot
     }
 
     /// Move the vias `which` of `w` through their intervals (one sweep each, in order) to the
@@ -1241,9 +1437,10 @@ impl<'a> CapModel<'a> {
             via_k: vec![Vec::new(); nw],
             nosite: vec![0; nw],
             end_sites: crate::fxhash::map(),
-            cost: vec![0.0; st.proj.edges.len() * nl],
-            sq: vec![0.0; st.proj.edges.len() * nl],
+            cost: vec![0.0; st.proj.edges.len() * nl + nw],
+            sq: vec![0.0; st.proj.edges.len() * nl + nw],
             log: None,
+            vpts: vec![Vec::new(); nw],
         };
         let mut m = CapModel { fx: Frame::new(st, packer, dirs, bottom, price, only), a, cut: None, evs: Vec::new(), pending: Vec::new() };
         if let Some(ctx) = packer.cuts.as_ref().filter(|_| cuts) {
@@ -1267,6 +1464,12 @@ impl<'a> CapModel<'a> {
             }
         }
         m.price_all();
+        if packer.via_cuts.is_some() {
+            for w in (0..nw).filter(|&w| st.wires[w].alive && used(w)) {
+                let c = m.fx.price * m.fx.via_over(&m.a, w).graded;
+                m.a.cost[m.fx.vbase + w] = c;
+            }
+        }
         {
             let (fx, mut ms) = m.master();
             ms.flush(fx);
@@ -1413,7 +1616,8 @@ impl<'a> CapModel<'a> {
     /// included.
     pub fn total(&self) -> f64 {
         let cut = self.cut.as_ref().map_or(0.0, |c| c.total());
-        self.edge_w() * self.cost.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.fx.price * self.nosite.iter().sum::<usize>() as f64 + cut
+        let (edges, vias) = self.cost.split_at(self.fx.vbase);
+        self.edge_w() * edges.iter().sum::<f64>() + vias.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.fx.price * self.nosite.iter().sum::<usize>() as f64 + cut
     }
 
     /// Via squeeze price of the labelling (mm).
@@ -1425,9 +1629,56 @@ impl<'a> CapModel<'a> {
     pub fn overfull(&self) -> usize {
         let over = match self.cut.as_ref() {
             Some(c) => c.overfull(),
-            None => self.cost.iter().filter(|&&c| c > 0.0).count(),
+            None => self.cost[..self.fx.vbase].iter().filter(|&&c| c > 0.0).count(),
         };
-        over + self.nosite.iter().sum::<usize>()
+        over + self.nosite.iter().sum::<usize>() + self.via_cut_count()
+    }
+
+    /// CM1: the over-full via cuts (per via the over-full layers of its gap cuts, plus its
+    /// over-full via-to-via cuts). O(wires with a priced via cut x their vias x cuts).
+    pub fn via_cut_count(&self) -> usize {
+        (0..self.vpts.len()).filter(|&w| self.cost[self.fx.vbase + w] > 0.0).map(|w| self.fx.via_over(&self.a, w).count).sum()
+    }
+
+    /// CM1: the wires with an over-full via cut, each with the wires that cross its gap cuts or
+    /// lie in its vias' neighbourhood (the P4 victims and history), ascending.
+    pub fn via_cut_list(&self) -> Vec<(WireId, Vec<WireId>)> {
+        let Some(norm) = self.fx.packer.via_cuts else { return Vec::new() };
+        (0..self.vpts.len())
+            .filter(|&w| self.cost[self.fx.vbase + w] > 0.0)
+            .map(|w| {
+                let net = self.fx.st.wires[w].net;
+                let mut xs: Vec<WireId> = self.vpts[w].iter().flatten().flat_map(|&(t, p)| self.fx.geo(t, net, p, norm).cuts.iter().flat_map(|c| c.cross.iter().map(|x| x.0)).collect::<Vec<_>>()).collect();
+                xs.sort_unstable();
+                xs.dedup();
+                (w, xs)
+            })
+            .collect()
+    }
+
+    /// CM1 check (tw4 T2, `TOPO_VIACHECK`, tests): the via entries whose stored price differs from
+    /// a fresh pricing under the current layers, `(mismatches, priced entries)`. O(wires x vias).
+    #[doc(hidden)]
+    pub fn via_check(&self) -> (usize, usize) {
+        let mut bad = 0;
+        let mut n = 0;
+        for w in 0..self.vpts.len() {
+            let fresh = self.fx.price * self.fx.via_over(&self.a, w).graded;
+            let c = self.cost[self.fx.vbase + w];
+            n += usize::from(c > 0.0 || fresh > 0.0);
+            if (fresh - c).abs() > 1e-6 * fresh.abs().max(1.0) {
+                bad += 1;
+                if bad <= 5 {
+                    eprintln!("VIACHECK wire {w} net {} stored {c:.6} fresh {fresh:.6}", self.fx.st.wires[w].net);
+                }
+            }
+        }
+        (bad, n)
+    }
+
+    /// CM1: the planned vias with an over-full via cut, located: `(wire, via point)` (the compass).
+    pub fn via_cut_points(&self) -> Vec<(WireId, Vec2)> {
+        (0..self.vpts.len()).filter(|&w| self.cost[self.fx.vbase + w] > 0.0).flat_map(|w| self.vpts[w].iter().flatten().map(move |&(_, p)| (w, p))).collect()
     }
 
     /// The predicted violations of this labelling as the TopoR loop's archive and every loop move
@@ -1442,9 +1693,10 @@ impl<'a> CapModel<'a> {
         let nosite = self.nosite.iter().sum::<usize>();
         let over = match self.cut.as_ref() {
             Some(c) => c.over_amount(),
-            None => self.cost.iter().filter(|&&c| c > 0.0).map(|&c| c / self.fx.price).sum(),
+            None => self.cost[..self.fx.vbase].iter().filter(|&&c| c > 0.0).map(|&c| c / self.fx.price).sum(),
         };
-        (self.overfull(), over + nosite as f64)
+        let vias: f64 = self.cost[self.fx.vbase..].iter().map(|&c| c / self.fx.price).sum();
+        (self.overfull(), over + nosite as f64 + vias)
     }
 
     /// Shopping list 2.4: the cut model's shrinkage level, `(cuts that fit only necked, graded
@@ -1463,7 +1715,7 @@ impl<'a> CapModel<'a> {
     /// The over-full `(edge, layer)` pairs, ascending.
     pub fn overfull_list(&self) -> Vec<(usize, usize)> {
         let nl = self.fx.nl;
-        (0..self.cost.len()).filter(|&i| self.cost[i] > 0.0).map(|i| (i / nl, i % nl)).collect()
+        (0..self.fx.vbase).filter(|&i| self.cost[i] > 0.0).map(|i| (i / nl, i % nl)).collect()
     }
 
     /// Wires with a via that has no site in its interval, ascending.
@@ -1581,6 +1833,10 @@ pub fn refine_only(
         super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
     }
     stats.after = cm.overfull();
+    if cm.fx.packer.via_cuts.is_some() && std::env::var_os("TOPO_VIACHECK").is_some() {
+        let (bad, n) = cm.via_check();
+        eprintln!("VIACHECK refine: {bad} mismatches of {n} priced via entries");
+    }
     stats.memo = memo_hash(&cm.a.end_sites);
     if cm.cut.is_none() && only.is_none() {
         stats.fin = Some(FinalCap { packer: packer as *const Packer as usize, bottom, price: cm.fx.price.to_bits(), key: cap_key(st, evl), viol: cm.violations() });

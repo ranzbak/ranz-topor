@@ -949,6 +949,36 @@ pub fn neighbourhood(st: &State, free: &[bool]) -> Vec<bool> {
     out
 }
 
+/// tw4 T2 (CM1 on the local judge): the wires a capacity model over `free`'s neighbourhood also
+/// needs so that its via-cut terms change exactly as the whole board's: every live wire that
+/// traverses a triangle within two vertex stars of a free wire's path. A via whose terms a free
+/// wire can change lies in a triangle that shares a vertex with that wire's path (a gap cut's
+/// crossers, a via-to-via partner and a pair's crossers all lie in the via triangle's vertex
+/// star, [`super::refine`] `reprice_vias`), and every participant of that via's terms traverses
+/// its triangle's vertex star: two stars from the path. O(free wires' triangles x star sizes x
+/// traversals).
+pub fn via_neighbourhood(st: &State, free: &[bool]) -> Vec<bool> {
+    let pr = st.proj;
+    let mut out = vec![false; st.wires.len()];
+    let star = |ts: &[usize]| -> Vec<usize> {
+        let mut v: Vec<usize> = ts.iter().flat_map(|&t| pr.tris[t].iter().flat_map(|&x| pr.vert_tris[x].iter().copied())).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let mut path: Vec<usize> = st.wires.iter().enumerate().filter(|(w, wi)| wi.alive && free.get(*w).copied().unwrap_or(false)).flat_map(|(_, wi)| wi.tris.iter().copied()).collect();
+    path.sort_unstable();
+    path.dedup();
+    for t in star(&star(&path)) {
+        for &(w, _) in &st.tri_trav[t] {
+            if st.wires[w].alive {
+                out[w] = true;
+            }
+        }
+    }
+    out
+}
+
 /// The free wires' part of a local layering ([`assign_local`]), before it is merged with the
 /// held one: per wire (empty for held ones) the labelled events, the refinement's masks and
 /// partners (inside the free set), the reported masks (a crossing with a held wire may take
