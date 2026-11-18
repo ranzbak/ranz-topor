@@ -239,3 +239,55 @@ def test_writer_maps_engine_codes_back_to_pcbnew(tmp_path):
     write_items(b, [{"net": eng[name], "layer": 0, "width": 250_000, "prim": seg}])
     t = [t for t in b.GetTracks() if t.GetStart().x == 0 and t.GetEnd().x == 1_000_000][0]
     assert str(t.GetNetname()) == name
+
+
+def _non_sig_codes(b):
+    """(engine code, pcbnew code) of GND: they differ on the fixture (engine GND 1, pcbnew GND 3), SIG is 2 in both."""
+    from harness.model import engine_net_codes
+    eng, pcb = engine_net_codes(b)["GND"], b.GetNetcodeFromNetname("GND")
+    assert eng != pcb
+    return eng, pcb
+
+
+def test_dangling_ends_carry_engine_code_of_non_sig_net(tmp_path):
+    b = _half(tmp_path)
+    eng, _ = _non_sig_codes(b)
+    for t in b.GetTracks():
+        t.SetNet(b.GetNetsByName()["GND"])
+    ends = find_dangling_ends(b)
+    assert ends and {e["net"] for e in ends} == {eng}
+
+
+def test_find_dangling_ends_standalone_ignores_stale_table(tmp_path):
+    """The code table is refreshed per call: an export of another board must not leak into a later standalone call."""
+    from harness import model
+    b = _half(tmp_path)
+    eng, _ = _non_sig_codes(b)
+    for t in b.GetTracks():
+        t.SetNet(b.GetNetsByName()["GND"])
+    model._CODES.clear()
+    model._CODES.update({"GND": 99, "SIG": 98, "VCC": 97})
+    ends = find_dangling_ends(b)
+    assert ends and {e["net"] for e in ends} == {eng}
+
+
+def test_teardrops_and_copper_shapes_carry_engine_code(fixture_board):
+    b = load_board(fixture_board)
+    eng, pcb = _non_sig_codes(b)
+    from harness.writer import save
+    from tests.test_smoother import _td_zone
+    path = save(b, fixture_board.pcb.parent / "td_nc.kicad_pcb")
+    path.write_text(path.read_text().rstrip()[:-1] + _td_zone("GND", "F.Cu", 1, 1, 3, 2) + ")\n")
+    b = load_board(type("P", (), {"pcb": path, "pro": None})())
+    r = pcbnew.PCB_SHAPE(b)
+    r.SetShape(pcbnew.SHAPE_T_RECT)
+    r.SetStart(pcbnew.VECTOR2I(30_000_000, 5_000_000))
+    r.SetEnd(pcbnew.VECTOR2I(32_000_000, 6_000_000))
+    r.SetLayer(pcbnew.F_Cu)
+    r.SetFilled(True)
+    r.SetNet(b.GetNetsByName()["GND"])
+    b.Add(r)
+    m = export_model(b, {}, name="td")
+    assert [t["net"] for t in m["teardrops"]] == [eng]
+    mine = [c for c in m["copper_shapes"] if c["uuid"] == str(r.m_Uuid.AsString())]
+    assert mine and all(c["net"] == eng for c in mine)

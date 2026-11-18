@@ -103,7 +103,14 @@ def write_items(board, items: list[dict]) -> list[str]:
     """Add items to the board; return the uuids of created items in input order."""
     from harness.model import engine_net_codes
     by_code = {c: n for n, c in engine_net_codes(board).items()}  # engine (IPC) code -> name -> pcbnew code
-    pcb_code = lambda c: (int(board.FindNet(by_code[c]).GetNetCode()) if c in by_code else 0)  # noqa: E731
+
+    def pcb_code(c: int) -> int:
+        if c == 0:
+            return 0
+        if c not in by_code:  # fail fast: a silent net 0 would write unnetted copper
+            raise ValueError(f"write_items: engine net code {c} is not in the board's net table {sorted(by_code)}")
+        return int(board.FindNet(by_code[c]).GetNetCode())
+
     groups: dict = {}
     ids: list[str] = []
     for it in items:

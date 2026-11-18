@@ -389,6 +389,7 @@ def _export_keepouts(board):
 def find_dangling_ends(board) -> list[dict]:
     """Track/arc endpoints touching no same-net pad, via or other same-net track/arc
     (`toporlib.geom.find_dangling`; pad containment from pcbnew's effective pad polygons)."""
+    use_board_codes(board)  # a standalone call must not use the table of an earlier board
     items = []
     vias_by_net: dict[int, list] = {}
     for t in board.GetTracks():
