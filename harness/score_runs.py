@@ -29,6 +29,16 @@ ROOT = Path(__file__).resolve().parent.parent
 CLOCK, TIMEOUT_S, THREADS, JOBS, SEEDS = "cpu", 2400, 4, 1, 5
 
 
+def unavailable_sets(sets) -> list:
+    """The `--set section.key=value` settings whose schema `since` is later than the plugin version: Config.engine_options
+    leaves them out, so a run would silently use the default. Empty with TOPOR_UNRELEASED_SETTINGS=1. O(sets)."""
+    plugin = str(ROOT / "plugin")
+    if plugin not in sys.path:
+        sys.path.insert(0, plugin)
+    from topor.config import unavailable_overrides  # noqa: PLC0415
+    return unavailable_overrides([kv.partition("=")[0] for kv in sets])
+
+
 def git_hash() -> str:
     try:
         h = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"], cwd=ROOT, capture_output=True, text=True,
@@ -121,6 +131,10 @@ def main(argv: list | None = None) -> int:
                          "limits.json). A {board} and {k} in the value become the board name and run number.")
     a = ap.parse_args(argv)
     runs = [int(x) for x in a.only.split(",")] if a.only else list(range(0, a.seeds + 1))
+    bad = unavailable_sets(a.set)
+    if bad:  # fail fast, before any run: route_board would drop them silently otherwise
+        ap.error("--set of a setting that does not reach the engine in this version: " + ", ".join(bad)
+                 + " (TOPOR_UNRELEASED_SETTINGS=1 lets later-release settings through for measurement)")
     a.root.mkdir(parents=True, exist_ok=True)
     lim = limits(a.clock, a.timeout, a.threads, JOBS, a.seeds, a.boards)
     if not a.no_cut_check and not any(kv.startswith("capacity.compass_cut_check=") for kv in a.set):

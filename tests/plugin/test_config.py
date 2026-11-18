@@ -364,3 +364,25 @@ def test_finite_list_and_table_values_still_accepted(tmp_path):
     cfg, findings = load_config(tmp_path)
     assert not [f for f in findings if f.code.startswith("CFG_")], [f.message for f in findings]
     assert cfg.get("factors", "weight") == {"via": 30.5}
+
+
+def test_toml_setting_of_a_later_release_is_a_visible_warning(tmp_path):
+    """A topor.toml value of a `since` > plugin version setting never reaches the engine: loud, naming setting + version."""
+    (tmp_path / "topor.toml").write_text('version = 1\n[search]\ndangling_ends = "fixed"\ndangling_lead_mm = 1.5\n')
+    cfg, findings = load_config(tmp_path)
+    got = {f.items[0]: f for f in findings if f.code == "CFG_NOT_YET_AVAILABLE"}
+    assert set(got) == {"search.dangling_ends", "search.dangling_lead_mm"}
+    f = got["search.dangling_ends"]
+    assert f.severity == "warning" and "0.5.0" in f.message and "line 3" in f.message
+    assert "dangling_ends" not in str(cfg.engine_options())  # the gate itself stays
+    # a value equal to the default changes nothing: quiet
+    (tmp_path / "topor.toml").write_text('version = 1\n[search]\ndangling_lead_mm = 0.0\n')
+    assert "CFG_NOT_YET_AVAILABLE" not in codes(load_config(tmp_path)[1])
+
+
+def test_unavailable_overrides_and_opt_in(monkeypatch):
+    from topor.config import unavailable_overrides
+    monkeypatch.delenv("TOPOR_UNRELEASED_SETTINGS", raising=False)
+    assert unavailable_overrides([("search", "dangling_ends"), "optimize.rounds", ("nope", "x")]) == ["search.dangling_ends (since 0.5.0)"]
+    monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")
+    assert unavailable_overrides([("search", "dangling_ends")]) == []

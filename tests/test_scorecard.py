@@ -1,4 +1,5 @@
 """harness.scorecard: signal vs stitching via split and the median [min–max] spread."""
+import pytest
 from harness.scorecard import _spread, via_split
 
 BOARD = """(kicad_pcb (version 20250000)
@@ -91,3 +92,29 @@ def test_score_runs_dry_run_writes_limits_json(tmp_path, capsys):
     assert (lim["clock"], lim["limit_s"], lim["threads"], lim["jobs"]) == ("cpu", 2400, 4, 1)
     assert lim["git_hash"] and lim["engine"] and len(lim["load_avg_start"]) == 3 and len(lim["load_avg_end"]) == 3
     assert capsys.readouterr().out.count("route_board.sh") == 3
+
+
+# ---- fail fast: a --set of a setting of a later release (schema `since` > plugin version) never reaches the engine
+def test_score_runs_set_of_unreleased_setting_is_an_error_before_any_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("TOPOR_UNRELEASED_SETTINGS", raising=False)
+    root = tmp_path / "r"
+    with pytest.raises(SystemExit) as e:
+        score_runs.main([str(root), "eprom-to-kernal", "--dry-run", "--set", "search.dangling_lead_mm=1.5"])
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert "search.dangling_lead_mm" in err and "0.5.0" in err
+    assert not (root / "limits.json").exists() and "route_board.sh" not in capsys.readouterr().out
+    # an available setting is fine, and so is the opt-in switch
+    assert score_runs.main([str(root), "eprom-to-kernal", "--seeds", "0", "--dry-run", "--set", "optimize.rounds=1"]) == 0
+    monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")
+    assert score_runs.main([str(tmp_path / "r2"), "eprom-to-kernal", "--seeds", "0", "--dry-run",
+                            "--set", "search.dangling_lead_mm=1.5"]) == 0
+
+
+def test_route_board_set_of_unreleased_setting_is_an_error(tmp_path, monkeypatch):
+    from harness.route_board import route_board
+    monkeypatch.delenv("TOPOR_UNRELEASED_SETTINGS", raising=False)
+    with pytest.raises(SystemExit) as e:
+        route_board("eprom-to-kernal", tmp_path / "o", overrides={("search", "dangling_ends"): "fixed"})
+    assert "search.dangling_ends (since 0.5.0)" in str(e.value)
+    assert not (tmp_path / "o").exists()
