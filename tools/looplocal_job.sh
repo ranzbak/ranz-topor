@@ -102,6 +102,9 @@ case ${1:-} in
     wait; note "all done" ;;
   tests) hzq run --threads 4 --name tests -- bash $ROOT/tools/looplocal_job.sh tests-in ;;
   tests-in) tests ;;
+  shadow)  # SH again on eprom esp qmtech (shadow compares changes after - before)
+    for n in eprom esp qmtech; do ( hzq run --threads 1 --name "SH-$n" -- bash $ROOT/tools/looplocal_job.sh task SH b $n; ) & sleep 1; done
+    wait; note "all done" ;;
   both)  # SH = L's copper (the shadow only observes), so L needs no own rounds=1 units
     gen
     for c in G SH; do

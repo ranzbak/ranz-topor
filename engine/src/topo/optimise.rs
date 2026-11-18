@@ -170,6 +170,9 @@ pub struct CycleStats {
     pub shadow_err_graded: f64,
     pub shadow_err_vias: usize,
     pub shadow_unl_diff: usize,
+    /// The shadow's sum of |graded violations of the whole-board layering - of the present one|
+    /// of the state before each sampled move (the offset the global judge would charge).
+    pub shadow_base_graded: f64,
 }
 
 impl CycleStats {
@@ -202,6 +205,7 @@ impl CycleStats {
         self.shadow_err_graded += o.shadow_err_graded;
         self.shadow_err_vias += o.shadow_err_vias;
         self.shadow_unl_diff += o.shadow_unl_diff;
+        self.shadow_base_graded += o.shadow_base_graded;
     }
 }
 

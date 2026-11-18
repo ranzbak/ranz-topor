@@ -3532,11 +3532,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         /// `[optimize] loop_shadow`: one re-lay judged both ways (local, whole board): the price
         /// of its violations and vias, the predicted violations, the vias and the unlayerable
         /// crossings, local then global.
+        /// The whole board's judge also layers the state before the move (`base`: its
+        /// predicted violations, vias, unlayerable crossings and price), so both sides compare a
+        /// change: the whole-board layering of the board as it is differs from the present
+        /// (locally evolved) layering on wires the move never touched, and that offset is no part
+        /// of the move.
         struct Shadow {
             v: (f64, f64),
             pred: (Predicted, Predicted),
             vias: (usize, usize),
             unl: (usize, usize),
+            base: (Predicted, usize, usize, f64),
         }
         /// The single-wire move's price and placement ([`Rerouter`]).
         struct Rr<'a, 'p> {
@@ -3623,7 +3629,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let lg = (self.assign_t)(st, self.ties);
                     let pg = (self.measure)(st, &lg);
                     let vg = pg.price(self.viol_mm) + self.via_mm * lg.vias as f64;
-                    self.shadow_out = Some(Shadow { v: (v, vg), pred: (p, pg), vias: (lr.vias, lg.vias), unl: (lr.unlayerable.len(), lg.unlayerable.len()) });
+                    let after = st.take_topology();
+                    st.restore(saved.clone());
+                    let lb = (self.assign_t)(st, self.ties);
+                    let pb = (self.measure)(st, &lb);
+                    let vb = pb.price(self.viol_mm) + self.via_mm * lb.vias as f64;
+                    st.restore(after);
+                    self.shadow_out = Some(Shadow { v: (v, vg), pred: (p, pg), vias: (lr.vias, lg.vias), unl: (lr.unlayerable.len(), lg.unlayerable.len()), base: (pb, lb.vias, lb.unlayerable.len(), vb) });
                 }
                 self.pending = Some((lr, p));
                 v
@@ -3705,7 +3717,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             shadow_k: usize,
             relays: usize,
             lctr: &'a LoopCtr,
-            shadow: (usize, usize, f64, usize, usize),
+            shadow: (usize, usize, f64, usize, usize, f64),
             /// Debug (`TOPO_LOOPDBG`): one line per reroute and per cycle stage.
             dbg: bool,
             dbg_tag: u64,
@@ -3877,32 +3889,32 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let shadow = rr.shadow_out.take();
                 drop(rr);
                 if let Some(sh) = shadow {
-                    // The keep test (`reroute_set`) with the whole board's price of the same state.
+                    // The keep test (`reroute_set`) with the whole board's change of the move
+                    // (after - before, both layered whole) on the same base as the local one.
                     let own = out.new - out.viol_new;
-                    let keep_g = own + sh.v.1 + extra < out.old - 1e-6;
+                    let keep_g = own + out.viol_old + (sh.v.1 - sh.base.3) + extra < out.old - 1e-6;
                     let agree = keep_g == out.kept;
                     let (pl, pg) = sh.pred;
+                    let (pb, vb, ub, _) = sh.base;
                     let (g0, v0, u0) = (self.pred.graded, self.lr.vias as i64, self.lr.unlayerable.len() as i64);
+                    let (dgl, dgg) = (pl.graded - g0, pg.graded - pb.graded);
+                    let (dvl, dvg) = (sh.vias.0 as i64 - v0, sh.vias.1 as i64 - vb as i64);
+                    let (dul, dug) = (sh.unl.0 as i64 - u0, sh.unl.1 as i64 - ub as i64);
                     self.shadow.0 += 1;
                     self.shadow.1 += usize::from(agree);
-                    self.shadow.2 += (pl.graded - pg.graded).abs();
-                    self.shadow.3 += sh.vias.0.abs_diff(sh.vias.1);
-                    self.shadow.4 += sh.unl.0.abs_diff(sh.unl.1);
+                    self.shadow.2 += (dgl - dgg).abs();
+                    self.shadow.3 += dvl.abs_diff(dvg) as usize;
+                    self.shadow.4 += dul.abs_diff(dug) as usize;
+                    self.shadow.5 += (pb.graded - g0).abs();
                     eprintln!(
-                        "LOOPSHADOW wire {w} conn {ci} free {} kept local {} global {}: d graded local {:.4} global {:.4}; d pred local {} global {}; d vias local {} global {}; d unlayerable local {} global {}; price local {:.4} global {:.4}",
+                        "LOOPSHADOW wire {w} conn {ci} free {} kept local {} global {}: d graded local {dgl:.4} global {dgg:.4}; d pred local {} global {}; d vias local {dvl} global {dvg}; d unlayerable local {dul} global {dug}; whole-board layering of the board before vs present: graded {:+.4} vias {:+}",
                         self.lctr.local_free.get() - lf0,
                         out.kept,
                         keep_g,
-                        pl.graded - g0,
-                        pg.graded - g0,
                         pl.count as i64 - self.pred.count as i64,
-                        pg.count as i64 - self.pred.count as i64,
-                        sh.vias.0 as i64 - v0,
-                        sh.vias.1 as i64 - v0,
-                        sh.unl.0 as i64 - u0,
-                        sh.unl.1 as i64 - u0,
-                        sh.v.0,
-                        sh.v.1
+                        pg.count as i64 - pb.count as i64,
+                        pb.graded - g0,
+                        vb as i64 - v0
                     );
                 }
                 if self.dbg && out.kept {
@@ -4150,6 +4162,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 cs.shadow_err_graded = self.shadow.2 - s0.2;
                 cs.shadow_err_vias = self.shadow.3 - s0.3;
                 cs.shadow_unl_diff = self.shadow.4 - s0.4;
+                cs.shadow_base_graded = self.shadow.5 - s0.5;
                 cs
             }
         }
@@ -4489,7 +4502,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             shadow_k: opts.loop_shadow,
             relays: 0,
             lctr: &lctr,
-            shadow: (0, 0, 0.0, 0, 0),
+            shadow: (0, 0, 0.0, 0, 0, 0.0),
             dbg: std::env::var_os("TOPO_LOOPDBG").is_some(),
             dbg_tag: opts.seed,
         };
@@ -4667,7 +4680,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 mean(st_.local_free),
                 mean(st_.local_model),
                 if st_.shadow_n > 0 {
-                    format!("; shadow check ([optimize] loop_shadow = {}): {} moves also judged by the whole board, {} kept alike ({:.1} %), mean |difference| graded violations {:.4}, vias {:.2}, unlayerable crossings {:.2}", opts.loop_shadow, st_.shadow_n, st_.shadow_agree, 100.0 * st_.shadow_agree as f64 / st_.shadow_n as f64, st_.shadow_err_graded / st_.shadow_n as f64, st_.shadow_err_vias as f64 / st_.shadow_n as f64, st_.shadow_unl_diff as f64 / st_.shadow_n as f64)
+                    format!("; shadow check ([optimize] loop_shadow = {}): {} moves also judged by the whole board (its change after - before, both layered whole), {} kept alike ({:.1} %), mean |local change - whole-board change| graded violations {:.4}, vias {:.2}, unlayerable crossings {:.2}; mean |whole-board layering - present layering| before the move, graded {:.4}", opts.loop_shadow, st_.shadow_n, st_.shadow_agree, 100.0 * st_.shadow_agree as f64 / st_.shadow_n as f64, st_.shadow_err_graded / st_.shadow_n as f64, st_.shadow_err_vias as f64 / st_.shadow_n as f64, st_.shadow_unl_diff as f64 / st_.shadow_n as f64, st_.shadow_base_graded / st_.shadow_n as f64)
                 } else {
                     String::new()
                 }
@@ -4707,7 +4720,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "layer_local": rep.stats.layer_local,
                 "local_free": rep.stats.local_free,
                 "local_model": rep.stats.local_model,
-                "shadow": [rep.stats.shadow_n, rep.stats.shadow_agree, rep.stats.shadow_err_graded, rep.stats.shadow_err_vias, rep.stats.shadow_unl_diff],
+                "shadow": [rep.stats.shadow_n, rep.stats.shadow_agree, rep.stats.shadow_err_graded, rep.stats.shadow_err_vias, rep.stats.shadow_unl_diff, rep.stats.shadow_base_graded],
             },
         }));
         if opts.via_pair_min {
