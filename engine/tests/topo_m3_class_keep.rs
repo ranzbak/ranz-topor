@@ -51,10 +51,13 @@ fn inner_wire_keeps_its_erbs_against_a_shortcut_across_the_outer() {
     assert!(a > a_ref - 0.01 && a <= a_xfail * 1.005, "A wraps J3 (reference {a_ref} mm, xfail bound {a_xfail} mm): {got:?}");
     assert!(a > a_ref * 1.005, "XPASS: A {a:.3} mm meets the approved judge (reference {a_ref} mm +0.5 %): tighten the bound to it");
     assert!((len(&got, "B") - 9.0).abs() < 0.01, "B straight: {got:?}");
-    assert_eq!(kept_count(&warn), 1, "one competitor kept out: {warn:?}");
-    // The rule off: the shortcut is drawn and B crosses it (the qmtech ADV_CLK / ADV_DE symptom).
-    assert!(len(&off, "A") < 14.5, "the straight competitor wins without the rule: {off:?}");
-    assert!(off.iter().any(|c| c.2 > 0), "B drawn across A without the rule: {off:?}");
+    // TW2 joint commit: B's ERBS is a kept band in the index before A draws, so the straight
+    // competitor that crosses it is illegal and never competes; the class rule (round i) has no
+    // case left here, with or without it (it still guards an undrawn wire without an ERBS:
+    // `a_wire_without_erbs_is_checked_by_its_planned_path`). Before TW2: one competitor kept out,
+    // and with the rule off the shortcut was drawn and B crossed it (qmtech ADV_CLK / ADV_DE).
+    assert_eq!(kept_count(&warn), 0, "no competitor reaches the class test: {warn:?}");
+    assert_eq!(off, got, "the rule off: the kept band of B keeps A's wrap all the same");
     assert_eq!(kept_count(&woff), 0);
     // Without the hooks: no violation either (the exact attempt finds the wrap or the ERBS is kept).
     assert!(nat.iter().all(|c| c.2 == 0), "no violation without hooks: {nat:?}");

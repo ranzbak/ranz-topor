@@ -1187,6 +1187,17 @@ pub struct Options {
     /// where the two part instead (one copper, a T there), when that is cheaper by length and the
     /// `junction_angle` factor and the new track keeps every clearance. Default on.
     pub fuse_branches: bool,
+    /// Topological core (TW2, `topor.toml [search] fuse_pour_check`): the fuse and the
+    /// octilinear polish after drawing are judged by the pour stitching too. The copper with and
+    /// without their moves is stitched; when the moved copper leaves more pour pieces cut off
+    /// (each an error: KiCad's DRC lists it as unconnected), the moves nearest the new pieces
+    /// are undone, then all of them. Costs two or more stitching passes on a board with pours.
+    /// Default on.
+    pub fuse_pour_check: bool,
+    /// Topological core (TW2, `topor.toml [search] fuse_pour_rounds`): rounds of the fuse pour
+    /// check that undo the moves nearest the new cut-off pieces and stitch again, before every
+    /// move is undone. Default 2.
+    pub fuse_pour_rounds: usize,
     /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route cycles per run (the
     /// first included). Since M-B0 a safety cap: a run ends at "Routes stable" (`stable_*`) or at
     /// the user's OK; the cap ends a run that never settles. A work cap, not a time cap: the same
@@ -1338,13 +1349,25 @@ pub struct Options {
     /// vertex goes where the straight leg keeps every rule and the side of every wire not drawn
     /// yet; `draw::Drawer::pull_taut`).
     pub draw_pull_taut: bool,
-    /// M3 (`[drawing] realise`): how the drawing realises the plan's topology. `"sequential"`
-    /// (default; the wires one by one, each against the copper drawn before it, through the
-    /// attempt ladder of `draw::Drawer::draw_wire`) or `"erbs"` (each run first as its extended
-    /// rubber band from the plan's spoke tips and stack radii, `topo::erbs`, independent of the
-    /// draw order, the wires in Staepelaere's precedes order; the old ladder only where the
-    /// checker rejects the band, counted).
+    /// M3, TW2 (`[drawing] realise`): how the drawing realises the plan's topology. `"erbs"`
+    /// (default since TW2; every run as its extended rubber band from the plan's spoke tips and
+    /// stack radii, `topo::erbs`; all bands checked together and the kept ones committed before
+    /// any wire is drawn, so the draw order decides nothing; the attempt ladder only for the runs
+    /// whose band is not kept, against every kept band, counted) or `"sequential"` (the wires one
+    /// by one, each against the copper drawn before it, through the attempt ladder of
+    /// `draw::Drawer::draw_wire`).
     pub realise: String,
+    /// TW2 (`[drawing] erbs_conflict_keep`): with realise = "erbs", which of two bands the joint
+    /// check finds too close stays ([`crate::topo::erbs::KeepMode`]): `"tier"` (default; the most
+    /// kept bands of the highest priority tier first, then of the next) or `"count"` (the most
+    /// kept bands). Ties by route order.
+    pub erbs_conflict_keep: String,
+    /// TW2 (`[drawing] erbs_gap_keep_max_mm`): with realise = "erbs", two bands the joint check
+    /// finds too close by a model gap of the ERBS (`RunBand::gap`, no over-full cut predicts it)
+    /// are both kept when the overlap is at most this: the gap stays as a clearance violation of
+    /// the band drawn second, counted (`route.erbs.gap_kept`), instead of a forced run. A larger
+    /// overlap goes to the selector (`erbs_conflict_keep`). 0 = every conflict to the selector.
+    pub erbs_gap_keep_max_mm: f64,
     /// M3 (`[drawing] erbs_length_weight`): with realise = "erbs", the graded price of an ERBS
     /// longer than its band: the drawing prices a legal ERBS of length `L` over a band of length
     /// `B` at `L (1 + k max(0, L/B - 1)^2)` and keeps it unless a legal sequential run is cheaper
@@ -1554,6 +1577,8 @@ impl Default for Options {
             dangling_lead_mm: 0.0,
             dangling_lead_via: true,
             fuse_branches: true,
+            fuse_pour_check: true,
+            fuse_pour_rounds: 2,
             topo_rounds: 30,
             max_ripped: 5000,
             max_expansions: 2_000_000,
@@ -1588,7 +1613,9 @@ impl Default for Options {
             bend_spacing_mm: 0.5,
             octi_room: true,
             draw_pull_taut: true,
-            realise: "sequential".into(),
+            realise: "erbs".into(),
+            erbs_conflict_keep: "tier".into(),
+            erbs_gap_keep_max_mm: 0.15,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
             bundle_pull: 0.3,

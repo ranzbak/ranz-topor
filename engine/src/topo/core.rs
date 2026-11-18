@@ -1368,11 +1368,17 @@ impl Run {
             let empty = self.arch.items.is_empty();
             let RoundOut { result, crit, pre, .. } = ro;
             if let Some((c, r)) = pre.filter(|_| !cancel_cut) {
+                if std::env::var_os("TOPO_FUSEDBG").is_some() {
+                    eprintln!("STITCH variant: round {cycle} as drawn");
+                }
                 let (r, c) = stitched(r, c);
                 if !past() || empty {
                     note_judged(c, r.routed, true);
                     self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
                 }
+            }
+            if std::env::var_os("TOPO_FUSEDBG").is_some() {
+                eprintln!("STITCH variant: round {cycle} (reduced + fused)");
             }
             let (r, c) = stitched(result, crit);
             (cyc_err, cyc_viol) = (c.errors, c.violations);
@@ -1588,25 +1594,7 @@ fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, dead
     if pour_nets.is_empty() {
         return 0;
     }
-    // A label can name several pads (a switch with two pads "2"): the one at the terminal.
-    let pad_of = |label: &str, at: [i64; 2]| {
-        let q = Vec2 { x: at[0] as f64, y: -(at[1] as f64) };
-        (0..model.pads.len())
-            .filter(|&i| format!("{}.{}", model.pads[i].ref_, model.pads[i].number) == label)
-            .min_by(|&a, &b| (model.pads[a].center.to_vec2() - q).len().total_cmp(&(model.pads[b].center.to_vec2() - q).len()).then(a.cmp(&b)))
-    };
-    let mut routed_pads: Vec<usize> = Vec::new();
-    for c in best.connections.iter().filter(|c| c.status == "routed" && pour_nets.contains(&c.net)) {
-        for t in [&c.from, &c.to] {
-            if t.kind == "pad" {
-                if let Some(p) = pad_of(&t.label, t.at) {
-                    routed_pads.push(p);
-                }
-            }
-        }
-    }
-    routed_pads.sort_unstable();
-    routed_pads.dedup();
+    let routed_pads = super::stitch::routed_pour_pads(model, &best.connections);
     let (reg, _) = Registry::from_config(standard_factors(), &opts.factors);
     let t = Instant::now();
     let s = super::stitch::stitch_until(model, opts, &reg, &best.items, &routed_pads, deadline, stop);
@@ -5734,6 +5722,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 dr.test_no_sequential = ctl.test_point("no sequential run");
                 dr.test_no_class_keep = ctl.test_point("erbs class keep off");
                 dr.test_straight_seq = ctl.test_point("straight sequential run");
+                dr.test_fail_via_wire = ctl.test_point("fail via wire");
+                dr.test_joint_conflict = ctl.test_point("joint conflict");
                 if ctl.test_point("wind erbs") {
                     // test-only fault: every ERBS runs its path three times (a wound band of the
                     // same copper, legal and three times its band), for the length factor
@@ -5749,6 +5739,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 erbs_line = Some(format!("ERBS drawing ([drawing] realise = \"erbs\") not available, the sequential drawing instead: {e}"));
                 erbs_err = Some(e);
             }
+        }
+        // TW2: every band committed and checked at once, a conflict keeps an independent set
+        // (`super::joint`); the kept bands are reserved for their wires, so the order below only
+        // says who draws first among the rest.
+        if !dr.erbs.is_empty() {
+            let mode = super::erbs::KeepMode::parse(&opts.erbs_conflict_keep).unwrap_or_else(|| {
+                warnings.push(format!("[drawing] erbs_conflict_keep = {:?} is not \"tier\" or \"count\": \"tier\" used", opts.erbs_conflict_keep));
+                super::erbs::KeepMode::Tier
+            });
+            let rank: BTreeMap<WireId, usize> = draw_order.iter().enumerate().map(|(i, &w)| (w, i)).collect();
+            let key = |w: WireId| (wire_conn.get(w).filter(|&&c| c != usize::MAX).map_or(u8::MAX, |&c| tier_of(conn_of[c])), rank.get(&w).copied().unwrap_or(usize::MAX));
+            let skip: BTreeSet<(WireId, usize)> = tree_js.iter().filter_map(|&(bw, end, ..)| plans.get(&bw).map(|p| (bw, if end == 0 { 0 } else { p.layers.len().saturating_sub(1) }))).collect();
+            if ctl.test_point("reverse draw order") {
+                // test-only: the precedes order backwards (the kept bands must not change)
+                live.reverse();
+            }
+            dr.reserve_bands(&live, &plans, &placed, &skip, &key, mode);
         }
     }
     let over_n = dr.over.iter().filter(|&&o| o).count();
@@ -5805,6 +5812,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     for &w in &live {
         if expired() {
             timed_out = true;
+            dr.release_bands(w);
             fail(&mut out, conn_of[wire_conn[w]], draw_cut_reason());
             continue;
         }
@@ -5812,6 +5820,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let mut ids = via_ids.remove(&w).unwrap_or_default();
         if ctl.test_point("fail wire drawing") {
             // test-only fault: this wire's drawing fails (no feedback diagnosis), so never drop meets it
+            dr.release_bands(w);
             for id in ids {
                 dr.uncommit(id);
             }
@@ -5842,6 +5851,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         if drawn_ok.is_multiple_of(50) {
             ctl.update("route", 3, drawn_ok, nconn, 0, t0.elapsed().as_secs_f64());
         }
+    }
+    // TW2: every reserved band was adopted or released with its wire; one left over would be copper
+    // no wire owns (counted, invariant 0).
+    let left: BTreeSet<WireId> = dr.joint.reserved.keys().map(|k| k.0).collect();
+    dr.joint.left_reserved = dr.joint.reserved.len();
+    for w in left {
+        dr.release_bands(w);
     }
     // Debug (D0): TOPO_D0AUDIT=<file> writes the neighbour audit of the drawing (packer
     // positions against the drawn crossings and copper gaps, `dwitness::audit`) as JSON.
@@ -6054,6 +6070,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         dr.force = false;
     }
+    // TW2: how the drawing drew each run (`realise = "erbs"`): the ERBS line and result.json route.erbs.
+    let mut erbs_runs = (opts.realise == "erbs" && erbs_err.is_none()).then(|| super::joint::tally(drawn.values(), &dr.joint, &opts.erbs_conflict_keep));
+    if let Some(rep) = erbs_runs.as_mut() {
+        // Only the runs of wires that were drawn; their connection by name.
+        rep.no_band_list.retain(|x| drawn.contains_key(&x.wire));
+        for x in &mut rep.no_band_list {
+            let c = &dec.connections[conn_of[wire_conn[x.wire]]];
+            x.net = model.nets.iter().find(|n| n.code == c.net).map_or(c.net.to_string(), |n| n.name.clone());
+            (x.from, x.to) = (c.from.label.clone(), c.to.label.clone());
+        }
+    }
+    debug_assert!(erbs_runs.as_ref().is_none_or(|r| r.lost_to_other == 0), "TW2 I1: a reserved band was taken out by another wire");
     // ---- Junctions (D5 net trees): a branch whose trunk was not drawn, or that reaches its
     // junction on another layer than the trunk passes it, is not connected: its copper goes and
     // its connection fails (locally; the rest of the tree stays).
@@ -6343,6 +6371,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // trunk's copper where the two part (TopoR FreeStyle auto move of T-points, black-box E8c-e;
     // overlap removal, REPORT section 4.C). Geometric, after everything is drawn: the checker sees
     // all copper. A wire at a pad end fuses only onto a wire not fused there itself (no cycle).
+    // (price gain, length gain mm) of every fuse applied, for the report line.
+    let mut fused: Vec<(f64, f64)> = Vec::new();
+    // Fuse pour check ([`super::fusepour`], after the octilinear polish: the variant table judges
+    // the copper the steps after the fuse leave): each applied move with the state it replaced
+    // (drawn wire, outcome, necked stretches of its connection), in the order made.
+    let pour_check = opts.fuse_pour_check && opts.stitch_islands && model.pours.iter().any(|z| !z.fills.is_empty());
+    type Saved = (WireOut, Outcome, Vec<(usize, Event)>);
+    let mut moves: Vec<(super::fusepour::Move, Saved)> = Vec::new();
+    // The polish's report numbers (segments, length added nm), and per polish move (index in
+    // `moves`) its own: the line is written after the check, without the undone moves (V5).
+    let mut polish: Option<(usize, f64)> = None;
+    let mut polish_of: BTreeMap<usize, (usize, f64)> = BTreeMap::new();
     if tree_free && opts.fuse_branches {
         let jw = reg.price(&Event::JunctionAngle { at: Vec2::default(), deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, &WireCtx::default());
         let js = tree::junctions(&st);
@@ -6358,8 +6398,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let u = ((p - x[0]).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
             (x[0] + ab * u - p).len() < 1_000.0
         });
-        // (price gain, length gain mm) of every fuse applied, for the report line.
-        let mut fused: Vec<(f64, f64)> = Vec::new();
         let ids: Vec<WireId> = drawn.keys().copied().collect();
         let pad_nm = opts.junction_pad_mm * MM;
         for &w in &ids {
@@ -6388,23 +6426,37 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 let ws_mm = (wi.w + wi.s) / MM;
                 let mut done = false;
+                if std::env::var("TOPO_FUSEDBG").is_ok() && !trunks.is_empty() {
+                    eprintln!("FUSE try wire {w} net {} end {end} layer {layer} trunks {trunks:?}", wi.net);
+                }
                 for u in trunks {
                     let Some(uo) = drawn.get(&u) else { continue };
                     let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
                     let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
                     for (gain, len_gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw).into_iter().take(8) {
                         let cut = &run[..=i];
+                        let fdbg = std::env::var("TOPO_FUSEDBG").is_ok();
                         if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, cut))) {
+                            if fdbg {
+                                eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: an anchor on the cut part");
+                            }
                             continue;
                         }
                         let q = pts[0];
                         // `junction_pad_mm`: no T that close to a pad of the net.
                         if pad_nm > 0.0 && pad_verts.get(&wi.net).is_some_and(|ps| ps.iter().any(|&(v, _)| (proj.pos[v] - q).len() < pad_nm)) {
+                            if fdbg {
+                                eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: junction_pad_mm at ({:.3}, {:.3})", q.x / MM, -q.y / MM);
+                            }
                             continue;
                         }
                         if end == 1 {
                             pts.reverse();
                         }
+                        let saved: Option<Saved> = pour_check.then(|| {
+                            let ci = conn_of[wire_conn[w]];
+                            (drawn[&w].clone(), out[ci].clone(), necking.iter().filter(|(c, _)| *c == ci).cloned().collect())
+                        });
                         let mut wo = drawn.remove(&w).expect("drawn wire");
                         let ok = dr.refit_run(&mut wo, r, pts);
                         if ok {
@@ -6413,12 +6465,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
                         }
                         drawn.insert(w, wo);
+                        if !ok && fdbg {
+                            eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: refit not legal at ({:.3}, {:.3})", q.x / MM, -q.y / MM);
+                        }
                         if ok {
+                            if let Some(sv) = saved {
+                                // Where the copper changed: the stretch taken away and the new link.
+                                let mut path = cut.to_vec();
+                                path.push(q);
+                                moves.push((super::fusepour::Move { w, onto: u, path: vec![path] }, sv));
+                            }
                             fused.push((gain, len_gain));
                             fused_at.insert((w, end));
                             anchors.entry(u).or_default().push(q);
                             if std::env::var("TOPO_FUSEDBG").is_ok() {
-                                eprintln!("FUSED round {round} wire {w} net {} end {end} onto {u} at ({:.3}, {:.3}) gain {gain:.2} mm", wi.net, q.x / MM, -q.y / MM);
+                                let pl = |p: &[Vec2]| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM;
+                                eprintln!("FUSED round {round} wire {w} net {} end {end} onto {u} at ({:.3}, {:.3}) gain {gain:.2} mm, length gain {len_gain:.3} mm, i {i} of {} vertices, run {:.3} -> {:.3} mm, wire now {:.3} mm", wi.net, q.x / MM, -q.y / MM, run.len(), pl(&run), drawn[&w].runs[r].1.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM, drawn[&w].length_nm / MM);
                             }
                             done = true;
                             break;
@@ -6430,7 +6492,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
         }
-        warnings.push(fuse_line(&fused));
     }
     // M-45: what the steps after the drawing left not at 0/45/90 degrees (a fused branch end)
     // becomes an elbow or Z where the checker accepts it.
@@ -6440,17 +6501,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         for w in ids {
             let mut wo = drawn.remove(&w).expect("drawn wire");
             let len0 = wo.length_nm;
+            let ci = conn_of[wire_conn[w]];
+            let saved: Option<Saved> = pour_check.then(|| (wo.clone(), out[ci].clone(), necking.iter().filter(|(c, _)| *c == ci).cloned().collect()));
             let k = dr.octi_polish(&mut wo);
             if k > 0 {
+                if let Some(sv) = saved {
+                    let path = super::fusepour::changed(&sv.0.runs, &wo.runs);
+                    polish_of.insert(moves.len(), (k, wo.length_nm - len0));
+                    moves.push((super::fusepour::Move { w, onto: super::fusepour::NO_WIRE, path }, sv));
+                }
                 n_pol += k;
                 pol_nm += wo.length_nm - len0;
-                let ci = conn_of[wire_conn[w]];
                 necking.retain(|(c, _)| *c != ci);
                 settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
             }
             drawn.insert(w, wo);
         }
-        warnings.push(polish_line(n_pol, pol_nm / MM));
+        polish = Some((n_pol, pol_nm));
         // Bundles (M-45 item 4): bends a wire takes together with a parallel neighbour, and the
         // skew each such bend gives the outer wire (2 d tan(a/2): 0.83 x pitch per 45 degrees).
         let wires = &st.wires;
@@ -6470,6 +6537,149 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 bb.iter().map(|x| x.skew_nm).sum::<f64>() / MM
             ));
         }
+    }
+    if !moves.is_empty() {
+        use super::fusepour;
+        let t_pc = Instant::now();
+        let (sreg, _) = Registry::from_config(standard_factors(), &opts.factors);
+        // Part of the drawing's last steps: a limit acting as hard cuts its stitching as it cuts
+        // the variant table's (verify V6); a cut stitching decides nothing (the moves stay).
+        cut_step.set(CutStep::Stitching);
+        let pc_cut = std::cell::Cell::new(false);
+        // Test hook "fuse pour cut": the stitching is cut at once.
+        let test_cut = ctl.test_point("fuse pour cut");
+        let pc_stop = || {
+            let c = test_cut || ctl.is_cancelled() || limit_cut();
+            if c {
+                pc_cut.set(true);
+            }
+            c
+        };
+        // The pieces a stitching leaves cut off in the copper of `o` (the variant table's pass).
+        let left_of = |o: &[Outcome]| {
+            let a = assemble(model, dec, o, &term_over, signal[0], &reg);
+            let pads = super::stitch::routed_pour_pads(model, &a.reports);
+            super::stitch::stitch_until(model, opts, &sreg, &a.items, &pads, None, &pc_stop).left
+        };
+        let mut unfused = out.clone();
+        for (m, sv) in moves.iter().rev() {
+            unfused[conn_of[wire_conn[m.w]]] = sv.1.clone();
+        }
+        let base = left_of(&unfused);
+        let mut cur = left_of(&out);
+        let first = cur.len();
+        let mv: Vec<fusepour::Move> = moves.iter().map(|(m, _)| m.clone()).collect();
+        let mut live = vec![true; mv.len()];
+        let mut rounds = 0usize;
+        let mut undone_nets: BTreeSet<String> = BTreeSet::new();
+        let net_name = |w: WireId| model.nets.iter().find(|n| n.code == st.wires[w].net).map_or_else(|| st.wires[w].net.to_string(), |n| n.name.clone());
+        // Undo the moves of `set` that are still kept, latest first: each wire ends at the state
+        // its earliest undone move replaced (drawn wire with the drawing's index, outcome, necked
+        // stretches). Returns how many it undid.
+        let undo = |set: &BTreeSet<usize>, live: &mut Vec<bool>, drawn: &mut BTreeMap<WireId, WireOut>, out: &mut Vec<Outcome>, necking: &mut Vec<(usize, Event)>, dr: &mut Drawer, names: &mut BTreeSet<String>| -> usize {
+            let mut n = 0;
+            for &i in set.iter().rev() {
+                if !std::mem::replace(&mut live[i], false) {
+                    continue;
+                }
+                n += 1;
+                let (m, (wo, o, nk)) = &moves[i];
+                let ci = conn_of[wire_conn[m.w]];
+                let now = drawn.remove(&m.w).expect("moved wire is drawn");
+                let back = dr.restore_wire(&now, wo);
+                out[ci] = o.clone();
+                necking.retain(|(c, _)| *c != ci);
+                necking.extend(nk.iter().cloned());
+                drawn.insert(m.w, back);
+                names.insert(net_name(m.w));
+            }
+            n
+        };
+        // Test hooks: judge the moved copper worse whatever it leaves, so every move is undone;
+        // undo the first fuse move in one round whatever the counts (a partial undo); report the
+        // first kept fuse move's wire as clashing once in the re-check (verify V3).
+        let undo_all = ctl.test_point("fuse pour undo all");
+        let partial = ctl.test_point("fuse pour partial undo");
+        let fake_clash = std::cell::Cell::new(ctl.test_point("fuse pour clash"));
+        let mut rechecked = 0usize;
+        while !pc_cut.get() && (undo_all || (partial && rounds == 0) || !fusepour::fused_ok(cur.len(), base.len())) && !ctl.is_cancelled() {
+            let mut seed: BTreeSet<usize> = BTreeSet::new();
+            if partial && rounds == 0 {
+                seed.extend(mv.iter().position(|m| m.onto != fusepour::NO_WIRE));
+            } else if rounds < opts.fuse_pour_rounds && !undo_all {
+                for c in fusepour::new_pieces(&cur, &base) {
+                    seed.extend(fusepour::nearest_move(&mv, &live, &fusepour::piece_points(model, c)));
+                }
+            }
+            let all = seed.is_empty();
+            if all {
+                seed = (0..mv.len()).filter(|&i| live[i]).collect();
+            }
+            // The violations of each wire with a kept move before this round's undo: the re-check
+            // undoes a kept move only where the copper that came back adds violations.
+            let pre: BTreeMap<WireId, usize> = if all {
+                BTreeMap::new()
+            } else {
+                mv.iter().zip(&live).filter(|(_, l)| **l).map(|(m, _)| m.w).collect::<BTreeSet<_>>().into_iter().map(|w| (w, drawn.get(&w).map_or(0, |wo| dr.wire_viols(wo)))).collect()
+            };
+            undo(&fusepour::with_dependents(&mv, &seed), &mut live, &mut drawn, &mut out, &mut necking, &mut dr, &mut undone_nets);
+            // Re-check (verify V3): the moves kept were legal with the undone copper in place;
+            // the copper that came back may clash with them. Undo those too, until none clashes.
+            while !all && live.iter().any(|l| *l) {
+                let fake_w = fake_clash.get().then(|| mv.iter().zip(&live).find(|(m, l)| **l && m.onto != fusepour::NO_WIRE).map(|(m, _)| m.w)).flatten();
+                fake_clash.set(false);
+                let clash = fusepour::clash_seed(&mv, &live, &|w| fake_w == Some(w) || drawn.get(&w).is_some_and(|wo| dr.wire_viols(wo) > pre.get(&w).copied().unwrap_or(0)));
+                if clash.is_empty() {
+                    break;
+                }
+                rechecked += undo(&fusepour::with_dependents(&mv, &clash), &mut live, &mut drawn, &mut out, &mut necking, &mut dr, &mut undone_nets);
+            }
+            rounds += 1;
+            if all || live.iter().all(|l| !l) {
+                cur = base.clone();
+                break;
+            }
+            cur = left_of(&out);
+        }
+        let n_undone = live.iter().filter(|l| !**l).count();
+        let n_fuse = mv.iter().filter(|m| m.onto != fusepour::NO_WIRE).count();
+        let fuse_undone = mv.iter().zip(&live).filter(|(m, l)| m.onto != fusepour::NO_WIRE && !**l).count();
+        // Self-check: the undone wires' tracks are back in the drawing's index.
+        let stale = moves.iter().enumerate().filter(|(i, (m, _))| !live[*i] && drawn.get(&m.w).is_some_and(|wo| !dr.handles_hold(wo))).count();
+        if stale > 0 {
+            warnings.push(format!("fuse pour self-check: {stale} undone moves left wires whose tracks are not in the drawing's index (engine bug)"));
+        }
+        if n_undone > 0 {
+            // The fuse line counts the fuse moves kept (`fused` holds one entry per fuse move, in
+            // the order of the fuse moves in `moves`), the polish line the polish moves kept.
+            let mut it = mv.iter().zip(&live).filter(|(m, _)| m.onto != fusepour::NO_WIRE).map(|(_, l)| *l);
+            fused.retain(|_| it.next().unwrap_or(true));
+            if let Some((n, len)) = polish.as_mut() {
+                for (i, (k, d)) in &polish_of {
+                    if !live[*i] {
+                        *n -= k;
+                        *len -= d;
+                    }
+                }
+            }
+        }
+        warnings.push(format!(
+            "fuse pour check: the stitching leaves {first} pour pieces cut off in the copper after the fuse and the octilinear polish, {} without their moves; {n_undone} of {} moves undone (fuse {fuse_undone} of {n_fuse}, polish {} of {}; {rechecked} by the re-check of the kept moves){}, now {}{} ({:.2} s; these steps never add a cut-off pour piece, errors first, TopoR 6.3 p. 72)",
+            base.len(),
+            mv.len(),
+            n_undone - fuse_undone,
+            mv.len() - n_fuse,
+            if undone_nets.is_empty() { String::new() } else { format!(" ({})", undone_nets.iter().cloned().collect::<Vec<_>>().join(", ")) },
+            cur.len(),
+            if pc_cut.get() { "; the time limit or Cancel cut its stitching: the moves not undone by then stay" } else { "" },
+            t_pc.elapsed().as_secs_f64()
+        ));
+    }
+    if let Some((n, len)) = polish {
+        warnings.push(polish_line(n, len / MM));
+    }
+    if tree_free && opts.fuse_branches {
+        warnings.push(fuse_line(&fused));
     }
     // Vias in a narrow pass (the `via_squeeze` factor's report): a drawn wire via whose
     // passages keep less slack than half its diameter in the drawing's packing.
@@ -6652,7 +6862,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let _ = std::fs::write(std::path::Path::new(&d).join("nets.json"), serde_json::Value::Object(nets).to_string());
     }
     if let Some(l) = erbs_line {
-        warnings.push(format!("{l}; drawn: {} runs from their ERBS ({} in its octilinear form before the check), {} by the sequential attempts after the check rejected the ERBS, {} without an ERBS, {} ERBS priced past their band against a sequential run ({} replaced by it, {} kept because the sequential run crossed an undrawn wire's path with another parity: another class)", dr.stats.erbs_ok, dr.stats.erbs_octi, dr.stats.erbs_fallback, dr.stats.erbs_none, dr.stats.erbs_long, dr.stats.erbs_long_replaced, dr.stats.erbs_class_kept));
+        let drawn_part = erbs_runs.as_ref().map_or_else(|| "drawn: 0 runs from their ERBS".to_string(), super::joint::drawn_text);
+        warnings.push(format!("{l}; {drawn_part}; {} ERBS priced past their band against a sequential run ({} replaced by it, {} kept because the sequential run crossed an undrawn wire's path with another parity: another class)", dr.stats.erbs_long, dr.stats.erbs_long_replaced, dr.stats.erbs_class_kept));
     }
     // M3 length factor (`draw::erbs_length_price`): every ERBS priced past its band, the longest
     // over its band first (plugin finding ERBS_LONG).
@@ -6685,11 +6896,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // (plugin finding ERBS_FALLBACK; the time limit's share is erbs_timeout's, ERBS_TIMEOUT).
     if let Some(e) = &erbs_err {
         warnings.push(format!("erbs_fallback: no ERBS for the whole run, every trace drawn the sequential way: {e}"));
-    } else if opts.realise == "erbs" && (dr.stats.erbs_fallback > 0 || !erbs_failed.is_empty()) {
+    } else if let Some(er) = erbs_runs.as_ref().filter(|r| r.cut_back + r.forced_erbs > 0 || !erbs_failed.is_empty()) {
         let ex: Vec<String> = erbs_failed.iter().take(3).map(|(w, m)| format!("wire {w}: {m}")).collect();
         warnings.push(format!(
-            "erbs_fallback: {} run(s) drawn by the sequential attempts after the check rejected their ERBS, {} stretch(es) without a sleeve to the end{}{}",
-            dr.stats.erbs_fallback,
+            "erbs_fallback: {} run(s) drawn by the sequential attempts after the check rejected their ERBS (static {}, predicted {}, gap {}, no band {}, junction {}, redrawn {}), {} on their ERBS by never drop, {} stretch(es) without a sleeve to the end{}{}",
+            er.cut_back,
+            er.cut_static,
+            er.cut_predicted,
+            er.cut_gap,
+            er.cut_no_band,
+            er.cut_junction,
+            er.cut_redrawn,
+            er.forced_erbs,
             erbs_failed.len(),
             if ex.is_empty() { "" } else { ": " },
             ex.join("; ")
@@ -6766,6 +6984,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let n_copper = b.signal_layers.len().max(1);
     let crit_main = criteria(model, dec, &asm, &out, warn_n(&necking), n_copper, &reg, opts);
+    if std::env::var("TOPO_FUSEDBG").is_ok() {
+        // Debug: the connections each variant counts as an error (open or violating), to compare.
+        let errs = |o: &[Outcome]| -> Vec<usize> { o.iter().enumerate().filter(|(_, x)| !x.routed || !x.viol.is_empty()).map(|(i, _)| i).collect() };
+        eprintln!("VARIANT reduced+fused errors {:?}", errs(&out));
+        if let Some((o, _)) = pre_snap.as_ref() {
+            eprintln!("VARIANT as drawn errors {:?}", errs(o));
+        }
+    }
     let pre_parts = pre_snap.as_ref().map(|(o, nk)| {
         let a = assemble(model, dec, o, &term_over, first_layer, &reg);
         let c = criteria(model, dec, &a, o, warn_n(nk), n_copper, &reg, opts);
@@ -7074,6 +7300,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         violations: viol_list,
         diff_pairs: dp_list,
         limit: None,
+        erbs: erbs_runs,
         compass: compass_plan.map(|mut c| {
             c.drawn_shrinkages = crit_main.shrinkages;
             c

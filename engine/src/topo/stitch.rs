@@ -88,6 +88,8 @@ pub struct StitchOut {
     pub fine_s: f64,
     /// Report lines.
     pub notes: Vec<String>,
+    /// The pieces still cut off at the end (what `after` counts).
+    pub left: Vec<Cut>,
 }
 
 fn kicad_mm(p: Vec2) -> String {
@@ -191,6 +193,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
     let (mut fine_on, mut fine_passes) = (false, 0usize);
     let mut fine_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut kept: Option<PourReach> = None;
+    let mut left: Vec<Cut> = Vec::new();
     for pass in 0..PASSES + FINE_PASSES {
         unplaced.clear();
         let again = kept.is_some();
@@ -208,6 +211,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
             }
         }
         out.after = reach.cuts.len();
+        left = reach.cuts.clone();
         if reach.cuts.is_empty() || expired() {
             break;
         }
@@ -384,6 +388,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                     reach.dump(&format!("{path}.p{}", pass + 1));
                 }
                 out.after = reach.cuts.len();
+                left = reach.cuts.clone();
             }
             break;
         }
@@ -399,7 +404,41 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
         ));
     }
     out.notes.extend(unplaced.into_iter().map(|s| format!("no stitch site for {s}")));
+    if std::env::var_os("TOPO_FUSEDBG").is_some() {
+        // Debug: the pieces left cut off, to compare the variants' stitchings.
+        for c in &left {
+            eprintln!("STITCH left ({} before, {} after): {}", out.before, out.after, cut_text(model, c));
+        }
+    }
+    out.left = left;
     out
+}
+
+/// The pads at the ends of the routed connections of pour nets in `conns` (model pad indices,
+/// sorted): their copper must reach the main component too ([`stitch_until`]'s `routed_pads`).
+/// A label can name several pads (a switch with two pads "2"): the one at the terminal.
+/// O(conns x pads).
+pub fn routed_pour_pads(model: &BoardModel, conns: &[crate::route::ConnReport]) -> Vec<usize> {
+    let pour_nets: std::collections::BTreeSet<i32> = model.pours.iter().map(|z| z.net).collect();
+    let pad_of = |label: &str, at: [i64; 2]| {
+        let q = Vec2 { x: at[0] as f64, y: -(at[1] as f64) };
+        (0..model.pads.len())
+            .filter(|&i| format!("{}.{}", model.pads[i].ref_, model.pads[i].number) == label)
+            .min_by(|&a, &b| (model.pads[a].center.to_vec2() - q).len().total_cmp(&(model.pads[b].center.to_vec2() - q).len()).then(a.cmp(&b)))
+    };
+    let mut routed_pads: Vec<usize> = Vec::new();
+    for c in conns.iter().filter(|c| c.status == "routed" && pour_nets.contains(&c.net)) {
+        for t in [&c.from, &c.to] {
+            if t.kind == "pad" {
+                if let Some(p) = pad_of(&t.label, t.at) {
+                    routed_pads.push(p);
+                }
+            }
+        }
+    }
+    routed_pads.sort_unstable();
+    routed_pads.dedup();
+    routed_pads
 }
 
 /// Price of an island join of length `len` that runs `edge` from the pad's edge (nm): the length,

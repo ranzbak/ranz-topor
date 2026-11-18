@@ -263,6 +263,93 @@ pub struct RouteResult {
     pub compass: Option<crate::topo::compass::Compass>,
     /// M2.TL: the time limit of the call and what it did (`None`: no limit set).
     pub limit: Option<LimitReport>,
+    /// TW2: how the ERBS drawing drew its runs (`[drawing] realise = "erbs"`; `None` otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub erbs: Option<ErbsRunReport>,
+}
+
+/// TW2: two bands kept across a model gap ([`ErbsRunReport::gap_kept_list`]): the yielding band
+/// (wire, run), the other wire, the overlap of the clearance (mm), where (KiCad frame, mm), layer id.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct ErbsGapKept {
+    pub wire: usize,
+    pub run: usize,
+    pub other_wire: usize,
+    pub overlap_mm: f64,
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub layer: u32,
+}
+
+/// TW2: a run of a drawn wire with no ERBS stretch at its ends ([`ErbsRunReport::no_band_list`],
+/// class `cut_no_band`): the wire, run, layer id, connection (net, pad labels) and why: "no
+/// stretch" (the ERBS drawing has none for the wire), "other layer" (none on the run's layer), or
+/// "ends moved" (a stretch on the layer whose ends lie `end_moved_mm` from the run's: a via or
+/// pad end placed elsewhere than the ERBS assumed).
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct ErbsNoBand {
+    pub wire: usize,
+    pub run: usize,
+    pub layer: u32,
+    pub net: String,
+    pub from: String,
+    pub to: String,
+    pub why: String,
+    pub end_moved_mm: f64,
+}
+
+/// TW2 (`[drawing] realise = "erbs"`): the runs of the drawn wires by how they came about, and the
+/// joint band commit ([`crate::topo::joint`]). `runs` = `from_erbs + replaced + cut_back +
+/// forced_erbs`; `cut_back` = the sum of the `cut_*` classes (legal sequential runs and runs drawn
+/// by never drop off their band); `forced` counts every run drawn by never drop.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct ErbsRunReport {
+    /// `[drawing] erbs_conflict_keep`.
+    pub keep: String,
+    /// Bands checked by the joint commit, kept, rejected per class.
+    pub bands: usize,
+    pub kept: usize,
+    pub rejected_static: usize,
+    pub rejected_predicted: usize,
+    pub rejected_gap: usize,
+    /// Conflict components solved exactly, and greedily (above `erbs::KEEP_EXACT_CAP` bands).
+    pub components_exact: usize,
+    pub components_greedy: usize,
+    /// Of `kept`: bands kept in their octilinear form because the any-angle band missed a clearance
+    /// (to a static item or a kept band) that the octilinear form keeps (octilinear style only).
+    pub octi_rescued: usize,
+    /// Conflicts across a model gap of the ERBS kept with both bands (`[drawing]
+    /// erbs_gap_keep_max_mm`): the gap stays as a clearance violation of the band drawn second.
+    /// Count, deepest overlap (mm), every pair (the TW2b list).
+    pub gap_kept: usize,
+    pub gap_kept_max_mm: f64,
+    pub gap_kept_list: Vec<ErbsGapKept>,
+    /// The runs drawn without a band (`cut_no_band` and forced ones), one entry each.
+    pub no_band_list: Vec<ErbsNoBand>,
+    /// Runs of the drawn wires.
+    pub runs: usize,
+    pub from_erbs: usize,
+    /// Of `from_erbs`: drawn in their octilinear form; kept any-angle because the octilinear form
+    /// broke a rule against another band.
+    pub octi_form: usize,
+    pub octi_vs_band: usize,
+    /// Legal ERBS a cheaper sequential run replaced (length factor).
+    pub replaced: usize,
+    /// Legal runs of the sequential attempts (the ladder); part of `cut_back`.
+    pub sequential: usize,
+    pub cut_back: usize,
+    pub cut_static: usize,
+    pub cut_predicted: usize,
+    pub cut_gap: usize,
+    pub cut_no_band: usize,
+    pub cut_junction: usize,
+    pub cut_redrawn: usize,
+    pub forced: usize,
+    pub forced_erbs: usize,
+    /// Reserved band items taken out by another wire's drawing (invariant: 0).
+    pub lost_to_other: usize,
+    /// Reserved bands left after the drawing loop, copper no wire owned (invariant: 0).
+    pub left_reserved: usize,
 }
 
 /// M2.TL: the time limit of a call ([`RouteResult::limit`]): the limit (s since the start, as it
@@ -771,6 +858,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         diff_pairs: Vec::new(),
         compass: None,
         limit: None,
+        erbs: None,
     }
 }
 
