@@ -134,3 +134,23 @@ two tip radii there, so the arc and the tips agree. A wire is never pushed past 
 - Showcase: serpentine_bundle and river_wrap smooth go to 0 erbs_gap.
 - Mutants: the point set dropped, the radius as max, the wedge bounds inclusive.
 - Boards later: the number of erbs_gap per board before and after.
+
+**Approved 2026-11-18 with conditions. Answers:**
+- **Sampling.** The new points form the polygon circumscribed about the wedge's own arc, not global directions. The
+  arc from tip A (at θ_A, on the circle) to tip B (at θ_B) is split into m = ceil((θ_B − θ_A) / step) parts of
+  Δ = (θ_B − θ_A) / m. The vertices sit at θ_A + (i + ½) Δ, i = 0..m−1, at radius r / cos(Δ/2).
+  - The tips are the tangent points of the first and last edge. So the whole chain tip A, V_0 ... V_{m−1}, tip B lies on
+    tangents of the circle and is convex. A taut path past it never comes closer to v than r (no sag).
+  - The octagonal norm uses the octagon's own vertices, as the wraps do.
+- **The wrap arc today** uses global directions k · step at r / cos(step/2) (norm_dirs, erbs.rs:303). That is the
+  circumscribed polygon, so its edges are tangent and do not sag inside the wedge.
+  - Its wedge runs from −d_in to d_out (wedge_share, erbs.rs:293), about 90° past the band's normals on each side. The
+    path's tangent points then lie well inside the sampled range.
+  - The only latent sag is a tangent point within step/2 of a wedge end. The unit test measures it on a wrap too. If it
+    shows, the wrap gets the same local polygon.
+- **Extra length** per passed corner, against the true arc r α: Δ²/12 of the arc (Δ ≤ step = 22.5° gives ≤ 1.3 %). In
+  the serpentine case (α = 68.6°, m = 4) it is 0.935 against 0.928 mm, +7 µm.
+  - Against the illegal chord (0.873 mm) the cost is +0.061 mm, which is the clearance itself.
+  - The detour counters on the approved patterns are compared before and after. The change must not be noticeable.
+- **Unit test**: the segment distance to v along the whole outer polyline is ≥ r − 1 nm, for both the passed-corner case
+  and a wrap case.
