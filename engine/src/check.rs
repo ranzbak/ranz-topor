@@ -1,7 +1,7 @@
 //! Clearance checker: grid-indexed copper gap tests of candidate items against the board.
 //!
 //! Gaps are copper-to-copper (`copper_gap` / `copper_gap_skeleton`), compared with
-//! `required + margin`. Copper-shape polygons are checked by their edges (grid obstacles) plus
+//! `required + margin`, short by at most [`CHECK_TOL_NM`] (float rounding, [`short_of`]). Copper-shape polygons are checked by their edges (grid obstacles) plus
 //! containment of the item's start point (gap 0). Keepouts (rule areas) and shape polygons
 //! live in a per-layer grid of regions (`region_grids`, bbox query, then exact edge tests).
 
@@ -14,6 +14,24 @@ use crate::model::{flip_track, via_layers, BoardModel, Item, Options};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
+
+/// Numeric tolerance of the checker (nm): a gap short of its requirement by at most this much
+/// passes. Geometry computed at exactly the clearance in f64 (an ERBS at its spoke tips, a
+/// tangent at a grown pad) lands a fraction of a nm either side of it (diag-bundle 2026-11-17:
+/// the innermost ERBS of every showcase pattern rejected at gap 200000 vs 200000 nm, short by
+/// < 0.5 nm). The drawing places at `clearance + margin_nm + DRAW_TOL_NM` (10 nm,
+/// `topo::pack::DRAW_TOL_NM`), so this tolerance never lets copper below the rule reach the
+/// board: KiCad's DRC itself only flags a gap short by more than its `DRCEpsilon` (0.5 um,
+/// `docs/geometry/23-distance-and-drc-checks.md` l. 66-67, `docs/kicad/30-kicad-constraints.md`
+/// l. 113), 500 x this value.
+pub const CHECK_TOL_NM: f64 = 1.0;
+
+/// `gap` violates `req` (nm): short by more than [`CHECK_TOL_NM`]. A requirement at or below 0
+/// gets no tolerance (as KiCad's `max(0, clearance - DRCEpsilon)`): overlapping copper stays a
+/// violation. O(1).
+pub fn short_of(gap: f64, req: f64) -> bool {
+    gap < (req - CHECK_TOL_NM).max(0.0).min(req)
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Violation {
@@ -714,7 +732,7 @@ impl Checker {
                     };
                     if let Some(gap) = hole_gap {
                         let req = self.hole_to_hole + self.margin;
-                        if gap < req {
+                        if short_of(gap, req) {
                             let (g, r) = (gap.round() as i64, req.round() as i64);
                             match found.iter_mut().find(|v| {
                                 v.against == o.label && v.layer == layer && v.required == r
@@ -744,7 +762,7 @@ impl Checker {
                 ];
                 for gap in holes.into_iter().flatten() {
                     let req = self.via_hole_clearance + self.margin;
-                    if gap < req {
+                    if short_of(gap, req) {
                         let (g, r) = (gap.round() as i64, req.round() as i64);
                         match found.iter_mut().find(|v| v.against == o.label && v.layer == layer && v.required == r) {
                             Some(v) => v.gap = v.gap.min(g),
@@ -754,7 +772,7 @@ impl Checker {
                 }
                 let req = self.required(net, &item_regs, layer, o, own_clr);
                 let gap = o.gap(&track);
-                if gap < req && !Self::tie_excluded(o, net, &track) {
+                if short_of(gap, req) && !Self::tie_excluded(o, net, &track) {
                     let (g, r) = (gap.round() as i64, req.round() as i64);
                     match found
                         .iter_mut()

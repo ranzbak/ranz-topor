@@ -278,3 +278,59 @@ def test_refine_lanes_auto_or_count(tmp_path):
         (tmp_path / "topor.toml").write_text(f'version = 1\n[optimize]\nrefine_lanes = {bad}\n')
         cfg, f = load_config(tmp_path)
         assert cfg.engine_options()["refine_lanes"] == 0 and [x for x in f if "refine_lanes" in str(x)], bad
+
+
+def test_any_negative_grace_is_accepted_as_no_bound(tmp_path):
+    """limit_grace_s / drawing_grace_s: any negative value = no bound (user 2026-11-17): -1 and -5 load without a
+    finding and reach the engine options as given; the defaults are 30 s and 60 s."""
+    from topor.schema import SETTINGS
+    by = {(s.section, s.key): s for s in SETTINGS}
+    assert by[("run", "limit_grace_s")].default == 30 and by[("run", "drawing_grace_s")].default == 60
+    for v in (-1, -5):
+        (tmp_path / "topor.toml").write_text(f"version = 1\n[run]\nlimit_grace_s = {v}\ndrawing_grace_s = {v}\n")
+        cfg, findings = load_config(tmp_path)
+        assert "CFG_VALUE" not in codes(findings), findings
+        assert cfg.get("run", "limit_grace_s") == v and cfg.get("run", "drawing_grace_s") == v
+    (tmp_path / "topor.toml").write_text("version = 1\n[run]\ndrawing_grace_s = 90000\n")
+    _, findings = load_config(tmp_path)
+    assert "CFG_VALUE" in codes(findings)
+
+
+@pytest.mark.parametrize("key", ["limit_grace_s", "drawing_grace_s", "timeout_s", "timeout_overrun_s"])
+@pytest.mark.parametrize("val", ["inf", "-inf", "+inf", "nan", "-nan"])
+def test_non_finite_seconds_are_a_config_error(tmp_path, key, val):
+    """verify limit-wait r3: -inf / nan passed the range test, serialised as -Infinity / NaN and the engine
+    then refused the whole run ('could not read this board'); a clear CFG_VALUE and the default instead."""
+    (tmp_path / "topor.toml").write_text(f"version = 1\n[run]\n{key} = {val}\n")
+    cfg, findings = load_config(tmp_path)
+    bad = [f for f in findings if f.code == "CFG_VALUE"]
+    assert len(bad) == 1 and key in bad[0].message and "finite" in bad[0].message, [f.message for f in findings]
+    assert cfg.get("run", key) == schema.SETTINGS_BY_KEY[("run", key)].default
+
+
+@pytest.mark.parametrize("key", ["limit_grace_s", "drawing_grace_s"])
+@pytest.mark.parametrize("val,want", [("-1", -1), ("0", 0), ("12.5", 12.5), ("-5", -5)])
+def test_finite_graces_still_accepted(tmp_path, key, val, want):
+    (tmp_path / "topor.toml").write_text(f"version = 1\n[run]\n{key} = {val}\n")
+    cfg, findings = load_config(tmp_path)
+    assert not [f for f in findings if f.code.startswith("CFG_")], [f.message for f in findings]
+    assert cfg.get("run", key) == want
+
+
+@pytest.mark.parametrize("val", ["inf", "-inf", "nan"])
+def test_non_finite_inside_list_and_table_is_a_config_error(tmp_path, val):
+    """limit-wait r5: inf / nan inside a list or table setting passed (allowed_drills_mm = [inf] crashed
+    engine_options with OverflowError, factors.weight inf/nan went out as Infinity/NaN JSON)."""
+    for sec, key, text in (("vias", "allowed_drills_mm", f"[0.3, {val}]"), ("factors", "weight", "{ via = " + val + " }")):
+        (tmp_path / "topor.toml").write_text(f"version = 1\n[{sec}]\n{key} = {text}\n")
+        cfg, findings = load_config(tmp_path)
+        bad = [f for f in findings if f.code == "CFG_VALUE"]
+        assert len(bad) == 1 and key in bad[0].message and ("finite" in bad[0].message or (val != "inf" and sec == "vias")), (sec, [f.message for f in findings])
+        assert cfg.get(sec, key) == schema.SETTINGS_BY_KEY[(sec, key)].default
+
+
+def test_finite_list_and_table_values_still_accepted(tmp_path):
+    (tmp_path / "topor.toml").write_text("version = 1\n[factors]\nweight = { via = 30.5 }\n")
+    cfg, findings = load_config(tmp_path)
+    assert not [f for f in findings if f.code.startswith("CFG_")], [f.message for f in findings]
+    assert cfg.get("factors", "weight") == {"via": 30.5}

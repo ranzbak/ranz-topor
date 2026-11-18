@@ -101,3 +101,44 @@ fn edge_clearance_ignores_the_outline_stroke() {
     m.rules.ignored_checks.push("copper_edge_clearance".into());
     assert_eq!(m.rules.edge_clear(), 200_000);
 }
+
+/// Net-1 track of width 0.2 mm from (-3, y0) to (3, y0 + 1 nm): over the pad its centre line is
+/// lowest at the pad's corner x = -0.5 mm, where it is `y0 + 2.5 / 6` nm high, so the copper gap
+/// to the pad is `y0 - 600000 + 0.41667` nm: a fraction of a nm off a whole number.
+fn slanted_above(y0: i32) -> (Item, f64) {
+    let it = Item::Track(TrackItem { net: 1, layer: 0, width: 200_000, prim: TrackPrim::Seg { a: [-3_000_000, y0].into(), b: [3_000_000, y0 + 1].into() }, group: None, wire: None });
+    // the exact gap: perpendicular distance from the corner to the centre line, less half the width
+    let (dx, dy) = (6_000_000.0_f64, 1.0_f64);
+    let d = ((y0 as f64 - 500_000.0) * dx - (-500_000.0 + 3_000_000.0) * dy).abs() / (dx * dx + dy * dy).sqrt();
+    (it, d - 100_000.0)
+}
+
+/// erbs-margin (user 2026-11-17: "when we use floating point math to do this we'll never have an
+/// exact match"): the checker passes a gap short of its requirement by at most
+/// `CHECK_TOL_NM` (1 nm, far below KiCad's DRCEpsilon of 0.5 um) and rejects anything shorter:
+/// a wire at the clearance + 0.42 nm, at it, at -0.58 nm and at -1 nm passes, at -1.58 nm and at
+/// -2 nm does not. The innermost ERBS of every showcase pattern was rejected at 200000 vs 200000
+/// nm (short by < 0.5 nm) before (diag-bundle 2026-11-17).
+#[test]
+fn clearance_tolerance_is_a_fraction_of_a_nm() {
+    use topor_engine::check::{short_of, CHECK_TOL_NM};
+    let m = model("");
+    let o = Options::default();
+    let c = Checker::new(&m, &o);
+    let req = 500_000.0;
+    for (y0, ok) in [(1_100_000, true), (1_099_999, true), (1_099_998, false), (1_099_990, false)] {
+        let (it, gap) = slanted_above(y0);
+        assert!((gap - req).abs() < 11.0 && (gap - gap.round()).abs() > 0.4, "test geometry: gap {gap}");
+        let v = c.check_items(&[it]).violations;
+        assert_eq!(v.is_empty(), ok, "gap {gap:.4} nm vs {req} nm (short by {:.4}): {v:?}", req - gap);
+    }
+    // whole nm: at the clearance, 1 nm short (the tolerance, inclusive), 2 nm short
+    assert!(c.check_items(&[track_above(500_000)]).violations.is_empty(), "exactly at the clearance");
+    assert!(c.check_items(&[track_above(499_999)]).violations.is_empty(), "1 nm short: within the tolerance");
+    assert_eq!(c.check_items(&[track_above(499_998)]).violations.len(), 1, "2 nm short");
+    // the predicate: the tolerance is the constant, and none where the requirement is 0 (touching
+    // copper of a 0 rule stays a violation, as KiCad's max(0, clearance - epsilon))
+    assert_eq!(CHECK_TOL_NM, 1.0);
+    assert!(!short_of(req - 0.5, req) && !short_of(req - 1.0, req) && short_of(req - 1.0001, req));
+    assert!(!short_of(0.0, 0.0) && short_of(-0.5, 0.0) && !short_of(0.0, 0.5) && short_of(-0.1, 0.5) && !short_of(0.5, 0.5));
+}

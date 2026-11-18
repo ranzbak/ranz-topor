@@ -902,6 +902,18 @@ pub struct Options {
     /// clock caps on its own (`RouteJob.harden`). It never changes `wall_clock_s`.
     #[serde(with = "overrun_cap")]
     pub timeout_overrun_s: f64,
+    /// `[run] limit_grace_s`: with the soft time limit, seconds past the limit that the TopoR loop
+    /// step (its cycle, down to the single move) may still run. Past it the step stops at its next
+    /// check, the cycle it was in is not kept, the best variant so far is drawn and the wait is
+    /// reported (`TIME_LIMIT_WAIT`). `0` = stop at the next check; negative = no bound. Never
+    /// changes the order of the moves (only read once the limit has passed).
+    pub limit_grace_s: f64,
+    /// `[run] drawing_grace_s`: with the soft time limit, seconds the drawing may run past the later
+    /// of the limit and its own start before its optional passes (the via reduction; ERBS, whose
+    /// stretches then draw the sequential way) stop. Every wire is drawn whatever the value (never
+    /// drop); the pour stitching is never cut by it. `0` = they stop at their first check past the
+    /// limit; negative = no bound. Read only once the limit has passed.
+    pub drawing_grace_s: f64,
     /// An accepted path longer than this factor times its slot-free ghost counts as an absurd
     /// detour and triggers rip-up of the blockers.
     pub detour_factor: f64,
@@ -1460,6 +1472,8 @@ impl Default for Options {
             wall_clock_s: 60.0,
             timeout_mode: "soft".into(),
             timeout_overrun_s: OVERRUN_AUTO,
+            limit_grace_s: 30.0,
+            drawing_grace_s: 60.0,
             detour_factor: 2.0,
             factors: Default::default(),
             drc_loop_cap: 5,
@@ -1728,6 +1742,21 @@ mod tests {
 
     /// User 2026-11-13: direct engine callers get the overrun cap by default ("auto" =
     /// `wall_clock_s`); the KiCad dialog passes 0 (no cap). JSON says "auto", "none" or seconds.
+    #[test]
+    fn the_limit_grace_defaults_to_30_s_and_reads_a_number() {
+        let o = Options::default();
+        assert_eq!(o.limit_grace_s, 30.0);
+        assert_eq!(serde_json::to_value(&o).unwrap()["limit_grace_s"], 30.0);
+        assert_eq!(Options::from_json(r#"{"limit_grace_s": 0}"#).map(|o| o.limit_grace_s), Ok(0.0));
+        assert_eq!(Options::from_json(r#"{"limit_grace_s": -1}"#).map(|o| o.limit_grace_s), Ok(-1.0));
+        assert_eq!(Options::from_json("{}").map(|o| o.limit_grace_s), Ok(30.0));
+        assert_eq!(Options::from_json(r#"{"limit_grace_s": -5}"#).map(|o| o.limit_grace_s), Ok(-5.0));
+        assert_eq!(o.drawing_grace_s, 60.0);
+        assert_eq!(Options::from_json("{}").map(|o| o.drawing_grace_s), Ok(60.0));
+        assert_eq!(Options::from_json(r#"{"drawing_grace_s": -5}"#).map(|o| o.drawing_grace_s), Ok(-5.0));
+        assert_eq!(Options::from_json(r#"{"drawing_grace_s": 0}"#).map(|o| o.drawing_grace_s), Ok(0.0));
+    }
+
     #[test]
     fn the_overrun_cap_is_auto_by_default_and_reads_auto_none_or_seconds() {
         let o = Options::default();

@@ -18,12 +18,16 @@ drawn in.
 3. `distant_radius`: pad A, two wires w1 and w2 over it, and a third wire w3 that passes above two pads B and C. The
    zero-width band of w3 touches nothing. A's radius through w1 and w2 (1.625 mm) still sets w3's height, across the
    triangle edge B-C (Popov & Popov 2012 pp. 120-121, Figs. 5-6). w3 is the shortest wire, so it is drawn first.
+4. `shortcut_across` (approved 2026-11-17, round i): A (PWR) from the top edge to the bottom edge wraps an end of B.
+   A is drawn first; its straight line is legal then (B is not copper yet), shorter, and crosses B's planned path.
+   Expected: A keeps the wrap (its ERBS), B straight, no crossing (qmtech ADV_CLK / ADV_DE).
 
 Rules on every board (the fit-pattern rules): Default class 0.25 mm at 0.20 mm, PWR class 0.40 mm at 0.20 mm, board
 minimum track width 0.25, copper to edge 0.50. B.Cu is closed by a rule area (no tracks, no vias): one layer.
 Style: octilinear, the engine default. Coordinates are mm in the KiCad frame (y down).
 
     python -m harness.radii_patterns [OUT] [--drc]
+    python -m harness.radii_patterns --fixture NAME   (engine/tests/fixtures/m3/model-NAME.json)
 
 writes `OUT/<name>/{problem,reference}/<name>.kicad_pcb`, `expected.json`, `<name>.png` and `OUT/README.md`. The
 default OUT is `scratch/agent-wt/m3-runs/patterns`. Deterministic.
@@ -256,11 +260,73 @@ def distant_radius() -> Pattern:
         witness={t.net: (t.layer, t.pts) for t in tracks}, extra={"m3": expected, "A": A, "rho": rho, "ys": ys})
 
 
-PATTERNS = {f.__name__: f for f in (three_diagonals, nested_wraps, distant_radius)}
-# User 2026-11-13: three_diagonals and nested_wraps approved; distant_radius reworked (W1 / W2 had no reason to bend
+# ----------------------------------------------------------------------------------------------- 4. shortcut across
+def shortcut_across() -> Pattern:
+    """4. A wrap drawn first whose straight shortcut would cross a wire not yet drawn (round i, qmtech ADV_CLK/ADV_DE)."""
+    W, H = 24.0, 16.0
+    nets = ["A", "B"]
+    ya, yb = 0.82, 15.18  # A's pads 0.52 mm from the top / bottom edge: no wire passes round them (one needs 0.95)
+    xa = 12.0
+    b_l, b_r, yB = 8.0, 17.0, 8.0  # B's pads; A's straight line meets B 4 mm from J3, 5 mm from J4
+    j1 = Fp("J1", [Pad("1", "A", (xa, ya), (0.6, 0.6))], "terminal")
+    j2 = Fp("J2", [Pad("1", "A", (xa, yb), (0.6, 0.6))], "terminal")
+    j3 = Fp("J3", [Pad("1", "B", (b_l, yB), (0.6, 0.6))], "terminal")
+    j4 = Fp("J4", [Pad("1", "B", (b_r, yB), (0.6, 0.6))], "terminal")
+    rho = CLEAR + EPS + W_PWR / 2
+    # A hugs the octagon of radius rho about J3's two left corners (KiCad frame, y down): vertical from J1, 45 degrees
+    # down-left on x + y = (cx + cy_top) - rho sqrt 2, vertical left of J3, 45 degrees down-right, vertical into J2.
+    def wrap(side: float) -> list[tuple[float, float]]:
+        # side -1: round J3's left corners; +1: round J4's right corners (mirror the x offsets).
+        cx = b_l - 0.3 if side < 0 else b_r + 0.3
+        ct, cb = yB - 0.3, yB + 0.3
+        xv = cx + side * rho
+        # The 45 degree leg on the octagon side: |x - cx| + (ct - y) = rho sqrt 2 above, mirrored below.
+        y1 = ct - (rho * SQ2 - rho) - abs(xa - xv)
+        y2 = ct - (rho * SQ2 - rho)
+        y3 = cb + (rho * SQ2 - rho)
+        y4 = cb + (rho * SQ2 - rho) + abs(xa - xv)
+        return [(xa, ya), (xa, y1), (xv, y2), (xv, y3), (xa, y4), (xa, yb)]
+
+    pa = wrap(-1.0)
+    tracks = [Track("A", "F.Cu", W_PWR, pa), Track("B", "F.Cu", W_SIG, [(b_l, yB), (b_r, yB)])]
+    lengths = {t.net: _len(t.pts) for t in tracks}
+    right = _len(wrap(1.0))
+    expected = {
+        "nets": {t.net: {"width": t.width, "length": _r(lengths[t.net]),
+                         "reference": [[_r(x), _r(y)] for x, y in t.pts]} for t in tracks},
+        "shortcut": {"A_straight": _r(yb - ya), "crosses": "B (not yet drawn when A is drawn)"},
+        "other_wrap": {"round_J4": _r(right)},
+        "draw_order_today": ["A (0.40 mm, widest first)", "B (0.25 mm)"],
+        "round_i": "the length factor's sequential competitor of A (shorter, legal while B is undrawn) crosses B's "
+                   "ERBS, which A's ERBS does not: A keeps its ERBS (draw.rs competitor_keeps_class)",
+        "judge": ["KiCad DRC 0 violations, 0 unconnected", "no via", "A wraps J3 (left of x = 7.7), length = "
+                  "reference (+0.5 %)", "B straight (9.0 mm)", "A and B do not cross"],
+    }
+    return Pattern(
+        name="shortcut_across", title="A wrap drawn first, its shortcut across an undrawn wire", kind="solvable",
+        gap_classes=["drawing: the length factor keeps the plan's class (round i)"],
+        purpose="A (0.40 mm, PWR) runs from J1 at the top edge to J2 at the bottom edge; B (0.25 mm) from J3 to J4 "
+                "across A's straight line. A's pads sit 0.52 mm from the edges (a wire needs 0.95), so B cannot pass "
+                "round A: A wraps an end of B. A is widest, so it is drawn first, while B is not yet copper; A's "
+                "straight line is then legal, shorter, and crosses B's planned path.",
+        answer=f"A wraps J3's left side on the octagon of radius {rho:.3f} mm (vertical, 45 degrees, vertical, 45 "
+               f"degrees, vertical; {lengths['A']:.3f} mm), B straight ({lengths['B']:.3f} mm). No crossing, no "
+               "via, DRC 0.",
+        why="Solvable by construction: A hugs the octagon of its radius about J3's two left corners, the shortest "
+            "octilinear way round the nearer end of B (J4's end is 1 mm further). Any way with A straight crosses B.",
+        size=(W, H), layers=2, nets=nets, fps=[j1, j2, j3, j4],
+        connections=[("A", "J1.1", "J2.1"), ("B", "J3.1", "J4.1")], cuts=[],
+        keepouts=_closed_bcu(W, H), classes=[dict(c) for c in CLASSES],
+        net_patterns=[{"netclass": "PWR", "pattern": "A"}],
+        ref_tracks=tracks, witness={t.net: (t.layer, t.pts) for t in tracks}, extra={"m3": expected, "rho": rho})
+
+
+PATTERNS = {f.__name__: f for f in (three_diagonals, nested_wraps, distant_radius, shortcut_across)}
+# User 2026-11-13: three_diagonals and nested_wraps approved; user 2026-11-17 approved shortcut_across; distant_radius reworked (W1 / W2 had no reason to bend
 # over A); user 2026-11-14 "approve distant_radius" (after the review page with the reworked PNG).
 STATUS = {"three_diagonals": "approved 2026-11-13", "nested_wraps": "approved 2026-11-13",
-          "distant_radius": "approved 2026-11-14"}
+          "distant_radius": "approved 2026-11-14",
+          "shortcut_across": "approved 2026-11-17"}
 
 
 # ----------------------------------------------------------------------------------------------- checks
@@ -342,8 +408,37 @@ def generate(name: str, out: Path, *, png: bool = True, drc: bool = False) -> di
     return paths
 
 
+def model_fixture(name: str, problem: Path, out: Path) -> Path:
+    """The engine BoardModel of the problem board (the `harness.fit_fixtures` steps: board rules, layer roles as the
+    plugin resolves them) as `out` (`engine/tests/fixtures/m3/model-<name>.json`)."""
+    import tempfile
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
+    from harness.copy import copy_project
+    from harness.model import export_model, load_board
+    from harness.rip import record_widths
+    from harness.rules import resolve_rules
+    from topor.layers import is_routed, resolve_layer_roles_ex
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cp = copy_project(Path(problem), Path(tmp) / name)
+        b = load_board(cp)
+        dru = cp.dru.read_text() if cp.dru is not None else None
+        rules = resolve_rules(b, dru_text=dru, widths_before=record_widths(b), fab_profile="board")
+        model = export_model(b, rules, name=name, dru_text=dru)
+        del b
+    roles, _, _ = resolve_layer_roles_ex([(lay["name"], lay["kind"]) for lay in model["layers"]], {})
+    for lay in model["layers"]:
+        if lay["name"] in roles:
+            lay["routable"] = is_routed(roles[lay["name"]])
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(model, separators=(",", ":"), sort_keys=True))
+    return out
+
+
 def readme(out: Path) -> Path:
-    lines = ["# M3 radii patterns (three_diagonals, nested_wraps approved 2026-11-13; distant_radius approved 2026-11-14)", "",
+    lines = ["# M3 radii patterns (three_diagonals, nested_wraps approved 2026-11-13; distant_radius approved 2026-11-14; shortcut_across approved 2026-11-17)", "",
              "Generated by `harness/radii_patterns.py` (branch `radii-m3`). Each directory: `problem/` (pads, rule "
              "areas, nets), `reference/` (the expected copper, KiCad DRC 0 / 0), `expected.json`, the PNG (problem "
              "left, reference right, radii and order marked).", ""]
@@ -360,6 +455,15 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     drc = "--drc" in argv
     argv = [a for a in argv if a != "--drc"]
+    if argv[:1] == ["--fixture"]:
+        import tempfile
+
+        name = argv[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = generate(name, Path(tmp), png=False)
+            dst = Path(__file__).resolve().parents[1] / "engine" / "tests" / "fixtures" / "m3" / f"model-{name}.json"
+            print(model_fixture(name, paths["problem"], dst))
+        return 0
     out = Path(argv[0]) if argv else Path(__file__).resolve().parents[1] / "scratch" / "agent-wt" / "m3-runs" / "patterns"
     for name in PATTERNS:
         paths = generate(name, out, drc=drc)
