@@ -1462,6 +1462,16 @@ impl Run {
                 (_, Some(w)) => format!("{cycle}: nothing kept to draw ({w})"),
                 _ => format!("{cycle}: not judged (Cancel / OK came first)"),
             });
+            if !self.queue.is_empty() && ro.skipped.is_some() {
+                // TW3: its rows follow in draw-only rounds (the TOPO_TW3_DRAWONLY test hook)
+                if let Some(e) = loop_end {
+                    self.stable_at = self.stable_at.or(e.stable.then_some(cycle));
+                    self.stable_stop = e.stopped_stable;
+                    self.time_hit = e.time_hit;
+                }
+                self.busy_s += t.elapsed().as_secs_f64();
+                return;
+            }
             if let Some(e) = loop_end.filter(|_| ro.skipped.is_some()) {
                 // A run whose pick another run draws still ended its loop: stable or cut by the limit.
                 if e.stable {
@@ -2778,7 +2788,6 @@ fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
 /// TW3 `draw_row`: a draw-only round: no initial routing, no rip-up rounds, no loop; the row's
 /// state and its run's pre-loop decisions ([`PreLoop`]) are restored and drawn (a run draws the
 /// rows of the call's four bests that no other run draws, [`DrawGate::assign`]).
-#[allow(clippy::too_many_arguments)]
 fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective, &dyn Fn(&LiveLoop)), draw_row: Option<&Assigned>) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
@@ -5256,7 +5265,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             None
         } else if gate.1.table.is_some() {
             let mut rows = gate.1.assign(gate.0, compat, arch.items[pick].crit, gate.2, stop_now());
-            if rows.is_empty() {
+            if !rows.is_empty() && std::env::var_os("TOPO_TW3_DRAWONLY").is_some() {
+                // test hook (tests/topo_tw3_table.rs): every row in a draw-only round, so the
+                // draw-only path is compared with the in-round drawing of the same row
+                sp.restore(&arch.items[pick].payload.var);
+                extra_rows = std::mem::take(&mut rows);
+                Some("TOPO_TW3_DRAWONLY: its rows are drawn in draw-only rounds".to_string())
+            } else if rows.is_empty() {
                 sp.restore(&arch.items[pick].payload.var);
                 Some(gate.1.why_not(stop_now()))
             } else {
@@ -5452,7 +5467,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // The one drawing of the loop's pick runs to its end (soft limit: nothing cuts it; hard:
         // the time limit); a run whose pick another run draws stops here, before any copper.
         if let Some(why) = skip_draw {
-            return (RoundOut::not_drawn(model, opts, Some(why), None, loop_end), Vec::new(), Memory::default());
+            return (RoundOut { extra: extra_rows, ..RoundOut::not_drawn(model, opts, Some(why), None, loop_end) }, Vec::new(), Memory::default());
         }
         draw_through.set(true);
     }

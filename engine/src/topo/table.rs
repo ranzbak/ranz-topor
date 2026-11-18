@@ -145,8 +145,7 @@ impl<V> SharedTable<V> {
     /// Commit the held offers of every cycle all runs have passed, in (cycle, run) order.
     fn commit(&self, g: &mut Inner<V>) {
         let h = Self::horizon(g);
-        loop {
-            let Some((c, _)) = g.pending.keys().next().copied() else { break };
+        while let Some((c, _)) = g.pending.keys().next().copied() {
             if c >= h {
                 break;
             }
@@ -179,7 +178,7 @@ impl<V> SharedTable<V> {
     /// The headless stable test over the committed cycles (D6). O(window).
     fn stable_now(&self, g: &Inner<V>) -> bool {
         let n = g.gain.len();
-        if n < self.window + 1 {
+        if n <= self.window {
             return false;
         }
         let w = n - self.window..n;
@@ -225,7 +224,7 @@ impl<V> SharedTable<V> {
         // `stable` over the committed cycles up to `need` (later commits are not this run's view).
         let stable = {
             let n = (need + 1).min(g.gain.len());
-            n >= self.window + 1 && !g.gain[n - self.window..n].iter().any(|&x| x) && g.restarts[n - self.window..n].iter().sum::<usize>() >= 2
+            n > self.window && !g.gain[n - self.window..n].iter().any(|&x| x) && g.restarts[n - self.window..n].iter().sum::<usize>() >= 2
         };
         Some(View { rows, mine_accepted, fps_before, stable })
     }
