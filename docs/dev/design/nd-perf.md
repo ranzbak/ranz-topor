@@ -77,3 +77,11 @@ Not in scope, priced for later: after F1/F2, bornhack never drop is 15.8 s (chec
 exact search 2.6, pricing 2.2). The via reduction (bornhack 17-25 s) and the feedback also call `viols_of` / `wire_viols`, which
 could be the next exact candidate. The 3000-point repaired attempts are hopeless candidates (a quality note for the forced candidate
 set, not part of this fix).
+
+## 6. As built (phase 2, user go-ahead 2026-11-18)
+`draw.rs`: `viols_measured(.., probe)` (`viols_with` = probe on), `pick_by_bound` (the pure branch and bound over
+`ForcedKey`s, unit-tested against `min_by`), `Drawer::{lazy_cand, cand_bound, price_cand, pick_forced}`; the forced
+candidates are `ForcedCand` with the report kept until priced. `reach_priced(opts)` gates the reach price in `via_reach`.
+Debug hook `TOPO_FORCED_CHECK=1`: every forced pick is also made exhaustively and the line `FORCED CHECK wire w: ...
+same|MISMATCH, bounds held|BROKEN` goes to stderr (the VM check runs it on the ladder and bornhack). `TOPO_FORCEDBG`
+prints "unpriced" for the candidates the bound ruled out.
