@@ -159,7 +159,7 @@ r2mut() {  # fix round 2 mutants: this round's lines (V3 re-check, V5 polish cou
   ( cd $MT/engine && cargo test --release --no-run > $R/mt-build.log 2>&1 9>&- ); note "mutant tree build rc $?"
   # The unmutated tree first: a test that fails without a mutant kills every mutant (tw2r2-b92ac74: a parser
   # of the new line format failed, so the tw2_fuse_pour kills meant nothing). Stop when it is red.
-  ( cd $MT/engine && cargo test --release --lib topo::fusepour --test tw2_fuse_pour > $R/mut-base.log 2>&1 9>&- ); local br=$?
+  ( cd $MT/engine && cargo test --release --lib topo::fusepour > $R/mut-base.log 2>&1 9>&- && cargo test --release --test tw2_fuse_pour >> $R/mut-base.log 2>&1 9>&- ); local br=$?  # one filter per call: a filter applies to every binary
   note "mutant base (unmutated) rc $br"; [ $br -ne 0 ] && { note "r2mut stopped: the unmutated tests fail"; return; }
   sub 'while !all && live.iter().any(|l| *l) {' 'while false && !all && live.iter().any(|l| *l) {' | mut fp7_recheck_off $C --test tw2_fuse_pour
   sub 'self.checker.check_against(&self.idx, &wo.items[..n], &skip).violations.len()' '{ let _ = (n, skip); 0 }' | mut fp8_wire_viols $D --test tw2_fuse_pour
@@ -207,7 +207,7 @@ case ${1:-} in
   r2-in) r2suite ;;
   r2mut-in) r2mut ;;
   bhtiles-in) bhtiles ;;
-  r2t-in) cd $ROOT/engine; cargo test --release --lib topo::fusepour --test tw2_fuse_pour > $R/r2t.log 2>&1 9>&-; note "r2t fuse pour tests rc $?: $(grep -E 'test result' $R/r2t.log | tr '\n' ' ')"
+  r2t-in) cd $ROOT/engine; { cargo test --release --lib topo::fusepour 9>&- && cargo test --release --test tw2_fuse_pour 9>&-; } > $R/r2t.log 2>&1; note "r2t fuse pour tests rc $?: $(grep -E 'test result' $R/r2t.log | tr '\n' ' ')"
     cd $ROOT; CI=1 python -m pytest -q tests/test_drcloop.py > $R/pytest-drcloop.log 2>&1; note "pytest drcloop rc $?: $(tail -1 $R/pytest-drcloop.log)" ;;
   r2t) ( hzq run --threads 4 --name tw2-r2t -- bash $ROOT/tools/tw2_job.sh r2t-in ) & sleep 1
     ( hzq run --threads 4 --name tw2-r2mut -- bash $ROOT/tools/tw2_job.sh r2mut-in ) & sleep 1; wait; note "all done" ;;
