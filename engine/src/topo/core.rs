@@ -7035,54 +7035,67 @@ mod tests {
     }
 
     /// par-refine x stable-label: a stable yield while lanes hold slots. The lanes borrow free
-    /// slots only while no run waits: not while a run waits for its first slot, and not while the
-    /// stable run that yielded waits to go on. The yielded slot goes to the run not yet begun, and
-    /// a slot a lane gives back goes to the waiting stable run, not to another lane.
+    /// slots only while no run waits: a slot a lane gives back while a run waits for its first
+    /// slot goes to that run, the slot a stable run yields goes to the run not yet begun, and a
+    /// slot a lane gives back while the yielder waits to go on goes to the yielder, never to
+    /// another lane. (A wrong loan is given back at once, so a failed check ends the test.)
     #[test]
     fn a_stable_yield_while_lanes_hold_slots() {
         use super::super::refine_par::lanes::Pool;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let slots = Slots::new(2);
-        slots.acquire_first(); // run 1 computes
-        assert_eq!(slots.try_take(8), 1, "nobody waits: a lane borrows the free slot");
-        let (begun, done) = (AtomicBool::new(false), AtomicBool::new(false));
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let slots = Slots::new(3);
         let state = |s: &Slots| {
             let g = s.st.lock().expect("slots");
             (g.free, g.first, g.waiting)
         };
+        slots.acquire_first(); // run 1 computes
+        assert_eq!(slots.try_take(8), 2, "nobody waits: the lanes borrow both free slots");
+        let (begun, done) = (AtomicUsize::new(0), AtomicBool::new(false));
         std::thread::scope(|s| {
-            let run2 = s.spawn(|| {
-                slots.acquire_first(); // run 2 waits for its first slot
-                begun.store(true, Ordering::SeqCst);
+            let run = || {
+                slots.acquire_first(); // a run waits for its first slot
+                begun.fetch_add(1, Ordering::SeqCst);
                 while !done.load(Ordering::SeqCst) {
                     std::thread::yield_now();
                 }
                 slots.release();
-            });
+            };
+            let run2 = s.spawn(run);
             while state(&slots).1 == 0 {
                 std::thread::yield_now();
             }
-            assert_eq!(slots.try_take(8), 0, "run 2 waits for its first slot: no lane borrows");
+            slots.give(1); // one lane ends its epoch: its slot is for run 2
+            let lent2 = slots.try_take(8);
+            slots.give(lent2);
+            while begun.load(Ordering::SeqCst) < 1 {
+                std::thread::yield_now();
+            }
+            // run 1, run 2 and one lane compute; run 3 waits for its first slot
+            let run3 = s.spawn(run);
+            while state(&slots) != (0, 1, 0) {
+                std::thread::yield_now();
+            }
             let run1 = s.spawn(|| {
-                // run 1 is stable: it gives its slot to run 2 and waits to go on
+                // run 1 is stable: it gives its slot to run 3 and waits to go on
                 let gave = slots.yield_to_first();
                 slots.release();
                 gave
             });
-            // run 2 has the yielded slot, the lane still holds one, run 1 waits to go on
-            while !(begun.load(Ordering::SeqCst) && state(&slots) == (0, 0, 1)) {
+            while !(begun.load(Ordering::SeqCst) == 2 && state(&slots) == (0, 0, 1)) {
                 std::thread::yield_now();
             }
-            slots.give(1); // the lane epoch ends: its slot is for run 1
-            let lent = slots.try_take(8);
-            slots.give(lent); // before the joins: a wrong loan must fail the test, not hang it
+            slots.give(1); // the other lane ends: its slot is for run 1
+            let lent1 = slots.try_take(8);
+            slots.give(lent1);
             let gave = run1.join().expect("run 1");
             done.store(true, Ordering::SeqCst);
             run2.join().expect("run 2");
-            assert!(gave, "run 2 waited for its first slot: run 1 gave its slot");
-            assert_eq!(lent, 0, "run 1 waits to go on: the lane's slot is not lent again");
+            run3.join().expect("run 3");
+            assert_eq!(lent2, 0, "run 2 waited for its first slot: a lane borrowed the slot given back");
+            assert!(gave, "run 3 waited for its first slot: run 1 gave its slot");
+            assert_eq!(lent1, 0, "run 1 waited to go on: a lane borrowed the slot given back");
         });
-        assert_eq!(state(&slots), (2, 0, 0));
+        assert_eq!(state(&slots), (3, 0, 0));
     }
 
     fn eprom() -> BoardModel {
