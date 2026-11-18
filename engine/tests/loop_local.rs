@@ -556,3 +556,51 @@ fn local_judge_keeps_every_partner_link_with_trees() {
         }
     }
 }
+
+/// Step B (fallback): with `[capacity] model = "cuts"` the local judge has no local model, so the
+/// loop judges every move by the whole board, says so in a warning, and names the global judge in
+/// its report line; no move is laid out locally.
+#[test]
+fn local_judge_falls_back_to_global_under_cuts() {
+    let mut pads = fan_pads();
+    pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
+    let m = board_layers(30.0, 20.0, 8, &pads, 2);
+    let o = loop_opts(r#""loop_judge": "local", "capacity_model": "cuts""#);
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let r = route_with(&m, &o, &ctl);
+    let warn = r.warnings.iter().find(|w| w.contains("prices the per-edge capacity model only")).unwrap_or_else(|| panic!("cuts fallback warning: {:?}", r.warnings));
+    assert!(warn.contains("loop_judge = \"global\""), "{warn}");
+    let (g, l, line) = judge_line(&m, &o);
+    assert!(line.contains("loop_judge = \"global\"") && l == 0.0 && g > 0.0, "{line}");
+}
+
+/// Step B (`[optimize] local_depth`): a deeper ring frees at least as many wires per local
+/// layering as depth 1 (the crossings of the crossings; more on one of the boards), and the layerings stay exact (no partner
+/// fault, no unpriced held-held crossing, no stale held event), 2 and 4 layers.
+#[test]
+fn local_depth_two_frees_more_and_stays_exact() {
+    // SAFETY: the variable only switches on a debug count; tests reading it all want it on.
+    unsafe { std::env::set_var("TOPO_LOCALCHECK", "1") };
+    let mean_free = |l: &str| -> f64 {
+        let i = l.find(" wires laid again").unwrap_or_else(|| panic!("mean in {l}"));
+        l[..i].trim_end().rsplit(' ').next().unwrap().parse().unwrap()
+    };
+    let (mut f1, mut f2) = (0.0, 0.0);
+    for n_layers in [2, 4] {
+        let mut pads = fan_pads();
+        pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
+        pads.push(("B3", 2, 4.0, 17.0, 1.0, 1.0, 2));
+        let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
+        let (_, l1, d1) = judge_line(&m, &loop_opts(r#""loop_judge": "local", "local_depth": 1"#));
+        let (_, l2, d2) = judge_line(&m, &loop_opts(r#""loop_judge": "local", "local_depth": 2"#));
+        eprintln!("{n_layers} layers:\n  depth 1: {d1}\n  depth 2: {d2}");
+        assert!(l1 > 0.0 && l2 > 0.0, "{n_layers} layers: local re-lays {d1} / {d2}");
+        assert!(mean_free(&d2) >= mean_free(&d1), "{n_layers} layers: depth 2 frees fewer: {d1} / {d2}");
+        (f1, f2) = (f1 + mean_free(&d1), f2 + mean_free(&d2));
+        for d in [&d1, &d2] {
+            assert!(d.contains("TOPO_LOCALCHECK: 0 partner faults, 0 unpriced held-held crossings, 0 stale held events"), "{n_layers} layers: {d}");
+        }
+    }
+    assert!(f2 > f1, "depth 2 frees more wires somewhere: {f1} vs {f2}");
+}

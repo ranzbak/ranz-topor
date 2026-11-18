@@ -113,6 +113,12 @@ struct LoopCtr {
     local_changed: std::cell::Cell<usize>,
     /// `TOPO_LOCALCHECK` (debug): partner links of the local layerings that point nowhere.
     local_faults: std::cell::Cell<usize>,
+    /// `TOPO_LOCALCHECK`: the held-held crossings the local layerings leave unpriced
+    /// ([`layers::unpriced_crossings`]; 0 when the judge is exact).
+    local_unpriced: std::cell::Cell<usize>,
+    /// `TOPO_LOCALCHECK`: the held events whose crossing partner the move killed
+    /// ([`layers::stale_held_events`]; 0 when the judge is exact).
+    local_stale: std::cell::Cell<usize>,
 }
 
 impl LoopCtr {
@@ -3445,6 +3451,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
             }
+            // A double-crossing swap of the placing (`State::uncross_from_touched`, also when the
+            // relay after it keeps the old lay) changes the pass order of the wires that took part
+            // and so their crossings with held wires, path and passes unchanged: each is laid out
+            // again too, or a held-held crossing would keep its stale events (an unpriced crossing).
+            let mut took: Vec<WireId> = st.took_part.iter().copied().filter(|&w| w < nw && w < saved.wires().len() && saved.wires()[w].alive && st.wires[w].alive).collect();
+            took.sort_unstable();
+            took.dedup();
+            for w in took {
+                if !gone_v.contains(&w) {
+                    if local_check {
+                        eprintln!("LOOPLOCAL changed wire {w} (net {}): order; move gone {gone:?} new {new:?}", st.wires[w].net);
+                    }
+                    changed += 1;
+                    gone_v.push(w);
+                    new_v.push(w);
+                }
+            }
             LoopCtr::add(&lctr.local_changed, changed);
             let (gone, new) = (&gone_v[..], &new_v[..]);
             let mut free = vec![false; nw];
@@ -3541,6 +3564,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             if local_check {
                 let f = layers::partner_faults(st, &lr);
                 LoopCtr::add(&lctr.local_faults, f.len());
+                let (_, hh) = layers::unpriced_crossings(st, &lr, bottom, Some(&free));
+                LoopCtr::add(&lctr.local_unpriced, hh);
+                let stale = layers::stale_held_events(st, prev, &free);
+                LoopCtr::add(&lctr.local_stale, stale);
+                if stale > 0 {
+                    eprintln!("LOOPLOCAL stale held events {stale}; gone {gone:?} new {new:?} changed {changed}");
+                }
+                if hh > 0 {
+                    eprintln!("LOOPLOCAL unpriced held-held crossings {hh}; gone {gone:?} new {new:?} changed {changed}");
+                }
                 if !f.is_empty() {
                     eprintln!("LOOPLOCAL partner faults {} (first {:?}); gone {gone:?} new {new:?} changed {changed}", f.len(), &f[..f.len().min(5)]);
                 }
@@ -3631,6 +3664,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 cis.sort_by_key(|&ci| self.rank[ci]);
                 cis.dedup();
                 self.saved = Some(self.forced.borrow().clone());
+                // loop-local: the wires this placing's double-crossing swaps take part in.
+                st.took_part.clear();
                 for &ci in &cis {
                     self.forced.borrow_mut().remove(&self.conn_of[ci]);
                 }
@@ -4118,6 +4153,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
                 let n0 = self.st.wires.len();
+                // loop-local: the wires this placing's double-crossing swaps take part in.
+                self.st.took_part.clear();
                 let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
                 let mut kept = false;
                 if placed {
@@ -4717,7 +4754,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 mean(st_.local_free),
                 mean(st_.local_model),
                 lctr.local_changed.get(),
-                if local_check { format!("; TOPO_LOCALCHECK: {} partner faults", lctr.local_faults.get()) } else { String::new() },
+                if local_check { format!("; TOPO_LOCALCHECK: {} partner faults, {} unpriced held-held crossings, {} stale held events", lctr.local_faults.get(), lctr.local_unpriced.get(), lctr.local_stale.get()) } else { String::new() },
                 if st_.shadow_n > 0 {
                     format!("; shadow check ([optimize] loop_shadow = {}): {} moves also judged by the whole board (its change after - before, both layered whole), {} kept alike ({:.1} %), mean |local change - whole-board change| graded violations {:.4}, vias {:.2}, unlayerable crossings {:.2}; mean |whole-board layering - present layering| before the move, graded {:.4}", opts.loop_shadow, st_.shadow_n, st_.shadow_agree, 100.0 * st_.shadow_agree as f64 / st_.shadow_n as f64, st_.shadow_err_graded / st_.shadow_n as f64, st_.shadow_err_vias as f64 / st_.shadow_n as f64, st_.shadow_unl_diff as f64 / st_.shadow_n as f64, st_.shadow_base_graded / st_.shadow_n as f64)
                 } else {

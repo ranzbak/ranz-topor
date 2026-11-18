@@ -5,6 +5,8 @@
 #   looplocal_job.sh full CFG...         one hzq unit per board (eprom wiccon esp qmtech bornhack) per CFG, the loop's
 #                                        default cycles (quality ladder at 100 % drawn), then wait
 #   looplocal_job.sh tests               engine tests + clippy + plugin config tests + Step B mutants (one hzq unit, 4 threads)
+#   looplocal_job.sh fuzz                tests (4 threads) + dense fuzz units on tip and mutants R M1 M2 M3 (fix round 2)
+#   looplocal_job.sh fuzz2               the same without the seed scan
 #   looplocal_job.sh both                tip: main G SH + full G L + tests in one session
 #   looplocal_job.sh task CFG KIND NAME  one run (inside a unit); KIND b = board, p = pattern, f = board, default cycles
 # CFG: D (defaults), NOSC (TOPO_NOSCACHE=1: Step A cache off), G (optimize.loop_judge="global"), L (="local"),
@@ -87,7 +89,48 @@ tests() {
   sub 'out[st.passes[q].wire] = true;' 'let _ = q;' | mut b5_neigh $L --test loop_local
   note "tests done"
 }
+A1='if !b.alive || a.tris != b.tris || a.turns != b.turns || a.passes.len() != b.passes.len() {'
+B1='if false {'
+A2='.map(|x| x.filter(|&(t, _)| t < nw && held(t))).collect();'
+B2='.map(|x| x.filter(|&(t, _)| !h.is_free(t))).collect();'
+A3='            for w in took {'
+B3='            for w in Vec::<WireId>::new() {'
+fz() {  # NAME: tree copy with the mutant (tip R M1 M2 M3), release + debug assertions: loop_local, loop_local_fuzz, scan 1000-1029
+  local n=$1 d=/root/ll-fz-$1
+  rm -rf $d; mkdir -p $d; cp -a $ROOT/engine $d/; rm -rf $d/engine/target
+  find $d/engine -name '*.rs' -exec touch {} +
+  local C=$d/engine/src/topo/core.rs L=$d/engine/src/topo/layers.rs pr=0
+  case $n in
+    tip) ;;
+    R) { sub "$A1" "$B1" | python3 - $C && sub "$A2" "$B2" | python3 - $L; } || pr=1 ;;
+    M1) sub "$A1" "$B1" | python3 - $C || pr=1 ;;
+    M2) sub "$A2" "$B2" | python3 - $L || pr=1 ;;
+    M3) sub "$A3" "$B3" | python3 - $C || pr=1 ;;
+  esac
+  note "fz $n patch rc $pr"
+  cd $d/engine
+  export CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true CARGO_TARGET_DIR=$d/target
+  cargo test --release --test loop_local --test loop_local_fuzz --no-run > $R/fz-$n-build.log 2>&1 9>&-
+  note "fz $n build rc $?"
+  local t0=$(date +%s)
+  cargo test --release --test loop_local --test loop_local_fuzz -- --nocapture > $R/fz-$n.log 2>&1 9>&-
+  note "fz $n tests rc $? wall $(( $(date +%s) - t0 )) s: $(grep -E '^test .* (ok|FAILED)$' $R/fz-$n.log | grep -c FAILED) failed: $(grep -E '^test .*FAILED$' $R/fz-$n.log | awk '{print $2}' | tr '\n' ' ')"
+  [ "${FZ_SCAN:-1}" = 0 ] && { rm -rf $d; return; }
+  t0=$(date +%s)
+  LOOPLOCAL_FUZZ=1000,30 cargo test --release --test loop_local_fuzz dense_board_scan -- --ignored --nocapture > $R/fz-$n-scan.log 2>&1 9>&-
+  note "fz $n scan rc $? wall $(( $(date +%s) - t0 )) s: $(grep -c PANIC $R/fz-$n-scan.log) panics, $(grep FUZZ $R/fz-$n-scan.log | grep -vc 'partner faults 0 ') with faults, $(grep FUZZ $R/fz-$n-scan.log | grep -c 'unpriced [1-9]') unpriced"
+  rm -rf $d
+}
 case ${1:-} in
+  fz-in) fz $2 ;;
+  fuzz)  # fix round 2: the tests (4 threads) + the dense fuzz on the tip and the mutants R M1 M2 M3 (2 threads each)
+    ( hzq run --threads 4 --name tests -- bash $ROOT/tools/looplocal_job.sh tests-in ) & sleep 1
+    for n in tip R M1 M2 M3; do ( hzq run --threads 2 --name "fz-$n" -- env CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 bash $ROOT/tools/looplocal_job.sh fz-in $n ) & sleep 1; done
+    wait; note "all done" ;;
+  fuzz2)  # fix round 2b (stale held events): tests (4 threads) + the two dense seeds on tip and R M1 M2 M3, no scan
+    ( hzq run --threads 4 --name tests -- bash $ROOT/tools/looplocal_job.sh tests-in ) & sleep 1
+    for n in tip R M1 M2 M3; do ( hzq run --threads 2 --name "fz-$n" -- env FZ_SCAN=0 CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 bash $ROOT/tools/looplocal_job.sh fz-in $n ) & sleep 1; done
+    wait; note "all done" ;;
   task) shift; task "$@" ;;
   small) for n in eprom wiccon; do task $2 b $n; done; for n in $(ls $R/pat); do task $2 p $n; done ;;
   main)
