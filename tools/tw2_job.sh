@@ -7,6 +7,7 @@
 #   tw2_job.sh retest          one hzq unit (4 threads): clippy (log kept), the TW2 tests, mutants j3 and d1
 #   tw2_job.sh fpcheck         one hzq unit (4 threads): the fuse pour check tests, clippy, config pytest, mutants fp1-fp5
 #   tw2_job.sh ladder-fp CFG...  ladder CFG... and fpcheck in one job
+#   tw2_job.sh final CFG...    ladder CFG..., tests and fpcheck in one job
 #   tw2_job.sh task CFG BOARD  one run (inside a unit)
 # CFG: D (the tree's defaults; main = sequential, tw2-metric = erbs joint), J (realise erbs), S (realise sequential),
 #      JF / SF (J / S with optimize.allow_violations = false: no never-drop forcing), JD (J + TOPO_ERBS_DEBUG=1: per-run trace).
@@ -123,6 +124,8 @@ case ${1:-} in
   retest-in) retest ;;
   fpcheck) hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in; note "all done" ;;
   fpcheck-in) fpcheck ;;
+  final) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1
+    ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
   ladder-fp) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
   both) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1; wait; note "all done" ;;
   ladder-retest) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in ) & sleep 1; wait; note "all done" ;;
