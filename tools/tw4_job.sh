@@ -107,6 +107,9 @@ case ${1:-} in
     u eqn-2 16 "e2w:esp:4" "e2wn:esp:4" "e3w:esp:4" "e3wn:esp:4"
     u eqn-3 16 "e4w:esp:4" "e4wn:esp:4" "e0w:qmtech:4" "e0wn:qmtech:4"
     wait; note "all done" ;;
+  eqnbh)
+    # the equal-time units first (alone on the --exclusive ccx43), then the long board's quality units
+    bash $ROOT/tools/tw4_job.sh eqn; bash $ROOT/tools/tw4_job.sh bh ;;
   bh)
     # TW4 merge round: the long board with via_cuts off / on (rounds=1, 4 threads, cpu 2400): cycle cost and DRC per
     # type; KiCad caps its counts there, so each routed board also gets the tiled DRC (net pairs, U6 courtyard apart)
