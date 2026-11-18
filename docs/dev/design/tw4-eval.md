@@ -74,6 +74,16 @@ Order: T2 (feature-cut machinery, already written) → T1 (reuses it) → T3. Co
 located shrinkage items (today `neck_loss` can never match: no item has a place), the `pad_exit_items` hook
 (compass.rs:219), the per-run ERBS source in result.json (the tw4-dbg dump as `route.erbs.runs_list`).
 
+## Lead decisions (2026-11-18; the user confirmed phase 2 the same day)
+- D1 approved (T1, exit side from the plan, neck depth price): the price is a smooth graded cost, no cutoff at the
+  floor; the neck-from-pad rule stays (a neck may reach further back from the footprint to free room, and the planner
+  knows the neck floor); the exit tip comes from the plan, never from the drawing (the 5.10 straight-line A/B).
+- D2 approved (order T2 → T1 → T3): CM1's cycle cost ≤ 10 %, measured on the T2 commit before T1 builds on it; the two
+  dead meter hooks first (located necks for `neck_loss`; `pad_exit_items`), so the meter sees T1.
+- D3 approved (acceptance form as below), plus: every changed connection judged per connection (`ladder_diff --json`),
+  and the D5 overall best reported next to the predicted gain.
+- Synthetic pattern first for T1 (PNG + text for approval). Budget for phase 2 ≤ €1.5.
+
 ## Meter, invariants, tests
 - Meter (the stage's own): unseen count and share per board at rounds=1 and esp r64/r200, qmtech r16; gain ratio
   pooled r1→r16 seeds 0–4 and s0 r1→r64 / r1→r200 (ratio ≥ 0.5 on all three); CM1 cycle cost on the local judge.
