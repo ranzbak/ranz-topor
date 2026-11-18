@@ -265,3 +265,20 @@ def test_route_async_cancel_in_the_topor_loop_returns_anytime_result(engine):
     assert not any(w.startswith("ERROR:") for w in out["warnings"]), out["warnings"][:3]
     chk = json.loads(engine.check_items(mj, json.dumps(out["items"]), json.dumps({"margin_nm": 0})))
     assert chk["violations"] == []
+
+
+def test_via_cuts_is_on_by_default_in_engine_schema_and_plugin(engine, root):
+    """tw4 merge round (2026-11-19): [capacity] via_cuts (CM1) is the default after the equal-time A/B (esp 5 seeds +
+    qmtech at wall 300 s). The engine default, the schema default and what the plugin passes all say true; an old
+    topor.toml that wrote the old default (false) is told so once (PAST_DEFAULTS)."""
+    import sys
+
+    sys.path.insert(0, str(root / "plugin"))
+    from topor import schema
+    from topor.config import Config
+
+    assert json.loads(engine.default_options())["via_cuts"] is True
+    s = schema.SETTINGS_BY_KEY[("capacity", "via_cuts")]
+    assert s.default is True and schema.available(s)
+    assert Config.defaults().engine_options()["via_cuts"] is True
+    assert schema.PAST_DEFAULTS[("capacity", "via_cuts")] == ((False, "2026-11-19"),)

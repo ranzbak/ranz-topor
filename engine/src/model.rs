@@ -1450,7 +1450,8 @@ pub struct Options {
     /// via to the obstacle across, Maley 1987 pp. 32-33, 40; `topo::viacut`) hold the via and
     /// every other net's wire that crosses them, so a via planned in a pad gap that another wire
     /// passes too is predicted over-full. false = the model before CM1 (a via counted only on the
-    /// two edges its own wire crosses / on static cuts within reach).
+    /// two edges its own wire crosses / on static cuts within reach). Default true since the tw4
+    /// equal-time A/B (2026-11-19: esp 5 seeds + qmtech at wall 300 s, KiCad DRC -23 % / -28 %).
     pub via_cuts: bool,
     /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
     /// after the plan of its first cycle (later cycles need the drawing's feedback), before the
@@ -1646,7 +1647,7 @@ impl Default for Options {
             edges_test: "price".into(),
             overflow_softness: 0.1,
             cut_vias: true,
-            via_cuts: false,
+            via_cuts: true,
             stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,
