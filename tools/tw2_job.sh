@@ -180,7 +180,7 @@ bhtiles() {  # bornhack J once (4 threads), then the tiled DRC of its routed boa
   task J bornhack 4
   local pcb; pcb=$(ls $R/J/bornhack/*-topor/*.kicad_pcb 2>/dev/null | head -1)
   note "bornhack pcb: ${pcb:-none}"
-  [ -n "$pcb" ] && { /usr/bin/python3 tools/drc_tiles.py run "$pcb" $R/tiles-bh --jobs 4 --area U6 > $R/tiles-bh.log 2>$R/tiles-bh.err; note "tiles rc $?: $(tr '\n' ' ' < $R/tiles-bh.log)"; }
+  [ -n "$pcb" ] && { /usr/bin/python3 tools/drc_tiles.py run "$pcb" $R/tiles-bh --jobs 4 --area U6 --depth 4 > $R/tiles-bh.log 2>$R/tiles-bh.err; note "tiles rc $?: $(tr '\n' ' ' < $R/tiles-bh.log)"; }
   note "bhtiles done"
 }
 case ${1:-} in

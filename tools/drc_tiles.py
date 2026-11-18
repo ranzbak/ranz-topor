@@ -8,15 +8,18 @@ of the routed board that keep only the tracks, vias and arcs whose bounding box 
 tile at a cap splits in 4, down to --depth. Violations are deduped by (type, sorted item uuids). Unconnected
 items are left out (cutting tracks away makes new ones): take them from the full-board report.
 
-Judge a board by the counts per type and the distinct net pairs per type (`net_pairs`), not by the capped
-full report. Tiles still at a cap at the deepest level are listed (`still_capped`): their counts are lower
-bounds.
+Judge a board by the distinct net pairs per type (`net_pairs`), not by the capped full report. Tiles still
+at a cap at the deepest level are listed (`still_capped`): their counts are lower bounds, and KiCad reports a
+different subset of a capped tile's violations run to run, so the COUNTS are noisy (bornhack, the same file
+twice, depth 4: clearance 1251 vs 1228, shorting 1453 vs 1431) while the net pairs are stable (1 clearance pair
+of 1079 pairs swapped; tw2r2tl-6062058). Tiling removes tracks only (pads and zones stay in every tile), so
+some tiles stay capped however deep (bornhack depth 4: 21-23 tiles).
 
 Method from the TW2 verification (reports/tw2-metric-verify-20261118-1804.md, section 5; validated on qmtech,
 which has no cap: tiles = full report, 0 missing, 0 extra). Needs KiCad's pcbnew Python module and
 kicad-cli (the VM image); run it on the VM, never in a desktop session.
 
-  drc_tiles.py run <pcb or dir> <out> [--nx 3 --ny 4 --margin 1 --depth 2 --jobs 4 --area REF]
+  drc_tiles.py run <pcb or dir> <out> [--nx 3 --ny 4 --margin 1 --depth 4 --jobs 4 --area REF]
       --area REF: split the counts into "area" (an item inside REF's courtyard) and "rest" (bornhack: U6)
   drc_tiles.py diff <a/tiles.json> <b/tiles.json>   counts and net pairs a -> b, new and gone pairs
   drc_tiles.py tile ...                              one tile (internal)
@@ -74,7 +77,7 @@ def _nets(v):
     return tuple(sorted({m for i in v.get("items", []) for m in re.findall(r"\[([^\]]*)\]", i.get("description", ""))}))
 
 
-def run(pcb, out, nx=3, ny=4, margin=1.0, depth=2, jobs=4, area=None):
+def run(pcb, out, nx=3, ny=4, margin=1.0, depth=4, jobs=4, area=None):
     import pcbnew
     if os.path.isdir(pcb):
         pcb = sorted(glob.glob(os.path.join(pcb, "*.kicad_pcb")))[0]
@@ -204,7 +207,7 @@ def main():
     r.add_argument("--nx", type=int, default=3)
     r.add_argument("--ny", type=int, default=4)
     r.add_argument("--margin", type=float, default=1.0, help="mm around a tile whose copper is kept")
-    r.add_argument("--depth", type=int, default=2, help="how often a capped tile splits in 4")
+    r.add_argument("--depth", type=int, default=4, help="how often a capped tile splits in 4")
     r.add_argument("--jobs", type=int, default=4)
     r.add_argument("--area", help="footprint reference whose courtyard splits the counts (area / rest)")
     d = s.add_parser("diff")
