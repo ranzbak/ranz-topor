@@ -87,6 +87,27 @@ tests() {
 case ${1:-} in
   lad) shift; lad "$@" ;;
   tests-in) tests ;;
+  r8)  # lead 2026-11-18 test fix round: the latch test 20x on a loaded box (a looped 6-job cargo build of the
+       # engine in its own target dir), then with "full" the whole release suite and the full pytest (CI=1)
+    shift; cd $ROOT/engine; export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2
+    cargo test --release --test topo_stop_reason --no-run > $R/build.log 2>&1 9>&-
+    LT=/root/tw3-load-$(basename $ROOT)
+    ( while [ ! -f $R/load.stop ]; do CARGO_TARGET_DIR=$LT cargo build --release -j 6 > /dev/null 2>&1; rm -rf $LT; done ) 9>&- & LP=$!
+    sleep 20; pass=0
+    for i in $(seq 1 20); do
+      if cargo test --release --test topo_stop_reason -- cancel_at_one_of_two_runs_stable_is_a_cancel --exact >> $R/latch.log 2>&1 9>&-; then pass=$((pass+1)); fi
+      note "latch $i: $pass passed, load $(cut -d' ' -f1 /proc/loadavg)"
+    done
+    touch $R/load.stop; wait $LP; rm -rf $LT; note "latch test: $pass of 20 passed under load"
+    if [ "${1:-}" = full ]; then
+      timeout 5400 cargo test --release --no-fail-fast > $R/suite.log 2>&1 9>&-; rc=$?
+      note "release suite rc $rc: $(grep -E '^test result' $R/suite.log | awk '{p+=$4; f+=$6; i+=$8} END {print p" passed, "f" failed, "i" ignored"}')"
+      grep -E "^test .* FAILED$|panicked at" $R/suite.log | head -20 | while read -r l; do note "suite: $l"; done
+      cd $ROOT; CI=1 timeout 3600 python -m pytest -q -p no:cacheprovider tests > $R/pytest-full.log 2>&1 9>&-
+      note "pytest full rc $?: $(tail -1 $R/pytest-full.log)"
+      grep -E "^FAILED" $R/pytest-full.log | head -20 | while read -r l; do note "pytest: $l"; done
+    fi
+    note "r8 done" ;;
   tip)
     mkdir -p $R/lad
     ladder
