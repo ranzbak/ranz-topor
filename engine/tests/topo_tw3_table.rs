@@ -55,6 +55,8 @@ fn the_four_bests_are_drawn_once_each_and_listed() {
     dedup.sort_unstable();
     dedup.dedup();
     assert_eq!(dedup.len(), rows.len(), "each distinct row drawn once: {rows:?}");
+    // eprom: every run has the same pre-loop state, so a row is drawn by the run it came from
+    assert!(r.bests.iter().all(|b| b["run"] == b["origin_run"]), "origin run first: {:?}", r.bests);
     assert_eq!(r.bests.iter().filter(|b| b["applied"].as_bool() == Some(true)).count(), 1);
     assert!(line(&r, "four bests of the variant table drawn").contains("APPLIED"));
     assert!(line(&r, "TopoR variant table (one for all 3 runs").contains("offers"));
