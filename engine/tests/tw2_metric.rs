@@ -127,6 +127,19 @@ fn forced_runs_are_counted() {
     }
 }
 
+/// A band whose any-angle form misses the clearance to a kept band keeps its octilinear form
+/// where that is legal against everything kept (`octi_rescued`, best key first): swap_vias
+/// octilinear draws every run from its ERBS, none cut back, no violation.
+#[test]
+fn a_band_that_misses_any_angle_keeps_its_octilinear_form() {
+    let r = route("erbs", "swap_vias", "octilinear", &[], &[]);
+    let e = erbs(&r);
+    partition_holds(&e);
+    let viol: usize = r.connections.iter().map(|c| c.violations).sum();
+    assert!(e.octi_rescued >= 1, "{e:?}");
+    assert_eq!((e.cut_back, e.forced, viol), (0, 0, 0), "{e:?}");
+}
+
 /// Every approved fixture in both styles: the partition holds and nothing is lost to another wire.
 #[test]
 #[ignore]
