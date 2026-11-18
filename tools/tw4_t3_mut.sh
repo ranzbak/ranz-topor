@@ -17,7 +17,9 @@ F[via_past]=src/topo/draw.rs;   P[via_past]='.is_some_and(|t| (ve.0 - k.at).len(
 F[octi_dir]=src/topo/octi.rs;   P[octi_dir]='// tw4 T3: a run from a start point short of the lead'"'"'s end goes on from the lead\n                Some(d)'; R[octi_dir]=''
 F[no_turn]=src/topo/core.rs;    P[no_turn]='cont_dirs.insert(u, \*d);'; R[no_turn]='let _ = (u, d);'
 F[centre_far]=src/topo/state.rs; P[centre_far]='(proj.pos\[v\] - c).len() < (proj.pos\[u\] - c).len()'; R[centre_far]='(proj.pos[v] - c).len() > (proj.pos[u] - c).len()'
-MS=("$@"); [ ${#MS[@]} -eq 0 ] && MS=(pts_off retain_end draw_full via_past octi_dir no_turn centre_far)
+F[no_default]=src/topo/factors/branch.rs; P[no_default]='if !opts.dangling_lead_choice || opts'; R[no_default]='if true || !opts.dangling_lead_choice || opts'
+F[default_unused]=src/topo/core.rs; P[default_unused]='let opts = match super::factors::with_lead_choice_turn(opts) {'; R[default_unused]='let opts = match None::<crate::model::Options> {'
+MS=("$@"); [ ${#MS[@]} -eq 0 ] && MS=(pts_off retain_end draw_full via_past octi_dir no_turn centre_far no_default default_unused)
 for m in "${MS[@]}"; do
   f=$W/engine/${F[$m]}
   cp "$f" "$f.orig"
@@ -32,7 +34,7 @@ PY
   fi
   if cmp -s "$f" "$f.orig"; then echo "mutant $m NOT APPLIED" >> "$OUT/mutants.txt"; continue; fi
   touch "$f"
-  ( cd "$W/engine" && cargo test --release $TESTS --lib -- a_lead_offers a_lead_that_points a_start_short > "$OUT/mut-$m.log" 2>&1 )
+  ( cd "$W/engine" && cargo test --release $TESTS --lib -- a_lead_offers a_lead_that_points a_start_short lead_choice_defaults > "$OUT/mut-$m.log" 2>&1 )
   rc=$?
   grep -q "^test result" "$OUT/mut-$m.log" || rc="build-failed($rc)"
   echo "mutant $m rc $rc ($( [ "$rc" = 0 ] && echo SURVIVED || echo killed )): $(grep -E '^test .* FAILED|panicked' "$OUT/mut-$m.log" | head -3 | tr '\n' ' ')" >> "$OUT/mutants.txt"
