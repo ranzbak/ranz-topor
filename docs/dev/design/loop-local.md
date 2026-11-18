@@ -46,6 +46,25 @@ crossing partners of O (before) and of N (after) plus their junction partners (t
    - `cuts` capacity model: falls back to the global judge, with one warning line.
    - `[optimize] loop_judge = "global"`: today's path, bit-identical.
 
+### Wires a move changes besides its own (fix rounds 1-2, 2026-11-18)
+A move's placing changes more than O and N, so F must take those wires too:
+- Laying a branch turns its trunk at the junction (`State::add_turn`); taking one out drops the
+  turn (`tree::remove_wire`).
+- The placing undoes double crossings of the new wire (`State::uncross_from_touched`, Polubasov
+  2010 «Начальная трассировка») and lays the wires that took part anew (`State::relay`). A kept
+  relay kills the old wire (bornhack2026 panic in `moves::flips` on 5e542178: a held partner link
+  pointed at it). A wire the relay leaves as it was keeps its path and passes, but the swap changed
+  its pass order, so its crossings with other held wires changed (verifier 2026-11-18: dense
+  fuzz seed 1446, 89 one-layer held-held crossings priced by nobody in 47 moves).
+- The judge therefore lays out again, as taken out and laid (gone + new): every wire whose path,
+  turns, pass count or life differs between the state before and after, and every wire in
+  `State::took_part` (the wires of the placing's kept swaps; `Rr::place` clears it). A held wire
+  keeps only partner links to held live wires.
+- `TOPO_LOCALCHECK=1` checks each local layering: partner links that point nowhere
+  (`layers::partner_faults`) and different-net crossings of two held wires left on one equal
+  layer that the layering neither pairs nor counts unlayerable (`layers::unpriced_crossings`).
+  Both must be 0; the judge line reports them.
+
 ### Why a local re-solve, not the present layers (topor-way plan: "no layering inside a try")
 The search already prices a path against the present layers (5.2b: a crossing costs the via it
 implies against the crossed stretch's layer). That estimate cannot be the move's price:
@@ -72,6 +91,10 @@ rate and the mean |difference|. The graded F expansion (grow F by one ring of cr
 when the local solve gives new unlayerable crossings) is built only if the shadow shows real
 disagreement on eprom/esp/qmtech. `[optimize] local_depth` (default 1) is the fixed-depth form of
 it: the rings of crossing partners of N.
+The shadow samples the re-lays of `reroute_set` (`Rr::violations_after`) only. `pair_move`'s
+local judgement (two local values on one base) is not sampled; its keep test compares two prices
+made by the same local judge, and the re-sync after the pair pass (`Sp::resync`) measures its
+result on the whole board.
 
 ## User rule 2026-11-18 (no worsen-veto)
 The local price adds no veto: the keep test is the one main uses (strict descent of the move's
@@ -97,6 +120,12 @@ plan. This branch does not touch it.
   Copper hash = main on eprom, wiccon, esp, qmtech, bornhack.
 - B: the invariants above as unit tests on small fixtures (2 and 4 layers, a tee). A counter
   test: global layerings per cycle ≤ 4 on a fixture.
+- B, dense boards (`engine/tests/loop_local_fuzz.rs`, the verifier's fuzz cut to two seeds; run in
+  release with `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`): seed 1000 (a relay kills a held
+  wire inside a move) and seed 1446 (swaps change held-held crossings) run without a panic, with
+  0 partner faults and 0 unpriced held-held crossings. `dense_board_scan` (ignored) scans a range.
+- B, options: the `cuts` fallback (warning + global judge line) and `local_depth = 2` (frees at
+  least as many wires, stays exact).
 - B, boards: eprom/esp/qmtech counters (global layerings, local W' sizes, work per re-lay) show
   linear cycle work. A ladder at 100 % drawn compares violations by class, forced pieces, vias,
   length and detours per connection against main (`ladder_diff --json`). Seconds come only from

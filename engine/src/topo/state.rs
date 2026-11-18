@@ -606,6 +606,11 @@ pub struct State<'p> {
     pub taut_len: bool,
     /// Lay the wires of a double-crossing removal anew ([`State::relay`], 4.3c; `initial = "once"`).
     pub relay_after_uncross: bool,
+    /// loop-local: every wire a kept double-crossing swap of [`State::uncross_from_touched`] took
+    /// part in since the caller last cleared it (ascending per call, appended). The swap changes
+    /// such a wire's pass order (its crossings with other held wires) but not its path, so the
+    /// local judge lays it out again with the move. Not part of [`Topology`].
+    pub took_part: Vec<WireId>,
     /// The TopoR loop's layer-aware reroute (shopping list 5.2, `[optimize] loop = "topor"`): per
     /// wire, the layers of each traversal under the loop's current layer assignment (bit per
     /// layer, both layers of a via interval; [`super::optimise::layers_now`]). A crossing is then
@@ -649,6 +654,7 @@ impl<'p> State<'p> {
             neck_from_pad: true,
             taut_len: false,
             relay_after_uncross: true,
+            took_part: Vec::new(),
             layers_now: Vec::new(),
         }
     }

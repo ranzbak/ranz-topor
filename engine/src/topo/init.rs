@@ -1055,7 +1055,9 @@ impl State<'_> {
                 }
             }
         }
-        (swaps, took_part.into_iter().collect())
+        let took_part: Vec<WireId> = took_part.into_iter().collect();
+        self.took_part.extend_from_slice(&took_part);
+        (swaps, took_part)
     }
 
     /// Price of the wire `w` as placed (4.3c, to compare two lays of one connection): its length
