@@ -922,7 +922,7 @@ mod tests {
             for _ in 0..60 {
                 let wp = rand_wp(dr, g);
                 let c = pt(g);
-                let half = [0.3, 1.5, 4.0, 12.0][g.int(0, 3) as usize] * MM;
+                let half = [0.3, 1.5, 4.0, 12.0, 12.0, 24.0][g.int(0, 5) as usize] * MM;
                 let ents = dr.local_ents(&wp, Aabb { min: c - Vec2 { x: half, y: half }, max: c + Vec2 { x: half, y: half } }.grow(dr.qgrow));
                 // also a random subset (sets on both sides of NEAR_MIN)
                 let ents: Vec<usize> = if g.int(0, 3) == 0 { ents.into_iter().filter(|_| g.int(0, 2) == 0).collect() } else { ents };
@@ -957,7 +957,7 @@ mod tests {
                 }
             }
         });
-        assert!(n[0] > 50 && n[1] > 2_000 && n[2] > 2_000, "{n:?}");
+        assert!(n[0] > 60 && n[1] > 2_000 && n[2] > 2_000, "{n:?}");
     }
 
     /// The repair of before F6 (every segment searched again in every sweep).
