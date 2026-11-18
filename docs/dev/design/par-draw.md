@@ -151,3 +151,63 @@ independent of the lanes, so the table is unchanged.
 - Q3: Octilinear is 80 % of the per-wire loop (qmtech 11.2 of 13.9 s). Parallelism inside one `octilinear()` call (its
   DP over node pairs, which f67 restructured) is exact by construction and has no cross-wire dependency. Should I profile
   it as an alternative or complement to B?
+
+## 11. Decisions (lead, 2026-11-18) and what A is
+Q1: build A now; park B (too much risk for <= 1.2-1.7x on the loop). Q2: one bornhack trace run (section 12).
+Q3: profile parallelism inside `octilinear()`, preferred ahead of B; report ceiling and exactness first (section 13).
+
+A as built: `topo::par::map(items, f)` runs order-free units on lanes and returns the results in index order; the
+fold after it is the old sequential code. Lanes: `[drawing] draw_lanes` (`"auto"` = one plus the run's spare
+compute slots at that moment, the lane source of `[optimize] refine_lanes`; a number = that many). The drawing sets
+the mode on its thread (`par::set_mode` at the start of the drawing in `route_round`); a unit runs with no mode, so a
+unit never fans out again and a caller outside the drawing (cut report, tests) has one lane. Debug prints
+(`TOPO_ERBS_TIME`, `TOPO_ERBS_SLEEVE`) keep one lane so their lines stay in order. Units:
+- commit 1 (main): every ERBS stretch of a layer (`erbs_layer_with`); the sheet + bands of every layer, then the
+  flows of every layer (`cutflow::measure`, two passes: the bands are written back in layer order between them).
+  Time cut: a stretch that starts past the limit returns its stop reason; from the first such stretch in stretch order
+  on, every later one counts as cut (the serial loop's prefix: the limit only moves forward). `fail_first` = unit 0.
+  On main these units run only with `realise = "erbs"` (main's default is sequential; tw2 makes erbs the default).
+- commit 2 (tw2 tip, branch par-draw-tw2, separable): every run's band in `reserve_bands` (realise, else its
+  octilinear form; nothing is committed before all bands are formed) and the check of each committed band against
+  the fixed index. Needs `Drawer: Sync`: `only_static` (TOPO_DIAG_DEEP diagnosis, set only in the serial loop) is an
+  AtomicBool, `Widths::seg` is `Send + Sync`.
+Exactness: each unit is a pure function of state that no unit writes; results in index order; fold unchanged.
+Tests: `par::tests` (index order at 1/2/4/8 lanes with the reverse hook; no mode = serial; a unit panic reaches the
+caller) and `tests/par_draw.rs` (eprom, esp and qmtech fixtures, realise = erbs, pools of 1/2/4/8 threads with
+`draw_lanes` auto and the reverse hook, plus 5 fixed lanes on 2 threads, copper and connections equal to one lane).
+Mutant: the lanes' results stored in completion order.
+
+## 12. Bornhack (4 threads, exp branch = tw2 + f67, rounds 1, trace run pdbh-dc90733)
+Drawing 198.6 s: never drop 170.1 s (86 %), per-wire loop 9.3 s, plans + relocations 9.3 s, joint bands 4.0 s,
+ERBS 3.5 s, phase-1 vias 2.2 s. Never drop = 81 forced wires, 160.6 s; the three slowest take 97 s (wires 519 46 s,
+520 30 s, 518 21 s; then 9, 7, 7, 5, 4 s). octilinear: 951 calls, 17.3 s in all. So on bornhack neither A (~7 s
+of units) nor B (the per-wire loop is 9 s) nor parallel octilinear (<= 17 s) moves the drawing much: the forced
+draws of a handful of wires are the critical path (one wire alone is 46 s, serial by nature). That is a
+performance finding for the never-drop pass (why a forced draw takes 46 s), not a parallelism one.
+
+## 13. Inside `octilinear()` (Q3): profile, exactness, ceiling
+Profile (counters in the exp branch, 1 thread; the counters add ~15 %):
+
+| board | calls | total | setup | shape build (room / follow) | legality | nodes | (i, j) pairs | shapes | legality evals | calls >= 10 ms / >= 50 ms |
+|---|---|---|---|---|---|---|---|---|---|---|
+| qmtech | 683 | 13.2 s | 0.31 | 7.49 (4.56 / 0.95) | 4.15 | 31 712 | 1 116 390 | 4 364 231 | 3 174 499 | 91 % / 64 % of the time |
+| esp | 199 | 5.3 s | 0.11 | 3.38 (2.39 / 0.31) | 1.36 | 9 714 | 374 559 | 1 475 700 | 1 077 696 | 96 % / 80 % |
+| bornhack (4 t) | 951 | 17.3 s | 0.62 | 10.10 (6.71 / 1.21) | 5.08 | 37 354 | 1 056 512 | 4 202 288 | 3 291 748 | 94 % / 73 % |
+
+The DP is `for i { for din { for j in js(i) { for shape of (i, j) { price; prune; lazy legality; relax dist[j] } } } }`.
+Unit = one successor `j` of node `i`: its lane runs `for din { for shape }` in the same order. Exact because
+(a) the edges of node `i` read only `dist[i]`/`last[i]`, final once `i` is reached (all edges go from `i` to `j > i`);
+(b) they write only `dist[j]`, `last[j]`, `back[j]`, so lanes write disjoint rows; (c) for one `j` the sequence of
+relaxations (din ascending, shapes in order), the strict `<` prune and the lazy legality decisions are the serial
+ones, since they depend only on `dist[j]` and on pure functions of the shape; (d) the memo caches (legal, room,
+follow) are pure memoisation: a lane reads the shared cache (read-only during the node) plus its own overlay, and
+the overlays are merged after the node (values do not depend on who computed them). The shape list `pre[jx]` is
+built once per pair, as now. So the same copper for any lane count, by construction; no speculation, no waste
+except the within-node cache hits that two lanes no longer share.
+Ceiling: ~35 successors per node (1.12 M pairs / 31.7 k nodes) and ~0.4 ms per node, so a node barrier costs
+~2-5 % (fork/join ~10 us); setup + path rebuild are serial (2-4 %). At 8 lanes: Amdahl bound ~6.5x on octilinear;
+with per-j imbalance (exits on the first/last node, 3.9 shapes per pair on average) and lost cache sharing, 4-5x
+expected. Small calls (< ~40 nodes, < 10 % of the time) stay serial. Drawing time it saves (8 lanes, per board):
+qmtech ~8-9 of 11.2 s octilinear (in the loop, the joint bands and never drop), esp ~3.5 of 4.5 s, bornhack
+~13 of 17 s. With A: qmtech drawing ~26 s -> ~11 s at 8 threads (instrumented 1-thread base), esp ~8 s -> ~4 s;
+bornhack ~199 s -> ~180 s (the forced wires of section 12 dominate).
