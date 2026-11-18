@@ -532,3 +532,27 @@ fn neighbourhood_is_the_free_wires_and_their_edge_mates() {
         assert!(nb.iter().filter(|&&f| f).count() > 1 || edges.is_empty() || st.wires[w].passes.len() < 2, "free {w} shares an edge");
     }
 }
+
+/// Step B regression (bornhack2026, tip 5e542178: `flips` read the events of a dead wire through a
+/// held wire's partner link): a move that lays a branch turns its trunk at the junction, and taking
+/// a branch out drops that turn, so a move changes wires besides its own. On the fan with three
+/// three-pad nets (2 and 4 layers) the local judge sees such moves, lays those wires out again,
+/// and every partner link of every local layering points at a live wire's event that points back
+/// (`TOPO_LOCALCHECK` counts the ones that do not).
+#[test]
+fn local_judge_keeps_every_partner_link_with_trees() {
+    // SAFETY: the variable only switches on a debug count; tests reading it all want it on.
+    unsafe { std::env::set_var("TOPO_LOCALCHECK", "1") };
+    for n_layers in [2, 4] {
+        let mut pads = fan_pads();
+        pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
+        pads.push(("B3", 2, 4.0, 17.0, 1.0, 1.0, 2));
+        pads.push(("A3", 1, 15.0, 3.5, 1.0, 1.0, 0));
+        let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
+        for seed in [1, 2, 3] {
+            let (_, _, l) = judge_line(&m, &loop_opts(&format!(r#""loop_judge": "local", "topo_rounds": 4, "seed": {seed}"#)));
+            assert!(l.contains("TOPO_LOCALCHECK: 0 partner faults"), "{n_layers} layers seed {seed}: {l}");
+            eprintln!("{n_layers} layers seed {seed}: {l}");
+        }
+    }
+}

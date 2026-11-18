@@ -109,6 +109,10 @@ struct LoopCtr {
     layer_local: std::cell::Cell<usize>,
     local_free: std::cell::Cell<usize>,
     local_model: std::cell::Cell<usize>,
+    /// Wires a local move changed besides its own (trunk turns, wires that died).
+    local_changed: std::cell::Cell<usize>,
+    /// `TOPO_LOCALCHECK` (debug): partner links of the local layerings that point nowhere.
+    local_faults: std::cell::Cell<usize>,
 }
 
 impl LoopCtr {
@@ -3415,8 +3419,34 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             warnings.push("TopoR loop: [optimize] loop_judge = \"local\" prices the per-edge capacity model only; with [capacity] model = \"cuts\" every move is judged by the whole board (loop_judge = \"global\")".to_string());
         }
         let local_depth = opts.local_depth.max(1);
+        let local_check = std::env::var_os("TOPO_LOCALCHECK").is_some();
         let local_judge = |st: &mut State, saved: &super::state::Topology, gone: &[WireId], new: &[WireId], prev: &layers::LayerReport, pred: &Predicted, ties: u64| -> (layers::LayerReport, Predicted) {
             let nw = st.wires.len();
+            // The wires the move changed besides the ones it took out and laid: laying a branch
+            // turns its trunk at the junction (`State::add_turn`), taking one out drops that turn
+            // (`tree::remove_wire`), a wire may die. Each counts as taken out and laid again, so
+            // its own events and those of the wires it crosses are built afresh.
+            let (mut gone_v, mut new_v) = (gone.to_vec(), new.to_vec());
+            let mut changed = 0usize;
+            for (w, a) in saved.wires().iter().enumerate() {
+                if !a.alive || gone.contains(&w) || w >= nw {
+                    continue;
+                }
+                let b = &st.wires[w];
+                if !b.alive || a.tris != b.tris || a.turns != b.turns || a.passes.len() != b.passes.len() {
+                    if local_check {
+                        let how = if !b.alive { "died" } else if a.tris != b.tris { "path" } else if a.turns != b.turns { "turns" } else { "passes" };
+                        eprintln!("LOOPLOCAL changed wire {w} (net {}): {how}; move gone {gone:?} new {new:?}", a.net);
+                    }
+                    changed += 1;
+                    gone_v.push(w);
+                    if b.alive {
+                        new_v.push(w);
+                    }
+                }
+            }
+            LoopCtr::add(&lctr.local_changed, changed);
+            let (gone, new) = (&gone_v[..], &new_v[..]);
             let mut free = vec![false; nw];
             let net_of = |w: WireId| st.wires[w].net;
             let mut ring: Vec<WireId> = Vec::new();
@@ -3508,6 +3538,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 foreign: (du(pp.foreign.0, fc_a.0, fc_b.0), (pp.foreign.1 + fc_a.1 - fc_b.1).max(0.0), du(pp.foreign.2, fc_a.2, fc_b.2)),
             };
             let p = Predicted::from_parts(parts, opts.pick_shorts, opts.short_weight);
+            if local_check {
+                let f = layers::partner_faults(st, &lr);
+                LoopCtr::add(&lctr.local_faults, f.len());
+                if !f.is_empty() {
+                    eprintln!("LOOPLOCAL partner faults {} (first {:?}); gone {gone:?} new {new:?} changed {changed}", f.len(), &f[..f.len().min(5)]);
+                }
+            }
             (lr, p)
         };
         /// One topological variant: the routed state, the wire -> connection map, the layering,
@@ -4672,13 +4709,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let per = |x: usize| x as f64 / rep.cycles.max(1) as f64;
             let mean = |x: usize| x as f64 / st_.layer_local.max(1) as f64;
             warnings.push(format!(
-                "TopoR loop judge ([optimize] loop_judge = \"{}\"): per cycle {:.1} whole-board layerings, {:.1} whole-board measures, {:.1} local layerings (mean {:.1} wires laid again, {:.1} in the local capacity model){}",
+                "TopoR loop judge ([optimize] loop_judge = \"{}\"): per cycle {:.1} whole-board layerings, {:.1} whole-board measures, {:.1} local layerings (mean {:.1} wires laid again, {:.1} in the local capacity model; {} wires a move changed besides its own, laid out again with it){}{}",
                 if judge_local { "local" } else { "global" },
                 per(st_.layer_global),
                 per(st_.measure_global),
                 per(st_.layer_local),
                 mean(st_.local_free),
                 mean(st_.local_model),
+                lctr.local_changed.get(),
+                if local_check { format!("; TOPO_LOCALCHECK: {} partner faults", lctr.local_faults.get()) } else { String::new() },
                 if st_.shadow_n > 0 {
                     format!("; shadow check ([optimize] loop_shadow = {}): {} moves also judged by the whole board (its change after - before, both layered whole), {} kept alike ({:.1} %), mean |local change - whole-board change| graded violations {:.4}, vias {:.2}, unlayerable crossings {:.2}; mean |whole-board layering - present layering| before the move, graded {:.4}", opts.loop_shadow, st_.shadow_n, st_.shadow_agree, 100.0 * st_.shadow_agree as f64 / st_.shadow_n as f64, st_.shadow_err_graded / st_.shadow_n as f64, st_.shadow_err_vias as f64 / st_.shadow_n as f64, st_.shadow_unl_diff as f64 / st_.shadow_n as f64, st_.shadow_base_graded / st_.shadow_n as f64)
                 } else {

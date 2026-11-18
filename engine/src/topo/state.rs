@@ -559,6 +559,13 @@ pub struct Topology {
     pass_w: Vec<f64>,
 }
 
+impl Topology {
+    /// The wires of this topology (loop-local: which wires a move changed).
+    pub fn wires(&self) -> &[Wire] {
+        &self.wires
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct State<'p> {
     pub proj: &'p Projection,

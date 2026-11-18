@@ -862,6 +862,25 @@ impl Held<'_> {
     }
 }
 
+/// loop-local (debug, tests): the partner links of `rep` that do not point at an existing event of
+/// a live wire of `st` pointing back (`(wire, event, partner)`). O(events).
+pub fn partner_faults(st: &State, rep: &LayerReport) -> Vec<(WireId, usize, (WireId, usize))> {
+    let mut out = Vec::new();
+    for (w, list) in rep.partner.iter().enumerate() {
+        for (i, x) in list.iter().enumerate() {
+            if let Some((w2, i2)) = *x {
+                let ok = st.wires.get(w2).is_some_and(|x| x.alive)
+                    && rep.events.get(w2).is_some_and(|e| i2 < e.len())
+                    && rep.partner.get(w2).and_then(|p| p.get(i2)).copied().flatten() == Some((w, i));
+                if !ok {
+                    out.push((w, i, (w2, i2)));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// loop-local: the free wires and every wire with a pass on an edge one of them passes (the
 /// wires whose packing a free wire's layers can change; [`assign_local`]'s capacity model).
 /// O(passes of the free wires x passes per edge).
@@ -936,7 +955,8 @@ fn finish_local(
     for w in 0..nw {
         if held(w) {
             mask[w] = h.prev.mask.get(w).cloned().unwrap_or_default();
-            partner[w] = h.prev.partner.get(w).cloned().unwrap_or_default().into_iter().map(|x| x.filter(|&(t, _)| !h.is_free(t))).collect();
+            // Only the partners on held wires stay (a free or dead one's events are new).
+            partner[w] = h.prev.partner.get(w).cloned().unwrap_or_default().into_iter().map(|x| x.filter(|&(t, _)| t < nw && held(t))).collect();
             mask[w].resize(lp.evl[w].len(), 0);
             partner[w].resize(lp.evl[w].len(), None);
         }
