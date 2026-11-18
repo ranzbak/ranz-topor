@@ -25,8 +25,12 @@ its path and its surroundings, and they oscillate within limits", "раскач�
 **(b) Layering as a radical escape** (`[optimize] escape = "layering"` | `"ties"` = today).
 - 2 layers: the exact via optimum (unchanged solver), then a seeded plateau walk on the unreduced
   domain graph: `escape_walk` x domains tries (default 4), each picks a random free domain, grows a
-  random cluster across edges that are satisfied (no via) with probability 1/2 per edge, and flips it
-  when the via count does not rise (Δ <= 0: the cluster's satisfied and via boundary edges balance). The
+  random cluster across edges that are satisfied (no via) with probability 1/2 per edge and across via
+  edges with 1/4, and flips it when the via count does not rise (Δ <= 0: the cluster's satisfied and
+  via boundary edges balance). Before the clusters, every connected part without node 0 (lone domains
+  too) flips as a whole with probability 1/2. Any other optimum differs from the present one by
+  connected parts of change 0 each, so every optimum stays reachable (the via edges must be crossable:
+  with satisfied edges only, 147 of 226 small cases with several optima reached another one). The
   result is a random via-optimal layering far from the old one; then the capacity refinement as today.
   Source: Polubasov 2010 «Оптимизация расслоения» figs. 8-10 ("12 optimal layerings, only two get out",
   "choose at random", "the gain came from a radical change of the topological situation", also with 0
@@ -47,13 +51,18 @@ its path and its surroundings, and they oscillate within limits", "раскач�
   `s = [optimize] escape_share` 0.35 (<= 0.5: "not sooner than its own last duration"). κ is set once
   from a TW0 profile (time per traversal of a global layering / of a local judge), a documented
   constant; the measured time share is reported (target 20-50 %). Escapes run inside the sweep.
+  κ = 0.07 (`[optimize] escape_kappa`), measured in tw5r1 (16 cycles, 1 thread, ccx43) as the time per
+  alive wire of an escape against the time per unit of a re-lay: eprom 0.062, wiccon 0.069, qmtech
+  0.069, esp 0.123. With κ = 1 the work share was 32-35 % but the time share only 3-6 %: a re-lay's
+  path search, not its layering, dominates its time. The copper never depends on the clock.
 - After each escape and its via-rose re-lays the state is offered to the table (TopoR: every step is
   tested against the kept variants; manual pp. 72-73) once TW3's table is in; before that it is counted.
 
 **(c) History on cuts that stay over-full, inside the loop** (`[optimize] loop_history = true`).
-After every whole-board measure (cycle end, escape): `h_e <- f * h_e + d/(1+d)` on each edge of an
+After every whole-board measure (cycle end, escape): `h_e <- f * h_e + (1+d)/(2+d)` on each edge of an
 over-full edge-layer (cut model: the edges where the over-full cut's wires cross it; d = its graded
-depth), `f = [optimize] loop_history_fade` 0.8 on all edges; bounded by 1/(1-f) = 5, no cutoff. Priced as
+depth, so an edge just over-full adds 1/2 and a deep one up to 1), `f = [optimize] loop_history_fade`
+0.8 on all edges; bounded by 1/(1-f) = 5, no cutoff. Priced as
 today by the `congestion` factor per pass (search and keep price). Loop-wide memory, not part of a
 variant (restores keep it). Source: McMurchie & Ebeling 1995 p. 113 eq. 1 (c_n = (b_n + h_n) p_n), p. 112
 ("penalty gradually increased"); Dayan & Dai 1993 p. 5 (iterative reassignment by best gain).
@@ -86,8 +95,8 @@ rows archived per 20 escapes, layering time share; per connection: esp IO3/IO5/I
 connections (layers, vias, compass planner_overfull), esp copper-to-edge, inner_layer_room DRC.
 D8 patterns (Polubasov figs. 6, 8-9, 10, 11) proposed as PNG + text to the lead, not in the suite.
 
-## Open points for the lead
-1. κ from a profile is a constant that ages; alternative: count re-lays only (`escape_every` re-lays,
-   auto = alive wires / 4). I take the work units unless you prefer the simpler count.
-2. Offering after each escape needs a Space hook inside `optimise` (TW3 territory): I add it after the
-   TW3 merge, counted until then.
+## Lead decisions (2026-11-19)
+1. Throttle by deterministic work units with the profile-calibrated κ; no `escape_every` (it would
+   cost an extra code path). The plan's bound (not sooner than its last duration, share <= 50 %) in
+   work units.
+2. The table offer hook in `optimise()` after TW3 merges; counted until then.

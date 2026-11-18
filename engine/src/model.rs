@@ -1009,7 +1009,8 @@ pub struct Options {
     /// the plan gets better.
     pub crossing_rules: bool,
     /// Topological core (S3, `topor.toml [search] reroute_rounds`): most rounds of negotiated
-    /// rip-up-and-reroute after the first layer assignment (0 = off).
+    /// rip-up-and-reroute after the first layer assignment (0 = off). With `opt_loop = "topor"`
+    /// only when `preloop_p4` is true (TW5 (e): the loop's history and escapes do their work).
     pub reroute_rounds: usize,
     /// Topological core (S4, `topor.toml [vias] reduce_after_drawing`): after drawing, try every
     /// via-carrying wire with a layer run moved onto the layer of its neighbour run (dropping the

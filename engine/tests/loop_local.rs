@@ -621,3 +621,39 @@ fn local_depth_two_frees_more_and_stays_exact() {
     }
     assert!(f2 > f1, "depth 2 frees more wires somewhere: {f1} vs {f2}");
 }
+
+/// The loop's `plan metrics` block "loop" -> "escape" (TW5 report, docs/dev/design/tw5-escape.md).
+fn escape_json(m: &BoardModel, o: &Options) -> serde_json::Value {
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let r = route_with(m, o, &ctl);
+    let line = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).unwrap_or_else(|| panic!("plan metrics line: {:?}", r.warnings));
+    let v: serde_json::Value = serde_json::from_str(line.trim_start_matches("plan metrics:").trim()).expect("plan metrics JSON");
+    let mut e = v["loop"]["escape"].clone();
+    // Clock fields differ run to run; the copper and every count must not.
+    if let Some(x) = e.as_object_mut() {
+        x.retain(|k, _| !k.ends_with("_s"));
+    }
+    e
+}
+
+/// TW5 (b): with the defaults the layering escapes run inside the sweep and change layers of free
+/// positions (a random via-optimal layering, Polubasov 2010 figs. 8-10), deterministic per seed;
+/// `escape = "ties"` (before TW5) runs none. 2 and 4 layers.
+#[test]
+fn layering_escapes_change_free_positions_deterministically() {
+    for n_layers in [2, 4] {
+        let mut pads = fan_pads();
+        pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
+        let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
+        let e = escape_json(&m, &loop_opts(r#""loop_judge": "local""#));
+        let n = |k: &str| e[k].as_f64().unwrap_or_else(|| panic!("{k} in {e}"));
+        assert_eq!(e["mode"], "layering", "{e}");
+        assert!(n("escapes") > 0.0 && n("free_positions") > 0.0, "{n_layers} layers: {e}");
+        assert!(n("changed_positions") > 0.0, "{n_layers} layers, the escapes moved no free position: {e}");
+        assert!(n("work_share") <= 0.35 + 1e-9, "{n_layers} layers: {e}");
+        assert_eq!(e, escape_json(&m, &loop_opts(r#""loop_judge": "local""#)), "{n_layers} layers: deterministic per seed");
+        let t = escape_json(&m, &loop_opts(r#""loop_judge": "local", "escape": "ties""#));
+        assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, escape = ties: {t}");
+    }
+}
