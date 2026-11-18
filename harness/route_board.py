@@ -218,6 +218,9 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         "limit_cut": (outcome.time_limit or {}).get("cut"),
         "report_dir": str(outcome.report_dir) if outcome.report_dir else None,
     }
+    if outcome.profile:  # TW0 (TOPO_PROF=1): counters for tools/prof_table.py
+        from topor.run import _profile_facts
+        m["profile"] = _profile_facts(outcome)
     # M1 compass (toporlib.compass): per violation class predicted vs drawn vs KiCad DRC, per connection detour and
     # vias planned vs drawn; full table in <name>--compass.json, flat columns in the metrics
     try:

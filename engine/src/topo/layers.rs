@@ -643,6 +643,7 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
 /// Recompute the stretches, via slots and via counts of `rep` from changed labels `evl` (the P4
 /// label moves; the wires and their events are unchanged). O(events + passes).
 pub fn relabel(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
+    let _pg = super::prof::g(super::prof::K::Relabel);
     let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
     rep.stretches.clear();
     rep.events.clear();
@@ -663,6 +664,8 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
 /// [`assign`] with the drawing's packer: the labelling is then refined against capacity
 /// ([`refine`]) and the over-full edge-layers are counted.
 pub fn assign_with(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
+    let _pg = super::prof::g(super::prof::K::AssignWith);
+    super::prof::units(super::prof::K::AssignWith, st.wires.iter().filter(|w| w.alive).count());
     if st.proj.n_layers == 2 {
         assign_two(st, smd_layer, p, packer)
     } else {

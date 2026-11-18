@@ -182,6 +182,7 @@ pub fn trunk_of(st: &State, v: VertId) -> Option<(WireId, usize)> {
 /// branches ending on a turn of a gone wire, then theirs), not including `gone` itself.
 /// O(rounds x wires).
 pub fn dependents(st: &State, gone: &BTreeSet<WireId>) -> BTreeSet<WireId> {
+    let _pg = super::prof::g(super::prof::K::Dependents);
     let mut all = gone.clone();
     loop {
         let turns: BTreeSet<VertId> = all.iter().flat_map(|&w| st.wires[w].turns.iter().map(|t| t.1)).collect();
@@ -203,6 +204,7 @@ pub fn dependents(st: &State, gone: &BTreeSet<WireId>) -> BTreeSet<WireId> {
 /// Take wire `w` out of the state: its turns go with it, and a junction end of `w` drops the
 /// turn from its trunk (the trunk runs straight again).
 pub fn remove_wire(st: &mut State, w: WireId) {
+    let _pg = super::prof::g(super::prof::K::RemoveWire);
     for end in [(st.wires[w].pa, st.wires[w].a), (st.wires[w].pb, st.wires[w].b)] {
         if end.0 == NO_OBS {
             if let Some((t, _)) = trunk_of(st, end.1) {
@@ -218,6 +220,7 @@ pub fn remove_wire(st: &mut State, w: WireId) {
 
 /// The junctions of the alive wires: `(branch, end 0|1, trunk, traversal, vertex)`.
 pub fn junctions(st: &State) -> Vec<(WireId, usize, WireId, usize, VertId)> {
+    let _pg = super::prof::g(super::prof::K::Junctions);
     let mut turn_at: BTreeMap<VertId, (WireId, usize)> = BTreeMap::new();
     for (i, w) in st.wires.iter().enumerate().filter(|(_, w)| w.alive) {
         for &(k, v) in &w.turns {

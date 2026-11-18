@@ -120,6 +120,9 @@ class RunOutcome:
     time_limit: dict | None = None
     #: M1 compass (toporlib.compass.build): per violation class predicted vs drawn vs KiCad DRC, per connection
     compass: dict | None = None
+    #: TW0 profile (TOPO_PROF=1 only): the engine's counters (engine ``topo::prof::report``) plus the plugin's own
+    #: ``python`` split {before_s: run start to the engine job, job_s: the job, after_s: job end to run end, total_s}
+    profile: dict | None = None
 
 
 class _Log:
@@ -479,13 +482,25 @@ def _via_relax_notes(rr: dict) -> list:
     return [f"via relaxation: {v}"] if v and v not in ("off", "not run") else []
 
 
+def _profile_facts(out: RunOutcome) -> dict | None:
+    """TW0: the engine's profile with the plugin's python split completed (after_s, total_s); None without one. O(1)."""
+    p = out.profile
+    if not p:
+        return None
+    py = dict(p.get("python") or {})
+    if "before_s" in py:
+        py["total_s"] = round(out.wall_s, 3)
+        py["after_s"] = round(max(0.0, out.wall_s - py["before_s"] - py.get("job_s", 0.0)), 3)
+    return {**p, "python": py}
+
+
 def _facts_result(status: str, out: RunOutcome, report: dict | None) -> dict:
-    slim = {k: v for k, v in (report or {}).items() if k != "items"}
+    slim = {k: v for k, v in (report or {}).items() if k not in ("items", "profile")}
     return {"status": status, "routed": out.routed, "total": out.total, "stop_reason": out.stop_reason,
             "cancelled": out.cancelled, "rounds": out.rounds, "router_s": round(out.router_s, 3), "router_cpu_s": round(out.router_cpu_s, 3),
             "wall_s": round(out.wall_s, 3), "items": len(out.items), "ripped": len(out.ripped), "drc": out.drc,
             "findings": [asdict(f) for f in out.findings], "route": slim, "via_fallback": out.via_fallback,
-            "time_limit": out.time_limit, "compass": out.compass,
+            "time_limit": out.time_limit, "compass": out.compass, "profile": _profile_facts(out),
             "pcb_copy": str(out.pcb_copy) if out.pcb_copy else None}
 
 
@@ -1059,6 +1074,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             log.line(f"engine finished {time.monotonic() - limit_at:.1f} s (wall clock) after the "
                      f"{'soft' if soft_limit else 'hard'} time limit")
         res = json.loads(job.wait())  # a panicked job raises RuntimeError("routing thread panicked: ...")
+        if res.get("profile"):  # TW0: only with TOPO_PROF set in the engine's environment
+            res["profile"]["python"] = {"before_s": round(job_t0 - t0, 3), "job_s": round(time.monotonic() - job_t0, 3)}
         note_limit(res)
         items = res.get("items") or []
         if geometry == "segments":
@@ -1095,6 +1112,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         budget_s=NO_BUDGET_S if no_budget else budget, loop_cap=0,
         reach_nm=_zone_reach(model), clearance_nm=clearance)
     rr = loop.router_report or {}
+    out.profile = rr.get("profile")
     out.items = [{**it, "group": it.get("group") or "topor"} for it in loop.items]
     out.routed, out.total = int(rr.get("routed", 0)), int(rr.get("connections_total", 0))
     out.stop_reason = rr.get("stop_reason")

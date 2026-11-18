@@ -648,11 +648,13 @@ impl<'p> State<'p> {
 
     /// The routed part of the state ([`Topology`]).
     pub fn topology(&self) -> Topology {
+        let _pg = super::prof::g(super::prof::K::TopologyClone);
         Topology { passes: self.passes.clone(), edge_order: self.edge_order.clone(), wires: self.wires.clone(), tri_trav: self.tri_trav.clone(), ends: self.ends.clone(), pass_w: self.pass_w.clone() }
     }
 
     /// Put a [`Topology`] of the same projection back (the wires, their passes in edge order).
     pub fn restore(&mut self, t: Topology) {
+        let _pg = super::prof::g(super::prof::K::StateRestore);
         assert_eq!(t.edge_order.len(), self.edge_order.len(), "a topology of the same projection");
         (self.passes, self.edge_order, self.wires, self.tri_trav, self.ends, self.pass_w) = (t.passes, t.edge_order, t.wires, t.tri_trav, t.ends, t.pass_w);
     }
