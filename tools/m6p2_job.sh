@@ -180,7 +180,8 @@ case ${1:-} in
     case ${2:-} in
       base) u m6b-d 8 unit 8 D ;;
       tip) u m6t-tests 4 tests; u m6t-d 8 unit 8 D; u m6t-h1 8 unit 8 H1; u m6t-repro 1 repro ;;
-      *) echo "main base|tip" >&2; exit 2 ;;
+      r3) u m6r3-tests 4 tests3; u m6r3-esp 1 task D b esp ;;
+      *) echo "main base|tip|r3" >&2; exit 2 ;;
     esac
     wait; note "all done" ;;
   *) sed -n 2,9p "$0"; exit 2 ;;
