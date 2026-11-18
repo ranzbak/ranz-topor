@@ -75,7 +75,7 @@ tests() {
   sub 'n - from >= window && checks[from..n].iter().sum::<usize>() >= 2' 'n - from >= window' | mut m4_stable_no_checks $T "${LIB[@]}"
   sub 'let from = gain[..n].iter().rposition(|&x| x).map_or(0, |i| i + 1);' 'let from = n.saturating_sub(window);' | mut m9_checks_in_window $T "${LIB[@]}"
   sub 'view.rows[i].2.compat == compat && view.rows[i].2.fp != my_fp' 'view.rows[i].2.compat == compat' | mut m5_restart_own_state $O "${LIB[@]}"
-  sub 'if gaining && !duplicate {' 'if false {' | mut m6_cut_gaining $O "${LIB[@]}"
+  sub 'if !stalled && gaining && !duplicate {' 'if false {' | mut m6_cut_gaining $O "${LIB[@]}"
   sub 'for &(origin, key) in rows.iter().take(quota) {' 'for &(origin, key) in rows.iter().take(1) {' | mut m7_one_best $C --lib -- topo::core::tests::the_four_bests_rows
   sub 'let w = if cands.contains(&origin) && free(&origin) == 0 { Some(origin) } else {' 'let w = if false { Some(origin) } else {' | mut m8_not_origin $C --lib -- topo::core::tests::the_four_bests_rows
   sub 'let w = if cands.contains(&origin) && free(&origin) == 0 { Some(origin) } else {' 'let w = if cands.contains(&origin) { Some(origin) } else {' | mut m10_origin_serial $C --lib -- topo::core::tests::the_four_bests_rows

@@ -232,7 +232,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     }
     let mut coord = Coord::new(ctl, n, obj, opts.draw_candidates);
     if opts.opt_loop == "topor" {
-        coord = coord.with_table(super::table::SharedTable::new(n, opts.variants, obj, opts.loop_stable_window.max(1)));
+        // stable_gain_pct = 0: no gain is below 0 %, so the table is never stable (as the run's meter)
+        let window = if opts.stable_gain_pct <= 0.0 { usize::MAX } else { opts.loop_stable_window.max(1) };
+        coord = coord.with_table(super::table::SharedTable::new(n, opts.variants, obj, window));
     }
     let (mut outs, skipped) = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
     if outs.is_empty() {

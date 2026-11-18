@@ -119,14 +119,14 @@ fn check(mode: Mode, clock: Clock) {
     assert!(st.is_some_and(|s| s == n) && !r.timed_out, "{tag}: {n} {st:?}");
     no_budget_warning(&r);
     if mode == Mode::Dialog {
-        // TW3: the dialog's loop has no cycle cap (rounds = 10 is not obeyed); stable needs two
-        // period checks (each at least restart_min_cycles = 8 cycles), so it comes after cycle 10
-        let (r, running) = run(&opts(mode, clock, r#", "topo_rounds": 10"#), Act::OkAtStable, clock);
+        // TW3: the dialog's loop has no cycle cap (rounds = 3 is not obeyed); stable needs the
+        // four bests unchanged for loop_stable_window = 8 cycles, so it comes after cycle 3
+        let (r, running) = run(&opts(mode, clock, r#", "topo_rounds": 3"#), Act::OkAtStable, clock);
         let (n, st, by) = loop_line(&r);
         assert!(running, "{tag}: OK reached a running engine");
         assert_eq!(r.stop_reason, "stable", "{tag}: {:?}", r.warnings);
         assert_eq!(by, "Cancel", "{tag}: the loop ended by the OK ({n} cycles, stable at {st:?})");
-        assert!(st.is_some_and(|s| s <= n) && n > 10, "{tag}: no cycle cap in the dialog: {n} {st:?}");
+        assert!(st.is_some_and(|s| s <= n) && n > 3, "{tag}: no cycle cap in the dialog: {n} {st:?}");
         assert!(!r.timed_out && r.converged, "{tag}");
         no_budget_warning(&r);
         assert!(r.routed > 0 && r.routed == r.connections_total, "{tag}: the stable board, drawn in full: {} of {}", r.routed, r.connections_total);
