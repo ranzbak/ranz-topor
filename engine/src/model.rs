@@ -1310,13 +1310,19 @@ pub struct Options {
     /// vertex goes where the straight leg keeps every rule and the side of every wire not drawn
     /// yet; `draw::Drawer::pull_taut`).
     pub draw_pull_taut: bool,
-    /// M3 (`[drawing] realise`): how the drawing realises the plan's topology. `"sequential"`
-    /// (default; the wires one by one, each against the copper drawn before it, through the
-    /// attempt ladder of `draw::Drawer::draw_wire`) or `"erbs"` (each run first as its extended
-    /// rubber band from the plan's spoke tips and stack radii, `topo::erbs`, independent of the
-    /// draw order, the wires in Staepelaere's precedes order; the old ladder only where the
-    /// checker rejects the band, counted).
+    /// M3, TW2 (`[drawing] realise`): how the drawing realises the plan's topology. `"erbs"`
+    /// (default since TW2; every run as its extended rubber band from the plan's spoke tips and
+    /// stack radii, `topo::erbs`; all bands checked together and the kept ones committed before
+    /// any wire is drawn, so the draw order decides nothing; the attempt ladder only for the runs
+    /// whose band is not kept, against every kept band, counted) or `"sequential"` (the wires one
+    /// by one, each against the copper drawn before it, through the attempt ladder of
+    /// `draw::Drawer::draw_wire`).
     pub realise: String,
+    /// TW2 (`[drawing] erbs_conflict_keep`): with realise = "erbs", which of two bands the joint
+    /// check finds too close stays ([`crate::topo::erbs::KeepMode`]): `"tier"` (default; the most
+    /// kept bands of the highest priority tier first, then of the next) or `"count"` (the most
+    /// kept bands). Ties by route order.
+    pub erbs_conflict_keep: String,
     /// M3 (`[drawing] erbs_length_weight`): with realise = "erbs", the graded price of an ERBS
     /// longer than its band: the drawing prices a legal ERBS of length `L` over a band of length
     /// `B` at `L (1 + k max(0, L/B - 1)^2)` and keeps it unless a legal sequential run is cheaper
@@ -1555,7 +1561,8 @@ impl Default for Options {
             bend_spacing_mm: 0.5,
             octi_room: true,
             draw_pull_taut: true,
-            realise: "sequential".into(),
+            realise: "erbs".into(),
+            erbs_conflict_keep: "tier".into(),
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
             bundle_pull: 0.3,
