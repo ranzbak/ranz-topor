@@ -5177,7 +5177,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // `rounds` is the work cap of the comparisons.
         let dialog = !(opts.stop_when_stable || opts.finish_when_stable);
         let params = LoopParams {
-            cycles: if dialog && opts.restart != "stall" && opts.restart != "off" { usize::MAX - 1 } else { opts.topo_rounds.max(1) },
+            // TW3: the dialog's loop has no cycle cap (OK / Cancel / the limit end it); `[run]
+            // stop_after = "plan"` (a plan-only debug run, nothing drawn) keeps rounds as its cap
+            cycles: if dialog && opts.restart != "stall" && opts.restart != "off" && opts.stop_after != "plan" { usize::MAX - 1 } else { opts.topo_rounds.max(1) },
             restart_after: opts.loop_restart,
             seed: seed_of(opts.seed, round, 5000),
             fluctuation: fluct0,
