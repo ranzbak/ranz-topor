@@ -174,6 +174,19 @@ fn force_off_leaves_no_reserved_copper() {
     }
 }
 
+/// Hook "fail via wire": a wire with vias fails before its first run with force off. Its reserved
+/// bands (every run) leave with it: no band copper is left that no wire owns, and the wire's
+/// bands are not counted as drawn.
+#[test]
+fn a_failed_via_wire_takes_its_reserved_bands_with_it() {
+    let r = route("erbs", "swap_vias", "octilinear", &[("allow_violations", serde_json::json!(false))], &["fail via wire"]);
+    let e = erbs(&r);
+    partition_holds(&e);
+    let failed = r.connections.iter().filter(|c| c.status != "routed").count();
+    assert!(failed >= 1, "the hook fails the via wires: {e:?}");
+    assert!(e.runs < e.bands, "the failed wires' bands are not drawn: {e:?}");
+}
+
 /// Lead decision (b) 2026-11-18: two bands too close only by a model gap up to
 /// `[drawing] erbs_gap_keep_max_mm` are both kept; the gap is a clearance violation of the band drawn
 /// second (reported, not hidden) instead of a forced run. 0 = the selector decides (one yields).

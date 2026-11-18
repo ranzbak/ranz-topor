@@ -941,6 +941,10 @@ pub struct Drawer<'a> {
     /// between its ends as its first sequential attempt (a competitor of another class, as the
     /// exact window search gave qmtech ADV_CLK). Always false in real runs.
     pub test_straight_seq: bool,
+    /// Test-only (hook "fail via wire"): the drawing of a wire with more than one run fails
+    /// before its first run, so its reserved bands are still in the index (TW2:
+    /// [`Drawer::draw_wire`] releases them). Always false in real runs.
+    pub test_fail_via_wire: bool,
     /// Round i: the class test's reference paths, built at the first competitor.
     class_ref: Option<ClassRef>,
     /// M3 length factor: every legal ERBS a sequential run was drawn against (wire, layer, ERBS
@@ -1038,6 +1042,7 @@ impl<'a> Drawer<'a> {
             test_no_sequential: false,
             test_no_class_keep: false,
             test_straight_seq: false,
+            test_fail_via_wire: false,
             class_ref: None,
             erbs_long: Vec::new(),
             force: false,
@@ -2859,6 +2864,9 @@ impl<'a> Drawer<'a> {
     }
 
     fn draw_wire_runs(&mut self, w: WireId, plan: &Plan, vias: &[(usize, Vec2, ViaSize)], ids: &mut Vec<usize>) -> WireOut {
+        if self.test_fail_via_wire && plan.layers.len() > 1 {
+            return WireOut { reason: "drawing: injected by the test hook (fail via wire)".to_string(), ..WireOut::default() };
+        }
         // 5.4 `[search] branch_relocate`: a junction point the plan moved splits the run it lies
         // in, like a via that keeps the layer (a zero-size via, never emitted).
         let split = self.split_at.get(&w).filter(|v| !v.is_empty()).cloned();
