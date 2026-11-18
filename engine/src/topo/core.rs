@@ -6017,10 +6017,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // geometry, the feedback did not rescue it) is drawn on its best geometry against all copper
     // drawn so far; the rules it breaks are recorded with it and priced by the `violation` factor.
     let mut n_forced = 0usize;
-    if super::ndprof::on() {
-        eprintln!("NDPROF before never drop:{}", super::ndprof::diff(&[(0, 0.0); super::ndprof::N], &super::ndprof::snap()));
-    }
-    let nd_all = super::ndprof::snap();
     if opts.allow_violations {
         dr.force = true;
         ctl.test_point("never drop");
@@ -6041,14 +6037,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 continue;
             }
             // Its vias went with its failed drawing: placed again (legal sites first).
-            let nd0 = super::ndprof::snap();
-            let nd_t = Instant::now();
             let mut ids: Vec<usize> = Vec::new();
             dr.via_viol.remove(&w);
-            let nd_pv = super::ndprof::t(super::ndprof::PLACE_VIAS);
-            let vs_r = dr.place_vias(w, &plans[&w], &mut ids);
-            drop(nd_pv);
-            let vs = match vs_r {
+            let vs = match dr.place_vias(w, &plans[&w], &mut ids) {
                 Ok(v) => v,
                 Err(_) => {
                     for id in ids {
@@ -6061,23 +6052,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             if let Some((key, q)) = joint_of(w, &drawn, &plans) {
                 dr.end_at.insert(key, q);
             }
-            let nd_dw = super::ndprof::t(super::ndprof::DRAW_WIRE);
             let wo = dr.draw_wire(w, &plans[&w], &vs, &mut ids);
-            drop(nd_dw);
-            if super::ndprof::on() {
-                eprintln!(
-                    "NDPROF wire {w} net {} passes {} layers {} vias {} ok {} viol {} t {:.3} reason {:?}:{}",
-                    st.wires[w].net,
-                    st.wires[w].passes.len(),
-                    plans[&w].layers.len(),
-                    vs.len(),
-                    wo.ok,
-                    wo.viol.len(),
-                    nd_t.elapsed().as_secs_f64(),
-                    out[ci].reason.chars().take(90).collect::<String>(),
-                    super::ndprof::diff(&nd0, &super::ndprof::snap())
-                );
-            }
             if !wo.ok {
                 for id in ids {
                     dr.uncommit(id);
@@ -6094,9 +6069,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             drawn.insert(w, wo);
         }
         dr.force = false;
-    }
-    if super::ndprof::on() {
-        eprintln!("NDPROF never drop total ({n_forced} forced):{}", super::ndprof::diff(&nd_all, &super::ndprof::snap()));
     }
     // TW2: how the drawing drew each run (`realise = "erbs"`): the ERBS line and result.json route.erbs.
     let mut erbs_runs = (opts.realise == "erbs" && erbs_err.is_none()).then(|| super::joint::tally(drawn.values(), &dr.joint, &opts.erbs_conflict_keep));
