@@ -742,7 +742,7 @@ thread_local! {
 }
 
 impl<'a> Frame<'a> {
-    fn new(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], bottom: i32, price: f64) -> Self {
+    fn new(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], bottom: i32, price: f64, only: Option<&[bool]>) -> Self {
         let nl = st.proj.n_layers;
         let mut pass_k = vec![0; st.passes.len()];
         for wi in st.wires.iter().filter(|wi| wi.alive) {
@@ -752,7 +752,7 @@ impl<'a> Frame<'a> {
         }
         let pr = st.proj;
         let mut item0 = vec![PackItem::default(); st.passes.len()];
-        for (w, wi) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
+        for (w, wi) in st.wires.iter().enumerate().filter(|&(w, wi)| wi.alive && only.is_none_or(|o| o.get(w).copied().unwrap_or(false))) {
             for (k, &p) in wi.passes.iter().enumerate() {
                 let e = st.passes[p].edge;
                 item0[p] = PackItem { net: wi.net, w: st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, dirs[w][k]), disc: [0.0; 2] };
@@ -1211,17 +1211,27 @@ impl<'a> CapModel<'a> {
     /// The model of the labelling `evl` (events per wire). O(passes x margin lookups + vias x
     /// interval length x layers).
     pub fn new(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
-        Self::build(st, packer, dirs, evl, bottom, price, false)
+        Self::build(st, packer, dirs, evl, bottom, price, false, None)
+    }
+
+    /// loop-local: the per-edge model of the wires `only[w]` alone (the other wires' passes are
+    /// not laid out and pack nothing). Exact on every edge whose passes all belong to those wires;
+    /// `dirs` needs only their directions ([`Packer::taut_dirs_only`]). O(their passes x margin
+    /// lookups + their vias x interval x layers) plus O(passes) for the arrays.
+    pub fn new_only(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, only: &[bool]) -> Self {
+        Self::build(st, packer, dirs, evl, bottom, price, false, Some(only))
     }
 
     /// As [`CapModel::new`], priced by the per-layer cuts when `[capacity] model = "cuts"`
     /// ([`Packer::cuts`]; the P3 refinement). A sheet build that fails is recorded in
     /// [`super::cutmodel::CutCtx::problems`] and the model stays per-edge.
     pub fn new_cut(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64) -> Self {
-        Self::build(st, packer, dirs, evl, bottom, price, true)
+        Self::build(st, packer, dirs, evl, bottom, price, true, None)
     }
 
-    fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool, only: Option<&[bool]>) -> Self {
+        let used = |w: WireId| only.is_none_or(|o| o.get(w).copied().unwrap_or(false));
         let nl = st.proj.n_layers;
         let nw = st.wires.len();
         let a = Arrays {
@@ -1235,7 +1245,7 @@ impl<'a> CapModel<'a> {
             sq: vec![0.0; st.proj.edges.len() * nl],
             log: None,
         };
-        let mut m = CapModel { fx: Frame::new(st, packer, dirs, bottom, price), a, cut: None, evs: Vec::new(), pending: Vec::new() };
+        let mut m = CapModel { fx: Frame::new(st, packer, dirs, bottom, price, only), a, cut: None, evs: Vec::new(), pending: Vec::new() };
         if let Some(ctx) = packer.cuts.as_ref().filter(|_| cuts) {
             match ctx.sheets(st) {
                 Ok(sh) => {
@@ -1247,7 +1257,7 @@ impl<'a> CapModel<'a> {
         }
         let mut ch = Vec::new();
         for (w, ev) in evl.iter().enumerate().take(nw) {
-            if st.wires[w].alive {
+            if st.wires[w].alive && used(w) {
                 let iv = via_ranges(ev, packer.via_between).0;
                 let (fx, mut ms) = m.master();
                 let ks = fx.default_ks(&mut ms, w, ev, &iv, None);
@@ -1262,7 +1272,7 @@ impl<'a> CapModel<'a> {
             ms.flush(fx);
         }
         for (w, ev) in evl.iter().enumerate().take(nw) {
-            if st.wires[w].alive && !m.via_iv[w].is_empty() {
+            if st.wires[w].alive && used(w) && !m.via_iv[w].is_empty() {
                 let all: Vec<usize> = (0..m.via_iv[w].len()).collect();
                 let (fx, mut ms) = m.master();
                 fx.optimise(&mut ms, w, ev, &all);
@@ -1514,8 +1524,32 @@ pub fn refine(
     unary: &(dyn Fn(WireId, usize, usize) -> f64 + Sync),
     p: &RefineParams,
 ) -> RefineStats {
+    refine_only(st, packer, dirs, evl, mask, partner, bottom, trans, unary, p, None)
+}
+
+/// [`refine`] over the per-edge model of the wires `only[w]` alone ([`CapModel::new_only`];
+/// loop-local: the events the caller lets move belong to them, the others are held by `mask`).
+/// No final measure is handed on (the model is not the board's). `only = None` = [`refine`].
+#[allow(clippy::too_many_arguments)]
+pub fn refine_only(
+    st: &State,
+    packer: &Packer,
+    dirs: &[Vec<Vec2>],
+    evl: &mut [Vec<LEv>],
+    mask: &[Vec<u64>],
+    partner: &[Vec<Option<(WireId, usize)>>],
+    bottom: i32,
+    trans: &(dyn Fn(usize, usize) -> f64 + Sync),
+    unary: &(dyn Fn(WireId, usize, usize) -> f64 + Sync),
+    p: &RefineParams,
+    only: Option<&[bool]>,
+) -> RefineStats {
     // Switched off: the model is built with a unit price only to count the over-full edge-layers.
-    let mut cm = CapModel::new_cut(st, packer, dirs, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
+    let price = if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 };
+    let mut cm = match only {
+        Some(o) => CapModel::new_only(st, packer, dirs, evl, bottom, price, o),
+        None => CapModel::new_cut(st, packer, dirs, evl, bottom, price),
+    };
     let mut stats = RefineStats { before: cm.overfull(), ..RefineStats::default() };
     if p.overflow_mm <= 0.0 {
         stats.after = stats.before;
@@ -1524,7 +1558,7 @@ pub fn refine(
     // The cut model may add vias when its setting says so (`[capacity] cut_vias`).
     let add_vias = p.add_vias || (cm.cut.is_some() && packer.cuts.as_ref().is_some_and(|c| c.add_vias));
     let ctx = Around { st, mask, partner, bottom, trans, unary, add_vias, max_evals: p.max_evals };
-    if cm.cut.is_some() || p.reference {
+    if cm.cut.is_some() || p.reference || only.is_some() {
         refine_reference(&ctx, &mut cm, evl, &mut stats);
     } else if shadow::ON.load(std::sync::atomic::Ordering::Relaxed) {
         let mut evl_ref = evl.to_vec();
@@ -1548,7 +1582,7 @@ pub fn refine(
     }
     stats.after = cm.overfull();
     stats.memo = memo_hash(&cm.a.end_sites);
-    if cm.cut.is_none() {
+    if cm.cut.is_none() && only.is_none() {
         stats.fin = Some(FinalCap { packer: packer as *const Packer as usize, bottom, price: cm.fx.price.to_bits(), key: cap_key(st, evl), viol: cm.violations() });
     }
     stats

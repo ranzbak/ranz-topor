@@ -4,20 +4,35 @@
 //! report bit for bit as no cache, over a sequence of states and labellings in which each of the
 //! inputs it keys on changes alone (labels, a wire's path, a neighbour's polyline, the crossed
 //! chords of an end site, the parameters).
+//!
+//! Step B: the local layering ([`layers::assign_local`]) holds every wire outside the free set,
+//! separates (or counts as unlayerable) every crossing of a free wire with a held one, equals the
+//! whole-board layering when every wire is free, and leaves a two-layer board's vias as they were
+//! for a null move; on a routed board the local judge layers the whole board only a few times
+//! per cycle, and the shadow check compares it with the whole-board judge.
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use topor_engine::model::BoardModel;
 use topor_engine::topo::board::{self, Board, BuildOpts};
 use topor_engine::topo::init::{Conn, InitWeights};
-use topor_engine::topo::layers::{self, LayerParams, LayerReport, StretchCache};
-use topor_engine::topo::state::State;
+use topor_engine::control::RunControl;
+use topor_engine::model::Options;
+use topor_engine::route::route_with;
+use topor_engine::topo::layers::{self, Held, LayerParams, LayerReport, StretchCache};
+use topor_engine::topo::state::{State, WireId};
 
 const MM: f64 = 1e6;
 
-/// Two-layer board `w` x `h` mm with SMD rect pads `(ref, net, x, y, w, h, layer)` (layer 0 =
-/// F.Cu, 2 = B.Cu, 99 = both) and nets 1..=`nets` (as tests/topo_d6b.rs).
-fn board(w: f64, h: f64, nets: usize, pads: &[(&str, i32, f64, f64, f64, f64, u32)]) -> BoardModel {
+/// A board `w` x `h` mm with `n_layers` copper layers (2, or 4 with In1.Cu and In2.Cu), SMD rect
+/// pads `(ref, net, x, y, w, h, layer)` (layer 0 = F.Cu, 2 = B.Cu, 99 = both) and nets
+/// 1..=`nets` (as tests/topo_d6b.rs).
+fn board_layers(w: f64, h: f64, nets: usize, pads: &[(&str, i32, f64, f64, f64, f64, u32)], n_layers: usize) -> BoardModel {
+    let layers = if n_layers == 4 {
+        r#"{"id":0,"name":"F.Cu","kind":"signal"},{"id":4,"name":"In1.Cu","kind":"signal"},{"id":6,"name":"In2.Cu","kind":"signal"},{"id":2,"name":"B.Cu","kind":"signal"}"#
+    } else {
+        r#"{"id":0,"name":"F.Cu","kind":"signal"},{"id":2,"name":"B.Cu","kind":"signal"}"#
+    };
     let p = |v: f64| (v * MM) as i64;
     let c = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
     let segs: Vec<String> = (0..4)
@@ -46,7 +61,7 @@ fn board(w: f64, h: f64, nets: usize, pads: &[(&str, i32, f64, f64, f64, f64, u3
     let nets: Vec<String> = (1..=nets).map(|i| format!(r#"{{"code":{i},"name":"N{i}"}}"#)).collect();
     let s = format!(
         r#"{{"units":"nm","board":"t",
-            "layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],
+            "layers":[{layers}],
             "nets":[{}],
             "pads":[{}],"outline":[{}],
             "rules":{{"default":{{"clearance":200000,"width":250000}},"min_connection":127000,"max_error":5000,"per_net":{{}}}}}}"#,
@@ -80,6 +95,18 @@ fn shuffled(base: &LayerReport, rng: &mut ChaCha8Rng, flip: f64) -> Vec<Vec<(usi
 /// A crossing fan: three west-east nets and three north-south nets on a 2-layer board, plus a
 /// later net D that shares the edges of the A wires (their polylines shift when it is laid).
 fn fan() -> (BoardModel, Board) {
+    fan_layers(2)
+}
+
+/// [`fan`] on `n_layers` copper layers.
+fn fan_layers(n_layers: usize) -> (BoardModel, Board) {
+    let m = board_layers(30.0, 20.0, 8, &fan_pads(), n_layers);
+    let b = board::build(&m, &BuildOpts { existing_vias: true, keepouts: true, copper_shapes: true, ..BuildOpts::default() }).unwrap();
+    (m, b)
+}
+
+/// The fan's pads.
+fn fan_pads() -> Vec<(&'static str, i32, f64, f64, f64, f64, u32)> {
     let mut pads = vec![
         ("A1", 1, 2.0, 6.0, 1.0, 1.0, 0),
         ("A2", 1, 28.0, 6.0, 1.0, 1.0, 0),
@@ -99,9 +126,7 @@ fn fan() -> (BoardModel, Board) {
     // A foreign pad on each layer in the middle (no via site there).
     pads.push(("K0", 8, 12.5, 10.0, 2.0, 2.0, 0));
     pads.push(("K1", 8, 19.5, 8.0, 2.0, 2.0, 2));
-    let m = board(30.0, 20.0, 8, &pads);
-    let b = board::build(&m, &BuildOpts { existing_vias: true, keepouts: true, copper_shapes: true, ..BuildOpts::default() }).unwrap();
-    (m, b)
+    pads
 }
 
 /// Step A (Rule 9b): over a sequence of states (wires laid one by one, a wire taken out and laid
@@ -262,4 +287,175 @@ fn stretch_cache_sees_each_input_alone() {
         }
     }
     assert_eq!(found, ["net", "tris", "turns", "ev", "params", "poly"], "inputs whose change was seen");
+}
+
+/// The fan's wires laid (A, B, C, F, E, G) on `n_layers`.
+fn laid(n_layers: usize) -> (BoardModel, &'static Board, State<'static>) {
+    let (m, b) = fan_layers(n_layers);
+    let b: &'static Board = Box::leak(Box::new(b));
+    let wt = InitWeights::default();
+    let mut st = State::new(&b.proj);
+    for (net, ra, rb) in [(1, "A1", "A2"), (2, "B1", "B2"), (3, "C1", "C2"), (6, "F1", "F2"), (5, "E1", "E2"), (7, "G1", "G2")] {
+        st.route_conn(&conn(&m, b, net, ra, rb), &wt, 1.0).expect("routed");
+    }
+    (m, b, st)
+}
+
+/// The free set of a move (the core's rule, depth 1): the new wires, the different-net wires the
+/// gone ones crossed in `prev`, and the different-net wires the new ones cross.
+fn free_of(st: &State, prev: &LayerReport, gone: &[WireId], new: &[WireId]) -> Vec<bool> {
+    let mut free = vec![false; st.wires.len()];
+    for &n in new {
+        free[n] = true;
+        for x in st.crossings(n) {
+            if st.wires[x.other].net != st.wires[n].net {
+                free[x.other] = true;
+            }
+        }
+    }
+    for &o in gone {
+        for &(p, _) in prev.partner[o].iter().flatten() {
+            if st.wires[p].alive && st.wires[p].net != st.wires[o].net {
+                free[p] = true;
+            }
+        }
+    }
+    free
+}
+
+/// Checks the local layering `loc` of `st` against `prev` (the layering before the move) for the
+/// free set `free`: held wires keep events and masks (and partners among held wires), every
+/// crossing of a free wire with a held one is on two layers or unlayerable.
+fn check_local(st: &State, prev: &LayerReport, loc: &LayerReport, free: &[bool], what: &str) -> usize {
+    let held = |w: WireId| st.wires[w].alive && !free.get(w).copied().unwrap_or(true);
+    let mut links = 0usize;
+    for w in (0..st.wires.len()).filter(|&w| held(w)) {
+        assert_eq!(loc.events[w], prev.events[w], "{what}: held wire {w} keeps its events");
+        assert_eq!(loc.mask[w], prev.mask[w], "{what}: held wire {w} keeps its masks");
+        for (i, p) in prev.partner[w].iter().enumerate() {
+            if let Some((o, _)) = p.filter(|&(o, _)| held(o)) {
+                assert_eq!(loc.partner[w][i], *p, "{what}: held wire {w} event {i} keeps its held partner {o}");
+            }
+        }
+    }
+    let unl = |a: WireId, c: WireId| loc.unlayerable_w.contains(&(a.min(c), a.max(c)));
+    for w in (0..st.wires.len()).filter(|&w| st.wires[w].alive && !held(w)) {
+        let mut to_held: Vec<WireId> = Vec::new();
+        for (i, p) in loc.partner[w].iter().enumerate() {
+            if let Some((h, j)) = p.filter(|&(h, _)| held(h)) {
+                links += 1;
+                to_held.push(h);
+                let (lw, lh) = (loc.events[w][i].2, loc.events[h][j].2);
+                assert!(lw != lh || unl(w, h), "{what}: free {w} event {i} and held {h} event {j} on layer {lw}");
+                assert_eq!(loc.partner[h][j], Some((w, i)), "{what}: the held event points back");
+            }
+        }
+        for x in st.crossings(w).into_iter().filter(|x| held(x.other) && st.wires[x.other].net != st.wires[w].net) {
+            assert!(to_held.contains(&x.other) || unl(w, x.other), "{what}: free {w} crosses held {} without a linked event", x.other);
+        }
+    }
+    assert_eq!(loc.same_layer, loc.unlayerable.len(), "{what}: every one-layer crossing is counted");
+    assert_eq!(loc.unlayerable.len(), loc.unlayerable_w.len(), "{what}: one wire pair per unlayerable crossing");
+    links
+}
+
+/// Step B: a move (B taken out and laid again along a costlier path) layered locally on 2 and 4
+/// layers holds the wires outside F, links every crossing of F with a held wire, and equals the
+/// whole-board layering when every wire is free.
+#[test]
+fn local_layering_holds_the_rest_and_equals_global_when_all_free() {
+    for n_layers in [2, 4] {
+        let (m, b, mut st) = laid(n_layers);
+        let smd = |o: usize| b.smd_layer(o);
+        let p = LayerParams { via_between: true, via_site_r: 0.5e6, ..LayerParams::default() };
+        let prev = layers::assign(&st, &smd, &p);
+        let wb = (0..st.wires.len()).find(|&w| st.wires[w].alive && st.wires[w].net == 2).unwrap();
+        topor_engine::topo::tree::remove_wire(&mut st, wb);
+        let n0 = st.wires.len();
+        st.route_conn(&conn(&m, b, 2, "B1", "B2"), &InitWeights::default(), 3.0).expect("B again");
+        let new: Vec<WireId> = (n0..st.wires.len()).collect();
+        let free = free_of(&st, &prev, &[wb], &new);
+        assert!(free.iter().filter(|&&f| f).count() < st.wires.iter().filter(|w| w.alive).count(), "{n_layers} layers: some wires held");
+        let loc = layers::assign_local(&st, &smd, &p, None, None, &Held { prev: &prev, free: &free });
+        let links = check_local(&st, &prev, &loc, &free, &format!("{n_layers} layers, B moved"));
+        assert!(links > 0, "{n_layers} layers: the move has crossings of free and held wires");
+        // F = every wire: the whole-board layering.
+        let all = vec![true; st.wires.len()];
+        let g = layers::assign(&st, &smd, &p);
+        let la = layers::assign_local(&st, &smd, &p, None, None, &Held { prev: &prev, free: &all });
+        assert_eq!(la.events, g.events, "{n_layers} layers: all free = global (events)");
+        assert_eq!((la.vias, la.unlayerable.len(), la.same_layer), (g.vias, g.unlayerable.len(), g.same_layer), "{n_layers} layers: all free = global (counts)");
+        assert_eq!(stretch_text(&la), stretch_text(&g), "{n_layers} layers: all free = global (stretches)");
+    }
+}
+
+/// Step B: a null move (nothing changed, F = one wire and its crossing partners) on two layers
+/// keeps the vias and the unlayerable crossings of the whole-board layering (the exact solve on
+/// F with the rest held cannot beat the whole-board optimum and has its labels to take), and
+/// holds the rest; on four layers it holds the rest.
+#[test]
+fn local_layering_of_a_null_move_changes_nothing() {
+    for n_layers in [2, 4] {
+        let (_m, b, st) = laid(n_layers);
+        let smd = |o: usize| b.smd_layer(o);
+        let p = LayerParams { via_between: true, via_site_r: 0.5e6, ..LayerParams::default() };
+        let prev = layers::assign(&st, &smd, &p);
+        let mut links = 0;
+        for w in (0..st.wires.len()).filter(|&w| st.wires[w].alive) {
+            let free = free_of(&st, &prev, &[w], &[w]);
+            let loc = layers::assign_local(&st, &smd, &p, None, None, &Held { prev: &prev, free: &free });
+            links += check_local(&st, &prev, &loc, &free, &format!("{n_layers} layers, null move of {w}"));
+            if n_layers == 2 {
+                assert_eq!((loc.vias, loc.unlayerable.len()), (prev.vias, prev.unlayerable.len()), "null move of wire {w}");
+            }
+        }
+        // F holds every crossing partner of the moved wire, so links to held wires come only
+        // from the partners' own crossings.
+        eprintln!("{n_layers} layers: null moves, {links} links to held wires");
+    }
+}
+
+/// The options of a short TopoR loop on the fan (`extra`: JSON fields).
+fn loop_opts(extra: &str) -> Options {
+    let mut o: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 3, "runs": 1, "seed": 3}"#).unwrap();
+    let more: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&format!("{{{extra}}}")).unwrap();
+    o.extend(more);
+    Options::from_json(&serde_json::Value::Object(o).to_string()).unwrap()
+}
+
+/// The loop judge's report line: (whole-board layerings per cycle, local layerings per cycle, the
+/// line).
+fn judge_line(m: &BoardModel, o: &Options) -> (f64, f64, String) {
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let r = route_with(m, o, &ctl);
+    let l = r.warnings.iter().find(|w| w.starts_with("TopoR loop judge")).unwrap_or_else(|| panic!("judge line: {:?}", r.warnings)).clone();
+    let num = |key: &str| -> f64 {
+        let i = l.find(key).unwrap_or_else(|| panic!("{key} in {l}"));
+        l[..i].trim_end().rsplit(' ').next().unwrap().parse().unwrap()
+    };
+    (num(" whole-board layerings"), num(" local layerings"), l)
+}
+
+/// Step B (acceptance counter): on the fan with its moves (2 and 4 layers, a three-pad net for a
+/// junction), the local judge layers the whole board at most 4 times per cycle and every re-lay
+/// locally; the global judge layers the whole board per re-lay; the shadow check judges each
+/// move both ways and reports the comparison.
+#[test]
+fn local_judge_layers_the_board_a_few_times_per_cycle() {
+    for n_layers in [2, 4] {
+        let mut pads = fan_pads();
+        pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
+        let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
+        let (g, gl, lg) = judge_line(&m, &loop_opts(r#""loop_judge": "global""#));
+        let (l, ll, ln) = judge_line(&m, &loop_opts(r#""loop_judge": "local""#));
+        assert!(l <= 4.0, "{n_layers} layers, local: {ln}");
+        assert!(ll > 0.0, "{n_layers} layers, local re-lays: {ln}");
+        assert!(gl == 0.0 && g > l, "{n_layers} layers, global: {lg} vs local {ln}");
+        assert!(lg.contains("loop_judge = \"global\"") && ln.contains("loop_judge = \"local\""));
+        let (_, _, sh) = judge_line(&m, &loop_opts(r#""loop_judge": "local", "loop_shadow": 1"#));
+        eprintln!("{n_layers} layers:\n  {lg}\n  {ln}\n  {sh}");
+        assert!(sh.contains("shadow check ([optimize] loop_shadow = 1)") && sh.contains("kept alike"), "{sh}");
+    }
 }

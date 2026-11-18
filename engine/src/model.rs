@@ -1134,6 +1134,21 @@ pub struct Options {
     /// instead of building the model again from the same layers (per-edge model; the cut model
     /// always builds). Default true; false = the measure before par-refine.
     pub measure_reuse: bool,
+    /// `[optimize] loop_judge` (loop-local, docs/dev/design/loop-local.md): how the TopoR loop
+    /// prices a re-lay's layering. `"local"` (default) = the moved wires and the wires they cross
+    /// are laid on the layers again, every other wire keeps its layers, and the predicted
+    /// violations change by what changes on the edges they pass (Dayan 1997 pp. 55-57); the whole
+    /// board is layered once per cycle (stage 2). `"global"` = every re-lay layers the whole board
+    /// (the behaviour before loop-local). The cut capacity model always judges globally.
+    pub loop_judge: String,
+    /// `[optimize] loop_shadow` (diagnostic, loop-local): every k-th locally judged re-lay is also
+    /// judged by the whole board, and the two are compared (keep decision, graded violations, vias,
+    /// unlayerable crossings) in the loop's report; the local judgement is kept. 0 = off (default,
+    /// no cost).
+    pub loop_shadow: usize,
+    /// `[optimize] local_depth` (loop-local): the rings of crossing partners round the moved wires
+    /// laid again with them (1 = the wires they cross; 2 = also the wires those cross).
+    pub local_depth: usize,
     /// Tests (engine only): every refinement epoch evaluates at least this many candidates, also
     /// past a kept one ([`crate::topo::refine_par::lanes::with_window`]); 0 = off.
     pub refine_test_window: usize,
@@ -1516,6 +1531,9 @@ impl Default for Options {
             refine_lanes: 0,
             refine_reference: false,
             measure_reuse: true,
+            loop_judge: "local".into(),
+            loop_shadow: 0,
+            local_depth: 1,
             refine_test_window: 0,
             loop_crossing: 0.25,
             crossing_vias: "crossing".into(),

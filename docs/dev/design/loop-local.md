@@ -1,6 +1,7 @@
 # loop-local: price a TopoR-loop re-lay locally, layer the whole board once per cycle
 
-Branch `loop-local` (off main 2f5a61ae). Evidence: scratch/agent-wt/reports/loop-profile-20261118.md
+Branch `loop-local` (off main 2f5a61ae, merged with main 27c36203). Stage TW1 of the topor-way
+plan. Evidence: scratch/agent-wt/reports/loop-profile-20261118.md
 (F1, F1b, F9).
 
 ## What
@@ -44,6 +45,33 @@ crossing partners of O (before) and of N (after) plus their junction partners (t
    compares exact numbers and every archived variant has an exact measure.
    - `cuts` capacity model: falls back to the global judge, with one warning line.
    - `[optimize] loop_judge = "global"`: today's path, bit-identical.
+
+### Why a local re-solve, not the present layers (topor-way plan: "no layering inside a try")
+The search already prices a path against the present layers (5.2b: a crossing costs the via it
+implies against the crossed stretch's layer). That estimate cannot be the move's price:
+- the gone wires O have no layers left, and the new wires N have none yet;
+- 5.2c (Polubasov 2010 «Оптимизация расслоения», figs 4-5) showed the board decides the vias: a
+  detour pays off when a wire it crosses then changes layer and loses a via. That gain lives in
+  the labels of the crossing partners T, and only a solve that may relabel T sees it.
+So the try lays out F = N ∪ T again, with every other wire held. The solve is the same exact or
+greedy solver on F's events only, with O(F events + the local model) work instead of O(board).
+It is not a whole-board layering inside a try. The whole-board layering stays once per cycle.
+
+### Re-sync points
+`pred` after a kept local move is the sum of the local changes. A whole-board measure (a model
+build, no layering) replaces it before every whole-board comparison: `try_layers` (layer
+re-optimisation, floating up), the crossing pass, and the cycle's end (the offered variant).
+`pair_move` compares two local values on the same base, so it needs none.
+
+### Shadow check and the F expansion (lead 2026-11-18)
+`[optimize] loop_shadow = k` (default 0 = off, no cost): every k-th locally judged re-lay is
+also judged by the whole board (`assign_t` + `measure`). Per sample a `LOOPSHADOW` stderr line
+gives the change of the graded violations, the predicted count, the vias and the unlayerable
+crossings, both ways, and both keep decisions. The loop's report line sums them: the agreement
+rate and the mean |difference|. The graded F expansion (grow F by one ring of crossing partners
+when the local solve gives new unlayerable crossings) is built only if the shadow shows real
+disagreement on eprom/esp/qmtech. `[optimize] local_depth` (default 1) is the fixed-depth form of
+it: the rings of crossing partners of N.
 
 ## User rule 2026-11-18 (no worsen-veto)
 The local price adds no veto: the keep test is the one main uses (strict descent of the move's

@@ -2,7 +2,11 @@
 # looplocal_job.sh (branch loop-local, docs/dev/design/loop-local.md): copper and loop timing runs.
 #   looplocal_job.sh main CFG...         queue one hzq unit (1 thread) per board and pattern for each CFG, then wait
 #   looplocal_job.sh timing CFG...       exclusive timing: qmtech + esp per CFG, all at once (1 thread each), no hzq
-#   looplocal_job.sh task CFG KIND NAME  one run (inside a unit); KIND b = board, p = pattern
+#   looplocal_job.sh full CFG...         one hzq unit per board (eprom wiccon esp qmtech bornhack) per CFG, the loop's
+#                                        default cycles (quality ladder at 100 % drawn), then wait
+#   looplocal_job.sh tests               engine tests + clippy + plugin config tests + Step B mutants (one hzq unit, 4 threads)
+#   looplocal_job.sh both                tip: main G L SH + full G L + tests in one session
+#   looplocal_job.sh task CFG KIND NAME  one run (inside a unit); KIND b = board, p = pattern, f = board, default cycles
 # CFG: D (defaults), NOSC (TOPO_NOSCACHE=1: Step A cache off), G (optimize.loop_judge="global"), L (="local"),
 #      SH (local + shadow check every 8th re-lay).
 # Runs: seed 0, optimize.rounds=1 (one TopoR loop cycle) runs=1, 1 thread, --clock cpu --timeout 2400, TOPO_TIMES=1.
@@ -28,10 +32,11 @@ cfg() {
 task() {
   local c=$1 k=$2 n=$3; cfg $c
   local o=$R/$c/$k/$n; mkdir -p $o
-  local src; if [ $k = b ]; then src=$(board_path $n); else src=$R/pat/$n/problem/$n.kicad_pcb; fi
+  local src; if [ $k = p ]; then src=$R/pat/$n/problem/$n.kicad_pcb; else src=$(board_path $n); fi
+  local ROUNDS=(--set optimize.rounds=1); [ $k = f ] && ROUNDS=()
   local t0=$(date +%s)
   env RAYON_NUM_THREADS=1 TOPO_TIMES=1 "${ENVS[@]}" tools/route_board.sh "$src" $o --clock cpu --timeout 2400 --no-png \
-    --set optimize.rounds=1 --set optimize.runs=1 "${SETS[@]}" > $R/$c/$k-$n.log 2>&1
+    "${ROUNDS[@]}" --set optimize.runs=1 "${SETS[@]}" > $R/$c/$k-$n.log 2>&1
   note "task $c $k $n rc $? wall $(( $(date +%s) - t0 )) s"
   rm -rf $o/work $o/*/work 2>/dev/null
 }
@@ -52,6 +57,35 @@ for n in radii_patterns.PATTERNS:
 EOF
   note "gen rc $? patterns: $(ls $R/pat | tr '\n' ' ')"
 }
+mut() {  # name file test-args... ; the python snippet on stdin edits the file
+  local n=$1 f=$2; shift 2
+  cp $f $f.orig; python3 - $f; local pr=$?
+  if [ $pr -ne 0 ] || cmp -s $f $f.orig; then note "mutant $n: patch did not apply"; mv $f.orig $f; return; fi
+  ( cd $ROOT/engine && cargo test --release "$@" > $R/mut-$n.log 2>&1 ); local rc=$?
+  mv $f.orig $f
+  if [ $rc -ne 0 ]; then note "mutant $n: killed"; else note "mutant $n: SURVIVED"; fi
+}
+sub() { cat <<EOF
+import sys; p = sys.argv[1]; s = open(p).read(); a = '''$1'''; b = '''$2'''
+assert s.count(a) == 1, a; open(p, 'w').write(s.replace(a, b))
+EOF
+}
+tests() {
+  cd $ROOT/engine
+  { timeout 5400 cargo test --release --no-fail-fast 2>&1; echo "cargo test rc $?"
+    cargo clippy --release --all-targets 2>&1 | grep -E "^ +--> " | sort | uniq; echo "clippy rc ${PIPESTATUS[0]}"
+  } > $R/tests.log
+  grep -E "test result|rc |FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
+  cd $ROOT; CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_messages.py > $R/pytest.log 2>&1
+  note "pytest rc $?: $(tail -1 $R/pytest.log)"
+  local L=$ROOT/engine/src/topo/layers.rs
+  sub 'pi: (1 - lo.clamp(0, 1)) as u8, k, s }, i_o.map(|i| (o, i))));' 'pi: lo.clamp(0, 1) as u8, k, s }, i_o.map(|i| (o, i))));' | mut b1_two_orient $L --test loop_local
+  sub 'pi: (1 - lo.clamp(0, 1)) as u8, k, s }, i_o.map(|i| (o, i))));' 'pi: (1 - lo.clamp(0, 1)) as u8, k, s }, None));' | mut b2_two_link $L --test loop_local
+  sub 'let m = tm & !(1u64 << lo.clamp(0, 63));' 'let m = tm;' | mut b3_n_mask $L --test loop_local
+  sub 'unl.push(((a, b), h.prev.unlayerable[i]));' '' | mut b4_held_unl $L --test loop_local
+  sub 'out[st.passes[q].wire] = true;' 'let _ = q;' | mut b5_neigh $L --test loop_local
+  note "tests done"
+}
 case ${1:-} in
   task) shift; task "$@" ;;
   small) for n in eprom wiccon; do task $2 b $n; done; for n in $(ls $R/pat); do task $2 p $n; done ;;
@@ -61,6 +95,21 @@ case ${1:-} in
       for n in bornhack qmtech esp; do ( hzq run --threads 1 --name "$c-$n" -- bash $ROOT/tools/looplocal_job.sh task $c b $n; ) & sleep 1; done
       ( hzq run --threads 1 --name "$c-small" -- bash $ROOT/tools/looplocal_job.sh small $c ) & sleep 1
     done
+    wait; note "all done" ;;
+  full)
+    shift
+    for c in "$@"; do for n in bornhack qmtech esp wiccon eprom; do ( hzq run --threads 1 --name "$c-f-$n" -- bash $ROOT/tools/looplocal_job.sh task $c f $n; ) & sleep 1; done; done
+    wait; note "all done" ;;
+  tests) hzq run --threads 4 --name tests -- bash $ROOT/tools/looplocal_job.sh tests-in ;;
+  tests-in) tests ;;
+  both)
+    gen
+    for c in G L SH; do
+      for n in bornhack qmtech esp; do ( hzq run --threads 1 --name "$c-$n" -- bash $ROOT/tools/looplocal_job.sh task $c b $n; ) & sleep 1; done
+      ( hzq run --threads 1 --name "$c-small" -- bash $ROOT/tools/looplocal_job.sh small $c ) & sleep 1
+    done
+    for c in G L; do for n in bornhack qmtech esp wiccon eprom; do ( hzq run --threads 1 --name "$c-f-$n" -- bash $ROOT/tools/looplocal_job.sh task $c f $n; ) & sleep 1; done; done
+    ( hzq run --threads 4 --name tests -- bash $ROOT/tools/looplocal_job.sh tests-in ) & sleep 1
     wait; note "all done" ;;
   timing)
     shift

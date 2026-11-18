@@ -100,6 +100,23 @@ fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci
     }
 }
 
+/// loop-local (docs/dev/design/loop-local.md): the TopoR loop's deterministic work counters,
+/// summed over the run and read per cycle ([`super::optimise::CycleStats`]).
+#[derive(Default)]
+struct LoopCtr {
+    layer_global: std::cell::Cell<usize>,
+    measure_global: std::cell::Cell<usize>,
+    layer_local: std::cell::Cell<usize>,
+    local_free: std::cell::Cell<usize>,
+    local_model: std::cell::Cell<usize>,
+}
+
+impl LoopCtr {
+    fn add(c: &std::cell::Cell<usize>, n: usize) {
+        c.set(c.get() + n);
+    }
+}
+
 /// What happened to one connection.
 #[derive(Clone, Debug, Default)]
 struct Outcome {
@@ -2803,7 +2820,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let scache = layers::StretchCache::default();
     let scache_on = std::env::var_os("TOPO_NOSCACHE").is_none();
     let scache_ref = scache_on.then_some(&scache);
+    // loop-local: the deterministic work counters of the TopoR loop (whole-board layerings and
+    // measures, local layerings and their sizes, the shadow check), read per cycle.
+    let lctr = LoopCtr::default();
     let assign_t = |st: &State, ties: u64| {
+        lctr.layer_global.set(lctr.layer_global.get() + 1);
         let lp = LayerParams { ties, ..lp };
         let mut lr = layers::assign_cached(st, &|ob| b.smd_layer(ob), &lp, Some(&packer), scache_ref);
         if tree_free && proj.n_layers != 2 && st.wires.iter().any(|w| w.alive && !w.turns.is_empty()) {
@@ -2813,6 +2834,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             lr.mask.resize(st.wires.len(), Vec::new());
             lr.partner.resize(st.wires.len(), Vec::new());
             tree::fix_layers(st, &mut evl, &mut lr.mask, &mut lr.partner, bottom_l);
+            layers::relabel_cached(st, &evl, &lp, &mut lr, scache_ref);
+        }
+        lr
+    };
+    // loop-local Step B: the layering of a state whose wires outside `held.free` keep the layers of
+    // `held.prev` ([`layers::assign_local`]); the junction fix-up only on the free trees.
+    let assign_l = |st: &State, ties: u64, held: &layers::Held| {
+        lctr.layer_local.set(lctr.layer_local.get() + 1);
+        let lp = LayerParams { ties, ..lp };
+        let mut lr = layers::assign_local(st, &|ob| b.smd_layer(ob), &lp, Some(&packer), scache_ref, held);
+        if tree_free && proj.n_layers != 2 && st.wires.iter().enumerate().any(|(w, wi)| wi.alive && !wi.turns.is_empty() && held.is_free(w)) {
+            let mut evl = lr.events.clone();
+            let bottom_l = (if b.n_signal == 0 { proj.n_layers } else { b.n_signal }) as i32 - 1;
+            evl.resize(st.wires.len(), Vec::new());
+            lr.mask.resize(st.wires.len(), Vec::new());
+            lr.partner.resize(st.wires.len(), Vec::new());
+            tree::fix_layers_only(st, &mut evl, &mut lr.mask, &mut lr.partner, bottom_l, Some(held.free));
             layers::relabel_cached(st, &evl, &lp, &mut lr, scache_ref);
         }
         lr
@@ -3317,7 +3355,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let topor = opts.opt_loop == "topor";
     if topor {
-        use super::optimise::{criteria_of, evaluation, foreign_copper, k_osc, layers_now, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
+        use super::optimise::{criteria_of, evaluation, foreign_copper, foreign_copper_only, k_osc, layers_now, layers_now_only, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
         let t_loop = Instant::now();
         // The loop's own emergency stop: a share of the time left (the rest is the drawing's).
         let loop_deadline = ctl.deadline().map(|d| {
@@ -3347,6 +3385,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             if let Some(v) = reused(st, lr) {
                 return pred(v);
             }
+            LoopCtr::add(&lctr.measure_global, 1);
             let dirs = dirs_of(st);
             let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
             let p = pred(cm.violations());
@@ -3356,6 +3395,120 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let necks = st.cut_neck_widths(&cm.cut_necks());
             let added: usize = (0..st.wires.len()).filter(|&w| st.wires[w].alive).map(|w| st.neck_stretches_with(w, &necks).saturating_sub(st.neck_stretches_with(w, &BTreeMap::new()))).sum();
             p.with_shrink(added, cm.shrinkage().2)
+        };
+        // loop-local Step B (`[optimize] loop_judge = "local"`, docs/dev/design/loop-local.md): a
+        // move that took the wires `gone` out of the state `saved` (layered as `prev`, measured as
+        // `pred`) and laid `new` is layered locally and priced by what changes. F (the free wires) =
+        // `new`, the different-net wires `gone` crossed (their layering's partners and unlayerable
+        // pairs) and the wires `new` crosses, `[optimize] local_depth` rings deep, closed over the
+        // junctions (a tee keeps one layer); every other wire keeps its events and labels
+        // ([`layers::assign_local`]; Dayan 1997 pp. 55-57: "only the optimal candidate assignments
+        // for the 2-Nets affected by this assignment are recomputed"). The predicted violations
+        // change by the difference, before and after, of the capacity model over W (every wire with
+        // a pass on an edge an F wire passes, before or after: on those edges the model is
+        // complete, on the others W's passes are the same on both sides), of the foreign copper of
+        // F, and by the exact unlayerable and forced counts; the vias are the new layering's.
+        // Polubasov 2010 «Оптимизация расслоения»: the whole board is layered again once per
+        // cycle (stage 2), the escape from the local optima of this local layering.
+        let judge_local = opts.loop_judge != "global" && !cuts_on;
+        if opts.loop_judge != "global" && cuts_on && opts.opt_loop == "topor" {
+            warnings.push("TopoR loop: [optimize] loop_judge = \"local\" prices the per-edge capacity model only; with [capacity] model = \"cuts\" every move is judged by the whole board (loop_judge = \"global\")".to_string());
+        }
+        let local_depth = opts.local_depth.max(1);
+        let local_judge = |st: &mut State, saved: &super::state::Topology, gone: &[WireId], new: &[WireId], prev: &layers::LayerReport, pred: &Predicted, ties: u64| -> (layers::LayerReport, Predicted) {
+            let nw = st.wires.len();
+            let mut free = vec![false; nw];
+            let net_of = |w: WireId| st.wires[w].net;
+            let mut ring: Vec<WireId> = Vec::new();
+            let mark = |free: &mut Vec<bool>, ring: &mut Vec<WireId>, w: WireId| {
+                if w < nw && st.wires[w].alive && !free[w] {
+                    free[w] = true;
+                    ring.push(w);
+                }
+            };
+            for &n in new {
+                if n < nw {
+                    free[n] = true;
+                }
+            }
+            for &o in gone {
+                let no = net_of(o);
+                for &(p, _) in prev.partner.get(o).into_iter().flatten().flatten() {
+                    if p < nw && st.wires[p].net != no {
+                        mark(&mut free, &mut ring, p);
+                    }
+                }
+            }
+            for &(a, c) in &prev.unlayerable_w {
+                if gone.contains(&a) {
+                    mark(&mut free, &mut ring, c);
+                }
+                if gone.contains(&c) {
+                    mark(&mut free, &mut ring, a);
+                }
+            }
+            let mut front: Vec<WireId> = new.iter().copied().filter(|&n| n < nw && st.wires[n].alive).collect();
+            for d in 0..local_depth {
+                let mut next = Vec::new();
+                for &w in &front {
+                    let nwn = net_of(w);
+                    for x in st.crossings(w) {
+                        if st.wires[x.other].net != nwn {
+                            mark(&mut free, &mut next, x.other);
+                        }
+                    }
+                }
+                if d == 0 {
+                    next.append(&mut ring);
+                }
+                front = next;
+            }
+            let js = tree::junctions(st);
+            loop {
+                let mut changed = false;
+                for &(br, _, t, _, _) in &js {
+                    if br < nw && t < nw && free[br] != free[t] {
+                        free[br] = true;
+                        free[t] = true;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            let held = layers::Held { prev, free: &free };
+            let lr = assign_l(st, ties, &held);
+            // The model's wires W, after and before.
+            let w_after = layers::neighbourhood(st, &free);
+            let after = st.take_topology();
+            st.restore(saved.clone());
+            let nb = st.wires.len();
+            let free_b: Vec<bool> = (0..nb).map(|w| free.get(w).copied().unwrap_or(false) || gone.contains(&w)).collect();
+            let w_before = layers::neighbourhood(st, &free_b);
+            let wm: Vec<bool> = (0..nw.max(nb)).map(|w| w_after.get(w).copied().unwrap_or(false) || w_before.get(w).copied().unwrap_or(false)).collect();
+            let cap_of = |st: &State, evl: &[Vec<(usize, f64, i32)>], only: &[bool]| -> (usize, f64) {
+                let only = &only[..st.wires.len().min(only.len())];
+                let dirs = packer.taut_dirs_only(st, only);
+                CapModel::new_only(st, &packer, &dirs, evl, bottom, overflow_mm, only).violations()
+            };
+            let cap_b = cap_of(st, &prev.events, &wm);
+            let fc_b = foreign_copper_only(st, &layers_now_only(st, &prev.events, bottom, Some(&free_b)), Some(&free_b));
+            st.restore(after);
+            let cap_a = cap_of(st, &lr.events, &wm);
+            let fc_a = foreign_copper_only(st, &layers_now_only(st, &lr.events, bottom, Some(&free)), Some(&free));
+            LoopCtr::add(&lctr.local_free, free.iter().filter(|&&f| f).count());
+            LoopCtr::add(&lctr.local_model, wm.iter().filter(|&&f| f).count());
+            let pp = pred.parts;
+            let du = |base: usize, a: usize, b: usize| (base + a).saturating_sub(b);
+            let parts = super::optimise::MeasureParts {
+                cap: (du(pp.cap.0, cap_a.0, cap_b.0), (pp.cap.1 + cap_a.1 - cap_b.1).max(0.0)),
+                unlayerable: lr.unlayerable.len(),
+                forced: forced.borrow().len(),
+                foreign: (du(pp.foreign.0, fc_a.0, fc_b.0), (pp.foreign.1 + fc_a.1 - fc_b.1).max(0.0), du(pp.foreign.2, fc_a.2, fc_b.2)),
+            };
+            let p = Predicted::from_parts(parts, opts.pick_shorts, opts.short_weight);
+            (lr, p)
         };
         /// One topological variant: the routed state, the wire -> connection map, the layering,
         /// the connections placed without a legal path, the reroute counters and the predicted
@@ -3368,11 +3521,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             forced: BTreeSet<usize>,
             reroutes: Vec<u32>,
             pred: Predicted,
+            /// loop-local: `pred` is a sum of local changes ([`Sp::resync`]).
+            pred_local: bool,
         }
         type PlaceFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, usize, usize, &mut Vec<usize>, &Registry) -> bool;
         type CrossFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, &mut Vec<usize>, &mut Vec<u32>, &mut layers::LayerReport, &mut usize, usize);
         type MeasureFn<'f, 'p> = &'f dyn Fn(&State<'p>, &layers::LayerReport) -> Predicted;
         type AssignFn<'f, 'p> = &'f dyn Fn(&State<'p>, u64) -> layers::LayerReport;
+        type LocalFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, &super::state::Topology, &[WireId], &[WireId], &layers::LayerReport, &Predicted, u64) -> (layers::LayerReport, Predicted);
+        /// `[optimize] loop_shadow`: one re-lay judged both ways (local, whole board): the price
+        /// of its violations and vias, the predicted violations, the vias and the unlayerable
+        /// crossings, local then global.
+        struct Shadow {
+            v: (f64, f64),
+            pred: (Predicted, Predicted),
+            vias: (usize, usize),
+            unl: (usize, usize),
+        }
         /// The single-wire move's price and placement ([`Rerouter`]).
         struct Rr<'a, 'p> {
             topo: &'a Topo,
@@ -3400,6 +3565,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             measure: MeasureFn<'a, 'p>,
             /// The layering and predicted violations of the state after the try.
             pending: Option<(layers::LayerReport, Predicted)>,
+            /// loop-local: the local judge (None = every try layers the whole board), the
+            /// layering and predicted violations before the try, whether this try is also judged
+            /// by the whole board (`[optimize] loop_shadow`) and that comparison.
+            local: Option<LocalFn<'a, 'p>>,
+            lr_old: &'a layers::LayerReport,
+            pred_old: Predicted,
+            shadow: bool,
+            shadow_out: Option<Shadow>,
         }
         impl<'p> Rerouter<'p> for Rr<'_, 'p> {
             fn price(&mut self, st: &mut State<'p>, w: WireId) -> f64 {
@@ -3437,6 +3610,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let lr = (self.assign_t)(st, self.ties);
                 let p = (self.measure)(st, &lr);
                 let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
+                self.pending = Some((lr, p));
+                v
+            }
+            fn violations_after(&mut self, st: &mut State<'p>, saved: &super::state::Topology, gone: &[WireId], new: &[WireId]) -> f64 {
+                let Some(local) = self.local else {
+                    return self.violations(st, true);
+                };
+                let (lr, p) = local(st, saved, gone, new, self.lr_old, &self.pred_old, self.ties);
+                let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
+                if self.shadow {
+                    let lg = (self.assign_t)(st, self.ties);
+                    let pg = (self.measure)(st, &lg);
+                    let vg = pg.price(self.viol_mm) + self.via_mm * lg.vias as f64;
+                    self.shadow_out = Some(Shadow { v: (v, vg), pred: (p, pg), vias: (lr.vias, lg.vias), unl: (lr.unlayerable.len(), lg.unlayerable.len()) });
+                }
                 self.pending = Some((lr, p));
                 v
             }
@@ -3509,6 +3697,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             via_mm: f64,
             /// loop-local Step A: the per-wire stretch cache of the layerings (exact).
             scache: Option<&'a layers::StretchCache>,
+            /// loop-local Step B: the local judge of the moves (None = `loop_judge = "global"`),
+            /// whether `pred` came from it (then the next whole-board comparison measures the board
+            /// first), the shadow interval (0 = off), the re-lays so far, and the work counters.
+            local: Option<LocalFn<'a, 'p>>,
+            pred_local: bool,
+            shadow_k: usize,
+            relays: usize,
+            lctr: &'a LoopCtr,
+            shadow: (usize, usize, f64, usize, usize),
             /// Debug (`TOPO_LOOPDBG`): one line per reroute and per cycle stage.
             dbg: bool,
             dbg_tag: u64,
@@ -3535,7 +3732,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn set_lr(&mut self, lr: layers::LayerReport, p: Option<Predicted>) {
                 *self.lr = lr;
                 self.st.layers_now = layers_now(self.st, &self.lr.events, self.bottom);
+                if p.is_none() {
+                    self.pred_local = false;
+                }
                 self.pred = p.unwrap_or_else(|| (self.measure)(self.st, self.lr));
+            }
+            /// loop-local: after locally judged moves `pred` is the sum of their changes; a
+            /// whole-board comparison (layer re-optimisation, crossing pass) and every offered
+            /// variant take the board's measure of the present layering instead (no layering).
+            fn resync(&mut self) {
+                if self.pred_local {
+                    self.pred = (self.measure)(self.st, self.lr);
+                    self.pred_local = false;
+                }
             }
             /// The evaluation of the current topology every whole-board move is judged by
             /// ([`evaluation`]: the archive's objective value plus the violation weight per
@@ -3550,6 +3759,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// one is taken, so the random choice among equal layerings stays), else the one before
             /// comes back. Whether it was taken.
             fn try_layers(&mut self, lr: layers::LayerReport, ties: u64) -> bool {
+                self.resync();
                 let e0 = self.eval_now();
                 let (lr0, p0) = (self.lr.clone(), self.pred);
                 self.set_lr(lr, None);
@@ -3654,10 +3864,47 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     ties: self.ties,
                     measure: self.measure,
                     pending: None,
+                    local: self.local,
+                    lr_old: &*self.lr,
+                    pred_old: self.pred,
+                    shadow: self.local.is_some() && self.shadow_k > 0 && self.relays.is_multiple_of(self.shadow_k),
+                    shadow_out: None,
                 };
+                self.relays += 1;
+                let lf0 = self.lctr.local_free.get();
                 let out = reroute_set(self.st, &set, &mut rr, extra);
                 let pending = rr.pending.take();
+                let shadow = rr.shadow_out.take();
                 drop(rr);
+                if let Some(sh) = shadow {
+                    // The keep test (`reroute_set`) with the whole board's price of the same state.
+                    let own = out.new - out.viol_new;
+                    let keep_g = own + sh.v.1 + extra < out.old - 1e-6;
+                    let agree = keep_g == out.kept;
+                    let (pl, pg) = sh.pred;
+                    let (g0, v0, u0) = (self.pred.graded, self.lr.vias as i64, self.lr.unlayerable.len() as i64);
+                    self.shadow.0 += 1;
+                    self.shadow.1 += usize::from(agree);
+                    self.shadow.2 += (pl.graded - pg.graded).abs();
+                    self.shadow.3 += sh.vias.0.abs_diff(sh.vias.1);
+                    self.shadow.4 += sh.unl.0.abs_diff(sh.unl.1);
+                    eprintln!(
+                        "LOOPSHADOW wire {w} conn {ci} free {} kept local {} global {}: d graded local {:.4} global {:.4}; d pred local {} global {}; d vias local {} global {}; d unlayerable local {} global {}; price local {:.4} global {:.4}",
+                        self.lctr.local_free.get() - lf0,
+                        out.kept,
+                        keep_g,
+                        pl.graded - g0,
+                        pg.graded - g0,
+                        pl.count as i64 - self.pred.count as i64,
+                        pg.count as i64 - self.pred.count as i64,
+                        sh.vias.0 as i64 - v0,
+                        sh.vias.1 as i64 - v0,
+                        sh.unl.0 as i64 - u0,
+                        sh.unl.1 as i64 - u0,
+                        sh.v.0,
+                        sh.v.1
+                    );
+                }
                 if self.dbg && out.kept {
                     let neww: Vec<WireId> = (0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive && self.wire_conn.get(x).is_some_and(|c| cis.contains(c))).collect();
                     let mut m: BTreeMap<&'static str, f64> = BTreeMap::new();
@@ -3692,6 +3939,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 if out.kept {
                     let (lr, p) = pending.expect("a kept reroute was measured");
                     self.set_lr(lr, Some(p));
+                    self.pred_local = self.local.is_some();
                     for c in cis {
                         self.reroutes[c] += 1;
                     }
@@ -3820,11 +4068,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     self.forced.borrow_mut().remove(&self.conn_of[ci]);
                 }
                 let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
+                let n0 = self.st.wires.len();
                 let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
                 let mut kept = false;
                 if placed {
-                    let lr = (self.assign_t)(self.st, self.ties);
-                    self.set_lr(lr, None);
+                    if let Some(local) = self.local {
+                        // loop-local: the obstructing wires' move layered and priced locally.
+                        let new: Vec<WireId> = (n0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive).collect();
+                        let (lr, p) = local(self.st, &before.topo, &set, &new, &before.lr, &before.pred, self.ties);
+                        self.set_lr(lr, Some(p));
+                        self.pred_local = true;
+                    } else {
+                        let lr = (self.assign_t)(self.st, self.ties);
+                        self.set_lr(lr, None);
+                    }
                     let e1 = self.eval_now();
                     if self.dbg {
                         let c1 = self.criteria();
@@ -3868,7 +4125,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr + self.pred.shrink_n, area)
             }
             fn snapshot(&mut self) -> LoopVar {
-                LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone(), reroutes: self.reroutes.clone(), pred: self.pred }
+                LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone(), reroutes: self.reroutes.clone(), pred: self.pred, pred_local: self.pred_local }
             }
             fn restore(&mut self, v: &LoopVar) {
                 self.st.restore(v.topo.clone());
@@ -3876,9 +4133,29 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 self.reroutes.clone_from(&v.reroutes);
                 *self.forced.borrow_mut() = v.forced.clone();
                 self.set_lr(v.lr.clone(), Some(v.pred));
+                self.pred_local = v.pred_local;
             }
             fn cycle(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats {
                 let t0 = Instant::now();
+                let k0 = (self.lctr.layer_global.get(), self.lctr.measure_global.get(), self.lctr.layer_local.get(), self.lctr.local_free.get(), self.lctr.local_model.get(), self.shadow);
+                let mut cs = self.cycle_body(c, stop, t0);
+                let (l, s0) = (self.lctr, k0.5);
+                cs.layer_global = l.layer_global.get() - k0.0;
+                cs.measure_global = l.measure_global.get() - k0.1;
+                cs.layer_local = l.layer_local.get() - k0.2;
+                cs.local_free = l.local_free.get() - k0.3;
+                cs.local_model = l.local_model.get() - k0.4;
+                cs.shadow_n = self.shadow.0 - s0.0;
+                cs.shadow_agree = self.shadow.1 - s0.1;
+                cs.shadow_err_graded = self.shadow.2 - s0.2;
+                cs.shadow_err_vias = self.shadow.3 - s0.3;
+                cs.shadow_unl_diff = self.shadow.4 - s0.4;
+                cs
+            }
+        }
+        impl<'p> Sp<'_, 'p> {
+            /// One TopoR loop cycle ([`Space::cycle`]; the counters are taken round it).
+            fn cycle_body(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool, t0: Instant) -> CycleStats {
                 let mut cs = CycleStats::default();
                 if self.dbg {
                     let t = self.dbg_crit();
@@ -4061,6 +4338,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // The crossing rules (clinches, double crossings, crossings no layer separates),
                 // taken when the board's evaluation does not rise.
                 let x0 = (self.xkept)();
+                self.resync();
                 let before = self.snapshot();
                 let e0 = self.eval_now();
                 let mut rip = 0usize;
@@ -4140,6 +4418,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         w += 1;
                     }
                 }
+                // loop-local: the variant this cycle offers carries the board's measure.
+                self.resync();
                 cs.busy_s = t0.elapsed().as_secs_f64();
                 if self.dbg {
                     let t = self.dbg_crit();
@@ -4151,6 +4431,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let place_ref = &place;
         let assign_ref = &assign_t;
         let measure_ref = &measure;
+        let local_ref: LocalFn = &local_judge;
         let cross_ref = &crossing_pass;
         let xkept = || xstats.get()[3];
         // The loop's search is layer-aware (5.2b): the crossings price the via they imply against
@@ -4203,6 +4484,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pair_move: opts.via_pair_move.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             via_mm: opts.mm_per_via,
             scache: scache_ref,
+            local: judge_local.then_some(local_ref),
+            pred_local: false,
+            shadow_k: opts.loop_shadow,
+            relays: 0,
+            lctr: &lctr,
+            shadow: (0, 0, 0.0, 0, 0),
             dbg: std::env::var_os("TOPO_LOOPDBG").is_some(),
             dbg_tag: opts.seed,
         };
@@ -4366,6 +4653,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             rep.lines.join("; ")
         ));
         warnings.push(format!("TopoR loop {table}"));
+        {
+            // loop-local: the deterministic work counters (docs/dev/design/loop-local.md).
+            let st_ = &rep.stats;
+            let per = |x: usize| x as f64 / rep.cycles.max(1) as f64;
+            let mean = |x: usize| x as f64 / st_.layer_local.max(1) as f64;
+            warnings.push(format!(
+                "TopoR loop judge ([optimize] loop_judge = \"{}\"): per cycle {:.1} whole-board layerings, {:.1} whole-board measures, {:.1} local layerings (mean {:.1} wires laid again, {:.1} in the local capacity model){}",
+                if judge_local { "local" } else { "global" },
+                per(st_.layer_global),
+                per(st_.measure_global),
+                per(st_.layer_local),
+                mean(st_.local_free),
+                mean(st_.local_model),
+                if st_.shadow_n > 0 {
+                    format!("; shadow check ([optimize] loop_shadow = {}): {} moves also judged by the whole board, {} kept alike ({:.1} %), mean |difference| graded violations {:.4}, vias {:.2}, unlayerable crossings {:.2}", opts.loop_shadow, st_.shadow_n, st_.shadow_agree, 100.0 * st_.shadow_agree as f64 / st_.shadow_n as f64, st_.shadow_err_graded / st_.shadow_n as f64, st_.shadow_err_vias as f64 / st_.shadow_n as f64, st_.shadow_unl_diff as f64 / st_.shadow_n as f64)
+                } else {
+                    String::new()
+                }
+            ));
+        }
         if time_hit {
             warnings.push(format!("TopoR loop: the time limit ended the loop before its plan was stable ({TIME_HIT})"));
         }
@@ -4393,6 +4700,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "pair_move": [rep.stats.pair_moved_kept, rep.stats.pair_moved, rep.stats.pair_moved_wires, rep.stats.pair_moved_long],
             "variants_table": arch.items.iter().map(|v| serde_json::json!({"label": v.label, "gen": v.payload.gen, "cycle": v.payload.cycle, "errors": v.crit.errors, "penalty": (v.crit.penalty * 1e3).round() / 1e3, "vias": v.crit.vias, "length_mm": (v.crit.length_mm * 1e3).round() / 1e3, "shrinkages": v.crit.shrinkages})).collect::<Vec<_>>(),
             "layer_share_pct": (1000.0 * rep.stats.layer_s / loop_s.max(1e-9)).round() / 10.0,
+            "judge": {
+                "mode": if judge_local { "local" } else { "global" },
+                "layer_global": rep.stats.layer_global,
+                "measure_global": rep.stats.measure_global,
+                "layer_local": rep.stats.layer_local,
+                "local_free": rep.stats.local_free,
+                "local_model": rep.stats.local_model,
+                "shadow": [rep.stats.shadow_n, rep.stats.shadow_agree, rep.stats.shadow_err_graded, rep.stats.shadow_err_vias, rep.stats.shadow_unl_diff],
+            },
         }));
         if opts.via_pair_min {
             warnings.push(format!(
