@@ -318,6 +318,9 @@ fn norm_dirs(norm: Norm, arc_step_deg: f64) -> (Vec<Vec2>, f64) {
     }
 }
 
+/// A vertex end of a cut (addendum A): vertex, position, feature, the tip on its side, its label.
+type CutEnd = (usize, Vec2, usize, Vec2, bool);
+
 /// TW2 addendum A: the arc points of a stretch that passes sheet vertex `v` between two
 /// consecutive cut crossings (directions `ua`, `ub` from `v`, its spoke tips at radius `rho` in the
 /// norm there), inside the sector that holds `um` (the direction from `v` to the band between the
@@ -1251,7 +1254,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         let (x, y) = (&pair[0], &pair[1]);
         let (ca, cb) = (&sh.cuts[x.1], &sh.cuts[y.1]);
         // The vertex ends of a cut: (vertex, its position, its feature, tip on its side, its label).
-        let ends = |c: &super::sheet::Cut, a: Vec2, b: Vec2, a_left: bool| -> [Option<(usize, Vec2, usize, Vec2, bool)>; 2] { [Some((c.vp, c.p, c.fp, a, a_left)), c.vq.map(|vq| (vq, c.q, c.fq, b, !a_left))] };
+        let ends = |c: &super::sheet::Cut, a: Vec2, b: Vec2, a_left: bool| -> [Option<CutEnd>; 2] { [Some((c.vp, c.p, c.fp, a, a_left)), c.vq.map(|vq| (vq, c.q, c.fq, b, !a_left))] };
         for ea in ends(ca, x.2, x.3, x.4).into_iter().flatten() {
             for eb in ends(cb, y.2, y.3, y.4).into_iter().flatten() {
                 let (v, at, f, ta, la) = ea;
