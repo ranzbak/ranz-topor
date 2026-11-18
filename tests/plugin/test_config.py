@@ -265,6 +265,21 @@ def test_removed_keys_are_ignored_with_a_warning(tmp_path):
     assert "[ripup]" not in text and "[iterations]" not in text and "threads =" not in text
 
 
+def test_refine_lanes_auto_or_count(tmp_path):
+    """par-refine: [optimize] refine_lanes = "auto" (default) reaches the engine as 0, a count as itself; a bad
+    word or 0 is a finding and keeps the default."""
+    (tmp_path / "topor.toml").write_text('version = 1\n[optimize]\nrefine_lanes = 4\n')
+    cfg, _ = load_config(tmp_path)
+    assert cfg.engine_options()["refine_lanes"] == 4
+    (tmp_path / "topor.toml").write_text('version = 1\n[optimize]\nrefine_lanes = "auto"\n')
+    cfg, f = load_config(tmp_path)
+    assert cfg.engine_options()["refine_lanes"] == 0 and not [x for x in f if "refine_lanes" in str(x)]
+    for bad in ('"many"', "0"):
+        (tmp_path / "topor.toml").write_text(f'version = 1\n[optimize]\nrefine_lanes = {bad}\n')
+        cfg, f = load_config(tmp_path)
+        assert cfg.engine_options()["refine_lanes"] == 0 and [x for x in f if "refine_lanes" in str(x)], bad
+
+
 def test_any_negative_grace_is_accepted_as_no_bound(tmp_path):
     """limit_grace_s / drawing_grace_s: any negative value = no bound (user 2026-11-17): -1 and -5 load without a
     finding and reach the engine options as given; the defaults are 30 s and 60 s."""

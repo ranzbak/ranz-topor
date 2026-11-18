@@ -453,10 +453,16 @@ pub struct LayerReport {
     pub overfull_before: usize,
     pub overfull_after: usize,
     pub refine_moves: usize,
+    /// par-refine: the refinement's (evaluations, stream hash, end-site memo hash), see
+    /// [`super::refine::RefineStats::stream`].
+    pub refine_stream: (usize, u64, u64),
     /// Per wire, per event: the layers it may take (bit per layer) and the event of the other
     /// wire of its crossing (the two must differ in layer); for the P4 label moves.
     pub mask: Vec<Vec<u64>>,
     pub partner: Vec<Vec<Option<(WireId, usize)>>>,
+    /// The refinement's final capacity model measure ([`super::refine::FinalCap`]; par-refine
+    /// item 3), valid while the state and `events` are the ones it was taken for.
+    pub fin_cap: Option<super::refine::FinalCap>,
 }
 
 /// Parameters of P3.
@@ -489,6 +495,9 @@ pub struct LayerParams {
     /// 5.4 `[vias] between_crossings`: a via sits strictly between its two events
     /// ([`super::refine::via_ranges`]); an interval without a traversal there has no site.
     pub via_between: bool,
+    /// par-refine: the refinement runs the serial in-place loop (`RefineParams::reference`), the
+    /// reference the lane executor is tested against. Off by default.
+    pub cap_reference: bool,
 }
 
 impl Default for LayerParams {
@@ -507,6 +516,7 @@ impl Default for LayerParams {
             cap_vias: false,
             ties: 0,
             via_between: false,
+            cap_reference: false,
         }
     }
 }
@@ -796,6 +806,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
         partner[v[1].0][v[1].1] = Some(v[0]);
     }
     let via = p.via_mm;
+    let h_in = super::rtrace::on().then(|| super::rtrace::hash(&evl));
     let rs = packer.map(|pk| {
         refine(
             st,
@@ -807,13 +818,18 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             bottom,
             &|a, b| if a == b { 0.0 } else { via },
             &|_, _, _| 0.0,
-            &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias },
+            &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
         )
     });
     let rs = rs.unwrap_or_default();
+    if let Some(h) = h_in {
+        super::rtrace::note("a", h, &evl, &rs);
+    }
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
+    rep.refine_stream = (rs.evals, rs.stream, rs.memo);
+    rep.fin_cap = rs.fin;
     rep.mask = mask.clone();
     rep.partner = partner.clone();
     // Labels per (domain, wire) for the same-layer check.
@@ -1147,6 +1163,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     let mask: Vec<Vec<u64>> = wev.iter().map(|l| l.iter().map(|&e| ev[e].mask).collect()).collect();
     let partner: Vec<Vec<Option<(WireId, usize)>>> =
         wev.iter().map(|l| l.iter().map(|&e| ev[e].partner.map(|q| at_ev[q])).collect()).collect();
+    let h_in = super::rtrace::on().then(|| super::rtrace::hash(&evl));
     let rs = packer
         .map(|pk| {
             refine(
@@ -1159,13 +1176,18 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                 costs.plane_from.min(nl) as i32 - 1,
                 &|a, b| costs.trans(a, b),
                 &|w, i, l| costs.unary(wev[w][i], l),
-                &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias },
+                &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
             )
         })
         .unwrap_or_default();
+    if let Some(h) = h_in {
+        super::rtrace::note("b", h, &evl, &rs);
+    }
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
     rep.refine_moves = rs.moves;
+    rep.refine_stream = (rs.evals, rs.stream, rs.memo);
+    rep.fin_cap = rs.fin;
     rep.mask = mask.clone();
     rep.partner = partner.clone();
     for (w, list) in wev.iter().enumerate() {

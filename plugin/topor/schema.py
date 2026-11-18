@@ -276,6 +276,10 @@ SETTINGS: list[Setting] = [
        range=(0.0, 10.0), engine="loop_via_end"),
     _s("optimize", "loop_time_share", "float", 0.5, "Topological core, loop = \"topor\": the share of the time left (run.timeout_s) that the loop may use at most; the rest is kept for the one drawing. An emergency stop like the time limit (the loop normally ends when its plan is stable); when it fires the result says so.",
        range=(0.05, 1.0), engine="loop_time_share"),
+    _s("optimize", "refine_lanes", "int", "auto", "Topological core: how many lanes (threads) evaluate the layer refinement's candidate moves at once (the label moves that take traces off over-full edges, in the layer assignment of every cycle). The lanes take the moves in the order one lane tries them and the first move that lowers the price is kept, so every lane count keeps the same moves in the same order: the plan and the copper do not depend on it, only the time does. auto (default) = one lane plus the engine's compute slots no run uses at that moment (with [optimize] loop = \"topor\": runs fewer than the engine's threads, or runs waiting for the others at the end of their loop; with loop = \"cycles\" one lane); a number = that many lanes, whatever else runs (more lanes than free threads only wait for each other). 1 = the serial refinement on one thread.",
+       range=(1, 256), engine="refine_lanes"),
+    _s("optimize", "measure_reuse", "bool", True, "Topological core: the plan's measure (its predicted violations, which the TopoR loop's moves pay and the variants are judged by) takes the capacity model the layer refinement ended with (true, default: faster, the model is not built twice) instead of building it again from the final layers (false: the measure before par-refine). The two can differ slightly (the refinement's model keeps the via positions of the order its moves came in), so a plan can change. With [capacity] model = \"cuts\", or when the layers change after the refinement (the more-layer junction fix-up, the P4 label moves), the model is built again either way.",
+       engine="measure_reuse"),
     _s("optimize", "loop_crossing", "float", 0.25, "Topological core, loop = \"topor\": share of the crossing factor's weight ([factors] crossing) that a crossing of two nets keeps in the loop's reroutes. The loop lays each trace into the present layering: a crossing the trace can take on another layer than the crossed stretch costs this share only, a crossing that forces the trace to change layer costs the via (and the via back, where it has to return to its pad's layer) at the via weight on top (TopoR: before the optimisation every stretch gets a layer, and a crossing of a stretch with a via is penalised, Polubasov 2010). 1 = the full crossing price on top of the vias; 0 = only the vias.",
        range=(0.0, 1.0), engine="loop_crossing"),
     _s("optimize", "max_ripped", "int", 5000, "Topological core: most connections one whole-route round may take out and route again (negotiated rip-up-and-reroute, drawing feedback and the P4 moves together). A work cap (see rounds).",
@@ -421,6 +425,8 @@ ENGINE_INTERNAL = {
     "exclude_nets": "built per run from [nets] do_not_touch (patterns expanded against the board's net names)",
     "ignore_pads": "passed through from [nets] ignore_pads (REF.PAD strings) by run.build_options",
     "pour_served": "passed through from [nets] pour_served (boolean entries only) by run.build_options",
+    "refine_reference": "test/debug switch: run the serial reference refine instead of the lane executor (same result by construction)",
+    "refine_test_window": "test-only switch that caps the lane look-ahead window to force speculation conflicts",
 }
 
 # KiCad-owned behaviours, written as comment-only entries: (name, place)
