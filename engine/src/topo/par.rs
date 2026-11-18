@@ -186,6 +186,14 @@ struct CrewShared<J, U> {
 /// Spins of a waiting lane before it sleeps on the condvar (~0.1-0.3 ms).
 const CREW_SPIN: u32 = 4096;
 
+/// The spins of a waiting lane and of a round's caller: [`CREW_SPIN`], or the debug environment
+/// `TOPO_CREW_SPIN` (a count; 0 = a lane sleeps on the condvar and the caller yields at once).
+/// Scheduling only: the copper is the same for every value. O(1) after the first call.
+fn crew_spin() -> u32 {
+    static S: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("TOPO_CREW_SPIN").ok().and_then(|v| v.parse().ok()).unwrap_or(CREW_SPIN))
+}
+
 fn crew_work<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)) {
     let job = sh.job.read().unwrap_or_else(std::sync::PoisonError::into_inner);
     let out = sh.out.read().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -221,14 +229,14 @@ fn crew_work<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)
 fn crew_lane<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)) {
     let mut seen = 0u64;
     loop {
-        let mut spins = 0u32;
+        let (mut spins, spin) = (0u32, crew_spin());
         loop {
             let e = sh.epoch.load(Ordering::SeqCst);
             if e != seen {
                 seen = e;
                 break;
             }
-            if spins < CREW_SPIN {
+            if spins < spin {
                 std::hint::spin_loop();
                 spins += 1;
                 continue;
@@ -318,9 +326,9 @@ impl<J, U> Crew<'_, J, U> {
         }
         crew_work(sh, self.unit);
         // the units the lanes took are running on live threads: wait for them only
-        let mut spins = 0u32;
+        let (mut spins, spin) = (0u32, crew_spin());
         while sh.fin.load(Ordering::SeqCst) < n && !sh.failed.load(Ordering::SeqCst) {
-            if spins < CREW_SPIN {
+            if spins < spin {
                 std::hint::spin_loop();
                 spins += 1;
             } else {

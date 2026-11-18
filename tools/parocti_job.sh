@@ -17,7 +17,7 @@ P=scratch/boards/eprom-to-kernal/bfaf705c0f25/eprom-to-kernal.kicad_pcb
 # one NAME PCB THREADS [route_board args]: route, then hash the copper
 one() { local n=$1 b=$2 t=$3; shift 3
   local o=$R/o/$n; mkdir -p $o
-  hzq run --threads $t --name pd-$n -- env RAYON_NUM_THREADS=$t TOPO_TIMES=1 tools/route_board.sh $b $o $A "$@" > $R/$n.log 2>&1 9>&-
+  hzq run --threads $t --name pd-$n -- env RAYON_NUM_THREADS=$t TOPO_TIMES=1 ${ONE_ENV:-} tools/route_board.sh $b $o $A "$@" > $R/$n.log 2>&1 9>&-
   local rc=$? pcb; pcb=$(ls $o/*-topor/*.kicad_pcb 2>/dev/null | head -1)
   echo "$n rc $rc $(python3 tools/fx_hash.py $pcb $o/none 2>/dev/null || echo nohash)" >> $R/hash.txt; }
 boards() { # boards THREADS...
@@ -70,6 +70,17 @@ case ${1:-all} in
     hzq run --threads 4 --name pd-mutM1 -- bash -c "RAYON_NUM_THREADS=4 cargo test --release --lib -- octilinear_shape_cache par:: 9>&- > $R/mutM1.log 2>&1; echo \"lib rc \$?\" >> $R/mutM1.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/mutM1.log 2>&1; echo \"par_draw rc \$?\" >> $R/mutM1.log"
     grep -E "rc [0-9]|^test result" $R/mutM1.log | while read -r l; do note "mutant M1: $l"; done
     cp $R/par.rs.orig src/topo/par.rs; cp $R/octi.rs.orig src/topo/octi.rs
+    note "all done" ;;
+  spin)  # crew spin vs draw_lanes=1 at the product default runs (5), RAYON 8, rounds=1, seed 0, realise default:
+         # TOPO_CREW_SPIN 0 and 256 against draw_lanes=1, qmtech + esp, 3 samples interleaved (exclusive VM)
+    for k in 1 2 3; do
+      for bb in qmtech:$Q esp:$E; do
+        n=${bb%%:*}; b=${bb#*:}
+        ONE_ENV=TOPO_CREW_SPIN=0 one $n-spin0-k$k $b 8 --set optimize.rounds=1
+        ONE_ENV=TOPO_CREW_SPIN=256 one $n-spin256-k$k $b 8 --set optimize.rounds=1
+        one $n-l1-k$k $b 8 --set optimize.rounds=1 --set drawing.draw_lanes=1
+      done
+    done
     note "all done" ;;
   ref)
     for bb in eprom:$P wiccon:$W esp:$E qmtech:$Q; do
