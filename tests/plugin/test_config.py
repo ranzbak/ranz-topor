@@ -280,6 +280,36 @@ def test_refine_lanes_auto_or_count(tmp_path):
         assert cfg.engine_options()["refine_lanes"] == 0 and [x for x in f if "refine_lanes" in str(x)], bad
 
 
+def test_m6_removed_keys_name_m6_and_leave_the_engine_alone(tmp_path):
+    """M6 (6b, user 2026-11-18): [search] neck_in_drawing and [drawing] lane_walls are removed keys. Every value an
+    old topor.toml can hold (true / false, "price" / "hard") is ignored with CFG_REMOVED_KEY naming M6, the engine
+    options no longer carry them, and drawing_feedback stays a live key."""
+    from topor.schema import REMOVED_IN, REMOVED_WHEN, SETTINGS_BY_KEY
+    assert REMOVED_WHEN[("search", "neck_in_drawing")] == REMOVED_WHEN[("drawing", "lane_walls")] == "M6 of 2026-11-18"
+    assert ("search", "drawing_feedback") in SETTINGS_BY_KEY
+    for nid, lw in ((True, "hard"), (False, "price")):
+        (tmp_path / "topor.toml").write_text(
+            f"version = 1\n[search]\nneck_in_drawing = {str(nid).lower()}\n[drawing]\nlane_walls = \"{lw}\"\n")
+        cfg, findings = load_config(tmp_path)
+        rem = {f.items[0]: f.message for f in findings if f.code == "CFG_REMOVED_KEY"}
+        assert sorted(rem) == ["drawing.lane_walls", "search.neck_in_drawing"], findings
+        assert all("ignored: removed in M6 of 2026-11-18 (" in m for m in rem.values()), rem
+        # the line is named, as for CFG_DEPRECATED_KEY (V-5)
+        assert "'search.neck_in_drawing' in topor.toml (line 3) is ignored" in rem["search.neck_in_drawing"], rem
+        assert "'drawing.lane_walls' in topor.toml (line 5) is ignored" in rem["drawing.lane_walls"], rem
+        assert [f.code for f in findings if f.code != "CFG_REMOVED_KEY"] == []
+        eo = cfg.engine_options()
+        assert "neck_in_drawing" not in eo and "lane_walls" not in eo
+    # a whole removed section ([ripup], CL cleanup) names its line too
+    (tmp_path / "topor.toml").write_text("version = 1\n[ripup]\n# old\ngrowth = 2\n")
+    _, findings = load_config(tmp_path)
+    assert [f.message for f in findings if f.code == "CFG_REMOVED_KEY"][0].startswith("'ripup.growth' in topor.toml (line 4) is ignored"), findings
+    # a key of the CL cleanup still names the CL cleanup
+    (tmp_path / "topor.toml").write_text("version = 1\n[run]\nthreads = 4\n")
+    _, findings = load_config(tmp_path)
+    assert [f.message for f in findings if f.code == "CFG_REMOVED_KEY"][0].count(f"removed in {REMOVED_IN} (") == 1
+
+
 def test_any_negative_grace_is_accepted_as_no_bound(tmp_path):
     """limit_grace_s / drawing_grace_s: any negative value = no bound (user 2026-11-17): -1 and -5 load without a
     finding and reach the engine options as given; the defaults are 30 s and 60 s."""

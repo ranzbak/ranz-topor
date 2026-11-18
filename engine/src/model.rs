@@ -974,7 +974,9 @@ pub struct Options {
     /// one round per wire) instead of being reported failed at once; with `opt_loop = "cycles"`
     /// the rooms the drawing found too narrow also feed into the next cycle's plan. Default false
     /// (M0: the TopoR method computes the copper once from the topology, Polubasov 2010 intro;
-    /// the plugin's `"auto"` is on with `opt_loop = "cycles"`, off with `"topor"`).
+    /// the plugin's `"auto"` is on with `opt_loop = "cycles"`, off with `"topor"`). M6 (6b,
+    /// 2026-11-18): only `opt_loop = "cycles"` reads it; with `"topor"` true is ignored with the
+    /// warning `topo::core::FEEDBACK_IGNORED`.
     pub drawing_feedback: bool,
     /// Topological core (S2c, `topor.toml [vias] offset_sites`): besides the sample points of the
     /// via interval's triangles, also try the via's offset corners of nearby pads and copper.
@@ -1270,10 +1272,6 @@ pub struct Options {
     /// left to the plan and the drawing (the behaviour before 5.10). Not the classic router's
     /// removed `[search] exit_stubs`.
     pub pad_exit_stubs: bool,
-    /// M-C (`topor.toml [search] neck_in_drawing`): the drawing may also neck a pad end the plan
-    /// kept at full width when the full-width copper is rejected (the behaviour before M-C).
-    /// False (default): the drawing necks only where the plan necked.
-    pub neck_in_drawing: bool,
     /// M-C (`topor.toml [vias] reserve_sites`): a via the plan puts in a triangle takes its site
     /// there; another net's via planned in the same small triangle counts as a via without a site,
     /// so P3/P4 move it or reroute its wire before the drawing (true, default).
@@ -1312,9 +1310,6 @@ pub struct Options {
     /// vertex goes where the straight leg keeps every rule and the side of every wire not drawn
     /// yet; `draw::Drawer::pull_taut`).
     pub draw_pull_taut: bool,
-    /// P6 (b) (`[drawing] lane_walls`): "price" = the lane slot outside a run's span is a graded
-    /// price in the octilinear drawing; "hard" = a wall (before P6).
-    pub lane_walls: String,
     /// M3 (`[drawing] realise`): how the drawing realises the plan's topology. `"sequential"`
     /// (default; the wires one by one, each against the copper drawn before it, through the
     /// attempt ladder of `draw::Drawer::draw_wire`) or `"erbs"` (each run first as its extended
@@ -1552,7 +1547,6 @@ impl Default for Options {
             neck_max_nm: 0,
             neck_from_pad: true,
             pad_exit_stubs: false,
-            neck_in_drawing: false,
             draw_style: "octilinear".into(),
             draw_candidates: 1,
             any_angle: "costly".into(),
@@ -1561,7 +1555,6 @@ impl Default for Options {
             bend_spacing_mm: 0.5,
             octi_room: true,
             draw_pull_taut: true,
-            lane_walls: "price".into(),
             realise: "sequential".into(),
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,

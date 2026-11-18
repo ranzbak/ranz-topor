@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from .config import _range_text, toml_value
-from .schema import DEPRECATED, KICAD_ONLY, PAST_DEFAULTS, REMOVED, REMOVED_IN, SECTIONS, SETTINGS
+from .schema import DEPRECATED, KICAD_ONLY, PAST_DEFAULTS, REMOVED, REMOVED_IN, REMOVED_WHEN, SECTIONS, SETTINGS
 
 REFERENCE = Path(__file__).resolve().parents[2] / "docs" / "user" / "configuration.md"
 
@@ -78,10 +78,11 @@ def render_reference_md(settings=SETTINGS) -> str:
     out += [f"| `{s}.{k}` | {when} | {_cell(why)} |" for (s, k), (when, why) in DEPRECATED.items()]
     out += ["", "Known limitation: an existing `topor.toml` never gets options that were added in a later version; they use",
             "their default until you add them (copy the commented block from a freshly generated file).",
-            "", "## Removed keys", "", f"Removed in {REMOVED_IN}: the topological core never read them. A `topor.toml` that "
-            "still sets one keeps working; the key is ignored with the warning `CFG_REMOVED_KEY`.", "",
-            "| Key | Why |", "|---|---|"]
-    out += [f"| `{s}.{k}` | {_cell(why)} |" for (s, k), why in REMOVED.items()]
+            "", "## Removed keys", "", f"Removed in {REMOVED_IN} (the topological core never read them) or later, as the "
+            "table says. A `topor.toml` that still sets one keeps working; the key is ignored with the warning "
+            "`CFG_REMOVED_KEY`.", "",
+            "| Key | Removed in | Why |", "|---|---|---|"]
+    out += [f"| `{s}.{k}` | {REMOVED_WHEN.get((s, k), REMOVED_IN)} | {_cell(why)} |" for (s, k), why in REMOVED.items()]
     out.append("")
     return "\n".join(out)
 

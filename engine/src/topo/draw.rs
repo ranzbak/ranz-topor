@@ -364,14 +364,37 @@ fn trunk_foot(trunk: &[&[Vec2]], p: Vec2) -> Option<(Vec2, Vec<Vec2>)> {
     Some((q, arms))
 }
 
+/// The failure reason of a run for which no attempt of the drawing ladder produced copper to
+/// check (the exact path found none and no later attempt ran): a drawing failure, so the
+/// never-drop pass draws it ([`Options::allow_violations`](crate::model::Options)). O(layers).
+/// The reason a run that drew nothing fails with: the last attempt's own reason, or, when no
+/// attempt produced copper to check (an empty reason), [`no_run_reason`] (M6 F-1: never blank, so
+/// the never-drop pass, keyed on "drawing:", draws the wire and the report says why). O(layers).
+pub fn failed_run_reason(last: String, model: &BoardModel, lid: u32) -> String {
+    if last.is_empty() {
+        no_run_reason(model, lid)
+    } else {
+        last
+    }
+}
+
+pub fn no_run_reason(model: &BoardModel, lid: u32) -> String {
+    format!(
+        "drawing: no run found on layer {} (the exact taut path had no legal result and no other attempt gave one)",
+        model.layers.iter().find(|l| l.id == lid).map_or(lid.to_string(), |l| l.name.clone())
+    )
+}
+
 /// Shortcuts of a branch run onto its trunk (D6b fuse; TopoR's FreeStyle auto move of T-points,
 /// black-box E8c-E8e): `run` starts on the trunk's copper (`trunk`, the trunk's polylines on the
 /// run's layer, math frame); leaving the trunk at the foot `q` of a later vertex `run[i]`
 /// instead replaces `run[0..=i]` by `q -> run[i]`. Price per candidate (mm): its length plus the
 /// `junction_angle` price `jw x ws_mm x psi(angle to the trunk)`; returns the candidates that are
-/// cheaper than the run as it is, the cheapest first, as `(gain mm, i, new run)`.
+/// cheaper than the run as it is, the cheapest first, as `(price gain, length gain mm, i, new
+/// run)`: the price gain is the length gain plus the junction-angle price gain (a price, not a
+/// length: psi grows without bound as the branch leaves the trunk tangentially).
 /// O(run vertices x trunk segments).
-pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> Vec<(f64, usize, Vec<Vec2>)> {
+pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
     let price = |dir: Vec2, arms: &[Vec2]| -> f64 {
         let Some(u) = dir.unit() else { return 0.0 };
         if arms.is_empty() || jw <= 0.0 {
@@ -397,7 +420,7 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> 
             pts.extend_from_slice(&run[i..]);
             pts.dedup_by(|a, b| (*a - *b).len2() < 1.0);
             if pts.len() >= 2 {
-                out.push((gain, i, pts));
+                out.push((gain, along - d, i, pts));
             }
         }
     }
@@ -529,11 +552,6 @@ pub struct DrawStats {
     /// Vias placed out of the plan's class ([`Drawer::via_reach`]): no site in the class was found
     /// at all, so the cheapest one outside it was taken (counted in the plan-vs-drawn summary).
     pub via_out_of_class: usize,
-    /// P6 (a): crossing partners whose nominal chord was moved to follow a via ([`Drawer::follow_vias`]).
-    pub partners_moved: usize,
-    /// P6 (a): crossing partners neither their packed nor their taut crossing keeps on a placed
-    /// via's planned side ([`Drawer::follow_vias`]).
-    pub partners_unfixed: usize,
     /// P6 (c): vertices the taut pull removed from drawn runs ([`Drawer::pull_taut`]).
     pub pulled: usize,
     /// M3 `[drawing] realise = "erbs"`: runs drawn from their ERBS; runs whose ERBS the checker
@@ -1767,8 +1785,14 @@ impl<'a> Drawer<'a> {
                 for &sz in &sizes {
                     let item = via_item(net, p, sz, Some(w));
                     // The side test on the drawing's nominal chords, or on the plan's taut
-                    // geometry the relocation balanced the via on (P6 a: the partners then
-                    // follow the via, [`Drawer::follow_vias`]).
+                    // geometry the relocation balanced the via on (the drawing's checker then
+                    // judges the partners). M6 (user 2026-11-18) removed P6 a's partner move
+                    // (`follow_vias`), which led a wire crossing a via wire's part back to the side
+                    // the plan gave it (Polubasov 2001, printed p. 4). Its effect depends on the
+                    // plan: on esp-rust-board (seed 0, new net numbering) the forced USB_D- then runs
+                    // across IO21_TX on B.Cu next to its own via: 14 shorts, +43 DRC. In other plans
+                    // it is -12 or 0. The real fix is ERBS sheets with the placed vias, or the plan
+                    // itself (TopoR-way plan), not a drawing stand-in.
                     let (la, lb) = (plan.layers[i], plan.layers[i + 1]);
                     let taut_ok = || !self.via_site_tight.contains(&(w, i)) && self.via_side_ok_taut(w, k, p, la, lb);
                     // P6 (d): with the previous via as drawn (the plan's site of that one may not
@@ -2225,113 +2249,10 @@ impl<'a> Drawer<'a> {
 
     /// [`Drawer::via_side_ok`] on the plan's taut geometry (every wire's chord the taut path
     /// [`Packer::taut`] that the via relocation balanced the via on), not the drawing's packed
-    /// nominal chords. A planned site that holds here keeps the plan's crossing order; the
-    /// partners' nominal chords then follow the via ([`Drawer::follow_vias`]).
+    /// nominal chords. A planned site that holds here keeps the plan's crossing order (the
+    /// partners are judged by the drawing's checker).
     pub fn via_side_ok_taut(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
         self.via_side_ok_(w, k, p, la, lb, true)
-    }
-
-    /// Fraction along pass `pid`'s edge (from its first end) of the point `x` on it.
-    fn edge_frac(&self, pid: PassId, x: Vec2) -> f64 {
-        let pr = &self.b.proj;
-        let [p, q] = pr.edges[self.st.passes[pid].edge];
-        let (pp, pq) = (pr.pos[p], pr.pos[q]);
-        ((x - pp).dot(pq - pp) / (pq - pp).len2().max(1.0)).clamp(0.0, 1.0)
-    }
-
-    /// P6 (a), partners follow the via: after the vias are placed and the edges packed, a wire
-    /// not drawn yet whose packed nominal chord in the triangle of another net's via runs on the
-    /// wrong side of it (it would cross the via wire's part on its own layer, [`Drawer::via_side_ok`])
-    /// takes its crossing points of the plan's taut path on the two edges of that triangle
-    /// instead (its nominal and interval widened to them), when that keeps it on the via's right
-    /// side. The plan decided which part of the via wire the partner crosses (Polubasov 2001,
-    /// printed p. 4: a via between the two crossings); the drawing then re-reads the partner's
-    /// crossing from the via it drew, so the lane walls, the planned room and the run's portals
-    /// all lead the partner past the via on the planned side. Returns the partners moved.
-    /// O(vias x traversals of their triangle).
-    pub fn follow_vias(&mut self) -> usize {
-        if self.prov_layer.is_empty() {
-            return 0;
-        }
-        let marks: Vec<(WireId, usize, Vec2, usize, usize)> = self.via_marks.iter().map(|m| (m.0, m.1, m.2, m.3, m.4)).collect();
-        let mut moved = 0usize;
-        for (w, k, p, la, lb) in marks {
-            let st = self.st;
-            let wi = &st.wires[w];
-            let Some(&t) = wi.tris.get(k) else { continue };
-            for &(o, ok) in &st.tri_trav[t] {
-                let oi = &st.wires[o];
-                if o == w || !oi.alive || oi.net == wi.net || self.polys[o].is_empty() {
-                    continue;
-                }
-                if self.partner_side_ok(w, k, p, la, lb, o, ok, None) {
-                    continue;
-                }
-                let taut = self.taut_chord(o, ok);
-                if taut.len() < 2 {
-                    continue;
-                }
-                let n = oi.passes.len();
-                let ends = [(ok.checked_sub(1), taut[0]), ((ok < n).then_some(ok), *taut.last().expect("chord"))];
-                let fr: Vec<(PassId, f64)> = ends.iter().filter_map(|&(j, x)| j.map(|j| (oi.passes[j], self.edge_frac(oi.passes[j], x)))).collect();
-                if fr.is_empty() || !self.partner_side_ok(w, k, p, la, lb, o, ok, Some(&fr)) {
-                    // Neither the packed nor the taut crossing keeps this partner on the via's
-                    // planned side: it may cross the via wire's part on its own layer (counted and
-                    // reported; the drawing's checker then decides).
-                    self.stats.partners_unfixed += 1;
-                    if std::env::var("TOPO_VIAREL").is_ok() {
-                        eprintln!("FOLLOW wire {o} trav {ok} cannot follow via of wire {w} at ({:.3},{:.3})", p.x / 1e6, -p.y / 1e6);
-                    }
-                    continue;
-                }
-                for &(pid, f) in &fr {
-                    self.iv.nom[pid] = f;
-                    if self.iv.lo[pid].is_finite() {
-                        self.iv.lo[pid] = self.iv.lo[pid].min(f);
-                        self.iv.hi[pid] = self.iv.hi[pid].max(f);
-                    }
-                }
-                moved += 1;
-            }
-        }
-        self.stats.partners_moved += moved;
-        moved
-    }
-
-    /// The side test of one partner `(o, ok)` against the via `p` of wire `w` (traversal `k`,
-    /// layers `la` -> `lb`), with the partner's nominal fractions replaced by `over` (pass,
-    /// fraction) where given. `true` when the partner's chord does not cross the via wire's
-    /// part on the partner's layer.
-    #[allow(clippy::too_many_arguments)]
-    fn partner_side_ok(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, o: WireId, ok: usize, over: Option<&[(PassId, f64)]>) -> bool {
-        let (st, pr) = (self.st, &self.b.proj);
-        let oi = &st.wires[o];
-        let ps = &oi.passes;
-        let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
-        let b = if ok < ps.len() { self.prov_layer[ps[ok]] } else { -2 };
-        let lo = match (a, b) {
-            (-2, x) | (x, -2) => x,
-            (x, y) if x == y => x,
-            _ => -1,
-        };
-        let r = if lo == lb as i32 {
-            self.chord_pt(w, k + 1)
-        } else if lo == la as i32 {
-            self.chord_pt(w, k)
-        } else {
-            return true;
-        };
-        let pt = |j: usize| -> Vec2 {
-            if let Some(f) = (j >= 1 && j <= ps.len()).then(|| over.and_then(|v| v.iter().find(|x| x.0 == ps[j - 1]).map(|x| x.1))).flatten() {
-                self.portal(o, j - 1, f, f).0
-            } else {
-                self.chord_pt(o, j)
-            }
-        };
-        let mut chord = vec![pt(ok)];
-        chord.extend(oi.turns.iter().filter(|x| x.0 == ok).map(|x| pr.pos[x.1]));
-        chord.push(pt(ok + 1));
-        chord.windows(2).filter(|c| seg_proper(r, p, c[0], c[1])).count() % 2 == 0
     }
 
     /// Wire `o`'s packed nominal chord through traversal `ok`: [`Drawer::chord_pt`] `ok`, its turn
@@ -2968,7 +2889,6 @@ impl<'a> Drawer<'a> {
             // Force mode (M-B1): every attempt's copper with its violations, the cheapest wins.
             #[allow(clippy::type_complexity)]
             let mut cands: Vec<(f64, Vec<Vec2>, Vec<Item>, Vec<Viol>, Option<(f64, [f64; 2])>, &'static str)> = Vec::new();
-            let neck = self.neck_zones(w, r == 0, r == plan.layers.len() - 1);
             // M-C: the plan's necked stretches (width in P2); the drawing realises them.
             let pneck = self.plan_neck(w);
             // M3 `[drawing] realise = "erbs"`: the run's ERBS first (attempt -1), checked like any
@@ -2995,9 +2915,9 @@ impl<'a> Drawer<'a> {
                 // -1 (`realise = "erbs"`): the run's ERBS;
                 // 0: the exact taut path at the nominal width; 1: the same with the plan's necked
                 // stretches (M-C; TopoR 6.3 manual p. 56: the minimum width only where no other
-                // path is available), only when the plan necks the wire; 2 (only with
-                // `neck_in_drawing`, the behaviour before M-C): pad-end neck zones of the drawing's
-                // own; 3..5: S2a's funnel + repair attempts.
+                // path is available), only when the plan necks the wire; 2: none since M6 (the
+                // drawing's own pad-end necks of `neck_in_drawing`, before M-C, removed 2026-11-18);
+                // 3..5: S2a's funnel + repair attempts.
                 let restored = attempt == ERBS_KEPT;
                 if self.test_no_sequential && band.is_some() && (0..ERBS_KEPT).contains(&attempt) {
                     continue;
@@ -3021,16 +2941,12 @@ impl<'a> Drawer<'a> {
                 } else if attempt == 0 && self.test_straight_seq && band.is_some() {
                     vec![s, e]
                 } else if attempt <= 2 {
-                    if (attempt == 1 && pneck.is_none()) || (attempt == 2 && (neck.is_none() || !self.opts.neck_in_drawing)) {
+                    if attempt == 2 || (attempt == 1 && pneck.is_none()) {
                         continue;
                     }
                     let base = self.base_polyline(w, k0, k1, s, e, 0);
                     let t_ex = std::time::Instant::now();
-                    let fixed = self.exact_fix(w, k0, k1, layer, base, match attempt {
-                        1 => pneck,
-                        2 => neck,
-                        _ => None,
-                    });
+                    let fixed = self.exact_fix(w, k0, k1, layer, base, if attempt == 1 { pneck } else { None });
                     self.stats.exact_s += t_ex.elapsed().as_secs_f64();
                     match fixed {
                         Some(p) => p,
@@ -3093,13 +3009,6 @@ impl<'a> Drawer<'a> {
                     }
                 }
                 let mut neck: Option<(f64, [f64; 2])> = if restored { kept.as_ref().and_then(|k| k.5) } else { None };
-                if !rep.violations.is_empty() && self.opts.neck_in_drawing && self.opts.neck_to_pad && (ps || pe) {
-                    if let Some((wn, its, ls)) = self.neck_run(w, lid, &pts, ps, pe) {
-                        items = its;
-                        rep = CheckReport::default();
-                        neck = Some((wn, ls));
-                    }
-                }
                 if rep.violations.is_empty() && !self.track_own_pad_ok(w, &items) {
                     last_reason = "drawing: a track grazes a pad or via of its own net (KiCad minimum connection width)".to_string();
                     if self.force {
@@ -3465,6 +3374,11 @@ impl<'a> Drawer<'a> {
                 }
             }
             if !ok {
+                // Never a blank reason (M6 F-1): when no attempt produced copper to check (the
+                // exact path had no result and no later attempt ran), the wire still fails as a
+                // drawing failure, so the never-drop pass draws it (its key is "drawing:") and the
+                // report names why.
+                last_reason = failed_run_reason(std::mem::take(&mut last_reason), self.model, lid);
                 if self.quiet {
                     for id in committed {
                         self.uncommit(id);
@@ -3950,78 +3864,6 @@ impl<'a> Drawer<'a> {
             nk.ends[i] = Some((c, hi));
         }
         nk
-    }
-
-    /// The run with its pad ends narrowed to the widest width the checker accepts (plan item
-    /// "necking", `Options.neck_to_pad`): the first / last `neck_max` of the polyline (twice the
-    /// pad's long side unless `Options.neck_max_nm` is set) take width `wn`, `min_w <= wn < w`;
-    /// the rest keeps `w`. `None` when even `min_w` is rejected. Returns `(wn, items, lengths)`.
-    fn neck_run(&self, w: WireId, lid: u32, pts: &[Vec2], ps: bool, pe: bool) -> Option<(f64, Vec<Item>, [f64; 2])> {
-        let wi = &self.st.wires[w];
-        let (ps, pe) = (ps && wi.pa != super::state::NO_OBS, pe && wi.pb != super::state::NO_OBS);
-        let rules = &self.model.rules;
-        let min_w = Self::neck_floor(rules, wi.net, wi.w);
-        if min_w >= wi.w || !(ps || pe) {
-            return None;
-        }
-        let ext = |ob: usize| self.b.proj.obstacles[ob].poly.iter().map(|&p| (p - self.b.proj.obstacles[ob].center).len()).fold(0.0, f64::max);
-        let cap = |ob: usize| if self.opts.neck_max_nm > 0 { self.opts.neck_max_nm as f64 } else { 4.0 * ext(ob) };
-        let lens = [if ps { cap(wi.pa) } else { 0.0 }, if pe { cap(wi.pb) } else { 0.0 }];
-        let build = |wn: f64| -> (Vec<Item>, [f64; 2]) {
-            let n = pts.len();
-            // Cut points: along the polyline from each pad end.
-            let total: f64 = pts.windows(2).map(|p| (p[1] - p[0]).len()).sum();
-            let (mut l0, mut l1) = (lens[0].min(total), lens[1].min(total));
-            if l0 + l1 > total {
-                let f = total / (l0 + l1).max(1.0);
-                l0 *= f;
-                l1 *= f;
-            }
-            let mut items = Vec::new();
-            let mut acc = 0.0;
-            for i in 0..n - 1 {
-                let (a, b) = (pts[i], pts[i + 1]);
-                let sl = (b - a).len();
-                if sl < 1.0 {
-                    continue;
-                }
-                // Cuts of this segment at the neck ends, as fractions.
-                let mut cuts = vec![0.0, 1.0];
-                if l0 > acc && l0 < acc + sl {
-                    cuts.push((l0 - acc) / sl);
-                }
-                if total - l1 > acc && total - l1 < acc + sl {
-                    cuts.push((total - l1 - acc) / sl);
-                }
-                cuts.sort_by(f64::total_cmp);
-                for c in cuts.windows(2) {
-                    let (u, v) = (a + (b - a) * c[0], a + (b - a) * c[1]);
-                    let mid = acc + sl * 0.5 * (c[0] + c[1]);
-                    let neck = mid < l0 || mid > total - l1;
-                    if (v - u).len2() > 1.0 {
-                        items.push(track_item(wi.net, lid, if neck { wn } else { wi.w }, u, v, Some(w)));
-                    }
-                }
-                acc += sl;
-            }
-            (items, [l0, l1])
-        };
-        let ok = |wn: f64| self.checker.check_against(&self.idx, &build(wn).0, &[]).violations.is_empty();
-        if !ok(min_w) {
-            return None;
-        }
-        let (mut lo, mut hi) = (min_w, wi.w);
-        for _ in 0..12 {
-            let mid = 0.5 * (lo + hi);
-            if ok(mid) {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        let wn = lo.floor();
-        let (items, ls) = build(wn);
-        Some((wn, items, ls))
     }
 
     /// The polyline of one run from `s` (in traversal `k0`) to `e` (in traversal `k1`); `attempt`
@@ -4598,8 +4440,10 @@ mod tests {
         let run = [v(0.0, 0.0), v(1.0 * mm, 0.5 * mm), v(5.0 * mm, 0.5 * mm), v(6.0 * mm, 3.0 * mm)];
         let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0);
         assert!(!c.is_empty());
-        let (gain, i, pts) = &c[0];
+        let (gain, len_gain, i, pts) = &c[0];
         assert_eq!(*i, 3);
+        // The length part alone: 1.118 + 4 + 2.693 - 3 = 4.81 mm.
+        assert!((*len_gain - 4.81).abs() < 0.01, "{len_gain}");
         assert_eq!(pts.len(), 2, "{pts:?}");
         assert!((pts[0] - v(6.0 * mm, 0.0)).len() < 1.0 && (pts[1] - v(6.0 * mm, 3.0 * mm)).len() < 1.0, "{pts:?}");
         // Length 1.118 + 4 + 2.693 - 3 = 4.81 mm, plus the junction angle 10 x 0.45 x psi:
@@ -4607,6 +4451,21 @@ mod tests {
         assert!((*gain - 12.39).abs() < 0.02, "{gain}");
         // A branch that leaves straight away has nothing to gain.
         assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0).is_empty());
+    }
+
+    #[test]
+    fn a_run_that_drew_nothing_never_fails_blank() {
+        // M6 F-1: no attempt produced copper (empty reason): the wire fails as a drawing failure
+        // naming its layer, so the never-drop pass (key "drawing:") draws it; an attempt's own
+        // reason stays as it was.
+        let m = BoardModel::from_json(include_str!("../../tests/fixtures/fx-narrow-gap.json")).expect("fixture parses");
+        let l = &m.layers[0];
+        let r = failed_run_reason(String::new(), &m, l.id);
+        assert!(r.starts_with("drawing: no run found on layer "), "{r}");
+        assert!(r.contains(&l.name), "{r}");
+        assert_eq!(failed_run_reason("drawing: blocked by GND".into(), &m, l.id), "drawing: blocked by GND");
+        // A layer id the model does not have is named by its number.
+        assert!(failed_run_reason(String::new(), &m, 9999).starts_with("drawing: no run found on layer 9999 "));
     }
 
     #[test]

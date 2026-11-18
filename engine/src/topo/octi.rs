@@ -71,9 +71,6 @@ pub struct OctiCfg {
     /// `planned_room` factor weight: price per nm of drawn shape inside the room the plan keeps
     /// for a lane neighbour not drawn yet, times `x + x^2` (`x` = depth over the pitch).
     pub room: f64,
-    /// P6 (b) (`[drawing] lane_walls = "price"`): the lane slot outside the span the packing and
-    /// the drawn neighbours leave a run is priced like the planned room, not walled.
-    pub lane_price: bool,
 }
 
 impl OctiCfg {
@@ -91,14 +88,13 @@ impl OctiCfg {
             acute_forbidden: o.acute == "forbidden",
             pull: o.bundle_pull.clamp(0.0, 0.9),
             room: reg.weight("planned_room").unwrap_or(5.0).max(0.0),
-            lane_price: o.lane_walls == "price",
         }
     }
 }
 
 impl Default for OctiCfg {
     fn default() -> Self {
-        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0, lane_price: true }
+        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0 }
     }
 }
 
@@ -303,18 +299,9 @@ impl Drawer<'_> {
                 // stay for drawn copper, fixed obstacles and the undrawn wires' via chords): a
                 // leg crossing the edge `depth` beyond the span pays `room x pitch x (x + x^2)`,
                 // `x = depth / pitch` (Bast, Brosi & Storandt 2020 section 4.3, p. 7: room for
-                // the lines routed later as a cost). With `[drawing] lane_walls = "hard"` the
-                // walls of before.
-                if cfg.lane_price {
-                    gates.push((pp, u, len, if before && lo > 1.0 { lo } else { f64::NEG_INFINITY }, if after && hi < len - 1.0 { hi } else { f64::INFINITY }));
-                } else {
-                    if before && lo > 1.0 {
-                        strip.walls.push((pp, pp + u * lo));
-                    }
-                    if after && hi < len - 1.0 {
-                        strip.walls.push((pp + u * hi, pq));
-                    }
-                }
+                // the lines routed later as a cost). M6 (2026-11-18) removed the walls of before
+                // (`[drawing] lane_walls = "hard"`).
+                gates.push((pp, u, len, if before && lo > 1.0 { lo } else { f64::NEG_INFINITY }, if after && hi < len - 1.0 { hi } else { f64::INFINITY }));
                 // Which end of the edge lies on the wire's left, coming from the triangle before
                 // the pass.
                 let t = pr.tris[wi.tris[k]];

@@ -222,7 +222,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** topor.toml sets a key that was removed (a setting the topological core never read, most of them from the classic router); it is ignored.
+**Cause.** topor.toml sets a key that was removed (a setting the topological core never read, most of them from the classic router, or a drawing-side stand-in removed in M6, 2026-11-18); it is ignored.
 
 **Fix.** Delete the line from topor.toml; the finding names what takes its place, and docs/user/configuration.md lists the current keys (e.g. optimize.runs).
 

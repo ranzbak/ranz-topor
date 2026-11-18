@@ -535,7 +535,8 @@ reported unrouted and nothing of them is written (the behaviour before).
 = "taut"`), the per-edge room as the capacity price (`[capacity] model = "edges"`, `edges_test = "price"`; the
 per-layer cut test, `model = "cuts"`, is an option for now: too slow for a large board within the time limit), then TopoR's loop on the
 topology only (`[optimize] loop = "topor"`), and the picked variant drawn once, without drawing feedback
-(`[search] drawing_feedback = "auto"`). Every judgement is one price (the sum of weight × amount over the
+(`[search] drawing_feedback` only acts with `loop = "cycles"`; set with the TopoR loop it is ignored with a
+warning, M6 2026-11-18). Every judgement is one price (the sum of weight × amount over the
 factors): an over-full passage, a crossing on one layer or a trace through foreign copper is costly, never a
 refusal. The whole-route cycles below are the method before M0, still available with `loop = "cycles"`
 (`initial = "per_cycle"`, `length = "even"`, `[capacity] model = "edges"`, `edges_test = "refuse"` and
@@ -561,7 +562,7 @@ Minimum track width, or the net's custom-rule minimum) from the nearest pad of t
 A trace leaving its own pad needs half its width plus the clearance to the next pin, so the planner no longer plans
 exits through the gap between two fine-pitch pins. The drawing step draws the planned widths: the full width where
 it fits, the minimum only inside the planned stretches; it no longer narrows a trace on its own
-(`[search] neck_in_drawing = true` brings that back). Every narrowed stretch is a warning in the report with its
+(the option that brought that back, `[search] neck_in_drawing`, was removed in M6, 2026-11-18). Every narrowed stretch is a warning in the report with its
 width and length. A via the plan puts at a layer change takes its spot: another net's via planned in the same
 small spot is moved or its trace rerouted before the drawing (`[vias] reserve_sites`).
 
