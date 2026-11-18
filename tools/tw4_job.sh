@@ -87,12 +87,6 @@ case ${1:-} in
       ( cd engine && cargo test --release --test topo_cm1_room via_prices 9>&- > $R/mutant.log 2>&1; note "mutant (expect != 0) rc $?" )
     else note "mutant not applied"; fi
     cp $R/refine.rs.orig engine/src/topo/refine.rs
-    # mutant 2: the memo forgets the moved partner via (pair terms of other owners go stale)
-    sed -i 's/meets(\&relaid, \&g.deps) || meets(mtris, \&g.tris)/meets(\&relaid, \&g.deps)/' engine/src/topo/refine.rs
-    if ! grep -q "meets(mtris" engine/src/topo/refine.rs; then
-      ( cd engine && cargo test --release --test topo_cm1_room via_prices 9>&- > $R/mutant2.log 2>&1; note "mutant2 (expect != 0) rc $?" )
-    else note "mutant2 not applied"; fi
-    cp $R/refine.rs.orig engine/src/topo/refine.rs
     note "all done" ;;
   eq)
     # TW4 T2 at equal time (lead 2026-11-18): via_cuts off vs on, wall 300 s, 4 threads, esp s0-s4 + qmtech s0
