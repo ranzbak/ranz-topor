@@ -350,7 +350,11 @@ fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &s
 /// (a Cancel leaves its own). `None` without a limit. O(connections).
 fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option<crate::route::LimitReport> {
     let limit_s = ctl.limit.seconds()?;
-    let runtime_s = r.runtime_s;
+    // The limit's own clock (its `start`, taken when the caller built the RunControl), not `r.runtime_s`
+    // (from `route_topo`'s `t0`, later): a limit reached just before the run ended would read "not
+    // reached" while a stop test had already cut a step on it (limit-flake 2026-11-18: cut_steps
+    // named the via reduction with reached = false and no step).
+    let runtime_s = ctl.limit.elapsed_s().max(r.runtime_s);
     let mode = if opts.timeout_mode == "hard" { "hard" } else { "soft" };
     let reached = runtime_s >= limit_s;
     let step = if reached { ctl.snapshot().limit_step } else { String::new() };

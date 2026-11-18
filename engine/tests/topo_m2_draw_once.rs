@@ -474,12 +474,26 @@ fn a_hard_limit_reached_in_the_drawing_cuts_it_loudly() {
 fn a_hard_limit_reached_in_the_via_reduction_names_that_step() {
     // verify-m2d O2: the step the limit cut is the via reduction (its own CutStep), not the drawing
     // that precedes it: cut_steps names it and the report line says the vias it had not removed stay.
+    // Deterministic (limit-flake 2026-11-18): the hook reaches the limit at the via reduction's start,
+    // so a stop test inside it always cuts; the caller builds its RunControl 300 ms before the run
+    // starts, the run is then over within a few ms of the reach, i.e. less than the limit's own clock
+    // (`reached` read the run's later clock: cut_steps named the step with reached = false).
     let m = crop(SMALL_CROP);
     let o = topor(r#", "runs": 1, "capacity_model": "cuts", "timeout_mode": "hard", "opt_loop": "cycles", "topo_rounds": 1"#);
-    let (r, hit) = act_at(&m, &o, &["via reduction and fuse"], |c| c.limit.reach());
-    assert!(hit, "the run ended before the via reduction");
+    let mut ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let l2 = ctl.limit.clone();
+    ctl.set_test_hook(move |p| {
+        if p == "via reduction begin" {
+            l2.reach();
+        }
+        false
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let r = route_with(&m, &o, &ctl);
     let l = r.limit.as_ref().expect("limit report");
     assert!(l.reached && l.mode == "hard", "{l:?}");
+    assert!(!l.step.is_empty(), "the step the limit fell in is named: {l:?}");
     assert!(l.cut_steps.contains(&"via_reduction".to_string()), "the via reduction is the step cut: {l:?}");
     assert!(r.warnings.iter().any(|w| w.contains("the via reduction was cut (the vias it had not removed yet stay)")), "{:?}", r.warnings);
 }
