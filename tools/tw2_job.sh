@@ -11,6 +11,7 @@
 #   tw2_job.sh end CFG...      bornhack J (4 threads, started first), ladder CFG..., tests and fpcheck in one job
 #   tw2_job.sh r2 CFG...       fix round 2: bornhack J + tiled DRC (4 threads, started first), ladder CFG..., the whole
 #                              suite + clippy + FULL pytest + drcloop pin check, the mutants in their own tree
+#   tw2_job.sh r2m CFG...      the merge check of fix round 2: ladder CFG... and the r2 suite (no bornhack, no mutants)
 #   tw2_job.sh task CFG BOARD  one run (inside a unit)
 # CFG: D (the tree's defaults; main = sequential, tw2-metric = erbs joint), J (realise erbs), S (realise sequential),
 #      JF / SF (J / S with optimize.allow_violations = false: no never-drop forcing), JD (J + TOPO_ERBS_DEBUG=1: per-run trace).
@@ -202,6 +203,7 @@ case ${1:-} in
   r2-in) r2suite ;;
   r2mut-in) r2mut ;;
   bhtiles-in) bhtiles ;;
+  r2m) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-r2suite -- bash $ROOT/tools/tw2_job.sh r2-in ) & sleep 1; wait; note "all done" ;;
   r2) shift; ( hzq run --threads 4 --name J-bornhack -- bash $ROOT/tools/tw2_job.sh bhtiles-in ) & sleep 2
     ladder "$@"; ( hzq run --threads 4 --name tw2-r2suite -- bash $ROOT/tools/tw2_job.sh r2-in ) & sleep 1
     ( hzq run --threads 4 --name tw2-r2mut -- bash $ROOT/tools/tw2_job.sh r2mut-in ) & sleep 1; wait; note "all done" ;;
