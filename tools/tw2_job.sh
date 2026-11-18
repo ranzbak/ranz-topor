@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tw2_job.sh (branch tw2-metric, docs/dev/design/tw2-metric.md): board ladder, tests and mutants on the VM.
-#   tw2_job.sh ladder CFG...   per CFG one hzq unit per long board (qmtech 4 threads, esp 1 thread, started first)
-#                              and one for eprom + wiccon, then wait
+#   tw2_job.sh ladder CFG...   per CFG one hzq unit for qmtech (4 threads, started first) and one for esp + eprom +
+#                              wiccon (1 thread; <= 4 waiting units per job: 2 CFGs per job), then wait
 #   tw2_job.sh tests           one hzq unit (4 threads): cargo test --release, clippy, targeted pytest, TW2 mutants
 #   tw2_job.sh both CFG...     ladder CFG... and tests in one job
 #   tw2_job.sh task CFG BOARD  one run (inside a unit)
@@ -41,8 +41,7 @@ ladder() {
     ( hzq run --threads 4 --name "$c-qmtech" -- bash $ROOT/tools/tw2_job.sh task $c qmtech 4; ) & sleep 1
   done
   for c in "$@"; do
-    ( hzq run --threads 1 --name "$c-esp" -- bash $ROOT/tools/tw2_job.sh task $c esp; ) & sleep 1
-    ( hzq run --threads 1 --name "$c-small" -- bash $ROOT/tools/tw2_job.sh small $c ) & sleep 1
+    ( hzq run --threads 1 --name "$c-rest" -- bash $ROOT/tools/tw2_job.sh small $c ) & sleep 1
   done
 }
 mut() {  # name file test-args... ; the python snippet on stdin edits the file
@@ -81,7 +80,7 @@ tests() {
 }
 case ${1:-} in
   task) shift; task "$@" ;;
-  small) for n in eprom wiccon; do task $2 $n; done ;;
+  small) for n in esp eprom wiccon; do task $2 $n; done ;;
   ladder) shift; ladder "$@"; wait; note "all done" ;;
   tests) hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in; note "all done" ;;
   tests-in) tests ;;
