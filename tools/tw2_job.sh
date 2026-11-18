@@ -7,7 +7,7 @@
 #   tw2_job.sh retest          one hzq unit (4 threads): clippy (log kept), the TW2 tests, mutants j3 and d1
 #   tw2_job.sh task CFG BOARD  one run (inside a unit)
 # CFG: D (the tree's defaults; main = sequential, tw2-metric = erbs joint), J (realise erbs), S (realise sequential),
-#      JF / SF (J / S with optimize.allow_violations = false: no never-drop forcing).
+#      JF / SF (J / S with optimize.allow_violations = false: no never-drop forcing), JD (J + TOPO_ERBS_DEBUG=1: per-run trace).
 # Runs: seed 0, optimize.rounds=1 (one fixed TopoR loop cycle), runs=1, --clock cpu --timeout 2400, TOPO_TIMES=1.
 # Out: $HZ_RUN_DIR/<CFG>/<board>/ (route_board.sh layout; tools ladder_diff.py <tag>/S <tag>/J).
 # bornhack is not in the ladder here (lead 2026-11-18: once, at the end).
@@ -18,9 +18,10 @@ E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
 board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo bornhack2026;; esac; }
 cfg() {
-  SETS=()
+  SETS=(); ENVS=()
   case $1 in
     D) ;;
+    JD) SETS=(--set 'drawing.realise="erbs"'); ENVS=(TOPO_ERBS_DEBUG=1) ;;
     J) SETS=(--set 'drawing.realise="erbs"') ;;
     S) SETS=(--set 'drawing.realise="sequential"') ;;
     JF) SETS=(--set 'drawing.realise="erbs"' --set optimize.allow_violations=false) ;;
@@ -32,7 +33,7 @@ task() {
   local c=$1 n=$2 th=${3:-1}; cfg $c
   local o=$R/$c/$n; mkdir -p $o
   local t0=$(date +%s)
-  env RAYON_NUM_THREADS=$th TOPO_TIMES=1 tools/route_board.sh "$(board_path $n)" $o --clock cpu --timeout 2400 --no-png \
+  env RAYON_NUM_THREADS=$th TOPO_TIMES=1 "${ENVS[@]}" tools/route_board.sh "$(board_path $n)" $o --clock cpu --timeout 2400 --no-png \
     --set optimize.rounds=1 --set optimize.runs=1 "${SETS[@]}" > $R/$c-$n.log 2>&1
   note "task $c $n rc $? wall $(( $(date +%s) - t0 )) s"
   rm -rf $o/work $o/*/work 2>/dev/null
@@ -95,6 +96,7 @@ case ${1:-} in
   task) shift; task "$@" ;;
   small) for n in esp eprom wiccon; do task $2 $n; done ;;
   ladder) shift; ladder "$@"; wait; note "all done" ;;
+  one) shift; hzq run --threads ${3:-1} --name "$1-$2" -- bash $ROOT/tools/tw2_job.sh task "$@"; note "all done" ;;
   tests) hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in; note "all done" ;;
   tests-in) tests ;;
   retest) hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in; note "all done" ;;
