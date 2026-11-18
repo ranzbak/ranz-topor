@@ -5,6 +5,8 @@
 #   tw2_job.sh tests           one hzq unit (4 threads): cargo test --release, clippy, targeted pytest, TW2 mutants
 #   tw2_job.sh both CFG...     ladder CFG... and tests in one job
 #   tw2_job.sh retest          one hzq unit (4 threads): clippy (log kept), the TW2 tests, mutants j3 and d1
+#   tw2_job.sh fpcheck         one hzq unit (4 threads): the fuse pour check tests, clippy, config pytest, mutants fp1-fp5
+#   tw2_job.sh ladder-fp CFG...  ladder CFG... and fpcheck in one job
 #   tw2_job.sh task CFG BOARD  one run (inside a unit)
 # CFG: D (the tree's defaults; main = sequential, tw2-metric = erbs joint), J (realise erbs), S (realise sequential),
 #      JF / SF (J / S with optimize.allow_violations = false: no never-drop forcing), JD (J + TOPO_ERBS_DEBUG=1: per-run trace).
@@ -93,6 +95,23 @@ retest() {  # targeted: the tests and mutants a fix round touched, clippy with i
   sub '            self.release_bands(w);' '' | mut d1_release $D --test tw2_metric
   note "retest done"
 }
+fpcheck() {  # the fuse pour check (TW2, qmtech 43 vs 44 forensics)
+  cd $ROOT/engine
+  rustup component add clippy > $R/clippy-install.log 2>&1 9>&-
+  cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; note "clippy rc $?: $(grep -cE '^(warning|error)' $R/clippy.log) warning/error lines"
+  { cargo test --release --lib topo::fusepour 9>&-; cargo test --release --test tw2_fuse_pour --test topo_m6 --test topo_d4 --test tw2_metric 9>&-; } > $R/fpcheck.log 2>&1
+  note "fpcheck rc $?"; grep -E "test result|FAILED|panicked" $R/fpcheck.log | while read -r l; do note "fpcheck: $l"; done
+  cd $ROOT; CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py > $R/pytest.log 2>&1
+  note "pytest rc $?: $(tail -1 $R/pytest.log)"
+  local F=$ROOT/engine/src/topo/fusepour.rs C=$ROOT/engine/src/topo/core.rs
+  sub 'fused_left <= unfused_left' 'fused_left < unfused_left' | mut fp1_fused_ok $F --lib topo::fusepour
+  sub '(moves[j].w == moves[i].w || moves[j].onto == moves[i].w)' '(moves[j].onto == moves[i].w)' | mut fp2_dependents $F --lib topo::fusepour
+  sub 'let back = dr.restore_wire(&now, wo);' 'let back = { let _ = &now; wo.clone() };' | mut fp3_index $C --test tw2_fuse_pour
+  sub '                    out[ci] = o.clone();
+                    necking.retain' '                    necking.retain' | mut fp4_outcome $C --test tw2_fuse_pour
+  sub 'let pour_check = opts.fuse_pour_check &&' 'let pour_check = false && opts.fuse_pour_check &&' | mut fp5_off $C --test tw2_fuse_pour
+  note "fpcheck done"
+}
 case ${1:-} in
   task) shift; task "$@" ;;
   small) for n in esp eprom wiccon; do task $2 $n; done ;;
@@ -102,6 +121,9 @@ case ${1:-} in
   tests-in) tests ;;
   retest) hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in; note "all done" ;;
   retest-in) retest ;;
+  fpcheck) hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in; note "all done" ;;
+  fpcheck-in) fpcheck ;;
+  ladder-fp) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
   both) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1; wait; note "all done" ;;
   ladder-retest) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in ) & sleep 1; wait; note "all done" ;;
   *) sed -n 2,12p "$0"; exit 2 ;;

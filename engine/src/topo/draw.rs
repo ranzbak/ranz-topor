@@ -3573,6 +3573,19 @@ impl<'a> Drawer<'a> {
         ok
     }
 
+    /// Undo of [`Drawer::refit_run`]s (the fuse pour check, [`super::fusepour`]): the tracks of
+    /// `cur` leave the drawn copper and those of `saved` (the same wire before the refits) come
+    /// back; returns `saved` with its new handles. Both have plain tracks behind their handles,
+    /// first in their items (what `refit_run` accepts and keeps). O(tracks x index update).
+    pub fn restore_wire(&mut self, cur: &WireOut, saved: &WireOut) -> WireOut {
+        for &h in &cur.handles {
+            self.uncommit(h);
+        }
+        let mut wo = saved.clone();
+        wo.handles = saved.items[..saved.handles.len()].iter().map(|it| self.commit(it)).collect();
+        wo
+    }
+
     /// The reference paths of the round-i class test ([`ClassRef`]). O(passes of all wires).
     fn build_class_ref(&self) -> ClassRef {
         let st = self.st;

@@ -48,6 +48,7 @@ pub mod padend;
 pub mod joint;
 pub mod state;
 pub mod stitch;
+pub mod fusepour;
 pub mod tidy;
 pub mod stats;
 pub mod tree;
