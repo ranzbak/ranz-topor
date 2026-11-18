@@ -22,10 +22,10 @@ use crate::model::BoardModel;
 use crate::pourcheck::Cut;
 use std::collections::BTreeSet;
 
-/// Rounds of "undo the moves nearest the new pieces, stitch again" before every move is undone.
-pub const ROUNDS: usize = 2;
-
-/// Two pads, vias or pad-less centroids closer than this (nm) are the same place.
+/// Two pads, vias or pad-less centroids closer than this (nm) are the same place: a matching
+/// tolerance between two stitchings of nearly the same copper (a piece's centroid moves a little
+/// when a neighbouring track moves), not a routing judgement. The rounds of "undo the nearest
+/// moves, stitch again" are `[search] fuse_pour_rounds`.
 const SAME_NM: f64 = 1_000_000.0;
 
 /// No wire: the `onto` of a move that joins no other wire (a polish).
@@ -131,6 +131,21 @@ pub fn with_dependents(moves: &[Move], seed: &BTreeSet<usize>) -> BTreeSet<usize
     }
 }
 
+/// The moves to undo after a partial undo (verify V3): the moves kept were legality-checked
+/// against the copper as it was then, with the undone moves' copper in place; the copper that
+/// comes back may clash with them. For each wire with a kept move whose copper `clashes(wire)`
+/// against the drawing now, its earliest kept move (the later ones of that wire depend on it,
+/// [`with_dependents`]). The caller undoes them and asks again until none clashes: each round
+/// undoes at least one move, and the copper with no move kept is the drawing's own, so this ends.
+/// O(moves + wires x clashes).
+pub fn clash_seed(moves: &[Move], live: &[bool], clashes: &dyn Fn(usize) -> bool) -> BTreeSet<usize> {
+    let mut first: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for (i, m) in moves.iter().enumerate().filter(|(i, _)| live[*i]) {
+        first.entry(m.w).or_insert(i);
+    }
+    first.into_iter().filter(|(w, _)| clashes(*w)).map(|(_, i)| i).collect()
+}
+
 /// The moved copper is kept as it is when it leaves no more pieces cut off than the copper
 /// without the moves (the errors criterion first; length decides the rest). O(1).
 pub fn fused_ok(fused_left: usize, unfused_left: usize) -> bool {
@@ -185,6 +200,21 @@ mod tests {
         assert_eq!(nearest_move(&moves, &[true, false, true], &pts), Some(2), "an undone move is not a candidate");
         assert_eq!(nearest_move(&moves, &[false, false, false], &pts), None);
         assert_eq!(nearest_move(&moves, &[true, true, true], &[]), None);
+    }
+
+    #[test]
+    fn a_clash_undoes_the_earliest_kept_move_of_the_clashing_wire() {
+        let moves = [
+            Move { w: 1, onto: 9, ..Move::default() },
+            Move { w: 2, onto: 9, ..Move::default() },
+            Move { w: 2, onto: NO_WIRE, ..Move::default() },
+            Move { w: 3, onto: NO_WIRE, ..Move::default() },
+        ];
+        // Move 0 undone; wire 2's copper clashes with what came back: its first kept move.
+        assert_eq!(clash_seed(&moves, &[false, true, true, true], &|w| w == 2), BTreeSet::from([1]));
+        assert_eq!(clash_seed(&moves, &[false, false, true, true], &|w| w == 2), BTreeSet::from([2]));
+        assert!(clash_seed(&moves, &[false, true, true, true], &|_| false).is_empty());
+        assert!(clash_seed(&moves, &[false, true, true, true], &|w| w == 1).is_empty(), "wire 1 has no kept move");
     }
 
     #[test]

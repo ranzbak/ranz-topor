@@ -1194,6 +1194,10 @@ pub struct Options {
     /// are undone, then all of them. Costs two or more stitching passes on a board with pours.
     /// Default on.
     pub fuse_pour_check: bool,
+    /// Topological core (TW2, `topor.toml [search] fuse_pour_rounds`): rounds of the fuse pour
+    /// check that undo the moves nearest the new cut-off pieces and stitch again, before every
+    /// move is undone. Default 2.
+    pub fuse_pour_rounds: usize,
     /// Topological core (S3, `topor.toml [optimize] rounds`): most whole-route cycles per run (the
     /// first included). Since M-B0 a safety cap: a run ends at "Routes stable" (`stable_*`) or at
     /// the user's OK; the cap ends a run that never settles. A work cap, not a time cap: the same
@@ -1574,6 +1578,7 @@ impl Default for Options {
             dangling_lead_via: true,
             fuse_branches: true,
             fuse_pour_check: true,
+            fuse_pour_rounds: 2,
             topo_rounds: 30,
             max_ripped: 5000,
             max_expansions: 2_000_000,

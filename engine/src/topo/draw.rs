@@ -3662,10 +3662,27 @@ impl<'a> Drawer<'a> {
         if ok {
             wo.items.splice(lo..hi, keep);
             wo.runs[r].1 = pts;
-            // The leads of continued dangling ends (exist-term) stay part of the length.
-            wo.length_nm = wo.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum::<f64>() + wo.lead_nm;
+            wo.length_nm = wo.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
         }
         ok
+    }
+
+    /// The rule violations of the tracks of `wo` (committed, plain tracks first in its items)
+    /// against the board and the rest of the drawing (its own tracks skipped): the re-check of
+    /// the moves kept after a partial undo of the fuse pour check compares it before and after
+    /// the undo (verify V3), so a wire's own forced violations (never drop) undo nothing.
+    /// O(tracks x query).
+    pub fn wire_viols(&self, wo: &WireOut) -> usize {
+        let n = wo.handles.len();
+        let mut skip: Vec<usize> = wo.handles.iter().map(|&h| self.handles[h].0).collect();
+        skip.sort_unstable();
+        self.checker.check_against(&self.idx, &wo.items[..n], &skip).violations.len()
+    }
+
+    /// Whether the tracks of `wo` keep every rule against the rest of the drawing
+    /// ([`Self::wire_viols`] is 0). O(tracks x query).
+    pub fn wire_clear(&self, wo: &WireOut) -> bool {
+        self.wire_viols(wo) == 0
     }
 
     /// Whether every handle of `wo` names a live item of the drawing's index, one per track

@@ -7,9 +7,14 @@
 //! whole board on both layers added in code (the crop has no pours), so the fuse moves of its
 //! nets meet a pour. No new pattern.
 
+use topor_engine::check::Checker;
 use topor_engine::control::RunControl;
+use topor_engine::geom::Vec2;
 use topor_engine::model::{BoardModel, Item, Options};
 use topor_engine::route::RouteResult;
+use topor_engine::topo::board::{self, BuildOpts};
+use topor_engine::topo::draw::{track_item, Drawer, WireOut};
+use topor_engine::topo::state::State;
 
 fn crop_with_gnd_pour() -> BoardModel {
     let mut v: serde_json::Value = serde_json::from_str(include_str!("fixtures/esp-rust-board-usb-crop.json")).expect("fixture parses");
@@ -114,4 +119,75 @@ fn undoing_every_fuse_move_gives_the_copper_without_the_fuse() {
     let diag = |r: &RouteResult| -> Vec<String> { r.warnings.iter().filter(|w| w.starts_with("fuse") || w.starts_with("via reduction") || w.starts_with("octilinear polish") || w.starts_with("TopoR loop (") || w.starts_with("pour stitching")).map(|w| w.chars().take(300).collect()).collect() };
     assert_eq!(all.total_length_nm, off.total_length_nm, "undo all:\n{:#?}\nfuse off:\n{:#?}", diag(&all), diag(&off));
     assert_eq!(copper(&all), copper(&off));
+    // Octilinear: the polish line counts the polish moves kept (verify V5), here none.
+    let oct = route(&m, &[], &["fuse pour undo all"]);
+    let pl = line(&oct, "octilinear polish after drawing: ").expect("polish line");
+    assert!(pl.starts_with("octilinear polish after drawing: 0 segments") && pl.contains(": 0.0 mm"), "{pl}");
+}
+
+/// Verify V6: the check's stitching stops with the time limit (hook "fuse pour cut": cut at
+/// once); a cut stitching decides nothing, even where every move would be undone.
+#[test]
+fn a_cut_stitching_undoes_nothing() {
+    let m = crop_with_gnd_pour();
+    let r = route(&m, &[], &["fuse pour undo all", "fuse pour cut"]);
+    let l = line(&r, "fuse pour check: ").expect("fuse pour check line");
+    assert!(l.contains("cut its stitching") && undone(l).0 == 0, "{l}");
+}
+
+/// `(n)` of the line's "<n> by the re-check of the kept moves".
+fn rechecked(l: &str) -> usize {
+    l.split(" by the re-check of the kept moves").next().and_then(|t| t.rsplit(' ').next()).and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("{l}"))
+}
+
+/// Verify V3: after a partial undo the moves kept are checked again against the copper that came
+/// back, and a clashing one is undone too. Hooks: "fuse pour partial undo" undoes the first fuse
+/// move whatever the counts; "fuse pour clash" reports the first kept fuse move's wire as clashing
+/// once. The re-check undoes it (and nothing is left stale in the drawing's index).
+#[test]
+fn a_kept_move_that_clashes_with_the_restored_copper_is_undone_too() {
+    let m = crop_with_gnd_pour();
+    let r = route(&m, &[], &["fuse pour partial undo", "fuse pour clash"]);
+    let l = line(&r, "fuse pour check: ").expect("fuse pour check line");
+    let (n, k) = undone(l);
+    assert!(rechecked(l) >= 1 && n >= 2 && n < k, "{l}");
+    assert!(line(&r, "fuse pour self-check: ").is_none(), "{:?}", line(&r, "fuse pour self-check: "));
+    // Without the clash hook the partial undo re-checks the kept moves and finds them clear.
+    let p = route(&m, &[], &["fuse pour partial undo"]);
+    let lp = line(&p, "fuse pour check: ").expect("fuse pour check line");
+    assert_eq!(rechecked(lp), 0, "{lp}");
+}
+
+/// The re-check's test itself ([`Drawer::wire_clear`]): a wire's tracks against the rest of the
+/// drawing, its own tracks skipped.
+#[test]
+fn a_wire_is_clear_only_while_no_foreign_track_comes_too_close() {
+    const MM: f64 = 1e6;
+    let mut v: serde_json::Value = serde_json::from_str(include_str!("fixtures/esp-rust-board-usb-crop.json")).unwrap();
+    v["pours"] = serde_json::json!([]);
+    let m = BoardModel::from_json(&v.to_string()).unwrap();
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let st = State::new(&b.proj);
+    let o = Options::default();
+    let ck = Checker::new(&m, &o);
+    let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+    // An empty spot of the crop: (139, 119.5) mm is 5 mm from the nearest pad.
+    let (a, z) = (Vec2 { x: 139.0 * MM, y: -119.0 * MM }, Vec2 { x: 139.0 * MM, y: -120.0 * MM });
+    let w = 0.15 * MM;
+    let mine = track_item(1, 0, w, a, z, None);
+    let h = dr.commit(&mine);
+    let wo = WireOut { items: vec![mine.clone()], handles: vec![h], ..WireOut::default() };
+    let free = dr.wire_clear(&wo);
+    assert!(free, "the probe track itself must be legal on the empty corner");
+    // A foreign track 0.05 mm beside it: not clear; taken away again: clear.
+    let off = Vec2 { x: 0.2 * MM, y: 0.0 };
+    let other = track_item(2, 0, w, a + off, z + off, None);
+    let ho = dr.commit(&other);
+    assert!(!dr.wire_clear(&wo));
+    dr.uncommit(ho);
+    assert!(dr.wire_clear(&wo));
+    // Its own tracks never count against it (the same track committed twice is its own).
+    let h2 = dr.commit(&mine);
+    let both = WireOut { items: vec![mine.clone(), mine], handles: vec![h, h2], ..WireOut::default() };
+    assert!(dr.wire_clear(&both));
 }
