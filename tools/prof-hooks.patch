@@ -1,0 +1,885 @@
+diff --git a/engine/src/py.rs b/engine/src/py.rs
+index 91ff9ca3..e411e6b8 100644
+--- a/engine/src/py.rs
++++ b/engine/src/py.rs
+@@ -58,6 +58,19 @@ fn fuzz_items(
+     .map_err(PyValueError::new_err)
+ }
+ 
++/// The result as JSON; with `TOPO_PROF` set a `profile` member carries the run's counters
++/// (`topo::prof::report`).
++fn result_json(res: &crate::route::RouteResult) -> Result<String, String> {
++    match crate::topo::prof::report() {
++        None => serde_json::to_string(res).map_err(|e| e.to_string()),
++        Some(p) => {
++            let mut v = serde_json::to_value(res).map_err(|e| e.to_string())?;
++            v["profile"] = p;
++            serde_json::to_string(&v).map_err(|e| e.to_string())
++        }
++    }
++}
++
+ /// `RouteResult` JSON: topological routing of the unconnected nets (see `route::route`).
+ #[pyfunction]
+ fn route(py: Python<'_>, model_json: String, options_json: String) -> PyResult<String> {
+@@ -65,7 +78,7 @@ fn route(py: Python<'_>, model_json: String, options_json: String) -> PyResult<S
+         let model = BoardModel::from_json(&model_json)?;
+         let opts = Options::from_json(&options_json)?;
+         let res = crate::route::route(&model, &opts);
+-        serde_json::to_string(&res).map_err(|e| e.to_string())
++        result_json(&res)
+     })
+     .map_err(PyValueError::new_err)
+ }
+@@ -185,7 +198,7 @@ fn route_async(model_json: String, options_json: String) -> PyResult<RouteJob> {
+     let c2 = ctl.clone();
+     let job = Job::spawn(move || {
+         let res = crate::route::route_with(&model, &opts, &c2);
+-        serde_json::to_string(&res).map_err(|e| e.to_string())
++        result_json(&res)
+     });
+     Ok(RouteJob { ctl, job })
+ }
+diff --git a/engine/src/topo/core.rs b/engine/src/topo/core.rs
+index 75bac0c2..37ee1bb8 100644
+--- a/engine/src/topo/core.rs
++++ b/engine/src/topo/core.rs
+@@ -162,6 +162,7 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
+ /// finishing of the copper, `route::route_with`: ignored pads, edge trims, the Cleanup-safe tidy),
+ /// so a wait of the drawing counts to the copper handed back.
+ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
++    super::prof::begin();
+     let t0 = Instant::now();
+     let n = opts.runs.max(1);
+     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
+@@ -185,6 +186,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
+     ctl.limit.set_draw_grace(if opts.timeout_mode == "hard" { -1.0 } else { opts.drawing_grace_s });
+     let stubs = place_plane_stubs(model, opts, ctl);
+     ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
++    super::prof::mark("stubs");
+     let t_fx = Instant::now();
+     // Cancel / OK during the projection (cancel-fix; the cut room of `[capacity] model = "cuts"`
+     // took 150-200 s on qmtech and did not look at Cancel): the sheets stop at once and no run begins.
+@@ -192,6 +194,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
+     if std::env::var_os("TOPO_TIMES").is_some() {
+         eprintln!("[topo call] projection built once (decomposition, triangulation, cut room): {:.3} s", t_fx.elapsed().as_secs_f64());
+     }
++    super::prof::mark("projection built once");
+     if ctl.is_cancelled() && opts.capacity_model == "cuts" {
+         // M2.TL (fail fast): no plan kept yet, so nothing to draw, said loudly.
+         let why = format!("{NOTHING_TO_DRAW}: Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began, so no plan was kept and no copper is written");
+@@ -1394,6 +1397,7 @@ impl Run {
+             Some((cycle, end)),
+         );
+         self.busy_s += t.elapsed().as_secs_f64();
++        super::prof::mark("round tail");
+         if std::env::var_os("TOPO_TIMES").is_some() {
+             eprintln!("[topo run {} cycle {cycle}] cycle: {:.3} s", self.k + 1, t.elapsed().as_secs_f64());
+         }
+@@ -2309,6 +2313,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
+     let times = std::env::var_os("TOPO_TIMES").is_some();
+     let tlog = |what: &str, t: Instant| {
++        super::prof::mark(what);
+         if times {
+             eprintln!("[topo round {round}] {what}: {:.2} s", t.elapsed().as_secs_f64());
+         }
+@@ -2917,6 +2922,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+         xstats.set(x);
+     };
+     let crossing_pass = |st: &mut State, wire_conn: &mut Vec<usize>, reroutes: &mut Vec<u32>, lr: &mut layers::LayerReport, ripped_total: &mut usize, stage: usize| {
++        let _pg = super::prof::g(super::prof::K::CrossingPass);
+         if !opts.crossing_rules || expired() {
+             return;
+         }
+@@ -3337,6 +3343,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+             (f.packer == &packer as *const Packer as usize && f.bottom == bottom && f.price == overflow_mm.to_bits() && f.key == super::refine::cap_key(st, &lr.events)).then_some(f.viol)
+         };
+         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
++            let _pg = super::prof::g(super::prof::K::Measure);
+             let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).shorts_ranked(opts.pick_shorts, opts.short_weight);
+             if let Some(v) = reused(st, lr) {
+                 return pred(v);
+@@ -3397,6 +3404,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+         }
+         impl<'p> Rerouter<'p> for Rr<'_, 'p> {
+             fn price(&mut self, st: &mut State<'p>, w: WireId) -> f64 {
++                let _pg = super::prof::g(super::prof::K::RrPrice);
+                 let ci = self.wire_conn[w];
+                 let path = st.detach(w);
+                 let wire = st.wires[w].clone();
+@@ -3405,6 +3413,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 c
+             }
+             fn place(&mut self, st: &mut State<'p>, gone: &[WireId]) -> Option<Vec<WireId>> {
++                let _pg = super::prof::g(super::prof::K::RrPlace);
+                 let mut cis: Vec<usize> = gone.iter().map(|&g| self.wire_conn[g]).collect();
+                 cis.sort_by_key(|&ci| self.rank[ci]);
+                 cis.dedup();
+@@ -3428,6 +3437,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 // by the archive's measure: its predicted violations and its vias (5.2c: the vias
+                 // the reroute adds or removes on the whole board, also on the wires it crosses,
+                 // not the wire's own estimate against the present layers).
++                let _pg = super::prof::g(super::prof::K::RrViolAfter);
+                 let lr = (self.assign_t)(st, self.ties);
+                 let p = (self.measure)(st, &lr);
+                 let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
+@@ -3514,6 +3524,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 format!("viol {} (graded {:.3}) vias {} len {:.3} shr {} eval {:.3}", c.errors, self.pred.graded, c.vias, c.length_mm, c.shrinkages, evaluation(&self.obj, &c, self.viol_mm))
+             }
+             fn via_counts(&self) -> BTreeMap<usize, usize> {
++                let _pg = super::prof::g(super::prof::K::ViaCounts);
+                 let mut m = BTreeMap::new();
+                 for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive && w < self.lr.events.len()) {
+                     if let Some(&ci) = self.wire_conn.get(w).filter(|&&c| c != usize::MAX) {
+@@ -3542,6 +3553,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+             /// one is taken, so the random choice among equal layerings stays), else the one before
+             /// comes back. Whether it was taken.
+             fn try_layers(&mut self, lr: layers::LayerReport, ties: u64) -> bool {
++                let _pg = super::prof::g(super::prof::K::TryLayers);
+                 let e0 = self.eval_now();
+                 let (lr0, p0) = (self.lr.clone(), self.pred);
+                 self.set_lr(lr, None);
+@@ -3589,6 +3601,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+             /// One single-wire rip-up and reroute of `w` (and the branches on its junctions) with the
+             /// wire's oscillating coefficients and the via weight `via_w`; whether it was kept.
+             fn reroute(&mut self, topo: &mut Topo, w: WireId, seed: u64, amp: f64, via_w: f64) -> bool {
++                let _pg = super::prof::g(super::prof::K::Reroute);
+                 let ci = self.wire_conn[w];
+                 let (reg_w, amp_i) = self.try_reg(w, seed, amp, via_w);
+                 // The price the move is kept by (5.2a): the same coefficients without the search's
+@@ -3683,6 +3696,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 self.tries[ci] += 1;
+                 if out.kept {
+                     let (lr, p) = pending.expect("a kept reroute was measured");
++                    let _pg2 = super::prof::g(super::prof::K::RrSetLr);
+                     self.set_lr(lr, Some(p));
+                     for c in cis {
+                         self.reroutes[c] += 1;
+@@ -3773,6 +3787,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+             /// (its fruitless tries widen its coefficients, as a reroute's). A priced move, not a
+             /// gate: nothing is refused by a threshold. Whether it was kept.
+             fn pair_move(&mut self, a: WireId, c: &PairCand, seed: u64, amp: f64, via_w: f64) -> bool {
++                let _pg = super::prof::g(super::prof::K::PairMove);
+                 let e0 = self.eval_now();
+                 let before = self.snapshot();
+                 let ev = self.lr.events[a].clone();
+@@ -3846,6 +3861,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+         impl<'p> Space for Sp<'_, 'p> {
+             type Var = LoopVar;
+             fn criteria(&mut self) -> Criteria {
++                let _pg = super::prof::g(super::prof::K::Criteria);
+                 let (mut len_mm, mut area_mm, mut shr) = (0.0, 0.0, 0usize);
+                 for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive) {
+                     let l = self.st.wire_len(w) / MM;
+@@ -3860,9 +3876,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr + self.pred.shrink_n, area)
+             }
+             fn snapshot(&mut self) -> LoopVar {
++                let _pg = super::prof::g(super::prof::K::Snapshot);
+                 LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone(), reroutes: self.reroutes.clone(), pred: self.pred }
+             }
+             fn restore(&mut self, v: &LoopVar) {
++                let _pg = super::prof::g(super::prof::K::SpRestore);
+                 self.st.restore(v.topo.clone());
+                 self.wire_conn.clone_from(&v.wire_conn);
+                 self.reroutes.clone_from(&v.reroutes);
+@@ -3870,6 +3888,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 self.set_lr(v.lr.clone(), Some(v.pred));
+             }
+             fn cycle(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats {
++                let _pg = super::prof::g(super::prof::K::Cycle);
++                super::prof::units(super::prof::K::Cycle, self.st.wires.iter().filter(|w| w.alive).count());
++                let mut plap = Instant::now();
+                 let t0 = Instant::now();
+                 let mut cs = CycleStats::default();
+                 if self.dbg {
+@@ -3900,6 +3921,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 let mut ws: Vec<(f64, WireId)> = ids.into_iter().map(|w| (topo.potential(self.st, w), w)).collect();
+                 ws.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                 let n = ws.len().max(1);
++                super::prof::lap(&mut plap, super::prof::K::TopoSetup);
+                 let mut ripped = 0usize;
+                 for (j, &(_, w)) in ws.iter().enumerate() {
+                     if ripped >= self.max_ripped || stop() {
+@@ -3921,6 +3943,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 }
+                 // limit_grace_s: the cycle's later steps are not begun once the loop is to stop (the
+                 // caller drops a cycle cut short, so the state it leaves is never offered).
++                super::prof::lap(&mut plap, super::prof::K::StSweep);
+                 self.ctl.test_point("loop stage 1 check");
+                 if stop() {
+                     cs.busy_s = t0.elapsed().as_secs_f64();
+@@ -3957,6 +3980,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 cs.layer_s += tl.elapsed().as_secs_f64();
+                 // The wires whose via count rose are laid again, at the end-of-cycle via weight.
+                 let vias1 = self.via_counts();
++                super::prof::lap(&mut plap, super::prof::K::StUncrossReopt);
+                 let rose: Vec<WireId> = (0..self.st.wires.len())
+                     .filter(|&w| self.st.wires[w].alive && self.wire_conn.get(w).is_some_and(|&ci| ci != usize::MAX && vias1.get(&ci).copied().unwrap_or(0) > vias0.get(&ci).copied().unwrap_or(0)))
+                     .collect();
+@@ -3989,6 +4013,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                     cs.layer_runs += 1;
+                     cs.layer_s += tl.elapsed().as_secs_f64();
+                 }
++                super::prof::lap(&mut plap, super::prof::K::StViarose);
+                 self.ctl.test_point("loop stage 2 check");
+                 if stop() {
+                     cs.busy_s = t0.elapsed().as_secs_f64();
+@@ -4044,6 +4069,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                     let t = self.dbg_crit();
+                     eprintln!("LOOPDBG[{}] cycle {} after floating up (kept {}, undone {}): {t}", self.dbg_tag, c.cycle, cs.float_kept, cs.undone);
+                 }
++                super::prof::lap(&mut plap, super::prof::K::StFloat);
+                 self.ctl.test_point("loop stage 3 check");
+                 if stop() {
+                     cs.busy_s = t0.elapsed().as_secs_f64();
+@@ -4068,6 +4094,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                         cs.undone += 1;
+                     }
+                 }
++                super::prof::lap(&mut plap, super::prof::K::StCross);
+                 // 5.4 `[vias] pair_min`, the re-lay half (Luzin-Popov 2013 step 8.1, here for the
+                 // wire itself): a wire that dives to another layer and comes back over a short
+                 // stretch is laid again at the end-of-cycle via weight, so a way round on its own
+@@ -4105,6 +4132,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                 // per wire (id order) its obstructed via pairs, each tried once at the
+                 // end-of-cycle via weight; after a kept move the wire's pairs are read again from
+                 // the new layering (the pair it removed is gone, the next one moves up).
++                super::prof::lap(&mut plap, super::prof::K::StPairrelay);
+                 if let Some(scale) = self.pair_move {
+                     let mut w = 0;
+                     while w < self.st.wires.len() {
+@@ -4132,6 +4160,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+                         w += 1;
+                     }
+                 }
++                super::prof::lap(&mut plap, super::prof::K::StPairmove);
+                 cs.busy_s = t0.elapsed().as_secs_f64();
+                 if self.dbg {
+                     let t = self.dbg_crit();
+@@ -4257,6 +4286,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
+             live(&LiveLoop { pick: *pick, planned, total, stable });
+         };
+         let mut rep = crate::control::in_loop_scope(|| optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock, &mut on_pick));
++        super::prof::mark("loop-end");
+         if yields.get() > 0 {
+             warnings.push(format!(
+                 "TopoR loop: stable after cycle {}, it gave its compute slot to a run not yet begun {} time(s) (fewer engine threads than runs) and waited {:.1} s for one again",
+diff --git a/engine/src/topo/descent.rs b/engine/src/topo/descent.rs
+index 525c81c8..f44ed7fe 100644
+--- a/engine/src/topo/descent.rs
++++ b/engine/src/topo/descent.rs
+@@ -79,6 +79,7 @@ pub fn descend_topo(st: &mut State, t: &mut Topo, base: &Registry, seed: u64, fl
+ /// Label descent: flips, via shifts and lifts on every wire with a layer change, until a sweep
+ /// keeps nothing or the evaluation cap is reached.
+ pub fn descend_labels(lb: &mut Labels) -> Tally {
++    let _pg = super::prof::g(super::prof::K::DescendLabels);
+     for _ in 0..MAX_SWEEPS {
+         let mut kept = 0;
+         for w in lb.candidates() {
+diff --git a/engine/src/topo/init.rs b/engine/src/topo/init.rs
+index fdfa31aa..1447728e 100644
+--- a/engine/src/topo/init.rs
++++ b/engine/src/topo/init.rs
+@@ -836,6 +836,7 @@ impl<'p> State<'p> {
+     /// used). A junction end (`on: Some((w, k))`) is reached only in its triangle, and the chords
+     /// of `w` there are not crossed (the trunk turns at the corner).
+     pub fn search_tree(&self, c: &Conn, src: &[TreeEnd], dst: &[TreeEnd], wt: &InitWeights, scale: f64, hook: Option<&PassHook>) -> Option<TreePath> {
++        let _pg = super::prof::g(super::prof::K::SearchTree);
+         let pr = self.proj;
+         let mut off = Vec::with_capacity(pr.edges.len() + 1);
+         let mut acc = 0;
+@@ -959,6 +960,7 @@ impl<'p> State<'p> {
+     /// stretches between them run through the same edges) until none is left; a swap is kept
+     /// only when it lowers the different-net crossing count of the triangles it touches.
+     pub fn uncross_all(&mut self, max_rounds: usize) -> usize {
++        let _pg = super::prof::g(super::prof::K::UncrossAll);
+         let mut swaps = 0;
+         for _ in 0..max_rounds {
+             let mut changed = false;
+@@ -1015,6 +1017,7 @@ impl State<'_> {
+     /// [`State::uncross_from`] and the wires that took part in a kept swap (ascending, once each):
+     /// the ones Polubasov 2010 lays anew ([`State::relay`]).
+     pub fn uncross_from_touched(&mut self, w: WireId, max_swaps: usize) -> (usize, Vec<WireId>) {
++        let _pg = super::prof::g(super::prof::K::UncrossTouched);
+         let mut swaps = 0;
+         let mut took_part: std::collections::BTreeSet<WireId> = std::collections::BTreeSet::new();
+         let mut todo: Vec<WireId> = vec![w];
+@@ -1082,6 +1085,7 @@ impl State<'_> {
+     /// A wire with a junction end or turns is left alone. Returns `(old id, new id)` of the wires
+     /// that were replaced (a kept lay is a new wire; the old one is dead). At most `max` wires.
+     pub fn relay(&mut self, ws: &[WireId], max: usize, conn_of: &dyn Fn(WireId) -> Option<(Conn, InitWeights, f64)>) -> Vec<(WireId, WireId)> {
++        let _pg = super::prof::g(super::prof::K::Relay);
+         let mut replaced = Vec::new();
+         for &w in ws.iter().take(max) {
+             let wi = &self.wires[w];
+@@ -1112,6 +1116,7 @@ impl State<'_> {
+     /// their price is the caller's report), by breadth-first search, through the first gap of
+     /// each edge. `None` only when the two lie in parts of the board no edge joins. O(triangles).
+     pub fn any_path(&self, c: &Conn) -> Option<Path> {
++        let _pg = super::prof::g(super::prof::K::AnyPath);
+         let pr = self.proj;
+         let ok = |t: TriId| !pr.tri_out[t];
+         let starts: Vec<TriId> = pr.vert_tris[c.a].iter().copied().filter(|&t| ok(t)).collect();
+diff --git a/engine/src/topo/layers.rs b/engine/src/topo/layers.rs
+index 1f10a721..98a4e3dc 100644
+--- a/engine/src/topo/layers.rs
++++ b/engine/src/topo/layers.rs
+@@ -643,6 +643,7 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
+ /// Recompute the stretches, via slots and via counts of `rep` from changed labels `evl` (the P4
+ /// label moves; the wires and their events are unchanged). O(events + passes).
+ pub fn relabel(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
++    let _pg = super::prof::g(super::prof::K::Relabel);
+     let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
+     rep.stretches.clear();
+     rep.events.clear();
+@@ -663,6 +664,8 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
+ /// [`assign`] with the drawing's packer: the labelling is then refined against capacity
+ /// ([`refine`]) and the over-full edge-layers are counted.
+ pub fn assign_with(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
++    let _pg = super::prof::g(super::prof::K::AssignWith);
++    super::prof::units(super::prof::K::AssignWith, st.wires.iter().filter(|w| w.alive).count());
+     if st.proj.n_layers == 2 {
+         assign_two(st, smd_layer, p, packer)
+     } else {
+diff --git a/engine/src/topo/mod.rs b/engine/src/topo/mod.rs
+index 89ac566f..27a778b7 100644
+--- a/engine/src/topo/mod.rs
++++ b/engine/src/topo/mod.rs
+@@ -43,6 +43,7 @@ pub mod metrize;
+ pub mod moves;
+ pub mod octi;
+ pub mod optimise;
++pub mod prof;
+ pub mod pack;
+ pub mod padend;
+ pub mod state;
+diff --git a/engine/src/topo/moves.rs b/engine/src/topo/moves.rs
+index 1821301d..a5a0db06 100644
+--- a/engine/src/topo/moves.rs
++++ b/engine/src/topo/moves.rs
+@@ -187,6 +187,7 @@ impl Topo {
+     /// registry `reg` instead of [`Topo::reg`] (the TopoR loop prices its reroutes with the
+     /// try's own coefficients, shopping list 5.2). O(path x traversals).
+     pub fn path_price(&self, st: &State, wire: &Wire, path: &[(EdgeId, usize)], tris: &[TriId], ci: usize, reg: &Registry) -> f64 {
++        let _pg = super::prof::g(super::prof::K::PathPrice);
+         let mv = Move::Insert { wire, path, tris, scale: self.scale(ci) };
+         let ctx = self.ctx(ci);
+         super::factors::events(st, &mv).iter().map(|e| reg.price(e, &ctx)).sum()
+@@ -209,6 +210,7 @@ impl Topo {
+     /// What `w` could gain at most by moving: its price minus the price of its straight pad-to-pad
+     /// length (the length factor alone). O(path x traversals).
+     pub fn potential(&self, st: &mut State, w: WireId) -> f64 {
++        let _pg = super::prof::g(super::prof::K::Potential);
+         let ci = self.wire_conn[w];
+         let c = &self.conns[ci];
+         let straight = (st.proj.pos[c.b] - st.proj.pos[c.a]).len() / 1e6;
+diff --git a/engine/src/topo/optimise.rs b/engine/src/topo/optimise.rs
+index 21f4b842..b855437b 100644
+--- a/engine/src/topo/optimise.rs
++++ b/engine/src/topo/optimise.rs
+@@ -277,6 +277,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
+         Some((Score { incomplete: c.errors, shorts: c.shorts, ranked: c.ranked(), value: obj.value(&c), scale: obj.base(&c) }, obj.value(&c)))
+     };
+     let offer = |sp: &mut S, arch: &mut Archive<Gen<S::Var>>, label: String, gen: usize, cycle: usize, rep: &mut LoopReport| -> bool {
++        let _pg = super::prof::g(super::prof::K::Offer);
+         let crit = sp.criteria();
+         rep.offered += 1;
+         let kept = if arch.items.iter().any(|o| o.crit.covers(&crit)) {
+@@ -291,7 +292,9 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
+         }
+         kept
+     };
++    super::prof::mark("pre-loop");
+     offer(sp, arch, "initial plan (gen 0)".into(), 0, 0, &mut rep);
++    super::prof::mark("offer0");
+     let Some((s0, v0)) = score(arch) else { return rep };
+     on_pick(0, &arch.items[arch.pick(&obj).expect("scored")].crit, false);
+     meter.push(s0);
+@@ -343,6 +346,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
+             rep.stable_at = Some(cycle);
+         }
+         on_pick(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, rep.stable_at.is_some());
++        super::prof::cycle(cycle, cs.tried, cs.kept, cs.relaid, cs.pair_moved, cs.pair_relaid, kept);
+         rep.lines.push(format!(
+             "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, {}{}, best {:.1}{}",
+             ctx.amp,
+@@ -451,6 +455,7 @@ impl Predicted {
+ /// Polubasov 2010 («Многовариантная оптимизация»): "a design-rule violation cannot be compensated
+ /// by any reduction of wire length". O(traversals x obstacles per triangle).
+ pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64, usize) {
++    let _pg = super::prof::g(super::prof::K::ForeignCopper);
+     let pr = st.proj;
+     let all = if pr.n_layers >= 64 { u64::MAX } else { (1u64 << pr.n_layers) - 1 };
+     let (mut count, mut graded, mut shorts) = (0usize, 0.0f64, 0usize);
+@@ -519,6 +524,7 @@ pub fn evaluation(obj: &Objective, c: &Criteria, viol_mm: f64) -> f64 {
+ /// different layers, the stretch needs a via"); a wire without events lies on `bottom`
+ /// ([`super::draw::plan`]). Bit `l` = layer `l`. O(traversals + events).
+ pub fn layers_now(st: &State, events: &[Vec<(usize, f64, i32)>], bottom: i32) -> Vec<Vec<u64>> {
++    let _pg = super::prof::g(super::prof::K::LayersNow);
+     let bit = |l: i32| 1u64 << l.clamp(0, 63);
+     (0..st.wires.len())
+         .map(|w| {
+diff --git a/engine/src/topo/pack.rs b/engine/src/topo/pack.rs
+index 5d1d04bc..f6f81835 100644
+--- a/engine/src/topo/pack.rs
++++ b/engine/src/topo/pack.rs
+@@ -417,6 +417,7 @@ impl<'a> Packer<'a> {
+     /// The crossing directions of every pass of every wire (empty for dead wires), indexed like
+     /// [`State::wires`] and the pass lists. O(passes) when cached.
+     pub fn taut_dirs(&self, st: &State) -> Vec<Vec<Vec2>> {
++        let _pg = super::prof::g(super::prof::K::TautDirs);
+         (0..st.wires.len()).map(|w| if st.wires[w].alive { self.taut(st, w).dir.clone() } else { Vec::new() }).collect()
+     }
+ 
+diff --git a/engine/src/topo/prof.rs b/engine/src/topo/prof.rs
+new file mode 100644
+index 00000000..fb7acf8d
+--- /dev/null
++++ b/engine/src/topo/prof.rs
+@@ -0,0 +1,369 @@
++//! TW0 profiling counters: where the time of one run goes (design: docs/dev/profiling.md).
++//!
++//! Switch: the environment variable `TOPO_PROF` (any value; read once) or [`set_on`] (tests).
++//! Off, every hook is one relaxed load of a static flag and nothing else (no clock read, no
++//! allocation, no lock): the copper never depends on it, and the overhead stays under 3 %.
++//! On, a run records
++//!   * inclusive time, call and unit counts per [`K`] key (guards `g(K::..)`, `units`, `lap`),
++//!     summed over all threads (a key inside the refine lanes can exceed the wall time);
++//!   * stage windows: [`mark`] ends the window the label names, with the wall seconds since the
++//!     last mark and the key deltas of that window; consecutive windows of one stage merge;
++//!   * one row per TopoR loop cycle ([`cycle`]): wall seconds, re-lays tried / kept, ...
++//!
++//! [`report`] (the Python binding adds it to the result as `profile`) turns this into JSON; the
++//! table, shares and flame-graph stage folding are `tools/prof_run.py` / `tools/prof_table.py`.
++//! The windows are a wall-clock partition of one run, so they only make sense with
++//! `optimize.runs = 1` (several parallel runs interleave their marks).
++use serde_json::{json, Map, Value};
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
++use std::sync::{Mutex, OnceLock};
++use std::time::Instant;
++
++/// Counter keys. The names are the JSON keys (`K::name`).
++#[derive(Clone, Copy, Debug)]
++#[repr(usize)]
++pub enum K {
++    AssignWith,
++    Refine,
++    CapmodelBuild,
++    Measure,
++    TautDirs,
++    ForeignCopper,
++    LayersNow,
++    TopologyClone,
++    StateRestore,
++    Reroute,
++    RrPrice,
++    RrPlace,
++    RrViolAfter,
++    SearchTree,
++    UncrossAll,
++    UncrossTouched,
++    Relay,
++    DescendLabels,
++    CrossingPass,
++    ViaCounts,
++    Criteria,
++    Snapshot,
++    SpRestore,
++    Offer,
++    Potential,
++    TryLayers,
++    PairMove,
++    Relabel,
++    FixLayers,
++    Junctions,
++    StSweep,
++    StUncrossReopt,
++    StViarose,
++    StFloat,
++    StCross,
++    StPairrelay,
++    StPairmove,
++    Cycle,
++    CapmodelOptimise,
++    RemoveWire,
++    Dependents,
++    RrSetLr,
++    PathPrice,
++    CrossSPolys,
++    AssignCore,
++    AnyPath,
++    TopoSetup,
++}
++
++const NAMES: &[&str] = &[
++    "assign_with",       // layers::assign_with (whole-board layering, incl. refine)
++    "refine",            // refine::refine (P3 capacity refinement inside assign)
++    "capmodel_build",    // CapModel::build (any caller)
++    "measure",           // the loop's measure closure (dirs + CapModel + foreign + necks)
++    "taut_dirs",         // Packer::taut_dirs
++    "foreign_copper",    // optimise::foreign_copper
++    "layers_now",        // optimise::layers_now
++    "topology_clone",    // State::topology
++    "state_restore",     // State::restore
++    "reroute",           // Sp::reroute (one single-wire re-lay, everything)
++    "rr_price",          // Rr::price (path_price of a wire, old + new)
++    "rr_place",          // Rr::place (search + uncross + relay)
++    "rr_viol_after",     // Rr::violations(after) = assign_t + measure: the loop's judge
++    "search_tree",       // init::State::search_tree
++    "uncross_all",
++    "uncross_touched",
++    "relay",             // State::relay (4.3c)
++    "descend_labels",
++    "crossing_pass",
++    "via_counts",
++    "criteria",          // Sp::criteria
++    "snapshot",          // Sp::snapshot
++    "sp_restore",        // Sp::restore
++    "offer",             // optimise offer (criteria + covers + snapshot + archive)
++    "potential",         // Topo::potential (sweep order)
++    "try_layers",        // Sp::try_layers (measure inside)
++    "pair_move",         // Sp::pair_move
++    "relabel",           // layers::relabel
++    "fix_layers",        // tree::fix_layers
++    "junctions",         // tree::junctions
++    "st_sweep",          // cycle lap: the sweep (re-lays one by one)
++    "st_uncross_reopt",  // cycle lap: uncross_all + layer re-optimisation + via-rose candidates
++    "st_viarose",        // cycle lap: via-rose relay + 2nd re-optimisation
++    "st_float",          // cycle lap: floating up (labels)
++    "st_cross",          // cycle lap: crossing rules
++    "st_pairrelay",      // cycle lap: 5.4 pair_min relay
++    "st_pairmove",       // cycle lap: 5.8 pair_move
++    "cycle",             // Sp::cycle total (units = alive wires)
++    "capmodel_optimise", // CapModel::optimise (inside refine)
++    "remove_wire",       // tree::remove_wire
++    "dependents",        // tree::dependents
++    "rr_set_lr",         // set_lr after a kept re-lay
++    "path_price",        // Topo::path_price
++    "cross_s_polys",     // assign_two polylines
++    "assign_core",       // layer solve without refine (assign minus refine)
++    "any_path",          // State::any_path
++    "topo_setup",        // cycle lap: Topo clone + potentials + sort
++];
++const N: usize = NAMES.len();
++
++#[allow(clippy::declare_interior_mutable_const)]
++const Z: AtomicU64 = AtomicU64::new(0);
++static CALLS: [AtomicU64; N] = [Z; N];
++static NS: [AtomicU64; N] = [Z; N];
++static UNITS: [AtomicU64; N] = [Z; N];
++
++static ON: AtomicBool = AtomicBool::new(false);
++static INIT: OnceLock<()> = OnceLock::new();
++
++/// Is profiling on? One relaxed load (after the first call, which reads `TOPO_PROF`).
++#[inline]
++pub fn on() -> bool {
++    if INIT.get().is_none() {
++        INIT.get_or_init(|| {
++            if std::env::var_os("TOPO_PROF").is_some() {
++                ON.store(true, Relaxed);
++            }
++        });
++    }
++    ON.load(Relaxed)
++}
++
++/// Switch profiling on or off for this process (tests); overrides the environment.
++pub fn set_on(v: bool) {
++    INIT.get_or_init(|| ());
++    ON.store(v, Relaxed);
++}
++
++/// Time guard: adds its lifetime to the key when dropped (inclusive time, 1 call).
++pub struct G(K, Option<Instant>);
++#[inline]
++pub fn g(k: K) -> G {
++    G(k, if on() { Some(Instant::now()) } else { None })
++}
++impl Drop for G {
++    #[inline]
++    fn drop(&mut self) {
++        if let Some(t) = self.1 {
++            CALLS[self.0 as usize].fetch_add(1, Relaxed);
++            NS[self.0 as usize].fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
++        }
++    }
++}
++/// Add `n` units (sizes: items built, events, wires) to a key.
++#[inline]
++pub fn units(k: K, n: usize) {
++    if on() {
++        UNITS[k as usize].fetch_add(n as u64, Relaxed);
++    }
++}
++/// Lap timer: adds the time since `*t` to the key (1 call) and restarts `*t`. The clock is read only
++/// when profiling is on (off: `*t` is left alone).
++#[inline]
++pub fn lap(t: &mut Instant, k: K) {
++    if on() {
++        CALLS[k as usize].fetch_add(1, Relaxed);
++        NS[k as usize].fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
++        *t = Instant::now();
++    }
++}
++
++/// One stage of the run in the report: merged consecutive windows.
++struct Row {
++    stage: &'static str,
++    labels: Vec<String>,
++    wall_s: f64,
++    mono0: f64,
++    mono1: f64,
++    keys: [[u64; 3]; N],
++}
++struct Cyc {
++    n: usize,
++    wall_s: f64,
++    tried: usize,
++    kept: usize,
++    relaid: usize,
++    pair_moved: usize,
++    pair_relaid: usize,
++    archived: bool,
++}
++struct St {
++    last: Option<Instant>,
++    mono_last: f64,
++    rows: Vec<Row>,
++    cycles: Vec<Cyc>,
++}
++static ST: Mutex<St> = Mutex::new(St { last: None, mono_last: 0.0, rows: Vec::new(), cycles: Vec::new() });
++
++/// CLOCK_MONOTONIC seconds (Instant's clock on Linux), to match `perf record -k mono` samples.
++fn mono_now() -> f64 {
++    let dbg = format!("{:?}", Instant::now());
++    let num = |key: &str| dbg.split(key).nth(1).and_then(|r| r.trim_start_matches([':', ' ']).split(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
++    num("tv_sec") + num("tv_nsec") * 1e-9
++}
++
++/// Stage of the window a mark label ends (the windows partition the engine's time).
++fn stage_of(label: &str) -> &'static str {
++    const T: &[(&str, &str)] = &[
++        ("stubs", "stubs"),
++        ("projection", "projection"),
++        ("free radius", "p2_p4"),
++        ("P2", "p2_p4"),
++        ("P4", "p2_p4"),
++        ("pre-loop", "loop"),
++        ("offer0", "loop"),
++        ("cycle", "loop"),
++        ("loop-end", "loop"),
++        ("TopoR loop", "loop"),
++        ("via relocation", "relocation"),
++        ("branch relocation", "relocation"),
++        ("drawing", "drawing"),
++        ("via reduction", "via_reduction"),
++        ("diff pairs", "tail"),
++        ("round tail", "tail"),
++        ("finish", "tail"),
++    ];
++    T.iter().find(|(p, _)| label.starts_with(p)).map_or("other", |x| x.1)
++}
++
++/// Start a run's record (route_topo entry): clears counters and rows, starts the first window.
++pub fn begin() {
++    if !on() {
++        return;
++    }
++    for k in 0..N {
++        CALLS[k].store(0, Relaxed);
++        NS[k].store(0, Relaxed);
++        UNITS[k].store(0, Relaxed);
++    }
++    let mut s = ST.lock().unwrap();
++    s.rows.clear();
++    s.cycles.clear();
++    s.last = Some(Instant::now());
++    s.mono_last = mono_now();
++}
++
++/// End the window `label` names: wall seconds and key deltas since the last mark.
++pub fn mark(label: &str) {
++    if !on() {
++        return;
++    }
++    let mut s = ST.lock().unwrap();
++    let Some(last) = s.last else { return };
++    let wall = last.elapsed().as_secs_f64();
++    let mono1 = mono_now();
++    let mut keys = [[0u64; 3]; N];
++    for (k, row) in keys.iter_mut().enumerate() {
++        *row = [CALLS[k].swap(0, Relaxed), NS[k].swap(0, Relaxed), UNITS[k].swap(0, Relaxed)];
++    }
++    let (stage, mono0) = (stage_of(label), s.mono_last);
++    s.last = Some(Instant::now());
++    s.mono_last = mono1;
++    match s.rows.last_mut().filter(|r| r.stage == stage) {
++        Some(r) => {
++            r.wall_s += wall;
++            r.mono1 = mono1;
++            if !r.labels.iter().any(|l| l == label) && r.labels.len() < 12 {
++                r.labels.push(label.to_string());
++            }
++            for (a, b) in r.keys.iter_mut().zip(keys.iter()) {
++                for i in 0..3 {
++                    a[i] += b[i];
++                }
++            }
++        }
++        None => s.rows.push(Row { stage, labels: vec![label.to_string()], wall_s: wall, mono0, mono1, keys }),
++    }
++}
++
++/// End of one TopoR loop cycle: its row (wall seconds since the last mark, re-lays tried / kept, ...)
++/// and the mark that closes its window.
++pub fn cycle(n: usize, tried: usize, kept: usize, relaid: usize, pair_moved: usize, pair_relaid: usize, archived: bool) {
++    if !on() {
++        return;
++    }
++    {
++        let mut s = ST.lock().unwrap();
++        let wall_s = s.last.map_or(0.0, |t| t.elapsed().as_secs_f64());
++        s.cycles.push(Cyc { n, wall_s, tried, kept, relaid, pair_moved, pair_relaid, archived });
++    }
++    mark("cycle");
++}
++
++fn keys_json(k: &[[u64; 3]; N]) -> Value {
++    let mut m = Map::new();
++    for (i, v) in k.iter().enumerate() {
++        if v[0] != 0 || v[1] != 0 || v[2] != 0 {
++            m.insert(NAMES[i].to_string(), json!([v[0], v[1] as f64 / 1e9, v[2]]));
++        }
++    }
++    Value::Object(m)
++}
++
++/// The record as JSON (`None` when profiling is off or no run began): `stages` in run order with
++/// wall seconds and keys `[calls, inclusive seconds, units]`, `cycles` (one row per loop cycle),
++/// `engine_s` (sum of the stage windows).
++pub fn report() -> Option<Value> {
++    if !on() {
++        return None;
++    }
++    mark("finish");
++    let s = ST.lock().unwrap();
++    if s.rows.is_empty() {
++        return None;
++    }
++    let stages: Vec<Value> = s.rows.iter().map(|r| json!({"stage": r.stage, "labels": r.labels, "wall_s": r.wall_s, "mono0": r.mono0, "mono1": r.mono1, "keys": keys_json(&r.keys)})).collect();
++    let cycles: Vec<Value> = s.cycles.iter().map(|c| json!({"n": c.n, "wall_s": c.wall_s, "tried": c.tried, "kept": c.kept, "relaid": c.relaid, "pair_moved": c.pair_moved, "pair_relaid": c.pair_relaid, "archived": c.archived})).collect();
++    let engine_s: f64 = s.rows.iter().map(|r| r.wall_s).sum();
++    Some(json!({"version": 1, "engine_s": engine_s, "stages": stages, "cycles": cycles}))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::stage_of;
++
++    /// Every mark label the engine uses has a named stage (an unnamed window would hide time in "other").
++    #[test]
++    fn every_engine_label_has_a_stage() {
++        for (label, stage) in [
++            ("stubs", "stubs"),
++            ("projection built once", "projection"),
++            ("projection (shared, built once per call; feedback rooms applied)", "projection"),
++            ("free radius of the junction candidates", "p2_p4"),
++            ("P2 + P3", "p2_p4"),
++            ("P4 rip-up and reroute", "p2_p4"),
++            ("P4 moves", "p2_p4"),
++            ("pre-loop", "loop"),
++            ("offer0", "loop"),
++            ("cycle", "loop"),
++            ("loop-end", "loop"),
++            ("TopoR loop", "loop"),
++            ("via relocation", "relocation"),
++            ("branch relocation", "relocation"),
++            ("drawing + feedback", "drawing"),
++            ("via reduction", "via_reduction"),
++            ("diff pairs", "tail"),
++            ("round tail", "tail"),
++            ("finish", "tail"),
++            ("something new", "other"),
++        ] {
++            assert_eq!(stage_of(label), stage, "{label}");
++        }
++    }
++}
+diff --git a/engine/src/topo/refine.rs b/engine/src/topo/refine.rs
+index 6f660c56..b2858fb3 100644
+--- a/engine/src/topo/refine.rs
++++ b/engine/src/topo/refine.rs
+@@ -943,6 +943,7 @@ impl<'a> Frame<'a> {
+     /// traversal with a site and the least overflow price, ties by the drawing's preference.
+     /// O(vias x interval length x layers x passes of an edge).
+     fn optimise<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], which: &[usize]) {
++        let _pg = super::prof::g(super::prof::K::CapmodelOptimise);
+         let n = self.st.wires[w].passes.len();
+         let mut ch = Vec::new();
+         for &i in which {
+@@ -1222,6 +1223,8 @@ impl<'a> CapModel<'a> {
+     }
+ 
+     fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool) -> Self {
++        let _pg = super::prof::g(super::prof::K::CapmodelBuild);
++        super::prof::units(super::prof::K::CapmodelBuild, st.passes.len());
+         let nl = st.proj.n_layers;
+         let nw = st.wires.len();
+         let a = Arrays {
+@@ -1514,6 +1517,7 @@ pub fn refine(
+     unary: &(dyn Fn(WireId, usize, usize) -> f64 + Sync),
+     p: &RefineParams,
+ ) -> RefineStats {
++    let _pg = super::prof::g(super::prof::K::Refine);
+     // Switched off: the model is built with a unit price only to count the over-full edge-layers.
+     let mut cm = CapModel::new_cut(st, packer, dirs, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
+     let mut stats = RefineStats { before: cm.overfull(), ..RefineStats::default() };
+diff --git a/engine/src/topo/state.rs b/engine/src/topo/state.rs
+index 1a8b4b27..4852dacc 100644
+--- a/engine/src/topo/state.rs
++++ b/engine/src/topo/state.rs
+@@ -648,11 +648,13 @@ impl<'p> State<'p> {
+ 
+     /// The routed part of the state ([`Topology`]).
+     pub fn topology(&self) -> Topology {
++        let _pg = super::prof::g(super::prof::K::TopologyClone);
+         Topology { passes: self.passes.clone(), edge_order: self.edge_order.clone(), wires: self.wires.clone(), tri_trav: self.tri_trav.clone(), ends: self.ends.clone(), pass_w: self.pass_w.clone() }
+     }
+ 
+     /// Put a [`Topology`] of the same projection back (the wires, their passes in edge order).
+     pub fn restore(&mut self, t: Topology) {
++        let _pg = super::prof::g(super::prof::K::StateRestore);
+         assert_eq!(t.edge_order.len(), self.edge_order.len(), "a topology of the same projection");
+         (self.passes, self.edge_order, self.wires, self.tri_trav, self.ends, self.pass_w) = (t.passes, t.edge_order, t.wires, t.tri_trav, t.ends, t.pass_w);
+     }
+diff --git a/engine/src/topo/tree.rs b/engine/src/topo/tree.rs
+index 1319874d..a3d87f36 100644
+--- a/engine/src/topo/tree.rs
++++ b/engine/src/topo/tree.rs
+@@ -182,6 +182,7 @@ pub fn trunk_of(st: &State, v: VertId) -> Option<(WireId, usize)> {
+ /// branches ending on a turn of a gone wire, then theirs), not including `gone` itself.
+ /// O(rounds x wires).
+ pub fn dependents(st: &State, gone: &BTreeSet<WireId>) -> BTreeSet<WireId> {
++    let _pg = super::prof::g(super::prof::K::Dependents);
+     let mut all = gone.clone();
+     loop {
+         let turns: BTreeSet<VertId> = all.iter().flat_map(|&w| st.wires[w].turns.iter().map(|t| t.1)).collect();
+@@ -203,6 +204,7 @@ pub fn dependents(st: &State, gone: &BTreeSet<WireId>) -> BTreeSet<WireId> {
+ /// Take wire `w` out of the state: its turns go with it, and a junction end of `w` drops the
+ /// turn from its trunk (the trunk runs straight again).
+ pub fn remove_wire(st: &mut State, w: WireId) {
++    let _pg = super::prof::g(super::prof::K::RemoveWire);
+     for end in [(st.wires[w].pa, st.wires[w].a), (st.wires[w].pb, st.wires[w].b)] {
+         if end.0 == NO_OBS {
+             if let Some((t, _)) = trunk_of(st, end.1) {
+@@ -218,6 +220,7 @@ pub fn remove_wire(st: &mut State, w: WireId) {
+ 
+ /// The junctions of the alive wires: `(branch, end 0|1, trunk, traversal, vertex)`.
+ pub fn junctions(st: &State) -> Vec<(WireId, usize, WireId, usize, VertId)> {
++    let _pg = super::prof::g(super::prof::K::Junctions);
+     let mut turn_at: BTreeMap<VertId, (WireId, usize)> = BTreeMap::new();
+     for (i, w) in st.wires.iter().enumerate().filter(|(_, w)| w.alive) {
+         for &(k, v) in &w.turns {
