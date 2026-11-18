@@ -2,9 +2,10 @@
 # TW0: profile one or two revs side by side on ONE exclusive ccx43 (timing numbers only come from there).
 #   hz.sh job --exclusive --wait --rev <tw0 branch tip> -- bash tools/prof_job.sh --base 27c36203 --tip <loop-local tip> [--boards a,b,...] [--flame]
 # (--rev = the checkout whose plugin/harness/tools drive both engines; --tip default = that checkout's HEAD)
-# For each rev (base optional): build a wheel (sccache, frame pointers + debug info with --flame), then, one board at a time,
+# Builds both revs first (sccache; frame pointers + debug info with --flame), then runs the 1-thread units in parallel, at most
+# PROF_PAR (default 8 = half of a ccx43's 16 vCPUs) at once, each board's base and tip adjacent in the queue so both see the same load:
 # tools/prof_run.sh <board> <out>/<tag>/<board> (seed 0, optimize.rounds=1 runs=1, RAYON_NUM_THREADS=1, --timeout 600
-# wall, no extra options: same options for both revs); finally tools/prof_compare.py base vs tip -> <out>/compare.{md,json}.
+# wall, same options for both revs). Overhead: eprom and esp also run once with TOPO_PROF off (tip) -> overhead.md (router_s off vs on). Finally tools/prof_compare.py base vs tip -> <out>/compare.{md,json}.
 # A rev that does not carry the hooks (tools/prof-hooks.patch) gets the patch applied in a throw-away worktree first.
 # Output dir: $HZ_RUN_DIR (hz.sh) else scratch/prof-job. Progress lines in $OUT/rc.txt, "all done" at the end.
 set -u
@@ -27,19 +28,47 @@ prep() {  # prep <rev> <tag>: a worktree of <rev> with the hooks (patch applied 
   fi
   echo "$wt"
 }
-run_rev() {  # run_rev <rev> <tag>
+build_rev() {  # build_rev <rev> <tag>
   local wt; wt=$(prep "$1" "$2") || return 1
   build "$wt" "$OUT/site-$2" || { note "BUILD FAIL $2"; return 1; }
   note "build done $2 ($1)"
-  IFS=, read -ra BS <<< "$BOARDS"
-  for b in "${BS[@]}"; do
-    local bp=$b; [ "$b" = qmtech ] && bp=$ROOT/scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb  # not a BENCH_BOARDS key
-    # plugin, harness and tools of THIS checkout drive both engines; only the engine wheel differs
-    ( cd "$ROOT" && TOPOR_ENGINE_SITE="$OUT/site-$2" tools/prof_run.sh "$bp" "$OUT/$2/$b" --timeout 600 $FLAME ) > "$OUT/$2-$b.log" 2>&1
-    note "$2 $b rc $?"
-  done
 }
-[ -n "$BASE" ] && run_rev "$BASE" base
-run_rev "${TIP:-$(git -C "$ROOT" rev-parse HEAD)}" tip
-[ -n "$BASE" ] && python3 "$ROOT/tools/prof_compare.py" "$OUT/base" "$OUT/tip" --md "$OUT/compare.md" --json "$OUT/compare.json" > /dev/null 2>&1
+unit() {  # unit <tag> <board> [off]
+  local bp=$2; [ "$2" = qmtech ] && bp=$ROOT/scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb  # not a BENCH_BOARDS key
+  local d=$1; [ "${3:-}" = off ] && d=$1-off
+  # plugin, harness and tools of THIS checkout drive both engines; only the engine wheel differs
+  ( cd "$ROOT" && TOPO_PROF_OFF=$([ "${3:-}" = off ] && echo 1 || echo 0) TOPOR_ENGINE_SITE="$OUT/site-$1" tools/prof_run.sh "$bp" "$OUT/$d/$2" --timeout 600 $FLAME ) > "$OUT/$d-$2.log" 2>&1
+  note "$d $2 rc $?"
+}
+TIPREV=${TIP:-$(git -C "$ROOT" rev-parse HEAD)}
+[ -n "$BASE" ] && { build_rev "$BASE" base || { note "all done"; exit 1; }; }
+build_rev "$TIPREV" tip || { note "all done"; exit 1; }
+# queue: pairs adjacent, the counters-off reference of eprom / esp next to its pair
+Q=()
+IFS=, read -ra BS <<< "$BOARDS"
+for b in "${BS[@]}"; do
+  [ -n "$BASE" ] && Q+=("base $b")
+  Q+=("tip $b")
+  case $b in eprom-to-kernal|esp-rust-board) Q+=("tip $b off");; esac
+done
+PAR=${PROF_PAR:-8}
+for u in "${Q[@]}"; do
+  while [ "$(jobs -rp | wc -l)" -ge "$PAR" ]; do wait -n; done
+  unit $u &
+done
+wait
+# overhead: router_s counters off vs on (same rev, same batch)
+python3 - "$OUT" > "$OUT/overhead.md" <<'PY'
+import glob, json, sys
+o = sys.argv[1]
+print("| board | router_s off | router_s on | overhead % |\n|---|---:|---:|---:|")
+for b in ("eprom-to-kernal", "esp-rust-board"):
+    v = []
+    for d in ("tip-off", "tip"):
+        f = glob.glob(f"{o}/{d}/{b}/run/*--metrics.json")
+        v.append(json.load(open(f[0])).get("router_s") if f else None)
+    if all(v) and v[0]:
+        print(f"| {b} | {v[0]} | {v[1]} | {100 * (v[1] / v[0] - 1):+.1f} |")
+PY
+[ -n "$BASE" ] && python3 "$ROOT/tools/prof_compare.py" "$OUT/base" "$OUT/tip" --md "$OUT/compare.md" --json "$OUT/compare.json" --labels "base 27c36203 (pre-fp-clear),tip (pre-fp-clear)" > /dev/null 2>&1
 note "all done"

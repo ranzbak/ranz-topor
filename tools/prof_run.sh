@@ -19,7 +19,7 @@ for a in "$@"; do if [ "$a" = --flame ]; then FLAME=1; else ARGS+=("$a"); fi; do
 NAME=$(basename "${BOARD%.kicad_pcb}")
 OUT=${OUT:-$ROOT/scratch/prof/$NAME}
 mkdir -p "$OUT"
-export TOPO_PROF=1
+if [ "${TOPO_PROF_OFF:-0}" = 1 ]; then unset TOPO_PROF; else export TOPO_PROF=1; fi  # OFF = the overhead reference run (no table)
 CMD=("$ROOT/tools/route_board.sh" "$BOARD" "$OUT/run" --no-png --set optimize.rounds=1 --set optimize.runs=1 "${ARGS[@]}")
 if [ $FLAME = 1 ]; then
   for t in perf rustfilt inferno-flamegraph inferno-collapse-perf; do command -v $t >/dev/null || { echo "prof_run: --flame needs $t on PATH" >&2; exit 3; }; done
@@ -28,6 +28,7 @@ else
   "${CMD[@]}" > "$OUT/run.log" 2>&1 || { tail -20 "$OUT/run.log"; exit 1; }
 fi
 M=$(ls "$OUT"/run/*--metrics.json | head -1)
+[ "${TOPO_PROF_OFF:-0}" = 1 ] && { echo "counters off: metrics $M"; exit 0; }
 python3 "$ROOT/tools/prof_table.py" "$M" --name "$NAME" --json "$OUT/prof.json" | tee "$OUT/prof.md"
 if [ $FLAME = 1 ]; then
   perf script -i "$OUT/perf.data" -F comm,tid,time,period,ip,sym 2>/dev/null | rustfilt | python3 "$ROOT/tools/prof_fold.py" "$M" > "$OUT/stacks-timed.txt"
