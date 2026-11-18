@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# tw4_job.sh (branch tw4-eval, docs/dev/design/tw4-eval.md): TW4 EVAL phase-1 baseline on the VM.
+#   tw4_job.sh base           start the hzq units (inside hz.sh job), wait, note "all done"
+#   tw4_job.sh lane <run>...  one lane inside a unit: the runs one after another
+#   tw4_job.sh one <run>      one run; <run> = <cfg>:<board>[:<threads>]
+# Every run: harness.score_runs (cpu clock, 2400 s, [capacity] compass_cut_check on), seed 0 unless the cfg names one,
+# optimize.runs=1, --no-png. realise = erbs (the tw2-metric default, set explicitly).
+# cfg:
+#   JK          rounds=1 (one fixed loop cycle), TOPO_ERBS_DEBUG=1 (per-run source of the ERBS drawing)
+#   JF          JK without never-drop forcing (optimize.allow_violations=false): the open connections = the forced ones
+#   JPK / JPF   JK / JF with [search] pad_exit_stubs = true (5.10, the existing pad-exit plan object)
+#   r<N>s<k>    rounds=N, stable_patience=N (no stable stop before N cycles), seed k (0 = the default run)
+# Out: $HZ_RUN_DIR/<cfg>/<board>/<board>/s<k>/ (score_runs layout), logs $HZ_RUN_DIR/<cfg>-<board>.log.
+set -u
+R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
+note() { echo "$*" >> $R/rc.txt; }
+E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
+Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
+board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023;; esp) echo $E;; qmtech) echo $Q;; esac; }
+one() {
+  local c=${1%%:*} rest=${1#*:}; local b=${rest%%:*} th=1
+  [ "$rest" != "$b" ] && th=${rest#*:}
+  local SETS=(--set 'drawing.realise="erbs"' --set optimize.runs=1) ENVS=() only=0
+  case $c in
+    JK) SETS+=(--set optimize.rounds=1); ENVS=(TOPO_ERBS_DEBUG=1) ;;
+    JF) SETS+=(--set optimize.rounds=1 --set optimize.allow_violations=false) ;;
+    JPK) SETS+=(--set optimize.rounds=1 --set search.pad_exit_stubs=true); ENVS=(TOPO_ERBS_DEBUG=1) ;;
+    JPF) SETS+=(--set optimize.rounds=1 --set search.pad_exit_stubs=true --set optimize.allow_violations=false) ;;
+    r*s*) local n=${c#r}; n=${n%%s*}; only=${c##*s}
+          SETS+=(--set optimize.rounds=$n --set optimize.stable_patience=$n) ;;
+    *) note "unknown cfg $c"; return ;;
+  esac
+  local o=$R/$c/$b; mkdir -p $o
+  local t0=$(date +%s)
+  env "${ENVS[@]}" python -m harness.score_runs $o "$(board_path $b)" --only $only --no-png --threads $th "${SETS[@]}" \
+    > $R/$c-$b.log 2>&1 9>&-
+  note "run $c $b th $th rc $? wall $(( $(date +%s) - t0 )) s"
+  rm -rf $o/*/s*/work 2>/dev/null
+}
+lane() { for x in "$@"; do one "$x"; done; }
+u() {  # name threads "lane1 runs" "lane2 runs" ...
+  local n=$1 t=$2; shift 2
+  local cmd="" l
+  for l in "$@"; do cmd+="bash $ROOT/tools/tw4_job.sh lane $l & "; done
+  cmd+="wait"
+  printf '%s\n' "$cmd" > $R/unit-$n.sh
+  ( hzq run --threads $t --name $n -- bash $R/unit-$n.sh > $R/unit-$n.log 2>&1; note "unit $n rc $?" ) & sleep 1
+}
+case ${1:-} in
+  one) one "$2" ;;
+  lane) shift; lane "$@" ;;
+  base)
+    # long units first (qmtech), small ones bundled; every unit declares the threads its lanes use
+    u q-k 4 "JK:qmtech:2" "JF:qmtech:2"
+    u q-p 4 "JPK:qmtech:2" "JPF:qmtech:2"
+    u q-r16 4 "r16s0:qmtech:4"
+    u e-long 4 "r200s0:esp" "r64s0:esp" "r16s0:esp r4s0:esp" "r1s1:esp r1s2:esp"
+    u e-seeds 4 "r1s3:esp r1s4:esp" "r16s1:esp" "r16s2:esp" "r16s3:esp r16s4:esp"
+    u small 4 "JK:esp JF:esp" "JPK:esp JPF:esp" "JK:wiccon JF:wiccon JPK:wiccon JPF:wiccon" \
+      "JK:eprom JF:eprom JPK:eprom JPF:eprom"
+    wait; note "all done" ;;
+  *) echo "usage: tw4_job.sh base | lane <cfg:board[:threads]>... | one <cfg:board[:threads]>" >&2; exit 2 ;;
+esac
