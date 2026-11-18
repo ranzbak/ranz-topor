@@ -6548,6 +6548,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let pc_cut = std::cell::Cell::new(false);
         // Test hook "fuse pour cut": the stitching is cut at once.
         let test_cut = ctl.test_point("fuse pour cut");
+        // Test point (acts, e.g. reaches the limit; the answer is not used): the stitching begins.
+        let _ = ctl.test_point("fuse pour check begin");
         let pc_stop = || {
             let c = test_cut || ctl.is_cancelled() || limit_cut();
             if c {
@@ -6601,12 +6603,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let undo_all = ctl.test_point("fuse pour undo all");
         let partial = ctl.test_point("fuse pour partial undo");
         let fake_clash = std::cell::Cell::new(ctl.test_point("fuse pour clash"));
+        // Hook "fuse pour worse": the first round judges the copper worse whatever the counts and
+        // seeds its undo with the first kept fuse move (the nearest-move choice, which needs a real
+        // new piece), so `fuse_pour_rounds` (0: every move at once) decides what is undone.
+        let worse = ctl.test_point("fuse pour worse");
         let mut rechecked = 0usize;
-        while !pc_cut.get() && (undo_all || (partial && rounds == 0) || !fusepour::fused_ok(cur.len(), base.len())) && !ctl.is_cancelled() {
+        while !pc_cut.get() && (undo_all || (partial && rounds == 0) || (worse && rounds == 0) || !fusepour::fused_ok(cur.len(), base.len())) && !ctl.is_cancelled() {
             let mut seed: BTreeSet<usize> = BTreeSet::new();
             if partial && rounds == 0 {
                 seed.extend(mv.iter().position(|m| m.onto != fusepour::NO_WIRE));
             } else if rounds < opts.fuse_pour_rounds && !undo_all {
+                if worse {
+                    seed.extend(mv.iter().zip(&live).position(|(m, l)| *l && m.onto != fusepour::NO_WIRE));
+                }
                 for c in fusepour::new_pieces(&cur, &base) {
                     seed.extend(fusepour::nearest_move(&mv, &live, &fusepour::piece_points(model, c)));
                 }
@@ -6628,11 +6637,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             while !all && live.iter().any(|l| *l) {
                 let fake_w = fake_clash.get().then(|| mv.iter().zip(&live).find(|(m, l)| **l && m.onto != fusepour::NO_WIRE).map(|(m, _)| m.w)).flatten();
                 fake_clash.set(false);
-                let clash = fusepour::clash_seed(&mv, &live, &|w| fake_w == Some(w) || drawn.get(&w).is_some_and(|wo| dr.wire_viols(wo) > pre.get(&w).copied().unwrap_or(0)));
+                let clash = fusepour::recheck_seed(&mv, &live, &pre, &|w| drawn.get(&w).map_or(0, |wo| dr.wire_viols(wo)) + if fake_w == Some(w) { 1_000_000 } else { 0 });
                 if clash.is_empty() {
                     break;
                 }
-                rechecked += undo(&fusepour::with_dependents(&mv, &clash), &mut live, &mut drawn, &mut out, &mut necking, &mut dr, &mut undone_nets);
+                rechecked += undo(&clash, &mut live, &mut drawn, &mut out, &mut necking, &mut dr, &mut undone_nets);
             }
             rounds += 1;
             if all || live.iter().all(|l| !l) {

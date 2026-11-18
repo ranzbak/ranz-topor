@@ -12,7 +12,7 @@ Judge a board by the distinct net pairs per type (`net_pairs`), not by the cappe
 at a cap at the deepest level are listed (`still_capped`): their counts are lower bounds, and KiCad reports a
 different subset of a capped tile's violations run to run, so the COUNTS are noisy (bornhack, the same file
 twice, depth 4: clearance 1251 vs 1228, shorting 1453 vs 1431) while the net pairs are stable (1 clearance pair
-of 1079 pairs swapped; tw2r2tl-6062058). Tiling removes tracks only (pads and zones stay in every tile), so
+of 714 pairs swapped; tw2r2tl-6062058). Tiling removes tracks only (pads and zones stay in every tile), so
 some tiles stay capped however deep (bornhack depth 4: 21-23 tiles).
 
 Method from the TW2 verification (reports/tw2-metric-verify-20261118-1804.md, section 5; validated on qmtech,
