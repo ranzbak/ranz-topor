@@ -5196,6 +5196,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             restart: super::optimise::Restart::parse(&opts.restart),
             restart_relays: opts.restart_relays,
             restart_min_cycles: opts.restart_min_cycles,
+            relay_budget: opts.loop_relays,
             run: gate.0,
             runs: opts.runs.max(1),
         };
@@ -5357,16 +5358,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         });
         if rep.checks > 0 {
             warnings.push(format!(
-                "TopoR loop restarts ([optimize] restart = \"{}\", every {} re-lays and at least {} cycles; TW3, Polubasov 2010 «Многовариантная оптимизация»): {} period checks, {} restarts ({} from another run's row, {} led to a new table row), {} times the descent still gained and went on, {} times no other row to go to",
+                "TopoR loop restarts ([optimize] restart = \"{}\", every {} re-lays and at least {} cycles; stall after {} cycles without a gain; TW3, Polubasov 2010 «Многовариантная оптимизация»): {} checks, {} restarts ({} by a stall, {} from another run's row, {} led to a new table row), {} times the descent still gained and went on, {} times no other row to go to; {} re-lays",
                 opts.restart,
                 opts.restart_relays,
                 opts.restart_min_cycles,
+                opts.loop_restart,
                 rep.checks,
                 rep.restarts.len(),
+                rep.stall_restarts,
                 rep.restart_from.iter().filter(|r| r.1 != gate.0).count(),
                 restarts_new_row,
                 rep.kept_gaining,
-                rep.no_row
+                rep.no_row,
+                rep.relays
             ));
         }
         warnings.push(format!(
@@ -5430,7 +5434,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "stop": rep.stop,
             "stable_at": rep.stable_at,
             "restarts": rep.restarts.len(),
-            "restart": {"mode": opts.restart, "relays": opts.restart_relays, "min_cycles": opts.restart_min_cycles, "checks": rep.checks, "kept_gaining": rep.kept_gaining, "no_row": rep.no_row, "new_row": restarts_new_row, "from_other_run": rep.restart_from.iter().filter(|r| r.1 != gate.0).count()},
+            "restart": {"mode": opts.restart, "relays": opts.restart_relays, "min_cycles": opts.restart_min_cycles, "checks": rep.checks, "stall_restarts": rep.stall_restarts, "relays": rep.relays, "kept_gaining": rep.kept_gaining, "no_row": rep.no_row, "new_row": restarts_new_row, "from_other_run": rep.restart_from.iter().filter(|r| r.1 != gate.0).count()},
             "offered": rep.offered,
             "archived": rep.archived,
             "variants": arch.items.len(),

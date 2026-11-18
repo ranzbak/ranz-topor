@@ -103,3 +103,13 @@ parallel from one table).
   on every board where today's errors-vias-length order picked differently (expected, D5).
 - Q4: `loop_time_share` 0.5 kept in this stage (four drawings run in parallel, so the reserve is
   about one drawing); the TW0-measured reserve comes later.
+
+## Lead decisions 2026-11-18 (after r1 / r2)
+- **Hybrid restart (default `restart = "hybrid"`).** A stall (main's trigger: `loop_restart` = 2 cycles without
+  a gain of the run's own pick, no cycle floor) restarts the run through the shared table: a row drawn at
+  random (seeded) among the compatible rows, never the run's own state. The periodic re-lay check stays as
+  the backstop with its 8-cycle floor. Every restart or free check starts a new descent (stall count and
+  period reset). Without a table (`runs` with no shared table) the hybrid is main's stall restart.
+- **`restart_relays` 2400 -> 800** (measured: ~90 re-lays a cycle on esp, ~320 qmtech, ~57 wiccon, ~27 eprom).
+- **Comparisons at an equal re-lay budget:** `[optimize] loop_relays` (new, 0 = off) ends each run's loop
+  after that many re-lays; the budget per board and seed = main's re-lays in a 600 s wall run on the ccx43.

@@ -1114,7 +1114,9 @@ pub struct Options {
     /// descent that still gains is never cut (Polubasov 2010 «Многовариантная оптимизация»:
     /// "periodically stops working on the current variant and picks one from the table at
     /// random"). `"stall"` = after `loop_restart` cycles without a gain of the run's own pick (the
-    /// rule before TW3), `"off"` = never.
+    /// rule before TW3), `"off"` = never; `"hybrid"` (default, lead 2026-11-18) = a stall
+    /// (`loop_restart` cycles without a gain of the run's own pick, no cycle floor) restarts
+    /// through the shared table, the periodic check stays as the backstop.
     pub restart: String,
     /// TW3 `[optimize] restart_relays`: the period of `restart = "periodic"` on the work clock =
     /// re-lays tried in the descent (deterministic; TopoR's "time" since a re-lay is the unit of
@@ -1122,6 +1124,9 @@ pub struct Options {
     pub restart_relays: usize,
     /// TW3 `[optimize] restart_min_cycles`: a period is never shorter than this many cycles (D7).
     pub restart_min_cycles: usize,
+    /// TW3 `[optimize] loop_relays`: each run's TopoR loop ends after this many re-lays (the work
+    /// clock; 0 = no budget, the default). For comparisons at an equal amount of loop work.
+    pub loop_relays: usize,
     /// TW3 `[optimize] best_penalty` (D5): add the graded violation price to the overall best's
     /// value (`pick = "best"`); off (default) = fewest errors, then length + mm_per_via x vias.
     pub best_penalty: bool,
@@ -1579,9 +1584,10 @@ impl Default for Options {
             initial: "once".into(),
             opt_loop: "topor".into(),
             loop_restart: 2,
-            restart: "periodic".into(),
-            restart_relays: 2400,
+            restart: "hybrid".into(),
+            restart_relays: 800,
             restart_min_cycles: 8,
+            loop_relays: 0,
             best_penalty: false,
             loop_stable_window: 8,
             loop_via_start: 0.5,

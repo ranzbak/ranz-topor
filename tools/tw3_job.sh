@@ -79,6 +79,8 @@ tests() {
   sub 'for &(origin, key) in rows.iter().take(quota) {' 'for &(origin, key) in rows.iter().take(1) {' | mut m7_one_best $C --lib -- topo::core::tests::the_four_bests_rows
   sub 'let w = if cands.contains(&origin) && free(&origin) == 0 { Some(origin) } else {' 'let w = if false { Some(origin) } else {' | mut m8_not_origin $C --lib -- topo::core::tests::the_four_bests_rows
   sub 'let w = if cands.contains(&origin) && free(&origin) == 0 { Some(origin) } else {' 'let w = if cands.contains(&origin) { Some(origin) } else {' | mut m10_origin_serial $C --lib -- topo::core::tests::the_four_bests_rows
+  sub 'let stalled = hybrid && p.restart_after > 0 && since_gain >= p.restart_after;' 'let stalled = hybrid && p.restart_after > 0 && since_gain >= p.restart_after && since_check >= p.restart_min_cycles;' | mut m11_stall_floor $O "${LIB[@]}"
+  sub 'if p.relay_budget > 0 && rep.relays >= p.relay_budget {' 'if false {' | mut m12_no_relay_budget $O "${LIB[@]}"
   rm -rf $D $CARGO_TARGET_DIR
   note "tests done"
 }
@@ -102,6 +104,22 @@ case ${1:-} in
     for s in 0 1 2 3 4; do unit esp-s$s-r8 2 esp-s$s-r8 $E $s 2 --set optimize.rounds=30 "${FIX[@]}" --set optimize.restart_relays=800; done
     unit wiccon-r8 2 wiccon-r8 wiccon-2023 0 2 --set optimize.rounds=150 "${FIX[@]}" --set optimize.restart_relays=800
     unit eprom-r8 1 eprom-r8 eprom-to-kernal 0 1 --set optimize.rounds=300 "${FIX[@]}" --set optimize.restart_relays=800
+    wait; note "all done" ;;
+  b600)  # lead 2026-11-18 (3): what main does in 600 s (wall, the product limit) on the ccx43: no stable
+          # stop, its own rounds cap, runs 5 on 5 threads; its loop's re-lays are the tip's budget
+    mkdir -p $R/lad
+    for nb in "qmtech $Q 0" "esp-s0 $E 0" "esp-s1 $E 1" "esp-s2 $E 2" "esp-s3 $E 3" "esp-s4 $E 4" "wiccon wiccon-2023 0" "eprom eprom-to-kernal 0"; do
+      set -- $nb; unit b6-$1 5 b6-$1 $2 $3 5 --clock wall --timeout 600 --set optimize.loop_stable_window=1000 --set optimize.runs=5
+    done
+    wait; note "all done" ;;
+  t600)  # the tip at the same re-lay budget per run (NAME=RELAYS ...), the same clock and limit; + tests
+    shift; mkdir -p $R/lad
+    ( hzq run --threads 4 --name tw3-tests -- bash $SELF tests-in > $R/hzq-tests.log 2>&1 9>&-; note "unit tests rc $?" ) & sleep 1
+    for x in "$@"; do
+      n=${x%%=*}; b=${x#*=}
+      case $n in qmtech) src=$Q; s=0;; esp-s*) src=$E; s=${n#esp-s};; wiccon) src=wiccon-2023; s=0;; eprom) src=eprom-to-kernal; s=0;; esac
+      unit t6-$n 5 t6-$n $src $s 5 --clock wall --timeout 600 --set optimize.loop_stable_window=1000 --set optimize.runs=5 --set optimize.rounds=100000 --set optimize.loop_relays=$b
+    done
     wait; note "all done" ;;
   base)
     mkdir -p $R/lad

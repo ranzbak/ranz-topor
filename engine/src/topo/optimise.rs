@@ -252,15 +252,20 @@ pub enum Restart {
     Stall,
     /// Periodic on the re-lay work clock: see [`optimise`].
     Periodic,
+    /// TW3 hybrid (lead 2026-11-18, the default): a stall (`restart_after` cycles without a gain
+    /// of the run's own pick, main's trigger, no cycle floor) restarts through the shared table;
+    /// the periodic re-lay check stays as the backstop (with its `restart_min_cycles` floor).
+    Hybrid,
 }
 
 impl Restart {
-    /// `"off"` | `"stall"` | anything else = `"periodic"`.
+    /// `"off"` | `"stall"` | `"periodic"` | anything else = `"hybrid"`.
     pub fn parse(s: &str) -> Restart {
         match s {
             "off" => Restart::Off,
             "stall" => Restart::Stall,
-            _ => Restart::Periodic,
+            "periodic" => Restart::Periodic,
+            _ => Restart::Hybrid,
         }
     }
 }
@@ -309,6 +314,9 @@ pub struct LoopParams {
     pub restart_min_cycles: usize,
     pub run: usize,
     pub runs: usize,
+    /// TW3 `[optimize] loop_relays`: the run's loop ends after this many re-lays (the work clock;
+    /// 0 = no budget). A work cap like `cycles`: the same settings give the same result anywhere.
+    pub relay_budget: usize,
 }
 
 /// What [`optimise`] did.
@@ -337,6 +345,10 @@ pub struct LoopReport {
     pub checks: usize,
     pub kept_gaining: usize,
     pub no_row: usize,
+    /// TW3 hybrid: restarts the stall trigger started (through the table).
+    pub stall_restarts: usize,
+    /// Re-lays of the run's loop (the work clock, `tried + relaid + pair_moved_wires`).
+    pub relays: usize,
     /// Restarts: (cycle, origin run of the row) for the "led to a new row" count.
     pub restart_from: Vec<(usize, usize)>,
 }
@@ -421,7 +433,10 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
     rep.pick_values.push(v0);
     let mut gen = 0usize;
     let mut since_gain = 0usize;
-    let periodic = p.restart == Restart::Periodic && shared.is_some();
+    let periodic = matches!(p.restart, Restart::Periodic | Restart::Hybrid) && shared.is_some();
+    let hybrid = p.restart == Restart::Hybrid && shared.is_some();
+    // without a table the hybrid falls back to main's stall restart from the run's own archive
+    let own_stall = p.restart == Restart::Stall || (p.restart == Restart::Hybrid && shared.is_none());
     let period = p.restart_relays.max(1) as f64;
     // the work clock since the last boundary, the cycles since it, the next boundary's work
     let (mut work, mut since_check, mut check_from) = (0.0f64, 0usize, 1usize);
@@ -432,7 +447,13 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             rep.stop = "time limit".into();
             break;
         }
-        if periodic && since_check >= p.restart_min_cycles.max(1) && work >= boundary {
+        if p.relay_budget > 0 && rep.relays >= p.relay_budget {
+            rep.stop = "re-lay budget".into();
+            break;
+        }
+        let stalled = hybrid && p.restart_after > 0 && since_gain >= p.restart_after;
+        let due = periodic && since_check >= p.restart_min_cycles.max(1) && work >= boundary;
+        if stalled || due {
             let sh = shared.expect("periodic");
             // the wait ends at Cancel / OK or the limit's cut (`inner`); not `stop`, whose stable
             // yield needs the compute slot the wait has given back
@@ -451,7 +472,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             let (me, compat) = sh.me();
             let gaining = view.mine_accepted.iter().any(|&c| c >= check_from);
             let duplicate = view.fps_before.iter().any(|&(r, f)| r < me && f == my_fp);
-            if gaining && !duplicate {
+            if !stalled && gaining && !duplicate {
                 rep.kept_gaining += 1;
             } else {
                 let cands: Vec<usize> = (0..view.rows.len()).filter(|&i| view.rows[i].2.compat == compat && view.rows[i].2.fp != my_fp).collect();
@@ -466,15 +487,17 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
                     rep.restarts.push((cycle, label.clone()));
                     rep.restart_from.push((cycle, row.run));
                     check = super::table::CHECK_RESTART;
-                    since_gain = 0;
+                    rep.stall_restarts += usize::from(stalled);
                 }
             }
+            // a restart (or a free check) starts a new descent: its own stall count and period
+            since_gain = 0;
             work = 0.0;
             since_check = 0;
             check_from = cycle;
             boundary = period;
         }
-        if p.restart == Restart::Stall && p.restart_after > 0 && since_gain >= p.restart_after && !arch.items.is_empty() {
+        if own_stall && p.restart_after > 0 && since_gain >= p.restart_after && !arch.items.is_empty() {
             let i = rng.gen_range(0..arch.items.len());
             sp.restore(&arch.items[i].payload.var);
             gen = arch.items[i].payload.gen;
@@ -502,6 +525,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         }
         gen += 1;
         work += (cs.tried + cs.relaid + cs.pair_moved_wires) as f64;
+        rep.relays += cs.tried + cs.relaid + cs.pair_moved_wires;
         since_check += 1;
         let kept = offer(sp, arch, format!("cycle {cycle} (gen {gen})"), gen, cycle, &mut rep);
         my_fp = share(sp, &format!("run {} cycle {cycle} (gen {gen})", p.run + 1), gen, cycle, std::mem::take(&mut check));
@@ -914,6 +938,7 @@ mod tests {
             restart: Restart::Stall,
             restart_relays: 2400,
             restart_min_cycles: 8,
+            relay_budget: 0,
             run: 0,
             runs: 1,
         }
@@ -1240,6 +1265,57 @@ mod tests {
             assert!(reps[k].restart_from.iter().all(|w| w.0 >= 3), "never before the first period ends (min 2 cycles)");
         }
         assert!(n > 0);
+    }
+
+    /// TW3 hybrid (lead 2026-11-18): a stall restarts through the table at once (no cycle floor:
+    /// before the period's 8-cycle floor), never to the run's own state; the same on any timing.
+    #[test]
+    fn a_hybrid_stall_restarts_through_the_table_without_a_floor() {
+        let go = |jitter: Option<u64>| {
+            let obj = Objective::from_options("length_vias", 25.0, "best");
+            let t = super::super::table::SharedTable::new(2, 4, obj, 3);
+            std::thread::scope(|sc| {
+                let hs: Vec<_> = (0..2)
+                    .map(|k| {
+                        let t = &t;
+                        sc.spawn(move || {
+                            let mut sp = toy();
+                            sp.len.iter_mut().for_each(|l| *l += 3 * k as i64);
+                            sp.jitter = jitter.map(|j| j ^ k as u64);
+                            let mut a = Archive::new(6);
+                            let p = LoopParams { restart: Restart::Hybrid, restart_relays: 1_000_000, restart_min_cycles: 8, run: k, runs: 2, seed: 100 + k as u64, ..params(0, 1) };
+                            let rep = optimise_shared(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {}, Some(&TP { t, k }));
+                            (rep, sp.starts.clone(), sp.ends.clone())
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().expect("run")).collect::<Vec<_>>()
+            })
+        };
+        let a = go(None);
+        let mut early = 0;
+        for (k, (rep, starts, ends)) in a.iter().enumerate() {
+            assert_eq!(rep.stall_restarts, rep.restarts.len(), "run {k}: the period (1e6 re-lays) never came: {rep:?}");
+            for (cycle, _) in &rep.restarts {
+                assert_ne!(starts[cycle - 1], ends[cycle - 2], "run {k} cycle {cycle}: restarted to its own state");
+                early += usize::from(*cycle < 8);
+            }
+        }
+        assert!(early > 0, "a stall restarts before the period's floor: {:?}", a.iter().map(|x| &x.0.restarts).collect::<Vec<_>>());
+        // the same restarts whatever the runs' speed
+        let b = go(Some(7));
+        assert_eq!(a.iter().map(|x| x.0.restarts.clone()).collect::<Vec<_>>(), b.iter().map(|x| x.0.restarts.clone()).collect::<Vec<_>>());
+    }
+
+    /// TW3 `loop_relays`: the loop ends at its re-lay budget.
+    #[test]
+    fn the_loop_ends_at_its_relay_budget() {
+        let mut sp = toy();
+        let mut a = Archive::new(6);
+        let p = LoopParams { relay_budget: 10, ..params(0, 0) };
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {});
+        assert_eq!(rep.stop, "re-lay budget", "{rep:?}");
+        assert!(rep.relays >= 10 && rep.cycles < p.cycles, "{rep:?}");
     }
 
     /// A toy whose every cycle is a new best (shorter, no vias): its descent always gains.
