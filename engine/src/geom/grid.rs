@@ -4,7 +4,7 @@
 //! any two items closer than the clearance live in the same or adjacent cells.
 
 use super::prim::Aabb;
-use std::collections::{HashMap, HashSet};
+use crate::fxhash::{FxHashMap, FxHashSet};
 use std::fmt;
 use std::hash::Hash;
 
@@ -43,12 +43,16 @@ enum Placement {
 
 /// Uniform grid keyed by `floor(coord / cell)`. An item is stored in every cell its box covers;
 /// items covering more than `MAX_ITEM_CELLS` cells live in a side list instead.
+///
+/// The maps use the Fx hasher (F6, profile 2026-11-18: SipHash was 8-13 % of the drawing and the
+/// via reduction): they are only looked up, and the one scan over `cells` sorts its keys, so the
+/// hasher never reaches a query's order.
 #[derive(Clone)]
 pub struct Grid<T: Copy + Eq + Hash> {
     cell: f64,
-    cells: HashMap<(i64, i64), Vec<T>>,
+    cells: FxHashMap<(i64, i64), Vec<T>>,
     big: Vec<T>,
-    placed: HashMap<T, Placement>,
+    placed: FxHashMap<T, Placement>,
     len: usize,
 }
 
@@ -61,9 +65,9 @@ impl<T: Copy + Eq + Hash> Grid<T> {
         assert!(cell > 0.0 && cell.is_finite(), "cell size must be positive");
         Grid {
             cell,
-            cells: HashMap::new(),
+            cells: FxHashMap::default(),
             big: Vec::new(),
-            placed: HashMap::new(),
+            placed: FxHashMap::default(),
             len: 0,
         }
     }
@@ -186,7 +190,7 @@ impl<T: Copy + Eq + Hash> Grid<T> {
             return (out, 0);
         }
         let r = self.range(&bbox, 1);
-        let mut seen = HashSet::new();
+        let mut seen: FxHashSet<T> = FxHashSet::default();
         let mut visited = 0;
         let mut take = |v: &Vec<T>, out: &mut Vec<T>, visited: &mut usize| {
             *visited += v.len();
