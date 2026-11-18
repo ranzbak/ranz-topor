@@ -18,6 +18,12 @@
 //!    - every cut item: its two spoke tips, `a` (end of the spoke `p a`) on `p`'s side and `b`
 //!      (end of `b q`) on `q`'s side of the band's crossing (the tips hold half the width, the
 //!      clearance and the items between, [`super::radii::tip_point`]).
+//!    - every passed corner (TW2 addendum A, `corner_points`): two crossings in a row of cuts that
+//!      end at one vertex on the same side, the band passing the vertex without wrapping it. The
+//!      arc round the vertex at the smaller tip radius, as the polygon circumscribed about the
+//!      sector between the two cuts (Dayan PDF p. 32: the spokes of a point follow the final
+//!      geometry; PDF p. 33, Fig. 11: they approximate the arc). Without it the funnel's chord
+//!      between the two tips sagged into the inner wires' room.
 //!    - every wrap: its arc at the stack radius, sampled inside the wrap's wedge (the octagon's
 //!      vertices in the octagonal norm, a circumscribed polygon of `arc_step_deg` otherwise), on the
 //!      wrapped vertex's side.
@@ -310,6 +316,74 @@ fn norm_dirs(norm: Norm, arc_step_deg: f64) -> (Vec<Vec2>, f64) {
             ((0..n).map(|k| Vec2 { x: (k as f64 * st).cos(), y: (k as f64 * st).sin() }).collect(), 1.0 / (0.5 * st).cos())
         }
     }
+}
+
+/// TW2 addendum A: the arc points of a stretch that passes sheet vertex `v` between two
+/// consecutive cut crossings (directions `ua`, `ub` from `v`, its spoke tips at radius `rho` in the
+/// norm there), inside the sector that holds `um` (the direction from `v` to the band between the
+/// two crossings). Dayan 1997 PDF p. 32: "The number of spokes required at each point is related
+/// to the final geometry"; PDF p. 33, Fig. 11: for any-angle routing the spokes approximate the
+/// arc. The tips alone leave the sector open, and the funnel's chord between them sags
+/// `rho (1 - cos(alpha / 2))` into the inner wires' room (serpentine_bundle: 0.135 mm).
+/// - Euclidean: the polygon circumscribed about the sector's own arc. The sector is split into
+///   `m = ceil(alpha / step)` parts of `d = alpha / m`, with vertices at `ua + (i + 1/2) d`, radius
+///   `rho / cos(d / 2)`. The tips are the tangent points of its first and last edges, so the chain
+///   tip, vertices, tip lies on tangents of the circle (no sag). Its length exceeds the arc by about
+///   `d^2 / 12` of it.
+/// - Octagonal: the octagon's own vertices strictly inside the sector (as a wrap's arc). The tips lie
+///   on the octagon, so the chain runs on its sides.
+///
+/// Empty for a sector of pi or more, or of less than 1e-9 rad. O(alpha / step).
+fn corner_points(v: Vec2, ua: Vec2, ub: Vec2, um: Vec2, rho: f64, norm: Norm, arc_step_deg: f64) -> Vec<Vec2> {
+    let ang = |u: Vec2| u.y.atan2(u.x);
+    let md = |x: f64| x.rem_euclid(TAU);
+    let (aa, am, ab) = (ang(ua), ang(um), ang(ub));
+    let (dm, db) = (md(am - aa), md(ab - aa));
+    // The signed sweep from `ua` to `ub` through `um`.
+    let sweep = if dm < db { db } else { db - TAU };
+    if sweep.abs() >= std::f64::consts::PI - 1e-9 || sweep.abs() < 1e-9 || rho <= 0.0 {
+        return Vec::new();
+    }
+    let dir = |a: f64| Vec2 { x: a.cos(), y: a.sin() };
+    match norm {
+        Norm::Euclid => {
+            let st = arc_step_deg.clamp(1.0, 45.0).to_radians();
+            let m = (sweep.abs() / st).ceil().max(1.0);
+            let d = sweep / m;
+            let r = rho / (0.5 * d).cos();
+            (0..m as usize).map(|i| v + dir(aa + (i as f64 + 0.5) * d) * r).collect()
+        }
+        Norm::Octagonal => {
+            let (dirs, grow) = norm_dirs(norm, arc_step_deg);
+            let inside = |u: Vec2| {
+                let du = md(ang(u) - aa);
+                if sweep > 0.0 {
+                    du > 1e-9 && du < sweep - 1e-9
+                } else {
+                    du < TAU - 1e-9 && du > TAU + sweep + 1e-9
+                }
+            };
+            // In sweep order from `ua` (the chain tip A, points, tip B).
+            let along = |u: Vec2| if sweep > 0.0 { md(ang(u) - aa) } else { TAU - md(ang(u) - aa) };
+            let mut us: Vec<Vec2> = dirs.into_iter().filter(|&u| inside(u)).collect();
+            us.sort_by(|&x, &y| along(x).total_cmp(&along(y)));
+            us.into_iter().map(|u| v + u * (rho * grow)).collect()
+        }
+    }
+}
+
+/// Position of `x` along the polyline `band` (segment index plus share), by its nearest segment. O(band).
+fn band_pos(band: &[Vec2], x: Vec2) -> f64 {
+    let mut best = (f64::INFINITY, 0.0);
+    for (j, w) in band.windows(2).enumerate() {
+        let ab = w[1] - w[0];
+        let u = ((x - w[0]).dot(ab) / ab.len2().max(1e-18)).clamp(0.0, 1.0);
+        let d = (w[0] + ab * u - x).len2();
+        if d < best.0 {
+            best = (d, j as f64 + u);
+        }
+    }
+    best.1
 }
 
 /// Side of point `x` against the polyline `band` (`true`: left of its direction of travel) and
@@ -1109,6 +1183,9 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     let no_push = |f: usize| skip.contains(&f) || exit_set.contains(&f);
 
     // 1a. Cut items, grouped per cut in their order from p: the sides alternate along the cut.
+    // TW2 addendum A: every crossing's band position, cut, tips and side, for the passed corners
+    // below: (band position, cut, a, b, a_left, its band crossing, tip width).
+    let mut crossings: Vec<(f64, usize, Vec2, Vec2, bool, Vec2, f64)> = Vec::new();
     let mut per_cut: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for &(ci, ii) in items {
         per_cut.entry(ci).or_default().push(ii);
@@ -1147,6 +1224,9 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             let at = x.t_band.clamp(0.0, 1.0) * c.cap;
             let da = if at < lo - ON && !no_push(c.fp) { Detour::From(xb) } else { Detour::Never };
             let db = if at > hi + ON && !no_push(c.fq) { Detour::From(xb) } else { Detour::Never };
+            if x.kind == 0 {
+                crossings.push((band_pos(band, xb), cu.cut, a, b, a_left, xb, x.w_tip));
+            }
             // A tip at its cut's end on one of the stretch's own terminal pads holds no room (no
             // item before it, no clearance to its own copper): the wire may pass over that pad.
             if !((a - c.p).len() < 1.0 && in_pad(c.p)) {
@@ -1154,6 +1234,43 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
             }
             if !((c.q - b).len() < 1.0 && in_pad(c.q)) {
                 cand.push((b, !a_left, gi, x.w_tip, db, c.q));
+            }
+        }
+    }
+
+    // 1a2. TW2 addendum A, passed corners: two crossings in a row along the band whose cuts end
+    // at one sheet vertex `v` on the same side of the band (the band passes `v` without wrapping
+    // it). The stretch's arc round `v` at the smaller of its two tip radii there, inside the sector
+    // between the cuts (`corner_points`), on `v`'s side; a point the band passes on the wrong side
+    // is gone round from the nearest band point (`Detour::Auto`). Not at a vertex the stretch
+    // wraps (1b holds that arc), at its own terminal pad or via end, or at a feature that pushes
+    // nothing here (over-full cut, pad exit: `no_push`).
+    crossings.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let wrapped_v: BTreeSet<usize> = s.wraps.iter().flatten().map(|&(v, _)| v).collect();
+    for pair in crossings.windows(2) {
+        let (x, y) = (&pair[0], &pair[1]);
+        let (ca, cb) = (&sh.cuts[x.1], &sh.cuts[y.1]);
+        // The vertex ends of a cut: (vertex, its position, its feature, tip on its side, its label).
+        let ends = |c: &super::sheet::Cut, a: Vec2, b: Vec2, a_left: bool| -> [Option<(usize, Vec2, usize, Vec2, bool)>; 2] { [Some((c.vp, c.p, c.fp, a, a_left)), c.vq.map(|vq| (vq, c.q, c.fq, b, !a_left))] };
+        for ea in ends(ca, x.2, x.3, x.4).into_iter().flatten() {
+            for eb in ends(cb, y.2, y.3, y.4).into_iter().flatten() {
+                let (v, at, f, ta, la) = ea;
+                let (vb, _, _, tb, lb) = eb;
+                if v != vb || la != lb || wrapped_v.contains(&v) || no_push(f) || in_pad(at) || (at - c0).len() < 1.0 || (at - c1).len() < 1.0 {
+                    continue;
+                }
+                let (ra, rb) = (sh.norm.len(ta - at), sh.norm.len(tb - at));
+                let rho = ra.min(rb);
+                if rho < 1.0 {
+                    continue;
+                }
+                let mid = (x.5 + y.5) * 0.5;
+                let w = x.6.min(y.6);
+                for a in corner_points(at, ta - at, tb - at, mid - at, rho, sh.norm, opts.arc_step_deg) {
+                    let gi = gates.len();
+                    gates.push(Gate { a, b: a, w, src: GateSrc::Arc(v), p: at, q: at, p_left: la });
+                    cand.push((a, la, gi, w, Detour::Auto, at));
+                }
             }
         }
     }
@@ -2103,6 +2220,124 @@ mod tests {
         ports.extend(por.iter().map(|&(l, r)| (pp.pts[l], pp.pts[r])));
         ports.push((e, e));
         Ok(simplify(&pull(&ports).into_iter().map(|c| c.0).collect::<Vec<_>>(), 0.5))
+    }
+
+    /// Distance in `norm` from `c` to the segment `a b` (ternary search: the norm is convex along
+    /// the segment). Test helper.
+    fn norm_seg_dist(norm: Norm, c: Vec2, a: Vec2, b: Vec2) -> f64 {
+        let f = |t: f64| norm.len(a + (b - a) * t - c);
+        let (mut lo, mut hi) = (0.0, 1.0);
+        for _ in 0..200 {
+            let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if f(m1) <= f(m2) {
+                hi = m2;
+            } else {
+                lo = m1;
+            }
+        }
+        f(lo).min(f(0.0)).min(f(1.0))
+    }
+
+    /// TW2 addendum A: the chain tip A, corner points, tip B never comes closer to the vertex
+    /// than the tip radius, in both norms, for sectors of 5 to 175 degrees either way round. Every
+    /// point lies strictly inside the sector that holds the band's direction. Without the points
+    /// the chord between the tips sags `rho (1 - cos(alpha / 2))` (checked, so the test sees the bug).
+    #[test]
+    fn corner_points_keep_the_tip_radius_along_the_chain() {
+        let c = v(3.0, -2.0);
+        let rho = 0.775e6;
+        let dir = |deg: f64| Vec2 { x: deg.to_radians().cos(), y: deg.to_radians().sin() };
+        for norm in [Norm::Euclid, Norm::Octagonal] {
+            for a0 in [0.0, 13.0, 21.4, 90.0, 200.0] {
+                for sweep in [5.0, 22.5, 45.0, 68.6, 90.0, 120.0, 175.0, -30.0, -68.6, -150.0] {
+                    let (ua, ub, um) = (dir(a0), dir(a0 + sweep), dir(a0 + 0.5 * sweep));
+                    // the tips at the norm's radius on their cut directions
+                    let (ta, tb) = (c + ua * (rho / norm.len(ua)), c + ub * (rho / norm.len(ub)));
+                    let pts = corner_points(c, ua * 7.0, ub * 3.0, um, rho, norm, 22.5);
+                    let mut chain = vec![ta];
+                    chain.extend(pts.iter().copied());
+                    chain.push(tb);
+                    let d = chain.windows(2).map(|w| norm_seg_dist(norm, c, w[0], w[1])).fold(f64::INFINITY, f64::min);
+                    assert!(d >= rho - 1.0, "{norm:?} a0 {a0} sweep {sweep}: chain {:.1} nm inside the radius: {:?}", rho - d, chain.iter().map(|p| ((p.x - c.x) / 1e6, (p.y - c.y) / 1e6)).collect::<Vec<_>>());
+                    for &p in &pts {
+                        let s = (p - c).y.atan2((p - c).x).to_degrees();
+                        let rel = (s - a0).rem_euclid(360.0);
+                        let ok = if sweep > 0.0 { rel > 0.0 && rel < sweep } else { rel > 360.0 + sweep && rel < 360.0 };
+                        assert!(ok, "{norm:?} a0 {a0} sweep {sweep}: point at {s:.2} deg outside the sector");
+                    }
+                    let chord = norm_seg_dist(norm, c, ta, tb);
+                    if norm == Norm::Euclid && sweep.abs() >= 22.5 {
+                        assert!(rho - chord > 0.01 * rho, "a0 {a0} sweep {sweep}: the bare chord does not sag ({chord})");
+                        assert!(!pts.is_empty());
+                    }
+                }
+            }
+        }
+        // the extra length over the arc is about d^2 / 12 of it (d <= 22.5 deg: < 1.3 %)
+        let (ua, ub) = (dir(21.4), dir(90.0));
+        let pts = corner_points(c, ua, ub, dir(50.0), rho, Norm::Euclid, 22.5);
+        let mut chain = vec![c + ua * rho];
+        chain.extend(pts);
+        chain.push(c + ub * rho);
+        let len: f64 = chain.windows(2).map(|w| (w[1] - w[0]).len()).sum();
+        let arc = rho * 68.6f64.to_radians();
+        assert!(len > arc && len < arc * 1.013, "length {len} vs arc {arc}");
+        // a half turn or more, or nothing to sweep: no points
+        assert!(corner_points(c, dir(0.0), dir(180.0), dir(90.0), rho, Norm::Euclid, 22.5).is_empty());
+        assert!(corner_points(c, dir(10.0), dir(10.0), dir(10.0), rho, Norm::Euclid, 22.5).is_empty());
+    }
+
+    /// TW2 addendum A on the funnel: a band passing a vertex across two of its cuts 68.6 degrees
+    /// apart, its spoke tips there at the stack radius 0.775 mm (an inner wire runs round the
+    /// vertex): with the corner points the path keeps >= 0.775 mm - 1 nm from the vertex along
+    /// its whole polyline; with the tips alone it takes the chord, 0.135 mm closer
+    /// (serpentine_bundle smooth, M2 on main 27c36203).
+    #[test]
+    fn passed_corner_path_keeps_the_stack_radius() {
+        let c = v(10.0, 0.0);
+        let rho = 0.775e6;
+        let dir = |deg: f64| Vec2 { x: deg.to_radians().cos(), y: deg.to_radians().sin() };
+        // the band runs left to right just above the vertex: the vertex is right of it (label 3)
+        let band = [v(4.0, 0.3), v(16.0, 0.3)];
+        let (ua, ub) = (dir(124.3), dir(55.7));
+        let (ta, tb) = (c + ua * rho, c + ub * rho);
+        let xa = Vec2 { x: c.x - 0.3e6 / 124.3f64.to_radians().tan().abs(), y: 0.3e6 };
+        let xb = Vec2 { x: c.x + 0.3e6 / 55.7f64.to_radians().tan(), y: 0.3e6 };
+        let tips = [(ta, 3u8, Detour::From(xa)), (tb, 3u8, Detour::From(xb))];
+        let bare = path_band(&band, &tips).unwrap();
+        let mut pts: Vec<(Vec2, u8, Detour)> = tips.to_vec();
+        for p in corner_points(c, ua, ub, dir(90.0), rho, Norm::Euclid, 22.5) {
+            pts.push((p, 3, Detour::Auto));
+        }
+        let full = path_band(&band, &pts).unwrap();
+        let dmin = |p: &[Vec2]| p.windows(2).map(|w| norm_seg_dist(Norm::Euclid, c, w[0], w[1])).fold(f64::INFINITY, f64::min);
+        assert!(dmin(&full) >= rho - 1.0, "with corner points: {:.1} nm inside, path {full:?}", rho - dmin(&full));
+        let sag = rho * (1.0 - (0.5 * 68.6f64.to_radians()).cos());
+        assert!(rho - dmin(&bare) > 0.9 * sag, "tips alone: the chord should sag ~{sag:.0} nm, got {:.0} ({bare:?})", rho - dmin(&bare));
+    }
+
+    /// TW2 addendum A, lead condition: a wrap's arc samples (global directions of the
+    /// circumscribed polygon inside the wrap's wedge, step 1b) keep the path at the stack radius
+    /// along its whole polyline, also where the band's legs are steep or nearly straight (the
+    /// tangent points near a wedge end).
+    #[test]
+    fn wrap_arc_path_keeps_the_stack_radius() {
+        let c = v(10.0, 0.0);
+        let rho = 0.775e6;
+        let (dirs, grow) = norm_dirs(Norm::Euclid, 22.5);
+        for (l0, l1) in [(1.0, 1.0), (3.0, 0.2), (0.05, 0.05), (8.0, 8.0), (0.3, 6.0)] {
+            // the band wraps the vertex from above: the vertex lies right of it (label 3)
+            let band = [v(0.0, l0), c, v(20.0, l1)];
+            let mut pts: Vec<(Vec2, u8, Detour)> = Vec::new();
+            for &u in &dirs {
+                if wedge_share(band[1] - band[0], band[2] - band[1], false, u).is_some() {
+                    pts.push((c + u * (rho * grow), 3, Detour::From(c)));
+                }
+            }
+            let path = path_band(&band, &pts).unwrap();
+            let d = path.windows(2).map(|w| norm_seg_dist(Norm::Euclid, c, w[0], w[1])).fold(f64::INFINITY, f64::min);
+            assert!(d >= rho - 1.0, "legs {l0} / {l1}: {:.1} nm inside the stack radius, path {path:?}", rho - d);
+        }
     }
 
     /// A detour from the band's start (a tip whose spoke the band crosses at its first point):
