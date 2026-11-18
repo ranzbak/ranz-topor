@@ -95,7 +95,7 @@ fn oblique_factor_follows_the_taut_path_not_the_spread_pass_points() {
     assert!(zig >= 4, "the spread pass points zig-zag ({zig} off the line)");
     assert!(worst_even > 0.5, "the spread pass points overstate 1/sin by {worst_even}");
     // Cached per wire content: the same Rc comes back.
-    assert!(std::rc::Rc::ptr_eq(&t, &packer.taut(&st, 0)));
+    assert!(std::sync::Arc::ptr_eq(&t, &packer.taut(&st, 0)));
 }
 
 #[test]

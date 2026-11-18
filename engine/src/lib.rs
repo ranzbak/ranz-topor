@@ -5,6 +5,7 @@ pub mod check;
 pub mod control;
 pub mod decompose;
 pub mod fuzz;
+pub mod fxhash;
 pub mod geom;
 pub mod lengths;
 pub mod model;

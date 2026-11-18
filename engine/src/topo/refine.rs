@@ -16,7 +16,7 @@
 //! touches); the search stops after `max_evals` evaluations.
 
 use super::factors::squeeze_amount;
-use super::pack::{infl_dir, layer_items, wire_discs, Disc, PackItem, Packer};
+use super::pack::{infl_dir, layer_items, Disc, PackItem, Packer};
 use super::cutmodel::CutPrice;
 use super::state::{State, WireId};
 use crate::geom::Vec2;
@@ -36,6 +36,9 @@ pub struct RefineParams {
     /// A move may add layer changes (vias) when it removes more overflow than they cost; false =
     /// only moves that keep or lower the layer-change price (capacity for free).
     pub add_vias: bool,
+    /// The serial in-place loop of before par-refine (try, undo) instead of the lane executor
+    /// ([`super::refine_par`]); the tests' reference. The cut model always takes it.
+    pub reference: bool,
 }
 
 /// What the refinement did.
@@ -46,6 +49,166 @@ pub struct RefineStats {
     pub after: usize,
     /// Moves kept.
     pub moves: usize,
+    /// par-refine fingerprint (tests and the plan metrics' `move_cost.refine_stream`): the
+    /// candidates evaluated, a hash of their stream in order with each keep decision, and an
+    /// order-free hash of the end-site memo at the end. The lane executor promises all three
+    /// equal to the serial loop's, not only the labels.
+    pub evals: usize,
+    pub stream: u64,
+    pub memo: u64,
+    /// The final capacity model's measure (per-edge model only), for the plan's measure to take.
+    pub fin: Option<FinalCap>,
+}
+
+/// One step of [`RefineStats::stream`]: the candidate `mv`, its price change `delta` (bit for
+/// bit: the lanes promise the serial summation order) and whether it was kept. O(|mv|).
+pub(crate) fn stream_fold(h: u64, mv: &[((WireId, usize), i32)], delta: f64, keep: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut x = std::collections::hash_map::DefaultHasher::new();
+    (h, mv, delta.to_bits(), keep).hash(&mut x);
+    x.finish()
+}
+
+/// The keep test of a candidate (serial loop and lanes alike): the price with the wires' layer
+/// changes (`new_wc` vs `old_wc`) and the capacity change `d_oc` drops by more than [`EPS`], and
+/// without `add_vias` the wires' own price does not grow. O(1).
+pub(crate) fn keep_rule(new_wc: f64, old_wc: f64, d_oc: f64, add_vias: bool) -> bool {
+    (new_wc - old_wc) + d_oc < -EPS && (add_vias || new_wc <= old_wc + EPS)
+}
+
+/// Tests (par-refine): with [`shadow::ON`] every lane refinement ([`refine`] without the cut model
+/// and without `reference`) also runs the serial reference loop on its own model of the same
+/// labels and panics unless labels, model arrays, end-site memo, evaluations, stream and kept
+/// moves are equal bit for bit (a refinement a stop cut is not compared). Process-wide; a test
+/// binary sets it for itself. Off = one relaxed load per refinement.
+pub mod shadow {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+    pub static ON: AtomicBool = AtomicBool::new(false);
+    /// Refinements compared, and those of them that kept at least one move.
+    pub static CHECKED: AtomicU64 = AtomicU64::new(0);
+    pub static CHECKED_MOVED: AtomicU64 = AtomicU64::new(0);
+    /// The shadow's own negative test: `k` > 0 changes item `k` of [`FIELDS`] in the reference's
+    /// result before the comparison, which must then panic naming that item. 0 = off.
+    pub static FAULT: AtomicUsize = AtomicUsize::new(0);
+    /// What the comparison checks, in its order (`over-full after` follows from the prices, so a
+    /// changed price is reported as `prices`; it has no fault of its own).
+    pub const FIELDS: [&str; 12] = [
+        "labels",
+        "evaluations",
+        "stream",
+        "kept moves",
+        "pass layers",
+        "pass discs",
+        "via intervals",
+        "via traversals",
+        "vias without a site",
+        "prices",
+        "end-site memo",
+        "over-full after",
+    ];
+}
+
+/// [`shadow::FAULT`]: changes item `k` (1-based, of [`shadow::FIELDS`]) of a result. O(1).
+fn shadow_fault(k: usize, cm: &mut Arrays, evl: &mut [Vec<LEv>], st: &mut RefineStats) {
+    match k {
+        1 => match evl.iter_mut().find(|e| !e.is_empty()) {
+            Some(e) => e[0].2 += 1,
+            None => {
+                if let Some(e) = evl.first_mut() {
+                    e.push((0, 0.0, 0));
+                }
+            }
+        },
+        2 => st.evals += 1,
+        3 => st.stream ^= 1,
+        4 => st.moves += 1,
+        5 => cm.pass_layer.push(-1),
+        6 => cm.pass_disc.push([0.0, 0.0]),
+        7 => cm.via_iv.push(Vec::new()),
+        8 => cm.via_k.push(Vec::new()),
+        9 => cm.nosite.push(0),
+        10 => cm.cost.push(1.0),
+        11 => {
+            cm.end_sites.insert((usize::MAX, 0, 0, 0, 0), None);
+        }
+        _ => {}
+    }
+}
+
+/// [`shadow`]: the first difference between the lanes' result and the reference's, if any.
+fn shadow_diff(a: (&CapModel, &[Vec<LEv>], &RefineStats), b: (&CapModel, &[Vec<LEv>], &RefineStats)) -> Option<String> {
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+    let disc = |v: &[Disc]| v.iter().map(|d| (d[0].to_bits(), d[1].to_bits())).collect::<Vec<_>>();
+    let labels = |e: &[Vec<LEv>]| e.iter().map(|w| w.iter().map(|&(k, s, l)| (k, s.to_bits(), l)).collect::<Vec<_>>()).collect::<Vec<_>>();
+    let (ca, ea, sa) = a;
+    let (cb, eb, sb) = b;
+    let checks: [bool; 12] = [
+        labels(ea) == labels(eb),
+        sa.evals == sb.evals,
+        sa.stream == sb.stream,
+        sa.moves == sb.moves,
+        ca.pass_layer == cb.pass_layer,
+        disc(&ca.pass_disc) == disc(&cb.pass_disc),
+        ca.via_iv == cb.via_iv,
+        ca.via_k == cb.via_k,
+        ca.nosite == cb.nosite,
+        bits(&ca.cost) == bits(&cb.cost) && bits(&ca.sq) == bits(&cb.sq),
+        memo_hash(&ca.end_sites) == memo_hash(&cb.end_sites) && ca.end_sites.len() == cb.end_sites.len(),
+        ca.overfull() == cb.overfull(),
+    ];
+    let first = checks.iter().position(|ok| !ok)?;
+    Some(format!("{} (lanes: {} evaluations, {} kept; reference: {} evaluations, {} kept)", shadow::FIELDS[first], sa.evals, sa.moves, sb.evals, sb.moves))
+}
+
+/// [`RefineStats::memo`]: an order-free hash of the end-site memo. O(entries).
+fn memo_hash(m: &EndSites) -> u64 {
+    use std::hash::{Hash, Hasher};
+    m.iter().fold(m.len() as u64, |acc, (k, v)| {
+        let mut x = std::collections::hash_map::DefaultHasher::new();
+        (k, v.map(|(i, p)| (i, p.x.to_bits(), p.y.to_bits()))).hash(&mut x);
+        acc.wrapping_add(x.finish())
+    })
+}
+
+/// par-refine item 3 (`[optimize] measure_reuse`): the violations of the capacity model the
+/// refinement ended with ([`CapModel::violations`]) and what they belong to, so the plan's
+/// measure takes them instead of building the model again from the same labels. The two can
+/// differ in the last bits and in the via positions: the refinement's model keeps the via
+/// positions and end sites of the order its moves came in, a new build lays every wire out once
+/// in wire order. Valid for the packer at address `packer`, the `bottom` layer, the price bits
+/// `price` and the state + labels whose [`cap_key`] is `key`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinalCap {
+    pub packer: usize,
+    pub bottom: i32,
+    pub price: u64,
+    pub key: u64,
+    pub viol: (usize, f64),
+}
+
+/// A hash of what a capacity model is built from besides the packer: the live wires (net,
+/// width, clearance, terminals, turns, passes with their edges, triangles), the pass order of
+/// every edge and the labels, bit for bit. O(passes + events).
+pub fn cap_key(st: &State, evl: &[Vec<LEv>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = crate::fxhash::FxHasher::default();
+    (st.wires.len(), st.passes.len()).hash(&mut h);
+    st.edge_order.hash(&mut h);
+    for (w, wi) in st.wires.iter().enumerate() {
+        if !wi.alive {
+            continue;
+        }
+        (w, wi.net, wi.w.to_bits(), wi.s.to_bits(), wi.a, wi.b, wi.pa, wi.pb, &wi.turns, &wi.passes, &wi.tris).hash(&mut h);
+        for &p in &wi.passes {
+            (st.passes[p].wire, st.passes[p].edge).hash(&mut h);
+        }
+        let ev = evl.get(w).map_or(&[][..], |v| &v[..]);
+        ev.len().hash(&mut h);
+        for &(k, s, l) in ev {
+            (k, s.to_bits(), l).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// The via intervals of a wire's events: `(ka, kb)` per layer change (the traversals of the two
@@ -92,7 +255,7 @@ pub fn via_ranges(ev: &[LEv], strict: bool) -> (Vec<(usize, usize)>, Vec<bool>) 
 }
 
 /// Cache of [`end_site`] per (wire, end events as (traversal, fraction bits) pairs).
-type EndSites = std::collections::HashMap<(WireId, usize, u64, usize, u64), Option<(usize, Vec2)>>;
+type EndSites = crate::fxhash::FxHashMap<(WireId, usize, u64, usize, u64), Option<(usize, Vec2)>>;
 
 /// 5.2 (`[vias] between_crossings`): a site for the via of the interval between the events `a`
 /// and `b` of wire `w` inside an end traversal, on the via's own side of the event, for an
@@ -242,6 +405,10 @@ pub mod meter {
     pub static PARTS: AtomicU64 = AtomicU64::new(0);
     pub static INSTALL_NS: AtomicU64 = AtomicU64::new(0);
     pub static CUTS_PRICED: AtomicU64 = AtomicU64::new(0);
+    /// Build memo (par-refine item 2): edge-layers whose packing numbers came from an earlier
+    /// build (hits) and those packed again (misses).
+    pub static MEMO_HIT: AtomicU64 = AtomicU64::new(0);
+    pub static MEMO_MISS: AtomicU64 = AtomicU64::new(0);
     thread_local! {
         static OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -277,9 +444,727 @@ pub mod meter {
     }
 }
 
+/// A pass whose layout changed: `(pass, layer before, disc before)`.
+type Changed = (usize, i32, Disc);
+
+/// The layers of an edge whose pack items change when one of its passes goes from layer `ol`,
+/// disc `od` to layer `nl_`, disc `nd`, as a bit set over the `nl` layers ([`layer_items`]: a
+/// pass packs its track and disc on its own layer and its disc alone on every other layer). Same
+/// disc (bits): only the old and the new layer; with a disc and a layer of -1 (a dead wire's
+/// pass), or a changed disc: every layer. O(1).
+fn layers_changed(nl: usize, ol: i32, od: Disc, nl_: i32, nd: Disc) -> u64 {
+    let all = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
+    let bit = |l: i32| if l >= 0 && (l as usize) < 64 { 1u64 << l } else { 0 };
+    let same = od[0].to_bits() == nd[0].to_bits() && od[1].to_bits() == nd[1].to_bits();
+    if !same || (od[0].max(od[1]) > 0.0 && (ol < 0 || nl_ < 0)) {
+        return all;
+    }
+    (bit(ol) | bit(nl_)) & all
+}
+
 /// Order of a via traversal: (no site, overflow + squeeze change in um-mm, other wires in the
 /// triangle, -inradius, traversal).
 type SiteKey = (bool, i64, usize, i64, usize);
+
+/// "Not filled yet" in [`CapModel::margins`] (a NaN pattern no margin takes: margins are finite).
+const MARGIN_UNSET: u64 = u64::MAX;
+
+/// Margin table slots per pass: per end, `nl` track margins, `nl` disc-alone margins and the via
+/// disc's margin over all layers.
+fn margin_slots(nl: usize) -> usize {
+    2 * (2 * nl + 1)
+}
+
+/// Packing numbers of an edge-layer: `(over, via squeeze price, pitch)` ([`CapModel::numbers_in`]).
+pub type EdgeNumbers = (f64, f64, f64);
+
+/// The build memo of a packer ([`CapModel::price_all`]): per edge-layer the items priced there
+/// last and their packing numbers. Valid for the packer's projection only.
+#[derive(Default)]
+pub struct EdgeMemo {
+    nl: usize,
+    ent: Vec<MemoEnt>,
+}
+
+#[derive(Default)]
+struct MemoEnt {
+    items: Vec<PackItem>,
+    nums: Option<EdgeNumbers>,
+}
+
+/// Whether two item lists are equal bit for bit (every field; `-0.0` and `0.0` differ). O(items).
+fn same_items(a: &[PackItem], b: &[PackItem]) -> bool {
+    let bits = |i: &PackItem| (i.net, i.w.to_bits(), i.s.to_bits(), i.infl.to_bits(), i.disc[0].to_bits(), i.disc[1].to_bits());
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| bits(x) == bits(y))
+}
+
+/// Per-thread scratch of [`CapModel::eval`].
+#[derive(Default)]
+struct EvalScratch {
+    items: Vec<PackItem>,
+    /// The pass of each item and whether it is the pass's track (else its disc alone).
+    ids: Vec<(usize, bool)>,
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+    req: Vec<f64>,
+    rmax: Vec<f64>,
+}
+
+thread_local! {
+    static EVAL_SCRATCH: std::cell::RefCell<EvalScratch> = std::cell::RefCell::new(EvalScratch::default());
+}
+
+/// The static part of a [`CapModel`] (par-refine §3): the borrowed state, packer and directions
+/// and the per-pass tables, read by every lane of the parallel refinement and written by none
+/// (the margin table's atomics are a memo of the packer's pure margins). The layout and pricing
+/// code lives here, generic over where the labelling-dependent arrays are ([`Mem`]: the model's
+/// own arrays in place, or a lane's overlay over them).
+pub struct Frame<'a> {
+    pub(crate) st: &'a State<'a>,
+    pub(crate) packer: &'a Packer<'a>,
+    /// Crossing direction of every pass from its wire's taut path ([`Packer::taut_dirs`]).
+    dirs: &'a [Vec<Vec2>],
+    pub(crate) nl: usize,
+    price: f64,
+    pub(crate) bottom: i32,
+    /// Position of every pass in its wire.
+    pass_k: Vec<usize>,
+    /// Per pass of a live wire: its pack item without a disc (net, width, clearance, oblique
+    /// factor of its taut direction), as [`CapModel::items`] makes it; filled at the build
+    /// (static for the model's life: the state and the directions are borrowed).
+    item0: Vec<PackItem>,
+    /// Per wire: the via disc diameter its passes get ([`Packer::via_d`] of its net).
+    wire_d: Vec<f64>,
+    /// Per pass: its end margins ([`Packer::margin`] of its edge, both ends, every layer, at its
+    /// track width and as a disc alone (width 0), and [`Packer::margin_all`] of its wire's via
+    /// disc), filled when first asked ([`MARGIN_UNSET`] until then), [`margin_slots`] per pass.
+    /// The values are those of the packer's (pure) cache, so an entry read here equals the
+    /// packer's answer bit for bit, whichever lane filled it.
+    margins: Vec<std::sync::atomic::AtomicU64>,
+}
+
+/// The labelling-dependent arrays of a [`CapModel`] (its "master" in the parallel refinement:
+/// the lanes read it, only the run thread writes it, between the lanes' epochs).
+pub struct Arrays {
+    /// Layer of every pass (-1: wire dead).
+    pub pass_layer: Vec<i32>,
+    /// Via disc diameter at every pass next to a via of its wire (0: none).
+    pub pass_disc: Vec<Disc>,
+    /// Per wire: the via intervals of its events and the traversal of each via.
+    pub via_iv: Vec<Vec<(usize, usize)>>,
+    pub via_k: Vec<Vec<usize>>,
+    /// Per wire: its vias without a static site in their interval.
+    pub(crate) nosite: Vec<usize>,
+    /// 5.2: the site in an end traversal ([`end_site`]) of an interval without a traversal
+    /// strictly between its events, per (wire, event a, event b) (`f64` fractions as bits); the
+    /// state is borrowed for the model's life, so the geometry is fixed. A memo filled when first
+    /// asked (its value depends on the planned vias of other nets at that moment, `site_taken`):
+    /// the parallel refinement keeps the serial order of its fills (`refine_par`).
+    pub(crate) end_sites: EndSites,
+    /// Price of edge `e`, layer `l` at `e * nl + l`.
+    pub(crate) cost: Vec<f64>,
+    /// Via squeeze price of edge `e`, layer `l` (the `via_squeeze` factor, [`Packer::via_squeeze`]).
+    pub(crate) sq: Vec<f64>,
+    /// Undo log of `cost` / `sq` entries while a move is tried in place.
+    log: Option<Vec<(usize, f64, f64)>>,
+}
+
+/// Key of [`Arrays::end_sites`].
+pub(crate) type EndKey = (WireId, usize, u64, usize, u64);
+
+/// Reads of the labelling-dependent arrays ([`Arrays`] itself, or a lane's overlay over them).
+pub(crate) trait MemRead {
+    fn layer(&self, p: usize) -> i32;
+    fn disc(&self, p: usize) -> Disc;
+    fn via_iv(&self, w: WireId) -> &[(usize, usize)];
+    fn via_k(&self, w: WireId) -> &[usize];
+    fn nosite(&self, w: WireId) -> usize;
+    fn cost(&self, i: usize) -> (f64, f64);
+    fn end_site(&self, key: &EndKey) -> Option<Option<(usize, Vec2)>>;
+}
+
+/// Reads and writes of the labelling-dependent arrays, with the hooks of the in-place model (the
+/// cut model's repricing, the undo log, the meters) and of a lane (its candidate was dropped).
+pub(crate) trait Mem: MemRead {
+    fn set_pass(&mut self, p: usize, l: i32, d: Disc);
+    fn set_via_iv(&mut self, w: WireId, iv: Vec<(usize, usize)>);
+    fn set_via_k(&mut self, w: WireId, ks: &[usize]);
+    fn set_nosite(&mut self, w: WireId, n: usize);
+    /// Set the price of edge-layer `i` (called only when it changes).
+    fn set_cost(&mut self, i: usize, c: f64, q: f64);
+    fn put_end_site(&mut self, key: EndKey, v: Option<(usize, Vec2)>);
+    /// Weight of the per-edge overflow price in the total: 0 when the cut model prices (the
+    /// per-edge cost is then only kept for the reports).
+    fn edge_w(&self) -> f64 {
+        1.0
+    }
+    /// Wire `w` was laid out with events `ev` (the cut model reprices it at the next flush).
+    fn applied(&mut self, _w: WireId, _ev: &[LEv]) {}
+    /// Cut model: price the wires applied since the last call again; the change of the cut price.
+    fn flush(&mut self, _fx: &Frame) -> f64 {
+        0.0
+    }
+    /// One via position was tried, started at `t0` (the meters).
+    fn viapos(&mut self, t0: std::time::Instant);
+    /// The candidate this layout belongs to is no longer wanted (a lane's: an earlier one was
+    /// kept, or the run stops); the layout may end early, its result is thrown away.
+    fn abandoned(&self) -> bool {
+        false
+    }
+}
+
+impl MemRead for Arrays {
+    fn layer(&self, p: usize) -> i32 {
+        self.pass_layer[p]
+    }
+    fn disc(&self, p: usize) -> Disc {
+        self.pass_disc[p]
+    }
+    fn via_iv(&self, w: WireId) -> &[(usize, usize)] {
+        &self.via_iv[w]
+    }
+    fn via_k(&self, w: WireId) -> &[usize] {
+        self.via_k.get(w).map_or(&[], |v| v.as_slice())
+    }
+    fn nosite(&self, w: WireId) -> usize {
+        self.nosite[w]
+    }
+    fn cost(&self, i: usize) -> (f64, f64) {
+        (self.cost[i], self.sq[i])
+    }
+    fn end_site(&self, key: &EndKey) -> Option<Option<(usize, Vec2)>> {
+        self.end_sites.get(key).copied()
+    }
+}
+
+/// The model's own arrays, written in place (the build, the in-place moves of [`try_move`] and
+/// P4, the cut model, and the commit of a lane's candidate).
+pub(crate) struct Master<'m, 'a> {
+    pub(crate) a: &'m mut Arrays,
+    cut: &'m mut Option<CutPrice<'a>>,
+    evs: &'m mut Vec<Vec<LEv>>,
+    pending: &'m mut Vec<WireId>,
+}
+
+impl MemRead for Master<'_, '_> {
+    fn layer(&self, p: usize) -> i32 {
+        self.a.layer(p)
+    }
+    fn disc(&self, p: usize) -> Disc {
+        self.a.disc(p)
+    }
+    fn via_iv(&self, w: WireId) -> &[(usize, usize)] {
+        self.a.via_iv(w)
+    }
+    fn via_k(&self, w: WireId) -> &[usize] {
+        self.a.via_k(w)
+    }
+    fn nosite(&self, w: WireId) -> usize {
+        self.a.nosite(w)
+    }
+    fn cost(&self, i: usize) -> (f64, f64) {
+        self.a.cost(i)
+    }
+    fn end_site(&self, key: &EndKey) -> Option<Option<(usize, Vec2)>> {
+        self.a.end_site(key)
+    }
+}
+
+impl Mem for Master<'_, '_> {
+    fn set_pass(&mut self, p: usize, l: i32, d: Disc) {
+        self.a.pass_layer[p] = l;
+        self.a.pass_disc[p] = d;
+    }
+    fn set_via_iv(&mut self, w: WireId, iv: Vec<(usize, usize)>) {
+        self.a.via_iv[w] = iv;
+    }
+    fn set_via_k(&mut self, w: WireId, ks: &[usize]) {
+        let v = &mut self.a.via_k[w];
+        v.clear();
+        v.extend_from_slice(ks);
+    }
+    fn set_nosite(&mut self, w: WireId, n: usize) {
+        self.a.nosite[w] = n;
+    }
+    fn set_cost(&mut self, i: usize, c: f64, q: f64) {
+        let a = &mut *self.a;
+        if let Some(log) = a.log.as_mut() {
+            log.push((i, a.cost[i], a.sq[i]));
+        }
+        a.cost[i] = c;
+        a.sq[i] = q;
+    }
+    fn put_end_site(&mut self, key: EndKey, v: Option<(usize, Vec2)>) {
+        self.a.end_sites.insert(key, v);
+    }
+    fn edge_w(&self) -> f64 {
+        if self.cut.is_some() {
+            0.0
+        } else {
+            1.0
+        }
+    }
+    fn applied(&mut self, w: WireId, ev: &[LEv]) {
+        if self.cut.is_some() {
+            self.evs[w] = ev.to_vec();
+            self.pending.push(w);
+        }
+    }
+    fn flush(&mut self, fx: &Frame) -> f64 {
+        let Some(cut) = self.cut.as_mut() else { return 0.0 };
+        let mut ws = std::mem::take(self.pending);
+        ws.sort_unstable();
+        ws.dedup();
+        let mut d = 0.0;
+        for w in ws {
+            let t0 = std::time::Instant::now();
+            let (mut runs, vias) = cut.runs_of(fx.st, fx.packer, w, &self.evs[w], &self.a.via_k[w], fx.bottom);
+            meter::add(&meter::STRETCH_NS, &meter::FLUSHES, t0);
+            d += cut.set_wire(w, &mut runs, &vias);
+        }
+        d
+    }
+    fn viapos(&mut self, t0: std::time::Instant) {
+        meter::add(&meter::VIAPOS_NS, &meter::VIAPOS, t0);
+    }
+}
+
+/// Per-thread scratch of [`Frame::apply`] and [`Frame::reprice`].
+#[derive(Default)]
+struct LayScratch {
+    pl: Vec<i32>,
+    disc: Vec<Disc>,
+    es: Vec<(usize, u64)>,
+}
+
+thread_local! {
+    static LAY_SCRATCH: std::cell::RefCell<LayScratch> = std::cell::RefCell::new(LayScratch::default());
+}
+
+impl<'a> Frame<'a> {
+    fn new(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], bottom: i32, price: f64) -> Self {
+        let nl = st.proj.n_layers;
+        let mut pass_k = vec![0; st.passes.len()];
+        for wi in st.wires.iter().filter(|wi| wi.alive) {
+            for (k, &p) in wi.passes.iter().enumerate() {
+                pass_k[p] = k;
+            }
+        }
+        let pr = st.proj;
+        let mut item0 = vec![PackItem::default(); st.passes.len()];
+        for (w, wi) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
+            for (k, &p) in wi.passes.iter().enumerate() {
+                let e = st.passes[p].edge;
+                item0[p] = PackItem { net: wi.net, w: st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, dirs[w][k]), disc: [0.0; 2] };
+            }
+        }
+        let wire_d: Vec<f64> = st.wires.iter().map(|wi| packer.via_d(wi.net)).collect();
+        let margins = (0..st.passes.len() * margin_slots(nl)).map(|_| std::sync::atomic::AtomicU64::new(MARGIN_UNSET)).collect();
+        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins }
+    }
+
+    /// The price of one over-full edge-layer (mm).
+    pub(crate) fn price(&self) -> f64 {
+        self.price
+    }
+
+    /// Via radius plus clearance of wire `w` (0 when the packer has no via sizes).
+    fn need_r(&self, w: WireId) -> f64 {
+        let wi = &self.st.wires[w];
+        let d = self.packer.via_d(wi.net);
+        if d > 0.0 {
+            0.5 * d + wi.s
+        } else {
+            0.0
+        }
+    }
+
+    /// The drawing's preference of traversal `k` of `w` for a via: `(no site, other wires in
+    /// the triangle, -inradius, k)`, smaller first.
+    fn rank<M: MemRead + ?Sized>(&self, m: &M, w: WireId, k: usize) -> (bool, usize, i64, usize) {
+        let (st, pr) = (self.st, self.st.proj);
+        let t = st.wires[w].tris[k.min(st.wires[w].tris.len() - 1)];
+        let wi = &st.wires[w];
+        let d = self.packer.via_d(wi.net);
+        let site = d <= 0.0 || (self.packer.via_site(t, wi.net, 0.5 * d, wi.s) && !self.site_taken(m, w, t));
+        let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
+        (!site, others, -(pr.inradius(t) as i64), k)
+    }
+
+    /// Whether triangle `t` is taken for a via of `w` (M-C via room, Polubasov 2001 pp. 3-9: a via
+    /// lies in its interval, at a site of its own): another net's wire already has a planned via
+    /// in `t` and `t` cannot hold two discs (inradius below twice the via radius plus clearance).
+    /// Derived from `via_k` alone, so the undo of a move restores it. O(traversals of `t`).
+    fn site_taken<M: MemRead + ?Sized>(&self, m: &M, w: WireId, t: super::state::TriId) -> bool {
+        if !self.packer.reserve_sites {
+            return false;
+        }
+        let st = self.st;
+        let net = st.wires[w].net;
+        st.tri_trav[t].iter().any(|&(o, ko)| o != w && st.wires[o].net != net && m.via_k(o).contains(&ko)) && st.proj.inradius(t) < 2.0 * self.need_r(w)
+    }
+
+    /// The key of the end site of via interval `i` of `w` under events `ev`, and its two events;
+    /// `None` without `[vias] between_crossings` or without such an interval.
+    fn end_key(&self, w: WireId, ev: &[LEv], i: usize) -> Option<(EndKey, LEv, LEv)> {
+        if !self.packer.via_between {
+            return None;
+        }
+        let (a, b) = ev.windows(2).filter(|x| x[0].2 != x[1].2).nth(i).map(|x| (x[0], x[1]))?;
+        Some(((w, a.0, a.1.to_bits(), b.0, b.1.to_bits()), a, b))
+    }
+
+    /// [`end_site`] of the interval between events `a` and `b` of `w` under the planned vias of `m`.
+    fn end_site_raw<M: MemRead + ?Sized>(&self, m: &M, w: WireId, a: LEv, b: LEv) -> Option<(usize, Vec2)> {
+        let wi = &self.st.wires[w];
+        let d = self.packer.via_d(wi.net);
+        let (pr, packer, net, s) = (self.st.proj, self.packer, wi.net, wi.s);
+        let need = self.need_r(w);
+        end_site(self.st, w, a, b, &|t, q| pr.inradius(t) >= need && !self.site_taken(m, w, t) && super::cutflow::point_free(pr, packer, q, net, s) >= 0.5 * d)
+    }
+
+    /// 5.2: the end-traversal site ([`end_site`]) of via interval `i` of `w` under events `ev`
+    /// when the interval has no traversal strictly between its events (`[vias]
+    /// between_crossings`); `None` otherwise or when there is none. Cached ([`Arrays::end_sites`]).
+    fn end_site_of<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], i: usize) -> Option<(usize, Vec2)> {
+        let (key, a, b) = self.end_key(w, ev, i)?;
+        if let Some(x) = m.end_site(&key) {
+            return x;
+        }
+        let x = self.end_site_raw(&*m, w, a, b);
+        m.put_end_site(key, x);
+        x
+    }
+
+    /// Via traversals by the drawing's preference alone (no room), keeping the traversal of a
+    /// via whose interval is unchanged from `old` (intervals, traversals); a via of an interval
+    /// with no traversal strictly between its events takes the traversal of its end site
+    /// ([`Frame::end_site_of`]) when it has one.
+    fn default_ks<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], iv: &[(usize, usize)], old: Option<OldVias>) -> Vec<usize> {
+        let n = self.st.wires[w].passes.len();
+        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
+        let mut ks: Vec<usize> = Vec::with_capacity(iv.len());
+        for (i, &(ka, kb)) in iv.iter().enumerate() {
+            let lo = ka.max(ks.last().copied().unwrap_or(0)).min(n);
+            let hi = kb.min(n).max(lo);
+            if between.get(i) == Some(&false) {
+                if let Some((k, _)) = self.end_site_of(m, w, ev, i).filter(|&(k, _)| (lo..=hi).contains(&k)) {
+                    ks.push(k);
+                    continue;
+                }
+            }
+            if let Some((oiv, oks)) = old {
+                if oiv.get(i) == Some(&(ka, kb)) && oks.get(i).is_some_and(|&k| (lo..=hi).contains(&k)) {
+                    ks.push(oks[i]);
+                    continue;
+                }
+            }
+            ks.push((lo..=hi).min_by_key(|&k| self.rank(&*m, w, k)).unwrap_or(lo));
+        }
+        ks
+    }
+
+    /// Set the pass layers and via discs of `w` for via traversals `ks` (no pricing); appends the
+    /// passes whose layer or disc changed, with their layer and disc before, to `changed`.
+    /// O(passes of the wire).
+    fn apply<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], ks: &[usize], changed: &mut Vec<Changed>) {
+        let wi = &self.st.wires[w];
+        let n = wi.passes.len();
+        let d = self.wire_d[w];
+        LAY_SCRATCH.with(|sc| {
+            let sc = &mut *sc.borrow_mut();
+            pass_layers_into(&mut sc.pl, n, ev, self.bottom, ks);
+            wire_discs_into(&mut sc.disc, n, ks, d);
+            for (k, &p) in wi.passes.iter().enumerate() {
+                let (ol, od) = (m.layer(p), m.disc(p));
+                if ol != sc.pl[k] || od != sc.disc[k] {
+                    changed.push((p, ol, od));
+                    m.set_pass(p, sc.pl[k], sc.disc[k]);
+                }
+            }
+        });
+        let nr = self.need_r(w);
+        // 5.4 `[vias] between_crossings`: a via of an interval with no traversal between its
+        // events has a site only on its own side of an end event ([`end_site`], 5.2); the others
+        // have one when their traversal does.
+        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
+        let ns = if nr > 0.0 {
+            let mut c = 0;
+            for (i, &k) in ks.iter().enumerate() {
+                let no = if between.get(i) == Some(&false) { self.end_site_of(m, w, ev, i).is_none() } else { self.rank(&*m, w, k).0 };
+                c += no as usize;
+            }
+            c
+        } else {
+            0
+        };
+        m.set_nosite(w, ns);
+        m.set_via_k(w, ks);
+        m.applied(w, ev);
+    }
+
+    /// Price again the edge-layers of the passes `changed`; returns the change of the total.
+    ///
+    /// Only the layers whose items changed are evaluated ([`layers_changed`]): an edge-layer
+    /// whose items are the same would price the same, log nothing and add nothing to the
+    /// change, so leaving it out is exact (par-refine §3). Edges ascending, layers ascending, as
+    /// before. O(changed passes x layers x passes of an edge).
+    fn reprice<M: Mem + ?Sized>(&self, m: &mut M, changed: &[Changed]) -> f64 {
+        let nl = self.nl;
+        let mut es = LAY_SCRATCH.with(|sc| std::mem::take(&mut sc.borrow_mut().es));
+        es.clear();
+        es.extend(changed.iter().map(|&(p, ol, od)| (self.st.passes[p].edge, layers_changed(nl, ol, od, m.layer(p), m.disc(p)))));
+        es.sort_unstable_by_key(|x| x.0);
+        let mut delta = 0.0;
+        let ew = m.edge_w();
+        let mut j = 0;
+        while j < es.len() {
+            let e = es[j].0;
+            let mut mask = 0u64;
+            while j < es.len() && es[j].0 == e {
+                mask |= es[j].1;
+                j += 1;
+            }
+            for l in (0..nl).filter(|&l| (mask >> l) & 1 == 1) {
+                let i = e * nl + l;
+                let (c, q) = self.eval(&*m, e, l);
+                let (oc, oq) = m.cost(i);
+                if c != oc || q != oq {
+                    delta += ew * (c - oc) + (q - oq);
+                    m.set_cost(i, c, q);
+                }
+            }
+        }
+        LAY_SCRATCH.with(|sc| sc.borrow_mut().es = es);
+        delta + m.flush(self)
+    }
+
+    /// Move the vias `which` of `w` through their intervals (one sweep each, in order) to the
+    /// traversal with a site and the least overflow price, ties by the drawing's preference.
+    /// O(vias x interval length x layers x passes of an edge).
+    fn optimise<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], which: &[usize]) {
+        let n = self.st.wires[w].passes.len();
+        let mut ch = Vec::new();
+        for &i in which {
+            let mut ks = m.via_k(w).to_vec();
+            let (ka, kb) = m.via_iv(w)[i];
+            let lo = ka.max(if i > 0 { ks[i - 1] } else { 0 }).min(n);
+            let hi = kb.min(if i + 1 < ks.len() { ks[i + 1] } else { n }).min(n).max(lo);
+            if lo == hi {
+                continue;
+            }
+            let cur = ks[i];
+            let mut run = 0.0;
+            let mut best: Option<(SiteKey, usize)> = None;
+            for k in lo..=hi {
+                if m.abandoned() {
+                    return;
+                }
+                let t0 = std::time::Instant::now();
+                ks[i] = k;
+                ch.clear();
+                self.apply(m, w, ev, &ks, &mut ch);
+                run += self.reprice(m, &ch);
+                m.viapos(t0);
+                let r = self.rank(&*m, w, k);
+                let key = (r.0, (run * 1e3).round() as i64, r.1, r.2, r.3);
+                if best.as_ref().is_none_or(|b| key < b.0) {
+                    best = Some((key, k));
+                }
+            }
+            let k = best.map_or(cur, |b| b.1);
+            ks[i] = k;
+            ch.clear();
+            self.apply(m, w, ev, &ks, &mut ch);
+            self.reprice(m, &ch);
+        }
+    }
+
+    /// Lay out wire `w` again after its events changed: vias of unchanged intervals stay, the
+    /// others are placed by the drawing's preference and then moved for room. O(passes of the
+    /// wire + moved vias x interval).
+    pub(crate) fn relayout<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv]) {
+        let iv = via_ranges(ev, self.packer.via_between).0;
+        let (oiv, oks) = (m.via_iv(w).to_vec(), m.via_k(w).to_vec());
+        let ks = self.default_ks(m, w, ev, &iv, Some((&oiv, &oks)));
+        let moved: Vec<usize> = (0..iv.len()).filter(|&i| oiv.get(i) != Some(&iv[i])).collect();
+        m.set_via_iv(w, iv);
+        let mut ch = Vec::new();
+        self.apply(m, w, ev, &ks, &mut ch);
+        self.reprice(m, &ch);
+        self.optimise(m, w, ev, &moved);
+    }
+
+    /// Overflow price and via squeeze price of edge `e` on layer `l` under the pass layers of
+    /// `m`: every via disc there pays the `via_squeeze` weight times the squeeze of the slack the
+    /// packing leaves (the least `rmax - lmin`) against one via diameter.
+    ///
+    /// The items, their end margins and the packing come from the per-pass tables and a
+    /// per-thread scratch ([`EvalScratch`]): the same items in the same order and the same
+    /// operations as [`CapModel::items`] + [`Packer::bounds`] + [`super::pack::Bounds::worst`]
+    /// (par-refine §3, exact), without a hash lookup or an allocation per call.
+    fn eval<M: MemRead + ?Sized>(&self, m: &M, e: usize, l: usize) -> (f64, f64) {
+        let order = &self.st.edge_order[e];
+        if order.is_empty() {
+            return (0.0, 0.0);
+        }
+        EVAL_SCRATCH.with(|sc| {
+            let sc = &mut *sc.borrow_mut();
+            self.items_in(m, l, order, sc);
+            if sc.items.is_empty() {
+                return (0.0, 0.0);
+            }
+            let n = self.numbers_in(e, l, sc);
+            self.cost_of(n)
+        })
+    }
+
+    /// The pack items of edge-layer `l` of the passes `order` (an edge's order) into `sc.items`,
+    /// their passes into `sc.ids` ([`layer_items`]'s rule: a pass on `l` packs its track and its
+    /// disc, a pass on another layer with a disc packs the disc alone). O(passes of the edge).
+    fn items_in<M: MemRead + ?Sized>(&self, m: &M, l: usize, order: &[usize], sc: &mut EvalScratch) {
+        sc.items.clear();
+        sc.ids.clear();
+        for &p in order {
+            let (pl, d) = (m.layer(p), m.disc(p));
+            let it = if pl == l as i32 {
+                PackItem { disc: d, ..self.item0[p] }
+            } else if pl >= 0 && d[0].max(d[1]) > 0.0 {
+                let i0 = &self.item0[p];
+                PackItem { net: i0.net, w: 0.0, s: i0.s, infl: 1.0, disc: d }
+            } else {
+                continue;
+            };
+            sc.ids.push((p, pl == l as i32));
+            sc.items.push(it);
+        }
+    }
+
+    /// The packing numbers `(over, squeeze price, pitch)` of the items in `sc` on edge `e`,
+    /// layer `l` (`over` = [`super::pack::Bounds::worst`]): a function of the items and the
+    /// static packer alone (the end margins are the packer's), so equal items give equal bits.
+    fn numbers_in(&self, e: usize, l: usize, sc: &mut EvalScratch) -> EdgeNumbers {
+        sc.lo.clear();
+        sc.hi.clear();
+        let len = self.packer.edge_len(e);
+        for (&(p, track), it) in sc.ids.iter().zip(&sc.items) {
+            sc.lo.push(self.end_margin(p, e, 0, it, l, track));
+            sc.hi.push(len - self.end_margin(p, e, 1, it, l, track));
+        }
+        let items = &sc.items;
+        let over = self.packer.worst_into(e, items, &sc.lo, &sc.hi, &mut sc.req, &mut sc.rmax);
+        let sq_w = self.packer.via_squeeze;
+        let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
+        let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
+        (over, sq, pitch)
+    }
+
+    /// Overflow and via squeeze price of an edge-layer from its packing numbers ([`Frame::eval`]). O(1).
+    fn cost_of(&self, (over, sq, pitch): EdgeNumbers) -> (f64, f64) {
+        if over <= 1e-6 {
+            return (0.0, sq);
+        }
+        (self.price * (1.0 + over / pitch), sq)
+    }
+
+    /// The end margin of item `it` of pass `p` at end `end` of edge `e` on layer `l` as
+    /// [`Packer::bounds`] takes it (its track's or, `track` = false, its disc-alone item's
+    /// [`Packer::margin`], at least the via disc's [`Packer::margin_all`] when it has a disc
+    /// there), through the pass's margin table. O(1) once filled.
+    fn end_margin(&self, p: usize, e: usize, end: usize, it: &PackItem, l: usize, track: bool) -> f64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let nl = self.nl;
+        let base = p * margin_slots(nl) + end * (2 * nl + 1);
+        let slot = &self.margins[base + if track { l } else { nl + l }];
+        let m = match slot.load(Relaxed) {
+            MARGIN_UNSET => {
+                let m = self.packer.margin(e, end, it.net, it.w, it.s, l);
+                slot.store(m.to_bits(), Relaxed);
+                m
+            }
+            b => f64::from_bits(b),
+        };
+        let d = it.disc[end];
+        if d <= 0.0 {
+            return m;
+        }
+        let w = self.st.passes[p].wire;
+        if d.to_bits() != self.wire_d[w].to_bits() {
+            return m.max(self.packer.margin_all(e, end, it.net, d, it.s));
+        }
+        let slot = &self.margins[base + 2 * nl];
+        let ma = match slot.load(Relaxed) {
+            MARGIN_UNSET => {
+                let ma = self.packer.margin_all(e, end, it.net, d, it.s);
+                slot.store(ma.to_bits(), Relaxed);
+                ma
+            }
+            b => f64::from_bits(b),
+        };
+        m.max(ma)
+    }
+
+    /// The pack items of edge `e` on layer `l` under the pass layers of `m`, without the wires in
+    /// `gone` (the reference of [`Frame::eval`] and [`CapModel::fits_without`]).
+    fn items<M: MemRead + ?Sized>(&self, m: &M, e: usize, l: usize, gone: Option<&std::collections::BTreeSet<WireId>>) -> Vec<PackItem> {
+        let pr = self.st.proj;
+        let order: Vec<usize> = match gone {
+            Some(g) => self.st.edge_order[e].iter().copied().filter(|&p| !g.contains(&self.st.passes[p].wire)).collect(),
+            None => self.st.edge_order[e].clone(),
+        };
+        layer_items(
+            &order,
+            l,
+            |p| m.layer(p),
+            |p| m.disc(p),
+            |p| {
+                let w = self.st.passes[p].wire;
+                let wi = &self.st.wires[w];
+                PackItem { net: wi.net, w: self.st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]), disc: [0.0; 2] }
+            },
+        )
+        .1
+    }
+}
+
+/// [`pass_layers_at`] into `out` (the same values). O(events + n).
+fn pass_layers_into(out: &mut Vec<i32>, n: usize, ev: &[LEv], bottom: i32, ks: &[usize]) {
+    out.clear();
+    let Some(&(_, _, first)) = ev.first() else {
+        out.resize(n, bottom);
+        return;
+    };
+    out.resize(n, first);
+    let (mut start, mut cur, mut i) = (0usize, first, 0usize);
+    for x in ev.windows(2) {
+        let ((ka, _, la), (kb, _, lb)) = (x[0], x[1]);
+        if la == lb {
+            continue;
+        }
+        let km = ks.get(i).copied().unwrap_or_else(|| mid_k(ka, kb));
+        i += 1;
+        let km = km.min(n).max(start);
+        out[start..km].fill(cur);
+        start = km;
+        cur = lb;
+    }
+    out[start..].fill(cur);
+}
+
+/// [`super::pack::wire_discs`] of a wire with `n` passes and vias at `ks`, all of diameter `d`, into `out`
+/// (the same values). O(passes + vias).
+fn wire_discs_into(out: &mut Vec<Disc>, n: usize, ks: &[usize], d: f64) {
+    out.clear();
+    out.resize(n, [0.0, 0.0]);
+    if d <= 0.0 {
+        return;
+    }
+    for &k in ks {
+        for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < n) {
+            out[j] = [out[j][0].max(d), out[j][1].max(d)];
+        }
+    }
+}
 
 /// Per edge-layer overflow price of a labelling, kept incrementally.
 ///
@@ -292,35 +1177,13 @@ type SiteKey = (bool, i64, usize, i64, usize);
 /// traversal with a static via site ([`Packer::via_site`]) and the least overflow price, then
 /// the drawing's order (fewest other wires in the triangle, widest triangle, first). A via
 /// whose interval has no site at all pays one overflow price (`nosite`), so P3/P4 act on it.
+///
+/// The model is its static [`Frame`] and its labelling-dependent [`Arrays`] (reached through
+/// `Deref`: `cm.pass_layer`, `cm.via_k`, ...), so the lanes of the parallel refinement can read
+/// both while the run thread alone writes the arrays (par-refine §2-3).
 pub struct CapModel<'a> {
-    st: &'a State<'a>,
-    packer: &'a Packer<'a>,
-    /// Crossing direction of every pass from its wire's taut path ([`Packer::taut_dirs`]).
-    dirs: &'a [Vec<Vec2>],
-    nl: usize,
-    price: f64,
-    bottom: i32,
-    /// Position of every pass in its wire.
-    pass_k: Vec<usize>,
-    /// Layer of every pass (-1: wire dead).
-    pub pass_layer: Vec<i32>,
-    /// Via disc diameter at every pass next to a via of its wire (0: none).
-    pub pass_disc: Vec<Disc>,
-    /// Per wire: the via intervals of its events and the traversal of each via.
-    pub via_iv: Vec<Vec<(usize, usize)>>,
-    pub via_k: Vec<Vec<usize>>,
-    /// Per wire: its vias without a static site in their interval.
-    nosite: Vec<usize>,
-    /// 5.2: the site in an end traversal ([`end_site`]) of an interval without a traversal
-    /// strictly between its events, per (wire, event a, event b) (`f64` fractions as bits); the
-    /// state is borrowed for the model's life, so the geometry is fixed.
-    end_sites: std::cell::RefCell<EndSites>,
-    /// Price of edge `e`, layer `l` at `e * nl + l`.
-    cost: Vec<f64>,
-    /// Via squeeze price of edge `e`, layer `l` (the `via_squeeze` factor, [`Packer::via_squeeze`]).
-    sq: Vec<f64>,
-    /// Undo log of `cost` / `sq` entries while a move is tried.
-    log: Option<Vec<(usize, f64, f64)>>,
+    pub(crate) fx: Frame<'a>,
+    pub(crate) a: Arrays,
     /// P1a (`[capacity] model = "cuts"`, [`super::cutmodel`]): the over-full price of the
     /// per-layer cuts replaces the per-edge price `cost` (still kept, for the reports and the P4
     /// rip-up); `None` = the per-edge model.
@@ -329,6 +1192,19 @@ pub struct CapModel<'a> {
     /// last repricing.
     evs: Vec<Vec<LEv>>,
     pending: Vec<WireId>,
+}
+
+impl std::ops::Deref for CapModel<'_> {
+    type Target = Arrays;
+    fn deref(&self) -> &Arrays {
+        &self.a
+    }
+}
+
+impl std::ops::DerefMut for CapModel<'_> {
+    fn deref_mut(&mut self) -> &mut Arrays {
+        &mut self.a
+    }
 }
 
 impl<'a> CapModel<'a> {
@@ -348,192 +1224,74 @@ impl<'a> CapModel<'a> {
     fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool) -> Self {
         let nl = st.proj.n_layers;
         let nw = st.wires.len();
-        let mut pass_k = vec![0; st.passes.len()];
-        for wi in st.wires.iter().filter(|wi| wi.alive) {
-            for (k, &p) in wi.passes.iter().enumerate() {
-                pass_k[p] = k;
-            }
-        }
-        let mut m = CapModel {
-            st,
-            packer,
-            dirs,
-            nl,
-            price,
-            bottom,
-            pass_k,
+        let a = Arrays {
             pass_layer: vec![-1; st.passes.len()],
             pass_disc: vec![[0.0; 2]; st.passes.len()],
             via_iv: vec![Vec::new(); nw],
             via_k: vec![Vec::new(); nw],
             nosite: vec![0; nw],
-            end_sites: std::cell::RefCell::new(std::collections::HashMap::new()),
+            end_sites: crate::fxhash::map(),
             cost: vec![0.0; st.proj.edges.len() * nl],
             sq: vec![0.0; st.proj.edges.len() * nl],
             log: None,
-            cut: None,
-            evs: Vec::new(),
-            pending: Vec::new(),
         };
+        let mut m = CapModel { fx: Frame::new(st, packer, dirs, bottom, price), a, cut: None, evs: Vec::new(), pending: Vec::new() };
         if let Some(ctx) = packer.cuts.as_ref().filter(|_| cuts) {
             match ctx.sheets(st) {
                 Ok(sh) => {
                     m.cut = Some(CutPrice::new(st.proj, sh, ctx.o, price, nw));
                     m.evs = vec![Vec::new(); nw];
                 }
-                Err(e) => ctx.problems.borrow_mut().push(e),
+                Err(e) => super::cutmodel::lockp(&ctx.problems).push(e),
             }
         }
+        let mut ch = Vec::new();
         for (w, ev) in evl.iter().enumerate().take(nw) {
             if st.wires[w].alive {
                 let iv = via_ranges(ev, packer.via_between).0;
-                let ks = m.default_ks(w, ev, &iv, None);
-                m.via_iv[w] = iv;
-                m.apply(w, ev, ks);
+                let (fx, mut ms) = m.master();
+                let ks = fx.default_ks(&mut ms, w, ev, &iv, None);
+                ms.set_via_iv(w, iv);
+                ch.clear();
+                fx.apply(&mut ms, w, ev, &ks, &mut ch);
             }
         }
-        for e in 0..st.proj.edges.len() {
-            for l in 0..nl {
-                (m.cost[e * nl + l], m.sq[e * nl + l]) = m.eval(e, l);
-            }
+        m.price_all();
+        {
+            let (fx, mut ms) = m.master();
+            ms.flush(fx);
         }
-        m.flush();
         for (w, ev) in evl.iter().enumerate().take(nw) {
             if st.wires[w].alive && !m.via_iv[w].is_empty() {
                 let all: Vec<usize> = (0..m.via_iv[w].len()).collect();
-                m.optimise(w, ev, &all);
+                let (fx, mut ms) = m.master();
+                fx.optimise(&mut ms, w, ev, &all);
             }
         }
         m
     }
 
-    /// [`CapModel::rank`] (debug output).
+    /// The static frame and the model's own arrays as a writable [`Mem`]. O(1).
+    pub(crate) fn master(&mut self) -> (&Frame<'a>, Master<'_, 'a>) {
+        (&self.fx, Master { a: &mut self.a, cut: &mut self.cut, evs: &mut self.evs, pending: &mut self.pending })
+    }
+
+    /// The static frame and the arrays, read-only (what the lanes share). O(1).
+    pub(crate) fn parts(&self) -> (&Frame<'a>, &Arrays) {
+        (&self.fx, &self.a)
+    }
+
+    /// Number of layers of the model.
+    pub fn n_layers(&self) -> usize {
+        self.fx.nl
+    }
+
+    /// [`Frame::rank`] (debug output).
     pub fn rank_of(&self, w: WireId, k: usize) -> (bool, usize, i64, usize) {
-        self.rank(w, k)
+        self.fx.rank(&self.a, w, k)
     }
 
-    /// Via radius plus clearance of wire `w` (0 when the packer has no via sizes).
-    fn need_r(&self, w: WireId) -> f64 {
-        let wi = &self.st.wires[w];
-        let d = self.packer.via_d(wi.net);
-        if d > 0.0 {
-            0.5 * d + wi.s
-        } else {
-            0.0
-        }
-    }
-
-    /// The drawing's preference of traversal `k` of `w` for a via: `(no site, other wires in
-    /// the triangle, -inradius, k)`, smaller first.
-    fn rank(&self, w: WireId, k: usize) -> (bool, usize, i64, usize) {
-        let (st, pr) = (self.st, self.st.proj);
-        let t = st.wires[w].tris[k.min(st.wires[w].tris.len() - 1)];
-        let wi = &st.wires[w];
-        let d = self.packer.via_d(wi.net);
-        let site = d <= 0.0 || (self.packer.via_site(t, wi.net, 0.5 * d, wi.s) && !self.site_taken(w, t));
-        let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
-        (!site, others, -(pr.inradius(t) as i64), k)
-    }
-
-    /// Whether triangle `t` is taken for a via of `w` (M-C via room, Polubasov 2001 pp. 3-9: a via
-    /// lies in its interval, at a site of its own): another net's wire already has a planned via
-    /// in `t` and `t` cannot hold two discs (inradius below twice the via radius plus clearance).
-    /// Derived from `via_k` alone, so the undo of a move restores it. O(traversals of `t`).
-    fn site_taken(&self, w: WireId, t: super::state::TriId) -> bool {
-        if !self.packer.reserve_sites {
-            return false;
-        }
-        let st = self.st;
-        let net = st.wires[w].net;
-        st.tri_trav[t].iter().any(|&(o, ko)| o != w && st.wires[o].net != net && self.via_k.get(o).is_some_and(|ks| ks.contains(&ko)))
-            && st.proj.inradius(t) < 2.0 * self.need_r(w)
-    }
-
-    /// 5.2: the end-traversal site ([`end_site`]) of via interval `i` of `w` under events `ev`
-    /// when the interval has no traversal strictly between its events (`[vias]
-    /// between_crossings`); `None` otherwise or when there is none. Cached.
-    fn end_site_of(&self, w: WireId, ev: &[LEv], i: usize) -> Option<(usize, Vec2)> {
-        if !self.packer.via_between {
-            return None;
-        }
-        let (a, b) = ev.windows(2).filter(|x| x[0].2 != x[1].2).nth(i).map(|x| (x[0], x[1]))?;
-        let key = (w, a.0, a.1.to_bits(), b.0, b.1.to_bits());
-        if let Some(&x) = self.end_sites.borrow().get(&key) {
-            return x;
-        }
-        let wi = &self.st.wires[w];
-        let d = self.packer.via_d(wi.net);
-        let (pr, packer, net, s) = (self.st.proj, self.packer, wi.net, wi.s);
-        let need = self.need_r(w);
-        let x = end_site(self.st, w, a, b, &|t, q| pr.inradius(t) >= need && !self.site_taken(w, t) && super::cutflow::point_free(pr, packer, q, net, s) >= 0.5 * d);
-        self.end_sites.borrow_mut().insert(key, x);
-        x
-    }
-
-    /// Via traversals by the drawing's preference alone (no room), keeping the traversal of a
-    /// via whose interval is unchanged from `old` (intervals, traversals); a via of an interval
-    /// with no traversal strictly between its events takes the traversal of its end site
-    /// ([`CapModel::end_site_of`]) when it has one.
-    fn default_ks(&self, w: WireId, ev: &[LEv], iv: &[(usize, usize)], old: Option<OldVias>) -> Vec<usize> {
-        let n = self.st.wires[w].passes.len();
-        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
-        let mut ks: Vec<usize> = Vec::with_capacity(iv.len());
-        for (i, &(ka, kb)) in iv.iter().enumerate() {
-            let lo = ka.max(ks.last().copied().unwrap_or(0)).min(n);
-            let hi = kb.min(n).max(lo);
-            if between.get(i) == Some(&false) {
-                if let Some((k, _)) = self.end_site_of(w, ev, i).filter(|&(k, _)| (lo..=hi).contains(&k)) {
-                    ks.push(k);
-                    continue;
-                }
-            }
-            if let Some((oiv, oks)) = old {
-                if oiv.get(i) == Some(&(ka, kb)) && oks.get(i).is_some_and(|&k| (lo..=hi).contains(&k)) {
-                    ks.push(oks[i]);
-                    continue;
-                }
-            }
-            ks.push((lo..=hi).min_by_key(|&k| self.rank(w, k)).unwrap_or(lo));
-        }
-        ks
-    }
-
-    /// Set the pass layers and via discs of `w` for via traversals `ks` (no pricing); returns the
-    /// passes whose layer or disc changed. O(passes of the wire).
-    fn apply(&mut self, w: WireId, ev: &[LEv], ks: Vec<usize>) -> Vec<usize> {
-        let wi = &self.st.wires[w];
-        let n = wi.passes.len();
-        let pl = pass_layers_at(n, ev, self.bottom, &ks);
-        let d = self.packer.via_d(wi.net);
-        let disc = wire_discs(self.st, w, &ks, &vec![d; ks.len()]);
-        let mut changed = Vec::new();
-        for (k, &p) in wi.passes.iter().enumerate() {
-            if self.pass_layer[p] != pl[k] || self.pass_disc[p] != disc[k] {
-                self.pass_layer[p] = pl[k];
-                self.pass_disc[p] = disc[k];
-                changed.push(p);
-            }
-        }
-        let nr = self.need_r(w);
-        // 5.4 `[vias] between_crossings`: a via of an interval with no traversal between its
-        // events has a site only on its own side of an end event ([`end_site`], 5.2); the others
-        // have one when their traversal does.
-        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
-        self.nosite[w] = if nr > 0.0 {
-            ks.iter().enumerate().filter(|&(i, &k)| if between.get(i) == Some(&false) { self.end_site_of(w, ev, i).is_none() } else { self.rank(w, k).0 }).count()
-        } else {
-            0
-        };
-        self.via_k[w] = ks;
-        if self.cut.is_some() {
-            self.evs[w] = ev.to_vec();
-            self.pending.push(w);
-        }
-        changed
-    }
-
-    /// Weight of the per-edge overflow price in the total: 0 when the cut model prices (the
-    /// per-edge cost is then only kept for the reports).
+    /// Weight of the per-edge overflow price in the total: 0 when the cut model prices.
     fn edge_w(&self) -> f64 {
         if self.cut.is_some() {
             0.0
@@ -542,146 +1300,110 @@ impl<'a> CapModel<'a> {
         }
     }
 
-    /// Cut model: price the wires applied since the last call again; returns the change of the
-    /// cut price. O(runs of those wires, see [`CutPrice::set_wire`]).
-    fn flush(&mut self) -> f64 {
-        let Some(mut cut) = self.cut.take() else { return 0.0 };
-        let mut ws = std::mem::take(&mut self.pending);
-        ws.sort_unstable();
-        ws.dedup();
-        let mut d = 0.0;
-        for w in ws {
-            let t0 = std::time::Instant::now();
-            let (mut runs, vias) = cut.runs_of(self.st, self.packer, w, &self.evs[w], &self.via_k[w], self.bottom);
-            meter::add(&meter::STRETCH_NS, &meter::FLUSHES, t0);
-            d += cut.set_wire(w, &mut runs, &vias);
+    /// The build's price of every edge-layer (par-refine item 2, exact): an edge-layer whose
+    /// items are bit for bit those it had in an earlier build with the same packer (the packer's
+    /// [`EdgeMemo`], one entry per edge-layer: the last items priced there) takes the packing
+    /// numbers of that build instead of packing again; the numbers are a function of the items
+    /// and the static packer only ([`Frame::numbers_in`]), the price is applied after. Edges
+    /// without passes stay at 0. O(passes x layers) + the packings of the changed edge-layers.
+    fn price_all(&mut self) {
+        let fx = &self.fx;
+        let (st, nl) = (fx.st, fx.nl);
+        let ne = st.proj.edges.len();
+        let mut memo = fx.packer.edge_memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let usable = fx.packer.same_proj(st.proj);
+        if usable && (memo.nl != nl || memo.ent.len() != ne * nl) {
+            memo.nl = nl;
+            memo.ent.clear();
+            memo.ent.resize_with(ne * nl, Default::default);
         }
-        self.cut = Some(cut);
-        d
-    }
-
-    /// Price again the edge-layers of the passes `changed`; returns the change of the total.
-    fn reprice(&mut self, changed: &[usize]) -> f64 {
-        let mut es: Vec<usize> = changed.iter().map(|&p| self.st.passes[p].edge).collect();
-        es.sort_unstable();
-        es.dedup();
-        let mut delta = 0.0;
-        for e in es {
-            for l in 0..self.nl {
-                let i = e * self.nl + l;
-                let (c, q) = self.eval(e, l);
-                if c != self.cost[i] || q != self.sq[i] {
-                    if let Some(log) = self.log.as_mut() {
-                        log.push((i, self.cost[i], self.sq[i]));
+        let (mut hits, mut misses) = (0u64, 0u64);
+        let a = &mut self.a;
+        EVAL_SCRATCH.with(|sc| {
+            let sc = &mut *sc.borrow_mut();
+            for e in 0..ne {
+                let order = &st.edge_order[e];
+                if order.is_empty() {
+                    continue;
+                }
+                for l in 0..nl {
+                    fx.items_in(&*a, l, order, sc);
+                    if sc.items.is_empty() {
+                        continue;
                     }
-                    delta += self.edge_w() * (c - self.cost[i]) + (q - self.sq[i]);
-                    self.cost[i] = c;
-                    self.sq[i] = q;
+                    let n = if usable {
+                        let ent = &mut memo.ent[e * nl + l];
+                        match ent.nums.filter(|_| same_items(&ent.items, &sc.items)) {
+                            Some(n) => {
+                                hits += 1;
+                                n
+                            }
+                            None => {
+                                misses += 1;
+                                let n = fx.numbers_in(e, l, sc);
+                                ent.items.clear();
+                                ent.items.extend_from_slice(&sc.items);
+                                ent.nums = Some(n);
+                                n
+                            }
+                        }
+                    } else {
+                        fx.numbers_in(e, l, sc)
+                    };
+                    (a.cost[e * nl + l], a.sq[e * nl + l]) = fx.cost_of(n);
                 }
             }
-        }
-        delta + self.flush()
-    }
-
-    /// Move the vias `which` of `w` through their intervals (one sweep each, in order) to the
-    /// traversal with a site and the least overflow price, ties by the drawing's preference.
-    /// O(vias x interval length x layers x passes of an edge).
-    fn optimise(&mut self, w: WireId, ev: &[LEv], which: &[usize]) {
-        let n = self.st.wires[w].passes.len();
-        for &i in which {
-            let mut ks = self.via_k[w].clone();
-            let (ka, kb) = self.via_iv[w][i];
-            let lo = ka.max(if i > 0 { ks[i - 1] } else { 0 }).min(n);
-            let hi = kb.min(if i + 1 < ks.len() { ks[i + 1] } else { n }).min(n).max(lo);
-            if lo == hi {
-                continue;
-            }
-            let cur = ks[i];
-            let mut run = 0.0;
-            let mut best: Option<(SiteKey, usize)> = None;
-            for k in lo..=hi {
-                let t0 = std::time::Instant::now();
-                ks[i] = k;
-                let ch = self.apply(w, ev, ks.clone());
-                run += self.reprice(&ch);
-                meter::add(&meter::VIAPOS_NS, &meter::VIAPOS, t0);
-                let r = self.rank(w, k);
-                let key = (r.0, (run * 1e3).round() as i64, r.1, r.2, r.3);
-                if best.as_ref().is_none_or(|b| key < b.0) {
-                    best = Some((key, k));
-                }
-            }
-            let k = best.map_or(cur, |b| b.1);
-            ks[i] = k;
-            let ch = self.apply(w, ev, ks);
-            self.reprice(&ch);
+        });
+        drop(memo);
+        if meter::on() {
+            meter::MEMO_HIT.fetch_add(hits, std::sync::atomic::Ordering::Relaxed);
+            meter::MEMO_MISS.fetch_add(misses, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
-    /// Lay out wire `w` again after its events changed: vias of unchanged intervals stay, the
-    /// others are placed by the drawing's preference and then moved for room. Every changed
-    /// cost entry goes to the undo log. O(passes of the wire + moved vias x interval).
-    fn relayout(&mut self, w: WireId, ev: &[LEv]) {
-        let iv = via_ranges(ev, self.packer.via_between).0;
-        let (oiv, oks) = (std::mem::take(&mut self.via_iv[w]), self.via_k[w].clone());
-        let ks = self.default_ks(w, ev, &iv, Some((&oiv, &oks)));
-        let moved: Vec<usize> = (0..iv.len()).filter(|&i| oiv.get(i) != Some(&iv[i])).collect();
-        self.via_iv[w] = iv;
-        let ch = self.apply(w, ev, ks);
-        self.reprice(&ch);
-        self.optimise(w, ev, &moved);
-    }
-
-    /// The pack items of edge `e` on layer `l`, without the wires in `gone`.
-    fn items(&self, e: usize, l: usize, gone: Option<&std::collections::BTreeSet<WireId>>) -> Vec<PackItem> {
-        let pr = self.st.proj;
-        let order: Vec<usize> = match gone {
-            Some(g) => self.st.edge_order[e].iter().copied().filter(|&p| !g.contains(&self.st.passes[p].wire)).collect(),
-            None => self.st.edge_order[e].clone(),
-        };
-        layer_items(
-            &order,
-            l,
-            |p| self.pass_layer[p],
-            |p| self.pass_disc[p],
-            |p| {
-                let w = self.st.passes[p].wire;
-                let wi = &self.st.wires[w];
-                PackItem { net: wi.net, w: self.st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]), disc: [0.0; 2] }
-            },
-        )
-        .1
-    }
-
-    /// Overflow price and via squeeze price of edge `e` on layer `l` under the current pass
-    /// layers: every via disc there pays the `via_squeeze` weight times the squeeze of the slack
-    /// the packing leaves (the least `rmax - lmin`) against one via diameter.
-    fn eval(&self, e: usize, l: usize) -> (f64, f64) {
-        let items = self.items(e, l, None);
+    /// [`Frame::eval`] the way it was computed before the per-pass tables (par-refine §3):
+    /// [`Frame::items`] + [`Packer::bounds`] + [`super::pack::Bounds::worst`]. The tests'
+    /// reference for the exactness of the tables. O(passes of the edge x margin lookups).
+    #[doc(hidden)]
+    pub fn eval_reference(&self, e: usize, l: usize) -> (f64, f64) {
+        let fx = &self.fx;
+        let items = fx.items(&self.a, e, l, None);
         if items.is_empty() {
             return (0.0, 0.0);
         }
-        let over = self.packer.bounds(e, l, &items).worst();
-        let sq_w = self.packer.via_squeeze;
+        let over = fx.packer.bounds(e, l, &items).worst();
+        let sq_w = fx.packer.via_squeeze;
         let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
         if over <= 1e-6 {
             return (0.0, sq);
         }
         let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
-        (self.price * (1.0 + over / pitch), sq)
+        (fx.price * (1.0 + over / pitch), sq)
+    }
+
+    /// [`Frame::eval`] of edge `e`, layer `l` under the current pass layers (tests). O(passes of the edge).
+    #[doc(hidden)]
+    pub fn eval_at(&self, e: usize, l: usize) -> (f64, f64) {
+        self.fx.eval(&self.a, e, l)
+    }
+
+    /// The stored price `(cost, squeeze)` of edge `e`, layer `l` (tests). O(1).
+    #[doc(hidden)]
+    pub fn price_at(&self, e: usize, l: usize) -> (f64, f64) {
+        self.a.cost(e * self.fx.nl + l)
     }
 
     /// Whether the passes on edge `e`, layer `l` fit when the wires in `gone` are taken out.
     pub fn fits_without(&self, e: usize, l: usize, gone: &std::collections::BTreeSet<WireId>) -> bool {
-        let items = self.items(e, l, Some(gone));
-        items.is_empty() || self.packer.bounds(e, l, &items).fits()
+        let items = self.fx.items(&self.a, e, l, Some(gone));
+        items.is_empty() || self.fx.packer.bounds(e, l, &items).fits()
     }
 
     /// Total overflow price of the labelling (mm), vias without a site and via squeeze
     /// included.
     pub fn total(&self) -> f64 {
         let cut = self.cut.as_ref().map_or(0.0, |c| c.total());
-        self.edge_w() * self.cost.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.price * self.nosite.iter().sum::<usize>() as f64 + cut
+        self.edge_w() * self.cost.iter().sum::<f64>() + self.sq.iter().sum::<f64>() + self.fx.price * self.nosite.iter().sum::<usize>() as f64 + cut
     }
 
     /// Via squeeze price of the labelling (mm).
@@ -703,14 +1425,14 @@ impl<'a> CapModel<'a> {
     /// (over-full edge-layers, or over-full cuts with `[capacity] model = "cuts"`, plus vias
     /// without a site); the graded amount gives each of them 1 plus how far it is over, as the
     /// `violation` factor does (1 per violation plus its depth): an edge-layer its price factor
-    /// `1 + over / pitch` (the per-edge price, `CapModel::eval`), a cut `1 - slack / pitch`
+    /// `1 + over / pitch` (the per-edge price, `Frame::eval`), a cut `1 - slack / pitch`
     /// ([`CutPrice::over_amount`]), a via without a site 1. So `graded >= count`, and one more
     /// over-full item always adds at least 1. O(edges x layers + cuts).
     pub fn violations(&self) -> (usize, f64) {
         let nosite = self.nosite.iter().sum::<usize>();
         let over = match self.cut.as_ref() {
             Some(c) => c.over_amount(),
-            None => self.cost.iter().filter(|&&c| c > 0.0).map(|&c| c / self.price).sum(),
+            None => self.cost.iter().filter(|&&c| c > 0.0).map(|&c| c / self.fx.price).sum(),
         };
         (self.overfull(), over + nosite as f64)
     }
@@ -730,7 +1452,8 @@ impl<'a> CapModel<'a> {
 
     /// The over-full `(edge, layer)` pairs, ascending.
     pub fn overfull_list(&self) -> Vec<(usize, usize)> {
-        (0..self.cost.len()).filter(|&i| self.cost[i] > 0.0).map(|i| (i / self.nl, i % self.nl)).collect()
+        let nl = self.fx.nl;
+        (0..self.cost.len()).filter(|&i| self.cost[i] > 0.0).map(|i| (i / nl, i % nl)).collect()
     }
 
     /// Wires with a via that has no site in its interval, ascending.
@@ -742,16 +1465,19 @@ impl<'a> CapModel<'a> {
     /// traversal and per traversal of the interval the triangle, whether it has a static site,
     /// whether it is taken, its inradius and the free radius against the static board (mm).
     pub fn nosite_debug(&self, w: WireId, ev: &[LEv]) -> String {
-        let wi = &self.st.wires[w];
-        let d = self.packer.via_d(wi.net);
-        let (iv, ok) = via_ranges(ev, self.packer.via_between);
-        let mut out = format!("wire {w} net {} via_d {:.3} need_r {:.3} nosite {} ev {:?}:", wi.net, d / 1e6, self.need_r(w) / 1e6, self.nosite[w], ev);
+        let fx = &self.fx;
+        let wi = &fx.st.wires[w];
+        let d = fx.packer.via_d(wi.net);
+        let (iv, ok) = via_ranges(ev, fx.packer.via_between);
+        let mut out = format!("wire {w} net {} via_d {:.3} need_r {:.3} nosite {} ev {:?}:", wi.net, d / 1e6, fx.need_r(w) / 1e6, self.nosite[w], ev);
         for (i, &(ka, kb)) in iv.iter().enumerate() {
-            out += &format!(" [via {i} iv ({ka},{kb}) between_ok {} end_site {:?} k {:?}:", ok[i], self.end_site_of(w, ev, i).map(|(k, c)| (k, (c.x / 1e6 * 1e3).round() / 1e3, (-c.y / 1e6 * 1e3).round() / 1e3)), self.via_k[w].get(i));
+            // the cached end site, or computed without filling the cache (debug output changes nothing)
+            let es = fx.end_key(w, ev, i).and_then(|(key, a, b)| self.a.end_site(&key).unwrap_or_else(|| fx.end_site_raw(&self.a, w, a, b)));
+            out += &format!(" [via {i} iv ({ka},{kb}) between_ok {} end_site {:?} k {:?}:", ok[i], es.map(|(k, c)| (k, (c.x / 1e6 * 1e3).round() / 1e3, (-c.y / 1e6 * 1e3).round() / 1e3)), self.via_k[w].get(i));
             for k in ka..=kb.min(wi.tris.len().saturating_sub(1)) {
                 let t = wi.tris[k];
-                let site = d <= 0.0 || self.packer.via_site(t, wi.net, 0.5 * d, wi.s);
-                out += &format!(" k{k} t{t} site {site} taken {} inr {:.3} out {} obs {};", self.site_taken(w, t), self.st.proj.inradius(t) / 1e6, self.st.proj.tri_out[t], self.st.proj.tri_obs[t].len());
+                let site = d <= 0.0 || fx.packer.via_site(t, wi.net, 0.5 * d, wi.s);
+                out += &format!(" k{k} t{t} site {site} taken {} inr {:.3} out {} obs {};", fx.site_taken(&self.a, w, t), fx.st.proj.inradius(t) / 1e6, fx.st.proj.tri_out[t], fx.st.proj.tri_obs[t].len());
             }
             out += "]";
         }
@@ -784,8 +1510,8 @@ pub fn refine(
     mask: &[Vec<u64>],
     partner: &[Vec<Option<(WireId, usize)>>],
     bottom: i32,
-    trans: &dyn Fn(usize, usize) -> f64,
-    unary: &dyn Fn(WireId, usize, usize) -> f64,
+    trans: &(dyn Fn(usize, usize) -> f64 + Sync),
+    unary: &(dyn Fn(WireId, usize, usize) -> f64 + Sync),
     p: &RefineParams,
 ) -> RefineStats {
     // Switched off: the model is built with a unit price only to count the over-full edge-layers.
@@ -797,8 +1523,44 @@ pub fn refine(
     }
     // The cut model may add vias when its setting says so (`[capacity] cut_vias`).
     let add_vias = p.add_vias || (cm.cut.is_some() && packer.cuts.as_ref().is_some_and(|c| c.add_vias));
-    let mut evals = 0usize;
     let ctx = Around { st, mask, partner, bottom, trans, unary, add_vias, max_evals: p.max_evals };
+    if cm.cut.is_some() || p.reference {
+        refine_reference(&ctx, &mut cm, evl, &mut stats);
+    } else if shadow::ON.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut evl_ref = evl.to_vec();
+        let mut cm_ref = CapModel::new_cut(st, packer, dirs, evl, bottom, if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 });
+        let mut st_ref = RefineStats { before: cm_ref.overfull(), ..RefineStats::default() };
+        refine_reference(&ctx, &mut cm_ref, &mut evl_ref, &mut st_ref);
+        super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
+        shadow_fault(shadow::FAULT.load(std::sync::atomic::Ordering::Relaxed), &mut cm_ref.a, &mut evl_ref, &mut st_ref);
+        if !crate::control::stop_requested() {
+            if let Some(d) = shadow_diff((&cm, evl, &stats), (&cm_ref, &evl_ref, &st_ref)) {
+                panic!("par-refine shadow: the lanes differ from the serial refinement in {d}");
+            }
+            use std::sync::atomic::Ordering::Relaxed;
+            shadow::CHECKED.fetch_add(1, Relaxed);
+            if stats.moves > 0 {
+                shadow::CHECKED_MOVED.fetch_add(1, Relaxed);
+            }
+        }
+    } else {
+        super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
+    }
+    stats.after = cm.overfull();
+    stats.memo = memo_hash(&cm.a.end_sites);
+    if cm.cut.is_none() {
+        stats.fin = Some(FinalCap { packer: packer as *const Packer as usize, bottom, price: cm.fx.price.to_bits(), key: cap_key(st, evl), viol: cm.violations() });
+    }
+    stats
+}
+
+/// The serial refinement loop (in-place tries with undo, as before par-refine): the cut model's
+/// loop and the reference of the lane executor ([`super::refine_par`]). The per-edge stream is
+/// the one [`super::refine_par::Cursor`] unrolls. O(`max_evals` x passes of the touched edges).
+fn refine_reference(ctx: &Around, cm: &mut CapModel, evl: &mut [Vec<LEv>], stats: &mut RefineStats) {
+    let (st, max_evals) = (ctx.st, ctx.max_evals);
+    let mut evals = 0usize;
+    let nl = cm.fx.nl;
     for _sweep in 0..8 {
         let mut improved = false;
         if cm.cut.is_some() {
@@ -808,49 +1570,47 @@ pub fn refine(
                 let mut seen = std::collections::BTreeSet::new();
                 let its: Vec<(WireId, usize)> = cm.cut.as_ref().map(|c| c.items_at(l, ci)).unwrap_or_default().into_iter().filter(|x| seen.insert(*x)).collect();
                 for (w, k) in its {
-                    if evals >= p.max_evals || !cm.cut.as_ref().is_some_and(|c| c.is_over(l, ci)) {
+                    if evals >= max_evals || !cm.cut.as_ref().is_some_and(|c| c.is_over(l, ci)) {
                         break;
                     }
                     if !st.wires[w].alive {
                         continue;
                     }
-                    improved |= ctx.moves_around(&mut cm, evl, w, k, &mut evals, &mut stats);
+                    improved |= ctx.moves_around(cm, evl, w, k, &mut evals, stats);
                 }
             }
         } else {
             for (e, l) in cm.overfull_list() {
-                if cm.cost[e * cm.nl + l] <= 0.0 {
+                if cm.cost[e * nl + l] <= 0.0 {
                     continue;
                 }
                 let passes: Vec<usize> = st.edge_order[e].iter().copied().filter(|&q| cm.pass_layer[q] == l as i32).collect();
                 for pid in passes {
-                    if evals >= p.max_evals || cm.cost[e * cm.nl + l] <= 0.0 {
+                    if evals >= max_evals || cm.cost[e * nl + l] <= 0.0 {
                         break;
                     }
                     let w = st.passes[pid].wire;
                     let k = st.wires[w].passes.iter().position(|&x| x == pid).expect("pass of its wire");
-                    improved |= ctx.moves_around(&mut cm, evl, w, k, &mut evals, &mut stats);
+                    improved |= ctx.moves_around(cm, evl, w, k, &mut evals, stats);
                 }
             }
         }
-        if !improved || evals >= p.max_evals {
+        if !improved || evals >= max_evals {
             break;
         }
     }
-    stats.after = cm.overfull();
-    stats
 }
 
-/// The fixed inputs of the P3 moves around one pass.
-struct Around<'r> {
-    st: &'r State<'r>,
-    mask: &'r [Vec<u64>],
-    partner: &'r [Vec<Option<(WireId, usize)>>],
-    bottom: i32,
-    trans: &'r dyn Fn(usize, usize) -> f64,
-    unary: &'r dyn Fn(WireId, usize, usize) -> f64,
-    add_vias: bool,
-    max_evals: usize,
+/// The fixed inputs of the P3 moves around one pass (shared read-only by the lanes).
+pub(crate) struct Around<'r> {
+    pub(crate) st: &'r State<'r>,
+    pub(crate) mask: &'r [Vec<u64>],
+    pub(crate) partner: &'r [Vec<Option<(WireId, usize)>>],
+    pub(crate) bottom: i32,
+    pub(crate) trans: &'r (dyn Fn(usize, usize) -> f64 + Sync),
+    pub(crate) unary: &'r (dyn Fn(WireId, usize, usize) -> f64 + Sync),
+    pub(crate) add_vias: bool,
+    pub(crate) max_evals: usize,
 }
 
 impl Around<'_> {
@@ -873,7 +1633,7 @@ impl Around<'_> {
                     moves.push(vec![((w, i), c2), ((w2, i2), cur)]);
                 }
             }
-            for nl in 0..cm.nl as i32 {
+            for nl in 0..cm.fx.nl as i32 {
                 if nl == cur || (mask[w][i] >> nl) & 1 == 0 {
                     continue;
                 }
@@ -888,7 +1648,10 @@ impl Around<'_> {
                     break;
                 }
                 *evals += 1;
-                if try_move(self.st, cm, evl, &mv, self.bottom, self.trans, self.unary, self.add_vias, false) {
+                let (keep, delta) = try_move_delta(self.st, cm, evl, &mv, self.bottom, self.trans, self.unary, self.add_vias, false);
+                stats.evals += 1;
+                stats.stream = stream_fold(stats.stream, &mv, delta, keep);
+                if keep {
                     stats.moves += 1;
                     improved = true;
                     break;
@@ -914,6 +1677,22 @@ pub fn try_move(
     add_vias: bool,
     strict: bool,
 ) -> bool {
+    try_move_delta(st, cm, evl, mv, _bottom, trans, unary, add_vias, strict).0
+}
+
+/// [`try_move`], also returning the candidate's price change (the keep test's left side).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_move_delta(
+    st: &State,
+    cm: &mut CapModel,
+    evl: &mut [Vec<LEv>],
+    mv: &[((WireId, usize), i32)],
+    _bottom: i32,
+    trans: &dyn Fn(usize, usize) -> f64,
+    unary: &dyn Fn(WireId, usize, usize) -> f64,
+    add_vias: bool,
+    strict: bool,
+) -> (bool, f64) {
     let t0 = std::time::Instant::now();
     let r = try_move_in(st, cm, evl, mv, trans, unary, add_vias, strict);
     meter::add(&meter::MOVE_NS, &meter::MOVES, t0);
@@ -930,7 +1709,7 @@ fn try_move_in(
     unary: &dyn Fn(WireId, usize, usize) -> f64,
     add_vias: bool,
     strict: bool,
-) -> bool {
+) -> (bool, f64) {
     let mut wires: Vec<WireId> = mv.iter().map(|x| x.0 .0).collect();
     wires.sort_unstable();
     wires.dedup();
@@ -967,11 +1746,14 @@ fn try_move_in(
         c.begin();
         c.total()
     });
-    cm.log = Some(Vec::new());
-    for &w in &wires {
-        cm.relayout(w, &evl[w]);
+    cm.a.log = Some(Vec::new());
+    {
+        let (fx, mut ms) = cm.master();
+        for &w in &wires {
+            fx.relayout(&mut ms, w, &evl[w]);
+        }
     }
-    let log = cm.log.take().unwrap_or_default();
+    let log = cm.a.log.take().unwrap_or_default();
     // First logged value of every entry = its price before the move.
     let mut before: std::collections::BTreeMap<usize, (f64, f64)> = std::collections::BTreeMap::new();
     for &(i, c, q) in &log {
@@ -983,17 +1765,18 @@ fn try_move_in(
         (Some(c), Some(t0)) => c.total() - t0,
         _ => 0.0,
     };
-    let d_oc: f64 = before.iter().map(|(&i, &(c, q))| ew * (cm.cost[i] - c) + (cm.sq[i] - q)).sum::<f64>() + cm.price * (new_ns as f64 - old_ns as f64) + d_cut;
+    let d_oc: f64 = before.iter().map(|(&i, &(c, q))| ew * (cm.cost[i] - c) + (cm.sq[i] - q)).sum::<f64>() + cm.fx.price * (new_ns as f64 - old_ns as f64) + d_cut;
     let worse_edge = match cm.cut.as_ref() {
         Some(c) => c.worse_somewhere(),
         None => before.iter().any(|(&i, &(c, _))| cm.cost[i] > c + EPS),
     };
     let worse_somewhere = strict && (new_ns > old_ns || worse_edge);
-    if (new_wc - old_wc) + d_oc < -EPS && (add_vias || new_wc <= old_wc + EPS) && !worse_somewhere {
+    let delta = (new_wc - old_wc) + d_oc;
+    if keep_rule(new_wc, old_wc, d_oc, add_vias) && !worse_somewhere {
         if let Some(c) = cm.cut.as_mut() {
             c.commit();
         }
-        return true;
+        return (true, delta);
     }
     if let Some(c) = cm.cut.as_mut() {
         c.rollback();
@@ -1017,7 +1800,7 @@ fn try_move_in(
     for (&((w, i), _), &l) in mv.iter().zip(&old_lab) {
         evl[w][i].2 = l;
     }
-    false
+    (false, delta)
 }
 
 #[cfg(test)]
@@ -1048,6 +1831,22 @@ mod tests {
         // A one-layer triangle (s = 0) bounds like a crossing.
         let ev = [(2, 0.0, 0), (6, 0.0, 1)];
         assert_eq!(via_ranges(&ev, true), (vec![(3, 5)], vec![true]));
+    }
+
+    #[test]
+    fn keep_rule_needs_a_drop_beyond_eps() {
+        // a drop smaller than EPS (float noise of a price-neutral move) is not kept
+        assert!(!keep_rule(1.0, 1.0, -EPS / 2.0, false));
+        assert!(!keep_rule(1.0, 1.0, -EPS, false));
+        assert!(keep_rule(1.0, 1.0, -2.0 * EPS, false));
+        // without add_vias the wires' own price may not grow, whatever the capacity gain
+        assert!(!keep_rule(3.0, 1.0, -5.0, false));
+        assert!(keep_rule(3.0, 1.0, -5.0, true));
+        assert!(keep_rule(1.0 + EPS / 2.0, 1.0, -1.0, false));
+        // ... and the growth it allows is EPS, pinned from both sides (`<=`, not `<`; not more)
+        assert!(keep_rule(EPS, 0.0, -1.0, false));
+        assert!(!keep_rule(1.001 * EPS, 0.0, -1.0, false));
+        assert!(!keep_rule(1.0 + 2.0 * EPS, 1.0, -1.0, false));
     }
 
     #[test]

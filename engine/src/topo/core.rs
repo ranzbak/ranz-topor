@@ -581,8 +581,8 @@ struct Coord<'a> {
 struct DrawGate {
     st: std::sync::Mutex<GateState>,
     cv: std::sync::Condvar,
-    /// The runs that compute at once.
-    slots: Slots,
+    /// The runs that compute at once (and the refinements' spare lanes).
+    slots: std::sync::Arc<Slots>,
 }
 
 /// A counting semaphore: at most `n` runs compute at once (the others' threads wait idle, so the
@@ -591,6 +591,12 @@ struct DrawGate {
 /// TopoR loop that is stable and only waits for OK gives its slot to a run not yet begun
 /// ([`Slots::yield_to_first`], user 2026-11-17 "free the slot"), so "Routes stable" (every run
 /// stable) can come while the loops run. O(1) per call.
+///
+/// par-refine (docs/design/47-parallel-refine.md §6): there are as many slots as rayon threads;
+/// a run takes one for its steps and its refinements borrow the free ones as lanes
+/// (`[optimize] refine_lanes = "auto"`, [`super::refine_par::lanes::Pool`]) for one epoch at a
+/// time, never while any run waits for a slot (its first one or one to go on): a slot a stable
+/// loop yields to a run not yet begun is never borrowed as a lane before that run has it.
 struct Slots {
     st: std::sync::Mutex<SlotState>,
     cv: std::sync::Condvar,
@@ -602,22 +608,28 @@ struct SlotState {
     free: isize,
     /// Runs waiting for their first slot ([`Slots::acquire_first`]).
     first: usize,
+    /// Runs waiting in [`Slots::acquire`] to go on (par-refine: no lane is lent while one waits).
+    waiting: usize,
 }
 
 impl Slots {
     fn new(n: usize) -> Slots {
-        Slots { st: std::sync::Mutex::new(SlotState { free: n.max(1) as isize, first: 0 }), cv: std::sync::Condvar::new() }
+        Slots { st: std::sync::Mutex::new(SlotState { free: n.max(1) as isize, first: 0, waiting: 0 }), cv: std::sync::Condvar::new() }
     }
 
     /// Waits until a slot is free that no run waiting for its first one needs, and takes it.
     /// O(1) + the wait.
     fn acquire(&self) {
         let Ok(mut g) = self.st.lock() else { return };
-        while g.free <= g.first as isize {
-            g = match self.cv.wait(g) {
-                Ok(g) => g,
-                Err(_) => return,
-            };
+        if g.free <= g.first as isize {
+            g.waiting += 1;
+            while g.free <= g.first as isize {
+                g = match self.cv.wait(g) {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+            }
+            g.waiting -= 1;
         }
         g.free -= 1;
     }
@@ -661,11 +673,36 @@ impl Slots {
 
     /// Gives a slot back. O(1).
     fn release(&self) {
+        self.give_back(1);
+    }
+
+    /// Gives `k` slots back. O(1).
+    fn give_back(&self, k: usize) {
         if let Ok(mut g) = self.st.lock() {
-            g.free += 1;
+            g.free += k as isize;
         }
         // two kinds of waiters (first slot / go on): wake all, each tests its own condition
         self.cv.notify_all();
+    }
+}
+
+impl super::refine_par::lanes::Pool for Slots {
+    /// Up to `k` free slots, none while a run waits for one (its first slot or one to go on: a
+    /// run's step goes first, also before a yielded slot is borrowed). O(1).
+    fn try_take(&self, k: usize) -> usize {
+        let Ok(mut g) = self.st.lock() else { return 0 };
+        if g.waiting > 0 || g.first > 0 || g.free <= 0 {
+            return 0;
+        }
+        let t = k.min(g.free as usize);
+        g.free -= t as isize;
+        t
+    }
+
+    fn give(&self, k: usize) {
+        if k > 0 {
+            self.give_back(k);
+        }
     }
 }
 
@@ -702,7 +739,7 @@ impl DrawGate {
         DrawGate {
             st: std::sync::Mutex::new(GateState { quota: quota.max(1), open: (0..n).collect(), offered: BTreeMap::new(), decided: None }),
             cv: std::sync::Condvar::new(),
-            slots: Slots::new(slots),
+            slots: std::sync::Arc::new(Slots::new(slots)),
         }
     }
 
@@ -840,7 +877,7 @@ enum RoundEnd<'s> {
 
 impl<'a> Coord<'a> {
     fn new(ctl: &'a RunControl, n: usize, obj: Objective, candidates: usize) -> Coord<'a> {
-        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::new(n, candidates, n.min(rayon::current_num_threads())), judge: std::sync::Mutex::new(None) }
+        Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::new(n, candidates, rayon::current_num_threads()), judge: std::sync::Mutex::new(None) }
     }
 
     /// cancel-fix: note a run's pick with criteria `crit` (`complete`: of a cycle not cut short)
@@ -1469,7 +1506,11 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
         let c = if n == 1 { ctl.clone() } else { ctl.for_run(k as u32 + 1) };
         // M2.TL: with the soft limit only Cancel / OK stops the moves inside a step (M0's stop checks)
         let _slot = topor.then(|| SlotGuard::take(&coord.gate.slots));
-        crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || r.step(model, opts, &c, coord, stubs, fx, t_call));
+        // par-refine: the refinements of this step take their lanes from the free slots (TopoR
+        // loop; whole-route cycles: none) or the fixed `[optimize] refine_lanes`.
+        let pool: Option<std::sync::Arc<dyn super::refine_par::lanes::Pool>> = topor.then(|| coord.gate.slots.clone() as std::sync::Arc<dyn super::refine_par::lanes::Pool>);
+        let mode = super::refine_par::lanes::mode_of(opts.refine_lanes);
+        crate::control::with_control_mode(&c, opts.timeout_mode == "hard", || super::refine_par::lanes::with(mode, pool, || super::refine_par::lanes::with_window(opts.refine_test_window, || r.step(model, opts, &c, coord, stubs, fx, t_call))));
         c.idle(); // between its cycles or done: the soft limit's notice no longer names its step (F6)
         let st = (r.cycles, r.done);
         drop(r);
@@ -2745,6 +2786,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         cap_mm: if std::env::var("TOPO_NOCAP").is_ok() { 0.0 } else { reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()) },
         cap_vias: std::env::var("TOPO_CAPVIA").is_ok(),
         via_between: opts.via_between,
+        cap_reference: opts.refine_reference,
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);
@@ -3287,10 +3329,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // 2.4 (cut model): a cut that fits only necked is a shrinkage, no violation; its price
         // (`[factors] shrinkage`) is part of what a move pays, and the necked stretches its necks
         // add count as the archive's shrinkages (TopoR 6.3 manual pp. 72-73).
+        // par-refine item 3 (`[optimize] measure_reuse`): the per-edge model's violations come from
+        // the layer refinement's final model when it was taken for this packer, bottom layer,
+        // price, state and labels ([`super::refine::FinalCap`]); otherwise the model is built.
+        let reused = |st: &State, lr: &layers::LayerReport| -> Option<(usize, f64)> {
+            let f = lr.fin_cap.filter(|_| opts.measure_reuse && !cuts_on)?;
+            (f.packer == &packer as *const Packer as usize && f.bottom == bottom && f.price == overflow_mm.to_bits() && f.key == super::refine::cap_key(st, &lr.events)).then_some(f.viol)
+        };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
+            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).shorts_ranked(opts.pick_shorts, opts.short_weight);
+            if let Some(v) = reused(st, lr) {
+                return pred(v);
+            }
             let dirs = dirs_of(st);
             let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
-            let p = Predicted::of(cm.violations(), lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).shorts_ranked(opts.pick_shorts, opts.short_weight);
+            let p = pred(cm.violations());
             if !cuts_on {
                 return p;
             }
@@ -4599,9 +4652,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
             if let Some(ctx) = packer.cuts.as_ref() {
-                let (b, h) = *ctx.builds.borrow();
-                m["cut_sheets"] = serde_json::json!({"builds": b, "hits": h, "problems": ctx.problems.borrow().len()});
-                for e in ctx.problems.borrow().iter().take(3) {
+                let (b, h) = *super::cutmodel::lockp(&ctx.builds);
+                m["cut_sheets"] = serde_json::json!({"builds": b, "hits": h, "problems": super::cutmodel::lockp(&ctx.problems).len()});
+                for e in super::cutmodel::lockp(&ctx.problems).iter().take(3) {
                     warnings.push(format!("capacity model \"cuts\": a sheet build failed, that plan was priced per edge: {e}"));
                 }
             }
@@ -4609,6 +4662,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // Cost per move (shopping list 3.1 measurement; process-wide sums so far).
         let (mv_n, mv_us, vp_n, vp_us) = super::refine::meter::read();
         m["move_cost"] = serde_json::json!({"moves": mv_n, "us_per_move": (mv_us * 10.0).round() / 10.0, "via_positions": vp_n, "us_per_via_position": (vp_us * 10.0).round() / 10.0});
+        // par-refine: the lane executor's epochs, lane-epochs, candidates evaluated past a kept one
+        // (wasted) and again for an end-site fill (redone); the build memo's hits and misses.
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            use super::refine_par::stats as ls;
+            m["move_cost"]["lanes"] = serde_json::json!({"epochs": ls::EPOCHS.load(Relaxed), "lane_epochs": ls::LANE_EPOCHS.load(Relaxed), "wasted": ls::WASTED.load(Relaxed), "redone": ls::REDONE.load(Relaxed)});
+            m["move_cost"]["build_memo"] = serde_json::json!({"hits": super::refine::meter::MEMO_HIT.load(Relaxed), "misses": super::refine::meter::MEMO_MISS.load(Relaxed)});
+            // the plan's refinement: candidates, stream and memo fingerprint (equal for every lane count)
+            let (ev, sh, mh) = lr.refine_stream;
+            m["move_cost"]["refine_stream"] = serde_json::json!({"evals": ev, "stream": format!("{sh:016x}"), "memo": format!("{mh:016x}")});
+        }
         let (fl, st_ms, np, p_ms, nc, i_ms) = super::refine::meter::read_split();
         m["cut_split"] = serde_json::json!({"flushes": fl, "ms_stretches": st_ms.round(), "parts": np, "ms_parts": p_ms.round(), "cuts_priced": nc, "ms_install": i_ms.round()});
         warnings.push(format!("plan metrics: {m}"));
@@ -7006,6 +7070,85 @@ mod tests {
         });
         let g = slots.st.lock().expect("slots");
         assert_eq!((g.free, g.first), (1, 0));
+    }
+
+    /// par-refine x stable-label: a stable yield while lanes hold slots. The lanes borrow free
+    /// slots only while no run waits: a slot a lane gives back while a run waits for its first
+    /// slot goes to that run, the slot a stable run yields goes to the run not yet begun, and a
+    /// slot a lane gives back while the yielder waits to go on goes to the yielder, never to
+    /// another lane. (A wrong loan is given back at once, so a failed check ends the test.)
+    #[test]
+    fn a_stable_yield_while_lanes_hold_slots() {
+        use super::super::refine_par::lanes::Pool;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let slots = Slots::new(3);
+        let state = |s: &Slots| {
+            let g = s.st.lock().expect("slots");
+            (g.free, g.first, g.waiting)
+        };
+        slots.acquire_first(); // run 1 computes
+        // the guards alone, without the thread timing: free slots, but a run waits for its first
+        // slot / to go on
+        for (first, waiting) in [(1, 0), (0, 1)] {
+            {
+                let mut g = slots.st.lock().expect("slots");
+                (g.first, g.waiting) = (first, waiting);
+            }
+            let lent = slots.try_take(8);
+            slots.give(lent);
+            {
+                let mut g = slots.st.lock().expect("slots");
+                (g.first, g.waiting) = (0, 0);
+            }
+            assert_eq!(lent, 0, "free slots while a run waits (first {first}, waiting {waiting}): no lane borrows");
+        }
+        assert_eq!(slots.try_take(8), 2, "nobody waits: the lanes borrow both free slots");
+        let (begun, done) = (AtomicUsize::new(0), AtomicBool::new(false));
+        std::thread::scope(|s| {
+            let run = || {
+                slots.acquire_first(); // a run waits for its first slot
+                begun.fetch_add(1, Ordering::SeqCst);
+                while !done.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                slots.release();
+            };
+            let run2 = s.spawn(run);
+            while state(&slots).1 == 0 {
+                std::thread::yield_now();
+            }
+            slots.give(1); // one lane ends its epoch: its slot is for run 2
+            let lent2 = slots.try_take(8);
+            slots.give(lent2);
+            while begun.load(Ordering::SeqCst) < 1 {
+                std::thread::yield_now();
+            }
+            // run 1, run 2 and one lane compute; run 3 waits for its first slot
+            let run3 = s.spawn(run);
+            while state(&slots) != (0, 1, 0) {
+                std::thread::yield_now();
+            }
+            let run1 = s.spawn(|| {
+                // run 1 is stable: it gives its slot to run 3 and waits to go on
+                let gave = slots.yield_to_first();
+                slots.release();
+                gave
+            });
+            while !(begun.load(Ordering::SeqCst) == 2 && state(&slots) == (0, 0, 1)) {
+                std::thread::yield_now();
+            }
+            slots.give(1); // the other lane ends: its slot is for run 1
+            let lent1 = slots.try_take(8);
+            slots.give(lent1);
+            let gave = run1.join().expect("run 1");
+            done.store(true, Ordering::SeqCst);
+            run2.join().expect("run 2");
+            run3.join().expect("run 3");
+            assert_eq!(lent2, 0, "run 2 waited for its first slot: a lane borrowed the slot given back");
+            assert!(gave, "run 3 waited for its first slot: run 1 gave its slot");
+            assert_eq!(lent1, 0, "run 1 waited to go on: a lane borrowed the slot given back");
+        });
+        assert_eq!(state(&slots), (3, 0, 0));
     }
 
     fn eprom() -> BoardModel {

@@ -1119,6 +1119,24 @@ pub struct Options {
     /// `[optimize] loop_time_share` (`loop = "topor"`): the share of the time left that the loop may
     /// use at most (an emergency stop, like the time limit; the rest is the drawing's).
     pub loop_time_share: f64,
+    /// `[optimize] refine_lanes` (par-refine, docs/design/47-parallel-refine.md): how many lanes
+    /// evaluate the layer refinement's candidate moves at once. JSON `"auto"` (default; 0 in Rust)
+    /// = one plus the engine's spare compute slots at that moment (TopoR loop; the whole-route
+    /// cycles get one), a number = that many lanes. Every count keeps the same moves in the same
+    /// order (the plans and copper do not depend on it); only the time does.
+    #[serde(with = "lanes_opt")]
+    pub refine_lanes: usize,
+    /// Debug / tests (engine only, no `topor.toml` key): every refinement runs the serial in-place
+    /// reference loop the lane executor is tested against (`LayerParams::cap_reference`).
+    pub refine_reference: bool,
+    /// `[optimize] measure_reuse` (par-refine item 3): the plan's measure takes the violations of
+    /// the capacity model the layer refinement ended with ([`crate::topo::refine::FinalCap`])
+    /// instead of building the model again from the same layers (per-edge model; the cut model
+    /// always builds). Default true; false = the measure before par-refine.
+    pub measure_reuse: bool,
+    /// Tests (engine only): every refinement epoch evaluates at least this many candidates, also
+    /// past a kept one ([`crate::topo::refine_par::lanes::with_window`]); 0 = off.
+    pub refine_test_window: usize,
     /// `[optimize] loop_crossing` (5.2, `loop = "topor"`): the share of the `crossing` factor's
     /// weight the loop's layer-aware reroute keeps for a crossing itself. The loop prices the via
     /// a crossing implies against the crossed stretch's present layer as a via (Polubasov 2010
@@ -1495,6 +1513,10 @@ impl Default for Options {
             loop_via_start: 0.5,
             loop_via_end: 1.5,
             loop_time_share: 0.5,
+            refine_lanes: 0,
+            refine_reference: false,
+            measure_reuse: true,
+            refine_test_window: 0,
             loop_crossing: 0.25,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,
@@ -1593,6 +1615,33 @@ mod overrun_cap {
                 "none" => Ok(0.0),
                 _ => Err(serde::de::Error::custom(format!("timeout_overrun_s: {w:?} is not a number of seconds, \"auto\" or \"none\""))),
             },
+        }
+    }
+}
+
+/// `Options::refine_lanes` on the wire: `"auto"` (= 0) or a lane count (0 reads as auto).
+mod lanes_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &usize, s: S) -> Result<S::Ok, S::Error> {
+        if *v == 0 {
+            s.serialize_str("auto")
+        } else {
+            s.serialize_u64(*v as u64)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Count(u64),
+            Word(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Count(n) => Ok(n.min(1024) as usize),
+            Raw::Word(w) if w.trim().eq_ignore_ascii_case("auto") => Ok(0),
+            Raw::Word(w) => Err(serde::de::Error::custom(format!("refine_lanes: {w:?} is not a lane count or \"auto\""))),
         }
     }
 }

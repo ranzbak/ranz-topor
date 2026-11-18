@@ -37,6 +37,8 @@ pub mod schedule;
 pub mod sheet;
 pub mod radii;
 pub mod refine;
+pub mod refine_par;
+pub mod rtrace;
 pub mod metrize;
 pub mod moves;
 pub mod octi;
