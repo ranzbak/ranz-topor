@@ -35,7 +35,7 @@ use super::exact::{Neck, Strip, Wp};
 use super::state::{WireId, NO_OBS};
 use crate::geom::prim::Aabb;
 use crate::geom::Vec2;
-use std::collections::HashMap;
+use crate::fxhash::FxHashMap;
 use std::f64::consts::FRAC_PI_4;
 
 const MM: f64 = 1e6;
@@ -179,6 +179,14 @@ pub fn breaks(pts: &[Vec2]) -> (Vec<(Vec2, f64, f64)>, Vec<(Vec2, f64)>) {
 /// A connector leg: its end point and its octilinear direction (`None`: the taut segment, any
 /// angle).
 type Leg = (Vec2, Option<usize>);
+
+#[cfg(test)]
+thread_local! {
+    /// Test switch: run the DP loop without the shape cache (the reference).
+    pub(super) static OCTI_REF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test coverage: legs with a bundle length > 0, legs with a room price > 0 (cached loop).
+    pub(super) static OCTI_HITS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
+}
 
 /// Where the run ends at a pad: the pad's long axis (unit, pointing out of the pad towards the
 /// run) and the distance from the pad centre to just past its tip (half its length along the
@@ -349,6 +357,7 @@ impl Drawer<'_> {
         let pitch = wi.w + wi.s;
         let region: Aabb = bbox_of(&taut).grow(2.0 * MM + 4.0 * pitch);
         let ents = self.local_ents(&wp, region.grow(self.qgrow));
+        let nr = self.near(ents.clone(), &wp);
         // Cumulative length of the taut path, for the node order.
         let mut cum = vec![0.0];
         for p in taut.windows(2) {
@@ -400,7 +409,7 @@ impl Drawer<'_> {
             if nodes.iter().any(|n| (n.0 - p).len2() < 100.0) {
                 continue;
             }
-            if strip.contains(p) && self.seg_clear(&ents, &wp, p, p) {
+            if strip.contains(p) && self.seg_clear_near(&nr, p, p) {
                 nodes.push((p, t, None, false));
                 if !nodes.iter().any(|n| n.3 && (n.1 - t).abs() < foot_gap) {
                     nodes.push((f, t, None, true));
@@ -437,10 +446,11 @@ impl Drawer<'_> {
             Vec::new()
         };
         let tol = 0.05 * pitch + 1_000.0;
-        let mut follow_cache: HashMap<[u64; 4], f64> = HashMap::new();
+        let mut follow_cache: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
         // Length of the leg `a-b` (direction `k`) that runs beside a drawn neighbour at its
-        // clearance (the overlap of their projections).
-        let mut follow = |a: Vec2, b: Vec2, k: usize| -> f64 {
+        // clearance (the overlap of their projections). The scan of every neighbour: the
+        // reference of `follow` below (tests, `OCTI_REF`).
+        let mut follow_ref = |a: Vec2, b: Vec2, k: usize| -> f64 {
             let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
             if let Some(&v) = follow_cache.get(&key) {
                 return v;
@@ -466,8 +476,8 @@ impl Drawer<'_> {
         // `planned_room` price of the leg `a-b`: its length inside the planned room of an undrawn
         // lane neighbour (`zones`), each piece weighted by `x + x^2`, `x` = depth over the pitch
         // (midpoint rule, pieces of at most a quarter pitch or 1/24 of the leg).
-        let mut room_cache: HashMap<[u64; 4], f64> = HashMap::new();
-        let mut room = |a: Vec2, b: Vec2| -> f64 {
+        let mut room_cache: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
+        let mut room_ref = |a: Vec2, b: Vec2| -> f64 {
             if (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0 {
                 return 0.0;
             }
@@ -524,7 +534,37 @@ impl Drawer<'_> {
             room_cache.insert(key, v);
             v
         };
-        let mut legal_cache: HashMap<[u64; 4], bool> = HashMap::new();
+        // The same two prices with the per-leg work cut, exactly (see `RoomPre`, `FollowIdx`).
+        let rpre = RoomPre::new(&zones, &gates);
+        let fidx = FollowIdx::new(&side);
+        let mut follow_cache2: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
+        let mut follow = |a: Vec2, b: Vec2, k: usize| -> f64 {
+            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
+            if let Some(&v) = follow_cache2.get(&key) {
+                return v;
+            }
+            let best = fidx.follow(&side, tol, a, b, k);
+            #[cfg(test)]
+            OCTI_HITS.with(|h| h.set([h.get()[0] + usize::from(best > 0.0), h.get()[1]]));
+            follow_cache2.insert(key, best);
+            best
+        };
+        let mut room_cache2: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
+        let mut room = |a: Vec2, b: Vec2| -> f64 {
+            if (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0 {
+                return 0.0;
+            }
+            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
+            if let Some(&v) = room_cache2.get(&key) {
+                return v;
+            }
+            let v = cfg.room * rpre.room(pitch, a, b);
+            #[cfg(test)]
+            OCTI_HITS.with(|h| h.set([h.get()[0], h.get()[1] + usize::from(v > 0.0)]));
+            room_cache2.insert(key, v);
+            v
+        };
+        let mut legal_cache: FxHashMap<[u64; 4], bool> = crate::fxhash::map();
         let mut legal = |a: Vec2, b: Vec2| -> bool {
             let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
             if let Some(&v) = legal_cache.get(&key) {
@@ -538,7 +578,7 @@ impl Drawer<'_> {
                 && strip.contains(b)
                 && strip.contains((a + b) * 0.5)
                 && !strip.crosses_wall(a, b)
-                && self.seg_clear(&ents, &wp, a, b);
+                && self.seg_clear_near(&nr, a, b);
             legal_cache.insert(key, v);
             v
         };
@@ -613,116 +653,276 @@ impl Drawer<'_> {
                 None => 0.0,
             }
         };
-        for i in 0..n {
-            for din in 0..ND {
-                let d0 = dist[i][din];
-                if !d0.is_finite() {
-                    continue;
-                }
-                let (u_in, l_in) = last[i][din];
-                let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
-                if let Some(j) = next_on[i] {
-                    if !js.contains(&j) {
-                        js.push(j);
+        // The connector shapes of a node pair, their legs' lengths, directions, `planned_room`
+        // and bundle prices and their legality do not depend on the arrival state: built once
+        // per pair (on its first use) and shared by the states of node `i`, in the same order.
+        struct Shape {
+            s: Vec<Leg>,
+            // (leg index, length, unit direction, room price, follow length, direction)
+            legs: Vec<(usize, f64, Vec2, f64, f64, Option<usize>)>,
+            legal: Option<bool>,
+        }
+        let pull_on = cfg.pull > 0.0 && !side.is_empty();
+        // Tests: the loop before the shape cache (the reference the cached loop must equal).
+        #[cfg(test)]
+        let reference = OCTI_REF.with(|f| f.get());
+        #[cfg(not(test))]
+        let reference = false;
+        if reference {
+            for i in 0..n {
+                for din in 0..ND {
+                    let d0 = dist[i][din];
+                    if !d0.is_finite() {
+                        continue;
                     }
-                }
-                if !js.contains(&(n - 1)) && n - 1 > i {
-                    js.push(n - 1);
-                }
-                for &j in &js {
-                    let (p, q) = (nodes[i].0, nodes[j].0);
-                    let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
-                    if i == 0 {
-                        if let Some(x) = exits[0] {
-                            let p2 = p + x.axis * x.reach;
-                            if (q - p).dot(x.axis) > x.reach {
-                                for mut s in connectors(p2, q) {
-                                    s.insert(0, (p2, octi_dir(x.axis)));
-                                    shapes.push(s);
+                    let (u_in, l_in) = last[i][din];
+                    let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
+                    if let Some(j) = next_on[i] {
+                        if !js.contains(&j) {
+                            js.push(j);
+                        }
+                    }
+                    if !js.contains(&(n - 1)) && n - 1 > i {
+                        js.push(n - 1);
+                    }
+                    for &j in &js {
+                        let (p, q) = (nodes[i].0, nodes[j].0);
+                        let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
+                        if i == 0 {
+                            if let Some(x) = exits[0] {
+                                let p2 = p + x.axis * x.reach;
+                                if (q - p).dot(x.axis) > x.reach {
+                                    for mut s in connectors(p2, q) {
+                                        s.insert(0, (p2, octi_dir(x.axis)));
+                                        shapes.push(s);
+                                    }
                                 }
                             }
                         }
-                    }
-                    if j == n - 1 {
-                        if let Some(x) = exits[1] {
-                            let q2 = q + x.axis * x.reach;
-                            if (p - q).dot(x.axis) > x.reach {
-                                for mut s in connectors(p, q2) {
-                                    s.push((q, octi_dir(-x.axis)));
-                                    shapes.push(s);
+                        if j == n - 1 {
+                            if let Some(x) = exits[1] {
+                                let q2 = q + x.axis * x.reach;
+                                if (p - q).dot(x.axis) > x.reach {
+                                    for mut s in connectors(p, q2) {
+                                        s.push((q, octi_dir(-x.axis)));
+                                        shapes.push(s);
+                                    }
                                 }
                             }
                         }
-                    }
-                    // A piece of the taut path itself (any angle), between consecutive nodes on it.
-                    if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
-                        shapes.push(vec![(q, None)]);
-                    }
-                    for s in shapes {
-                        // Price.
-                        let mut c = 0.0;
-                        let (mut u, mut l, mut from) = (u_in, l_in, p);
-                        // One any-angle stretch pays its per-stretch price once, however many
-                        // pieces of the taut path it is made of.
-                        let mut prev_any = din == 8 && i != 0;
-                        let mut ok = true;
-                        for (k, &(e, dk)) in s.iter().enumerate() {
-                            let d = e - from;
-                            let len = d.len();
-                            if len < 1.0 {
+                        // A piece of the taut path itself (any angle), between consecutive nodes on it.
+                        if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
+                            shapes.push(vec![(q, None)]);
+                        }
+                        for s in shapes {
+                            // Price.
+                            let mut c = 0.0;
+                            let (mut u, mut l, mut from) = (u_in, l_in, p);
+                            // One any-angle stretch pays its per-stretch price once, however many
+                            // pieces of the taut path it is made of.
+                            let mut prev_any = din == 8 && i != 0;
+                            let mut ok = true;
+                            for (k, &(e, dk)) in s.iter().enumerate() {
+                                let d = e - from;
+                                let len = d.len();
+                                if len < 1.0 {
+                                    continue;
+                                }
+                                let v = d * (1.0 / len);
+                                let b = bend(u, l, v);
+                                if !b.is_finite() {
+                                    ok = false;
+                                    break;
+                                }
+                                c += len + b + room_ref(from, e);
+                                if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
+                                    c -= cfg.pull * follow_ref(from, e, kk);
+                                }
+                                if dk.is_none() {
+                                    c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
+                                }
+                                prev_any = dk.is_none();
+                                if i == 0 && k == 0 {
+                                    c += axis_price(&exits[0], v, len);
+                                }
+                                if j == n - 1 && k == s.len() - 1 {
+                                    c += axis_price(&exits[1], v, len);
+                                    if let Some(ul) = lead_out {
+                                        // on into the lead (from its end back to the hand track)
+                                        c += bend(v, len, -ul);
+                                    }
+                                }
+                                u = v;
+                                l = len;
+                                from = e;
+                            }
+                            if !ok {
                                 continue;
                             }
-                            let v = d * (1.0 / len);
-                            let b = bend(u, l, v);
-                            if !b.is_finite() {
-                                ok = false;
-                                break;
+                            let dout = s.last().and_then(|x| x.1).unwrap_or(8);
+                            if d0 + c >= dist[j][dout] {
+                                continue;
                             }
-                            c += len + b + room(from, e);
-                            if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
-                                c -= cfg.pull * follow(from, e, kk);
+                            // Legality (the taut segment is legal as drawn).
+                            let mut from = p;
+                            let mut leg_ok = true;
+                            for &(e, dk) in &s {
+                                if (e - from).len2() >= 1.0 && dk.is_some() && !legal(from, e) {
+                                    leg_ok = false;
+                                    break;
+                                }
+                                from = e;
                             }
-                            if dk.is_none() {
-                                c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
+                            if !leg_ok {
+                                continue;
                             }
-                            prev_any = dk.is_none();
-                            if i == 0 && k == 0 {
-                                c += axis_price(&exits[0], v, len);
+                            dist[j][dout] = d0 + c;
+                            last[j][dout] = (u, l);
+                            back[j][dout] = Some((i, din, s));
+                        }
+                    }
+                }
+            }
+        } else {
+            for i in 0..n {
+                let mut js: Option<Vec<usize>> = None;
+                let mut pre: Vec<Option<Vec<Shape>>> = Vec::new();
+                for din in 0..ND {
+                    let d0 = dist[i][din];
+                    if !d0.is_finite() {
+                        continue;
+                    }
+                    let (u_in, l_in) = last[i][din];
+                    let js = js.get_or_insert_with(|| {
+                        let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
+                        if let Some(j) = next_on[i] {
+                            if !js.contains(&j) {
+                                js.push(j);
                             }
-                            if j == n - 1 && k == s.len() - 1 {
-                                c += axis_price(&exits[1], v, len);
-                                if let Some(ul) = lead_out {
-                                    // on into the lead (from its end back to the hand track)
-                                    c += bend(v, len, -ul);
+                        }
+                        if !js.contains(&(n - 1)) && n - 1 > i {
+                            js.push(n - 1);
+                        }
+                        js
+                    });
+                    if pre.len() < js.len() {
+                        pre.resize_with(js.len(), || None);
+                    }
+                    for (jx, &j) in js.iter().enumerate() {
+                        let (p, q) = (nodes[i].0, nodes[j].0);
+                        let shapes = pre[jx].get_or_insert_with(|| {
+                            let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
+                            if i == 0 {
+                                if let Some(x) = exits[0] {
+                                    let p2 = p + x.axis * x.reach;
+                                    if (q - p).dot(x.axis) > x.reach {
+                                        for mut s in connectors(p2, q) {
+                                            s.insert(0, (p2, octi_dir(x.axis)));
+                                            shapes.push(s);
+                                        }
+                                    }
                                 }
                             }
-                            u = v;
-                            l = len;
-                            from = e;
-                        }
-                        if !ok {
-                            continue;
-                        }
-                        let dout = s.last().and_then(|x| x.1).unwrap_or(8);
-                        if d0 + c >= dist[j][dout] {
-                            continue;
-                        }
-                        // Legality (the taut segment is legal as drawn).
-                        let mut from = p;
-                        let mut leg_ok = true;
-                        for &(e, dk) in &s {
-                            if (e - from).len2() >= 1.0 && dk.is_some() && !legal(from, e) {
-                                leg_ok = false;
-                                break;
+                            if j == n - 1 {
+                                if let Some(x) = exits[1] {
+                                    let q2 = q + x.axis * x.reach;
+                                    if (p - q).dot(x.axis) > x.reach {
+                                        for mut s in connectors(p, q2) {
+                                            s.push((q, octi_dir(-x.axis)));
+                                            shapes.push(s);
+                                        }
+                                    }
+                                }
                             }
-                            from = e;
+                            // A piece of the taut path itself (any angle), between consecutive nodes on it.
+                            if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
+                                shapes.push(vec![(q, None)]);
+                            }
+                            shapes
+                                .into_iter()
+                                .map(|s| {
+                                    let mut legs = Vec::with_capacity(s.len());
+                                    let mut from = p;
+                                    for (k, &(e, dk)) in s.iter().enumerate() {
+                                        let d = e - from;
+                                        let len = d.len();
+                                        if len < 1.0 {
+                                            continue;
+                                        }
+                                        let v = d * (1.0 / len);
+                                        let rv = room(from, e);
+                                        let fv = match (dk, pull_on) {
+                                            (Some(kk), true) => follow(from, e, kk),
+                                            _ => 0.0,
+                                        };
+                                        legs.push((k, len, v, rv, fv, dk));
+                                        from = e;
+                                    }
+                                    Shape { s, legs, legal: None }
+                                })
+                                .collect()
+                        });
+                        for sh in shapes.iter_mut() {
+                            // Price.
+                            let mut c = 0.0;
+                            let (mut u, mut l) = (u_in, l_in);
+                            // One any-angle stretch pays its per-stretch price once, however many
+                            // pieces of the taut path it is made of.
+                            let mut prev_any = din == 8 && i != 0;
+                            let mut ok = true;
+                            let sn = sh.s.len();
+                            for &(k, len, v, rv, fv, dk) in &sh.legs {
+                                let b = bend(u, l, v);
+                                if !b.is_finite() {
+                                    ok = false;
+                                    break;
+                                }
+                                c += len + b + rv;
+                                if let (Some(_), true) = (dk, pull_on) {
+                                    c -= cfg.pull * fv;
+                                }
+                                if dk.is_none() {
+                                    c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
+                                }
+                                prev_any = dk.is_none();
+                                if i == 0 && k == 0 {
+                                    c += axis_price(&exits[0], v, len);
+                                }
+                                if j == n - 1 && k == sn - 1 {
+                                    c += axis_price(&exits[1], v, len);
+                                    if let Some(ul) = lead_out {
+                                        // on into the lead (from its end back to the hand track)
+                                        c += bend(v, len, -ul);
+                                    }
+                                }
+                                u = v;
+                                l = len;
+                            }
+                            if !ok {
+                                continue;
+                            }
+                            let dout = sh.s.last().and_then(|x| x.1).unwrap_or(8);
+                            if d0 + c >= dist[j][dout] {
+                                continue;
+                            }
+                            // Legality (the taut segment is legal as drawn).
+                            let leg_ok = *sh.legal.get_or_insert_with(|| {
+                                let mut from = p;
+                                for &(e, dk) in &sh.s {
+                                    if (e - from).len2() >= 1.0 && dk.is_some() && !legal(from, e) {
+                                        return false;
+                                    }
+                                    from = e;
+                                }
+                                true
+                            });
+                            if !leg_ok {
+                                continue;
+                            }
+                            dist[j][dout] = d0 + c;
+                            last[j][dout] = (u, l);
+                            back[j][dout] = Some((i, din, sh.s.clone()));
                         }
-                        if !leg_ok {
-                            continue;
-                        }
-                        dist[j][dout] = d0 + c;
-                        last[j][dout] = (u, l);
-                        back[j][dout] = Some((i, din, s));
                     }
                 }
             }
@@ -840,8 +1040,7 @@ impl Drawer<'_> {
                 }
             }
         }
-        let boxes = tris.iter().map(|t| bbox_of(t)).collect();
-        Strip { tris, boxes, walls }
+        Strip::new(tris, walls)
     }
 
     /// Octagon vertices (edges at 0/45/90 degrees) around the corners of object `id` inside `bb`:
@@ -908,6 +1107,126 @@ impl Drawer<'_> {
     }
 }
 
+/// The `planned_room` zones (a, b, sign) and lane-slot gates (first end, unit direction,
+/// length, span lo, span hi) of one octilinear run with what every leg needs of them computed
+/// once: the zone's length and unit direction, the gate's far end (the same expressions as the
+/// scan in `octilinear`, so the price is bit-identical).
+pub(super) struct RoomPre {
+    zones: Vec<(Vec2, f64, f64, Vec2)>,
+    gates: Vec<(Vec2, Vec2, f64, f64, f64)>,
+}
+
+impl RoomPre {
+    pub(super) fn new(zones: &[(Vec2, Vec2, f64)], gates: &[(Vec2, Vec2, f64, f64, f64)]) -> RoomPre {
+        let zones = zones
+            .iter()
+            .map(|&(za, zb, sign)| {
+                let zl = (zb - za).len();
+                (za, sign, zl, (zb - za) * (1.0 / zl))
+            })
+            .collect();
+        let gates = gates.iter().map(|&(gp, gu, glen, glo, ghi)| (gp, gp + gu * glen, glen, glo, ghi)).collect();
+        RoomPre { zones, gates }
+    }
+
+    /// The room price of the leg `a-b` before the `room` factor (the scan's `tot`). O(zones x
+    /// samples + gates).
+    pub(super) fn room(&self, pitch: f64, a: Vec2, b: Vec2) -> f64 {
+        let l = (b - a).len();
+        let mut tot = 0.0;
+        if l >= 1.0 {
+            let n = ((l / (0.25 * pitch)).ceil() as usize).clamp(2, 24);
+            let ds = l / n as f64;
+            for &(za, sign, zl, zu) in &self.zones {
+                let d0 = sign * zu.cross(a - za);
+                let d1 = sign * zu.cross(b - za);
+                if d0 <= 0.0 && d1 <= 0.0 {
+                    continue;
+                }
+                let (t0, t1) = ((a - za).dot(zu), (b - za).dot(zu));
+                if (t0 < 0.0 && t1 < 0.0) || (t0 > zl && t1 > zl) {
+                    continue;
+                }
+                for i in 0..n {
+                    let f = (i as f64 + 0.5) / n as f64;
+                    let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
+                    if d > 0.0 && (0.0..=zl).contains(&t) {
+                        let x = d / pitch;
+                        tot += ds * (x + x * x);
+                    }
+                }
+            }
+        }
+        // The lane slots beyond the span (P6 b): the depth of the crossing past it.
+        for &(gp, gq, glen, glo, ghi) in &self.gates {
+            if !super::draw::seg_proper(a, b, gp, gq) {
+                continue;
+            }
+            let (d1, d2) = (b - a, gq - gp);
+            let den = d1.cross(d2);
+            if den.abs() < 1e-9 {
+                continue;
+            }
+            let t = (gp - a).cross(d1) / den * glen;
+            let depth = (glo - t).max(t - ghi).max(0.0);
+            if depth > 0.0 {
+                let x = depth / pitch;
+                tot += pitch * (x + x * x);
+            }
+        }
+        tot
+    }
+}
+
+/// The drawn bundle neighbours (a, b, direction class 0..4, clearance) of one octilinear run per
+/// direction `k` (0..8): (`dir(k) x a`, index) of those of class `k % 4`, sorted, and the widest
+/// clearance. `follow` looks only at the neighbours whose offset across the leg can lie within
+/// `tol` of their clearance (window: widest clearance + tol + 1 nm against rounding) and takes the
+/// same `max` as the scan of every neighbour (order-free).
+pub(super) struct FollowIdx {
+    by: Vec<(Vec<(f64, usize)>, f64)>,
+}
+
+impl FollowIdx {
+    pub(super) fn new(side: &[(Vec2, Vec2, usize, f64)]) -> FollowIdx {
+        let by = (0..8)
+            .map(|k| {
+                let u = dir(k);
+                let mut v: Vec<(f64, usize)> = side.iter().enumerate().filter(|(_, x)| x.2 == k % 4).map(|(i, x)| (u.cross(x.0), i)).collect();
+                v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                let nmax = v.iter().map(|&(_, i)| side[i].3).fold(0.0, f64::max);
+                (v, nmax)
+            })
+            .collect();
+        FollowIdx { by }
+    }
+
+    /// Length of the leg `a-b` (direction `k`) that runs beside a neighbour of `side` at its
+    /// clearance (the overlap of their projections). O(log n + window).
+    pub(super) fn follow(&self, side: &[(Vec2, Vec2, usize, f64)], tol: f64, a: Vec2, b: Vec2, k: usize) -> f64 {
+        let u = dir(k);
+        let (t0, t1) = (0.0f64, (b - a).dot(u));
+        let mut best = 0.0f64;
+        let (by, nmax) = &self.by[k % 8];
+        let (sa, r) = (u.cross(a), nmax + tol + 1.0);
+        let from = by.partition_point(|x| x.0 < sa - r);
+        for &(sc, i) in &by[from..] {
+            if sc > sa + r {
+                break;
+            }
+            let (c, e, _, need) = side[i];
+            let off = u.cross(c - a).abs();
+            if (off - need).abs() > tol {
+                continue;
+            }
+            let (s0, s1) = ((c - a).dot(u), (e - a).dot(u));
+            let ov = (t1.min(s0.max(s1)) - t0.max(s0.min(s1))).max(0.0);
+            best = best.max(ov);
+        }
+        best
+    }
+}
+
 /// Octilinear connectors from `p` to `q`: the straight leg when they are aligned, else the two
 /// elbows and the two Z shapes over the two octilinear directions that bracket `q - p`.
 fn connectors(p: Vec2, q: Vec2) -> Vec<Vec<Leg>> {
@@ -942,6 +1261,163 @@ mod tests {
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn f(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % (hi - lo + 1) as u64) as i64
+        }
+    }
+
+    /// The `room` scan of `octilinear` before `RoomPre` (its `tot`), verbatim.
+    fn room_ref(zones: &[(Vec2, Vec2, f64)], gates: &[(Vec2, Vec2, f64, f64, f64)], pitch: f64, a: Vec2, b: Vec2) -> f64 {
+        let l = (b - a).len();
+        let mut tot = 0.0;
+        if l >= 1.0 {
+            for &(za, zb, sign) in zones {
+                let zl = (zb - za).len();
+                let zu = (zb - za) * (1.0 / zl);
+                let d0 = sign * zu.cross(a - za);
+                let d1 = sign * zu.cross(b - za);
+                if d0 <= 0.0 && d1 <= 0.0 {
+                    continue;
+                }
+                let (t0, t1) = ((a - za).dot(zu), (b - za).dot(zu));
+                if (t0 < 0.0 && t1 < 0.0) || (t0 > zl && t1 > zl) {
+                    continue;
+                }
+                let n = ((l / (0.25 * pitch)).ceil() as usize).clamp(2, 24);
+                let ds = l / n as f64;
+                for i in 0..n {
+                    let f = (i as f64 + 0.5) / n as f64;
+                    let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
+                    if d > 0.0 && (0.0..=zl).contains(&t) {
+                        let x = d / pitch;
+                        tot += ds * (x + x * x);
+                    }
+                }
+            }
+        }
+        for &(gp, gu, glen, glo, ghi) in gates {
+            let gq = gp + gu * glen;
+            if !super::super::draw::seg_proper(a, b, gp, gq) {
+                continue;
+            }
+            let (d1, d2) = (b - a, gq - gp);
+            let den = d1.cross(d2);
+            if den.abs() < 1e-9 {
+                continue;
+            }
+            let t = (gp - a).cross(d1) / den * glen;
+            let depth = (glo - t).max(t - ghi).max(0.0);
+            if depth > 0.0 {
+                let x = depth / pitch;
+                tot += pitch * (x + x * x);
+            }
+        }
+        tot
+    }
+
+    /// The `follow` scan of `octilinear` before `FollowIdx`, verbatim.
+    fn follow_ref(side: &[(Vec2, Vec2, usize, f64)], tol: f64, a: Vec2, b: Vec2, k: usize) -> f64 {
+        let u = dir(k);
+        let (t0, t1) = (0.0f64, (b - a).dot(u));
+        let mut best = 0.0f64;
+        for &(c, e, kk, need) in side {
+            if kk != k % 4 {
+                continue;
+            }
+            let off = u.cross(c - a).abs();
+            if (off - need).abs() > tol {
+                continue;
+            }
+            let (s0, s1) = ((c - a).dot(u), (e - a).dot(u));
+            let ov = (t1.min(s0.max(s1)) - t0.max(s0.min(s1))).max(0.0);
+            best = best.max(ov);
+        }
+        best
+    }
+
+    /// `RoomPre::room` and `FollowIdx::follow` equal the scans bit for bit on random runs:
+    /// zones and gates crossed, touched and missed, zero-length and sub-nm legs, gates parallel
+    /// to the leg, gate spans open on one side; neighbours exactly at clearance +- tol, at the
+    /// window edge (widest clearance + tol), of every direction class, collinear with the leg.
+    #[test]
+    fn room_and_follow_indexes_match_the_scans() {
+        let mut g = Rng(0x6a09_e667_f3bc_c909);
+        let (mut room_hits, mut follow_hits) = (0usize, 0usize);
+        const MM: f64 = 1e6;
+        for _ in 0..300 {
+            let o = v(1e8 * g.f(), -1e8 * g.f());
+            let sc = [0.2, 2.0, 10.0][g.int(0, 2) as usize] * MM;
+            let rp = |g: &mut Rng| o + v(g.f() * sc, g.f() * sc);
+            let pitch = (0.1 + 0.5 * g.f()) * MM;
+            let zones: Vec<(Vec2, Vec2, f64)> = (0..g.int(0, 12)).map(|_| (rp(&mut g), rp(&mut g), if g.int(0, 1) == 0 { 1.0 } else { -1.0 })).collect();
+            let gates: Vec<(Vec2, Vec2, f64, f64, f64)> = (0..g.int(0, 12))
+                .map(|_| {
+                    let (p, q) = (rp(&mut g), rp(&mut g));
+                    let len = (q - p).len().max(1.0);
+                    let lo = if g.int(0, 2) == 0 { f64::NEG_INFINITY } else { len * 0.5 * g.f() };
+                    let hi = if g.int(0, 2) == 0 { f64::INFINITY } else { len * (0.5 + 0.5 * g.f()) };
+                    (p, (q - p) * (1.0 / len), len, lo, hi)
+                })
+                .collect();
+            let tol = 0.05 * pitch + 1_000.0;
+            let mut side: Vec<(Vec2, Vec2, usize, f64)> = Vec::new();
+            for _ in 0..g.int(0, 30) {
+                let kk = g.int(0, 7) as usize;
+                let c = rp(&mut g);
+                side.push((c, c + dir(kk) * sc * g.f(), kk % 4, pitch * (0.5 + g.f())));
+            }
+            let rpre = RoomPre::new(&zones, &gates);
+            let fidx = FollowIdx::new(&side);
+            for _ in 0..60 {
+                let a = match g.int(0, 3) {
+                    0 if !side.is_empty() => side[g.int(0, side.len() as i64 - 1) as usize].0,
+                    1 if !gates.is_empty() => gates[g.int(0, gates.len() as i64 - 1) as usize].0,
+                    _ => rp(&mut g),
+                };
+                let k = g.int(0, 7) as usize;
+                let b = match g.int(0, 4) {
+                    0 => a,
+                    1 => a + dir(k) * 0.5,
+                    2 if !gates.is_empty() => {
+                        let gt = gates[g.int(0, gates.len() as i64 - 1) as usize];
+                        a + gt.1 * sc * g.f()
+                    }
+                    _ => a + dir(k) * sc * g.f(),
+                };
+                let r0 = room_ref(&zones, &gates, pitch, a, b);
+                assert_eq!(rpre.room(pitch, a, b).to_bits(), r0.to_bits(), "room a {a:?} b {b:?}");
+                room_hits += usize::from(r0 > 0.0);
+                // A leg next to a neighbour: offset exactly at its clearance, +- tol, the window edge.
+                let (a2, k2) = if !side.is_empty() && g.int(0, 1) == 0 {
+                    let (c, _, kk, need) = side[g.int(0, side.len() as i64 - 1) as usize];
+                    let k2 = kk + 4 * g.int(0, 1) as usize;
+                    let nmax = side.iter().map(|x| x.3).fold(0.0, f64::max);
+                    let off = [need, need + tol, need - tol, need + tol + 1e-3, nmax + tol, nmax + tol + 1.0, 0.0][g.int(0, 6) as usize];
+                    let u = dir(k2);
+                    (c + v(-u.y, u.x) * off * if g.int(0, 1) == 0 { 1.0 } else { -1.0 } - u * sc * g.f(), k2)
+                } else {
+                    (a, k)
+                };
+                let b2 = a2 + dir(k2) * sc * (0.2 + g.f());
+                let f0 = follow_ref(&side, tol, a2, b2, k2);
+                assert_eq!(fidx.follow(&side, tol, a2, b2, k2).to_bits(), f0.to_bits(), "follow a {a2:?} k {k2}");
+                follow_hits += usize::from(f0 > 0.0);
+            }
+        }
+        assert!(room_hits > 500 && follow_hits > 500, "room {room_hits} follow {follow_hits}");
     }
 
     #[test]
