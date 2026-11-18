@@ -61,10 +61,11 @@ def _swig_inputs(board) -> tuple[dict, dict, dict, dict]:
     of: dict[str, str] = {}
     codes: dict[str, int] = {}
     names = [""]
+    from toporlib.rules import net_codes_by_name
     for code, n in sorted(board.GetNetsByNetcode().items()):
         if int(code) != 0:
-            codes[str(n.GetNetname())] = int(code)
             names.append(str(n.GetNetname()))
+    codes = net_codes_by_name(names)  # the plugin's IPC numbering (sorted names), not pcbnew's file order
     for name in names:
         nc = ns.GetEffectiveNetClass(name)
         nm = str(nc.GetName())
