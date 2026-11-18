@@ -135,6 +135,60 @@ fn a_cut_stitching_undoes_nothing() {
     assert!(l.contains("cut its stitching") && undone(l).0 == 0, "{l}");
 }
 
+/// Verify V6, the limit path: a hard limit that passes while the stitching of the check begins
+/// cuts it (hook "fuse pour check begin" reaches the limit, after the 1 s floor every round gets),
+/// even where every move would be undone, and the report names the stitching as the step cut
+/// (not the step before it).
+#[test]
+fn a_hard_limit_reached_at_the_start_of_the_check_cuts_its_stitching() {
+    let m = crop_with_gnd_pour();
+    let mut val = serde_json::to_value(Options::default()).unwrap();
+    val["runs"] = serde_json::json!(1);
+    val["topo_rounds"] = serde_json::json!(1);
+    val["timeout_mode"] = serde_json::json!("hard");
+    val["wall_clock_s"] = serde_json::json!(if cfg!(debug_assertions) { 900.0 } else { 120.0 });
+    let o: Options = serde_json::from_value(val).unwrap();
+    let mut ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let lim = ctl.limit.clone();
+    let t0 = std::time::Instant::now();
+    ctl.set_test_hook(move |pt| {
+        match pt {
+            "fuse pour undo all" => return true,
+            "fuse pour check begin" => {
+                // The limit acts once a round's 1 s floor has passed (core.rs `floor`).
+                let left = std::time::Duration::from_millis(1200).saturating_sub(t0.elapsed());
+                std::thread::sleep(left);
+                lim.reach();
+            }
+            _ => {}
+        }
+        false
+    });
+    let r = topor_engine::route::route_with(&m, &o, &ctl);
+    let l = line(&r, "fuse pour check: ").expect("fuse pour check line");
+    assert!(l.contains("cut its stitching") && undone(l).0 == 0, "{l}");
+    let lr = r.limit.as_ref().expect("limit report");
+    assert!(lr.reached && lr.cut_steps.contains(&"stitching".to_string()), "{lr:?}");
+    // Only the stitching was cut: without the step set at the check's start the cut would be
+    // noted under the step before it (the drawing or the via reduction).
+    assert!(!lr.cut_steps.iter().any(|s| s == "drawing" || s == "via_reduction" || s == "plan"), "{lr:?}");
+}
+
+/// Verify V10: `[search] fuse_pour_rounds`. Hook "fuse pour worse" judges the first round worse and
+/// seeds it with the first kept fuse move: with the default rounds only that move (and its
+/// dependents) is undone; with 0 every move is undone at once.
+#[test]
+fn fuse_pour_rounds_zero_undoes_every_move_at_once() {
+    let m = crop_with_gnd_pour();
+    let d = route(&m, &[], &["fuse pour worse"]);
+    let (n, k) = undone(line(&d, "fuse pour check: ").expect("check line"));
+    assert!(n >= 1 && n < k, "rounds 2: only the nearest moves ({n} of {k})");
+    let z = route(&m, &[("fuse_pour_rounds", serde_json::json!(0))], &["fuse pour worse"]);
+    let (n0, k0) = undone(line(&z, "fuse pour check: ").expect("check line"));
+    assert!(k0 == k && n0 == k0, "rounds 0: every move ({n0} of {k0})");
+}
+
 /// `(n)` of the line's "<n> by the re-check of the kept moves".
 fn rechecked(l: &str) -> usize {
     l.split(" by the re-check of the kept moves").next().and_then(|t| t.rsplit(' ').next()).and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("{l}"))
