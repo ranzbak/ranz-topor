@@ -1988,7 +1988,7 @@ impl<'a> Drawer<'a> {
                         let price = self.via_plan_price(w, ka, kb.max(ka), p, dr) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
                         // In the plan's class only; the reach's violations priced like the squeeze
                         // (one via diameter of squeeze per violation unit, graded).
-                        let (in_class, reach) = self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
+                        let (in_class, reach) = self.via_reach_for_price(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
                         // `[vias] reach_price` (default off): the reach's violations priced too.
                         let price = price + self.reach_cost(reach, self.octi.room * dv);
                         if dbg {
@@ -2051,7 +2051,7 @@ impl<'a> Drawer<'a> {
                 let any_site = forced_in.is_none();
                 if let Some((k, p, sz, vs)) = forced_in.or_else(|| self.force_via(w, plan, i, ka, kb.max(ka), &sizes, None)) {
                     // A site forced over every site may be out of the class: counted like the legal one.
-                    if any_site && !self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed).0 {
+                    if any_site && !self.via_in_class(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed) {
                         self.stats.via_out_of_class += 1;
                     }
                     let id = self.commit(&via_item(net, p, sz, Some(w)));
@@ -2188,7 +2188,7 @@ impl<'a> Drawer<'a> {
                 }
                 let side = if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) { 0.0 } else { 1.0 };
                 let reach = match class {
-                    Some(c) => match self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], c) {
+                    Some(c) => match self.via_reach_for_price(w, k, p, plan.layers[i], plan.layers[i + 1], c) {
                         (false, _) => continue,
                         (true, r) => self.reach_cost(r, 1.0),
                     },
@@ -2256,6 +2256,27 @@ impl<'a> Drawer<'a> {
     /// Price: the violation amounts of both reach segments ([`Viol::amount`], graded; 0 for a free
     /// reach). O(chord + objects nearby).
     pub fn via_reach(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> (bool, f64) {
+        self.via_reach_(w, k, p, la, lb, crossed, true)
+    }
+
+    /// nd-perf F2: the class verdict of [`Drawer::via_reach`] without its price (the reach
+    /// segments' violations are not measured). O(chord + objects nearby).
+    pub fn via_in_class(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> bool {
+        self.via_reach_(w, k, p, la, lb, crossed, false).0
+    }
+
+    /// nd-perf F2: [`Drawer::via_reach`] where its price is read ([`reach_priced`]: `[vias]
+    /// reach_price` on), else its verdict and 0 (the price `reach_cost` would give then).
+    pub fn via_reach_for_price(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> (bool, f64) {
+        if reach_priced(self.opts) {
+            self.via_reach(w, k, p, la, lb, crossed)
+        } else {
+            (self.via_in_class(w, k, p, la, lb, crossed), 0.0)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn via_reach_(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings, priced: bool) -> (bool, f64) {
         let net = self.st.wires[w].net;
         let chord = self.taut_chord(w, k);
         let q = match chord.len() {
@@ -2290,9 +2311,8 @@ impl<'a> Drawer<'a> {
                     }
                 }
             }
-            // nd-perf F2: the price is read only through `reach_cost`, which is 0 while
-            // `[vias] reach_price` is off; the class verdict above reads the report alone.
-            if reach_priced(self.opts) {
+            // nd-perf F2: the class verdict above reads the report alone.
+            if priced {
                 price += self.viols_of(&items, &rep).iter().map(Viol::amount).sum::<f64>();
             }
         }

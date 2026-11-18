@@ -3,6 +3,7 @@
 #   ndperf_r2.sh tip    hzq units: bornhack 4 t (timing + copper), bornhack 4 t with TOPO_FORCED_CHECK (every forced pick
 #                       against the exhaustive one), eprom/wiccon/esp/qmtech 1 t with TOPO_FORCED_CHECK (copper + picks),
 #                       the release suite + clippy + FULL pytest (CI=1), the F1/F2 mutants in their own tree
+#   ndperf_r2.sh tip2   fix round 1: bornhack 4 t (copper), the four small boards with the check, suite, mutants
 #   ndperf_r2.sh base   (run on main through base64) eprom/wiccon/esp/qmtech 1 t: the copper base, same options
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); [ -d $ROOT/engine ] || ROOT=$(pwd); cd $ROOT
@@ -48,8 +49,10 @@ mutants() {
             vs.append(&mut c.3);' '            let mut vs = std::mem::take(&mut c.3);
             vs.extend(self.viols_of(&c.2, &rep));' | mut p1_graze_order $D $LB
   sub '    opts.via_reach_price || std::env::var_os("TOPO_VIADBG").is_some()' '    std::env::var_os("TOPO_VIADBG").is_some()' | mut r1_priced_off $D $RV
-  sub '            if reach_priced(self.opts) {' '            if false {' | mut r2_site_skip $D $RV
-  sub '            if reach_priced(self.opts) {' '            if true {' | mut r3_site_always $D $RV
+  sub '            if priced {' '            if false {' | mut r2_reach_never_priced $D $RV
+  sub '        if reach_priced(self.opts) {
+            self.via_reach(w, k, p, la, lb, crossed)' '        if !reach_priced(self.opts) {
+            self.via_reach(w, k, p, la, lb, crossed)' | mut r4_for_price_flipped $D $RV
 }
 suite() {
   cd $ROOT/engine
@@ -65,6 +68,16 @@ case "${1:-}" in
   tip)
     board bornhack 4 $B & sleep 2
     board bornhack-chk 4 $B TOPO_FORCED_CHECK=1 & sleep 2
+    board qmtech-chk 1 $Q TOPO_FORCED_CHECK=1 & sleep 1
+    board esp-chk 1 $E TOPO_FORCED_CHECK=1 & sleep 1
+    board wiccon-chk 1 $W TOPO_FORCED_CHECK=1 & sleep 1
+    board eprom-chk 1 $P TOPO_FORCED_CHECK=1 & sleep 1
+    ( hzq run --threads 4 --name nd2-suite -- bash $ROOT/tools/ndperf_r2.sh suite; note "suite unit rc $?" ) & sleep 1
+    ( hzq run --threads 2 --name nd2-mut -- bash $ROOT/tools/ndperf_r2.sh mutants; note "mutants unit rc $?" ) & sleep 1
+    wait; note "all done" ;;
+  tip2)  # fix round 1 (F2 keeps via_reach's price; via_in_class / via_reach_for_price): suite, mutants, copper on
+    # bornhack (no check run: the pick code is f86de4a5's) and the four small boards with the check
+    board bornhack 4 $B & sleep 2
     board qmtech-chk 1 $Q TOPO_FORCED_CHECK=1 & sleep 1
     board esp-chk 1 $E TOPO_FORCED_CHECK=1 & sleep 1
     board wiccon-chk 1 $W TOPO_FORCED_CHECK=1 & sleep 1

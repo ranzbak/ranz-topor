@@ -992,37 +992,38 @@ mod tests {
         Wp { wire: 0, net: g.int(1, 3) as i32, w: 100_000.0 + 400_000.0 * g.f(), s: 100_000.0 + 200_000.0 * g.f(), layer: g.int(0, 1) as usize, own: [wi.pa, wi.pb], neck, relax }
     }
 
-    /// nd-perf F2: `via_reach` gives the same class verdict with `[vias] reach_price` off and on; with
-    /// it on the price is the measured price of the reach segments (positive where they break a
-    /// rule), with it off 0 (its only reader, `reach_cost`, returns 0 then). Random via sites on
-    /// the routed wire's traversals of the pad field with drawn copper.
+    /// nd-perf F2: the verdict without the price (`via_in_class`) is `via_reach`'s; the call sites'
+    /// `via_reach_for_price` is `via_reach` itself with `[vias] reach_price` on and (the verdict, 0)
+    /// with it off (0 = what `reach_cost` gives then). Random via sites on the routed wire's
+    /// traversals of the pad field with drawn copper.
     #[test]
     fn via_reach_verdict_is_the_same_and_priced_only_when_read() {
         if std::env::var_os("TOPO_VIADBG").is_some() {
             return;
         }
         let crossed = crate::topo::draw::ClassCrossings::new();
-        let sites = |opts: &Options| -> Vec<(bool, f64)> {
-            let mut out = Vec::new();
-            with_fields_opts(opts, &mut |dr, g| {
+        let (mut priced, mut out_of_class) = (0usize, 0usize);
+        for on in [false, true] {
+            let opts = Options { via_reach_price: on, ..Options::default() };
+            with_fields_opts(&opts, &mut |dr, g| {
                 let n = dr.st.wires[0].passes.len();
                 for _ in 0..80 {
-                    let k = g.int(0, n as i64) as usize;
-                    out.push(dr.via_reach(0, k, pt(g), g.int(0, 1) as usize, g.int(0, 1) as usize, &crossed));
+                    let (k, p, la, lb) = (g.int(0, n as i64) as usize, pt(g), g.int(0, 1) as usize, g.int(0, 1) as usize);
+                    let full = dr.via_reach(0, k, p, la, lb, &crossed);
+                    assert_eq!(dr.via_in_class(0, k, p, la, lb, &crossed), full.0);
+                    let used = dr.via_reach_for_price(0, k, p, la, lb, &crossed);
+                    if on {
+                        assert_eq!((used.0, used.1.to_bits()), (full.0, full.1.to_bits()));
+                        priced += usize::from(full.1 > 0.0);
+                    } else {
+                        assert_eq!(used, (full.0, 0.0));
+                    }
+                    out_of_class += usize::from(!full.0);
                 }
             });
-            out
-        };
-        let off = sites(&Options::default());
-        let mut on_opts = Options::default();
-        on_opts.via_reach_price = true;
-        let on = sites(&on_opts);
-        assert_eq!(off.len(), on.len());
-        assert!(off.iter().zip(&on).all(|(a, b)| a.0 == b.0), "the class verdict depends on reach_price");
-        assert!(off.iter().all(|a| a.1 == 0.0));
-        let priced = on.iter().filter(|b| b.1 > 0.0).count();
+        }
         assert!(priced > 20, "only {priced} priced reaches");
-        assert!(off.iter().any(|a| !a.0), "no out-of-class site exercised");
+        assert!(out_of_class > 0, "no out-of-class site exercised");
     }
 
     /// nd-perf F1: the violations without probes ([`viols_measured`] with `probe = false`) bound the
@@ -1065,12 +1066,21 @@ mod tests {
                 // The lazy candidate priced later is the eager one (violations in the same order,
                 // the same price bits), and its bound is at or below that key.
                 let wire = 0;
-                let (p0, vs0, lazy) = dr.lazy_cand(wire, &items, &rep);
+                let (p0, mut vs0, lazy) = dr.lazy_cand(wire, &items, &rep);
+                // A graze violation (none arise on this field: no minimum connection width) goes
+                // after the measured ones, as the eager pricing appended it.
+                let mut graze = dr.graze_viols(wire, &items);
+                assert_eq!(vs0, graze);
+                if g.int(0, 1) == 0 {
+                    let fake = Viol { kind: "connection_width", at: p, layer, depth_nm: 1000.0, len_nm: w, against: "own-net pad or via".into(), via: false };
+                    vs0.push(fake.clone());
+                    graze.push(fake);
+                }
                 let mut c: crate::topo::draw::ForcedCand = (p0, Vec::new(), items.clone(), vs0, None, "test", lazy);
                 let bound = dr.cand_bound(&c);
                 dr.price_cand(&mut c);
                 let mut eager = dr.viols_of(&items, &rep);
-                eager.extend(dr.graze_viols(wire, &items));
+                eager.extend(graze);
                 let pe: f64 = eager.iter().map(Viol::amount).sum();
                 assert!(c.6.is_none());
                 assert_eq!(c.3, eager);
