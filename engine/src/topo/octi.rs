@@ -180,6 +180,12 @@ pub fn breaks(pts: &[Vec2]) -> (Vec<(Vec2, f64, f64)>, Vec<(Vec2, f64)>) {
 /// angle).
 type Leg = (Vec2, Option<usize>);
 
+#[cfg(test)]
+thread_local! {
+    /// Test switch: run the DP loop without the shape cache (the reference).
+    pub(super) static OCTI_REF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Where the run ends at a pad: the pad's long axis (unit, pointing out of the pad towards the
 /// run) and the distance from the pad centre to just past its tip (half its length along the
 /// axis plus the clearance and half the width).
@@ -592,112 +598,268 @@ impl Drawer<'_> {
                 None => 0.0,
             }
         };
-        for i in 0..n {
-            for din in 0..ND {
-                let d0 = dist[i][din];
-                if !d0.is_finite() {
-                    continue;
-                }
-                let (u_in, l_in) = last[i][din];
-                let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
-                if let Some(j) = next_on[i] {
-                    if !js.contains(&j) {
-                        js.push(j);
+        // The connector shapes of a node pair, their legs' lengths, directions, `planned_room`
+        // and bundle prices and their legality do not depend on the arrival state: built once
+        // per pair (on its first use) and shared by the states of node `i`, in the same order.
+        struct Shape {
+            s: Vec<Leg>,
+            // (leg index, length, unit direction, room price, follow length, direction)
+            legs: Vec<(usize, f64, Vec2, f64, f64, Option<usize>)>,
+            legal: Option<bool>,
+        }
+        let pull_on = cfg.pull > 0.0 && !side.is_empty();
+        // Tests: the loop before the shape cache (the reference the cached loop must equal).
+        #[cfg(test)]
+        let reference = OCTI_REF.with(|f| f.get());
+        #[cfg(not(test))]
+        let reference = false;
+        if reference {
+            for i in 0..n {
+                for din in 0..ND {
+                    let d0 = dist[i][din];
+                    if !d0.is_finite() {
+                        continue;
                     }
-                }
-                if !js.contains(&(n - 1)) && n - 1 > i {
-                    js.push(n - 1);
-                }
-                for &j in &js {
-                    let (p, q) = (nodes[i].0, nodes[j].0);
-                    let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
-                    if i == 0 {
-                        if let Some(x) = exits[0] {
-                            let p2 = p + x.axis * x.reach;
-                            if (q - p).dot(x.axis) > x.reach {
-                                for mut s in connectors(p2, q) {
-                                    s.insert(0, (p2, octi_dir(x.axis)));
-                                    shapes.push(s);
+                    let (u_in, l_in) = last[i][din];
+                    let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
+                    if let Some(j) = next_on[i] {
+                        if !js.contains(&j) {
+                            js.push(j);
+                        }
+                    }
+                    if !js.contains(&(n - 1)) && n - 1 > i {
+                        js.push(n - 1);
+                    }
+                    for &j in &js {
+                        let (p, q) = (nodes[i].0, nodes[j].0);
+                        let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
+                        if i == 0 {
+                            if let Some(x) = exits[0] {
+                                let p2 = p + x.axis * x.reach;
+                                if (q - p).dot(x.axis) > x.reach {
+                                    for mut s in connectors(p2, q) {
+                                        s.insert(0, (p2, octi_dir(x.axis)));
+                                        shapes.push(s);
+                                    }
                                 }
                             }
                         }
-                    }
-                    if j == n - 1 {
-                        if let Some(x) = exits[1] {
-                            let q2 = q + x.axis * x.reach;
-                            if (p - q).dot(x.axis) > x.reach {
-                                for mut s in connectors(p, q2) {
-                                    s.push((q, octi_dir(-x.axis)));
-                                    shapes.push(s);
+                        if j == n - 1 {
+                            if let Some(x) = exits[1] {
+                                let q2 = q + x.axis * x.reach;
+                                if (p - q).dot(x.axis) > x.reach {
+                                    for mut s in connectors(p, q2) {
+                                        s.push((q, octi_dir(-x.axis)));
+                                        shapes.push(s);
+                                    }
                                 }
                             }
                         }
-                    }
-                    // A piece of the taut path itself (any angle), between consecutive nodes on it.
-                    if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
-                        shapes.push(vec![(q, None)]);
-                    }
-                    for s in shapes {
-                        // Price.
-                        let mut c = 0.0;
-                        let (mut u, mut l, mut from) = (u_in, l_in, p);
-                        // One any-angle stretch pays its per-stretch price once, however many
-                        // pieces of the taut path it is made of.
-                        let mut prev_any = din == 8 && i != 0;
-                        let mut ok = true;
-                        for (k, &(e, dk)) in s.iter().enumerate() {
-                            let d = e - from;
-                            let len = d.len();
-                            if len < 1.0 {
+                        // A piece of the taut path itself (any angle), between consecutive nodes on it.
+                        if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
+                            shapes.push(vec![(q, None)]);
+                        }
+                        for s in shapes {
+                            // Price.
+                            let mut c = 0.0;
+                            let (mut u, mut l, mut from) = (u_in, l_in, p);
+                            // One any-angle stretch pays its per-stretch price once, however many
+                            // pieces of the taut path it is made of.
+                            let mut prev_any = din == 8 && i != 0;
+                            let mut ok = true;
+                            for (k, &(e, dk)) in s.iter().enumerate() {
+                                let d = e - from;
+                                let len = d.len();
+                                if len < 1.0 {
+                                    continue;
+                                }
+                                let v = d * (1.0 / len);
+                                let b = bend(u, l, v);
+                                if !b.is_finite() {
+                                    ok = false;
+                                    break;
+                                }
+                                c += len + b + room(from, e);
+                                if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
+                                    c -= cfg.pull * follow(from, e, kk);
+                                }
+                                if dk.is_none() {
+                                    c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
+                                }
+                                prev_any = dk.is_none();
+                                if i == 0 && k == 0 {
+                                    c += axis_price(&exits[0], v, len);
+                                }
+                                if j == n - 1 && k == s.len() - 1 {
+                                    c += axis_price(&exits[1], v, len);
+                                }
+                                u = v;
+                                l = len;
+                                from = e;
+                            }
+                            if !ok {
                                 continue;
                             }
-                            let v = d * (1.0 / len);
-                            let b = bend(u, l, v);
-                            if !b.is_finite() {
-                                ok = false;
-                                break;
+                            let dout = s.last().and_then(|x| x.1).unwrap_or(8);
+                            if d0 + c >= dist[j][dout] {
+                                continue;
                             }
-                            c += len + b + room(from, e);
-                            if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
-                                c -= cfg.pull * follow(from, e, kk);
+                            // Legality (the taut segment is legal as drawn).
+                            let mut from = p;
+                            let mut leg_ok = true;
+                            for &(e, dk) in &s {
+                                if (e - from).len2() >= 1.0 && dk.is_some() && !legal(from, e) {
+                                    leg_ok = false;
+                                    break;
+                                }
+                                from = e;
                             }
-                            if dk.is_none() {
-                                c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
+                            if !leg_ok {
+                                continue;
                             }
-                            prev_any = dk.is_none();
-                            if i == 0 && k == 0 {
-                                c += axis_price(&exits[0], v, len);
-                            }
-                            if j == n - 1 && k == s.len() - 1 {
-                                c += axis_price(&exits[1], v, len);
-                            }
-                            u = v;
-                            l = len;
-                            from = e;
+                            dist[j][dout] = d0 + c;
+                            last[j][dout] = (u, l);
+                            back[j][dout] = Some((i, din, s));
                         }
-                        if !ok {
-                            continue;
-                        }
-                        let dout = s.last().and_then(|x| x.1).unwrap_or(8);
-                        if d0 + c >= dist[j][dout] {
-                            continue;
-                        }
-                        // Legality (the taut segment is legal as drawn).
-                        let mut from = p;
-                        let mut leg_ok = true;
-                        for &(e, dk) in &s {
-                            if (e - from).len2() >= 1.0 && dk.is_some() && !legal(from, e) {
-                                leg_ok = false;
-                                break;
+                    }
+                }
+            }
+        } else {
+            for i in 0..n {
+                let mut js: Option<Vec<usize>> = None;
+                let mut pre: Vec<Option<Vec<Shape>>> = Vec::new();
+                for din in 0..ND {
+                    let d0 = dist[i][din];
+                    if !d0.is_finite() {
+                        continue;
+                    }
+                    let (u_in, l_in) = last[i][din];
+                    let js = js.get_or_insert_with(|| {
+                        let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
+                        if let Some(j) = next_on[i] {
+                            if !js.contains(&j) {
+                                js.push(j);
                             }
-                            from = e;
                         }
-                        if !leg_ok {
-                            continue;
+                        if !js.contains(&(n - 1)) && n - 1 > i {
+                            js.push(n - 1);
                         }
-                        dist[j][dout] = d0 + c;
-                        last[j][dout] = (u, l);
-                        back[j][dout] = Some((i, din, s));
+                        js
+                    });
+                    if pre.len() < js.len() {
+                        pre.resize_with(js.len(), || None);
+                    }
+                    for (jx, &j) in js.iter().enumerate() {
+                        let (p, q) = (nodes[i].0, nodes[j].0);
+                        let shapes = pre[jx].get_or_insert_with(|| {
+                            let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
+                            if i == 0 {
+                                if let Some(x) = exits[0] {
+                                    let p2 = p + x.axis * x.reach;
+                                    if (q - p).dot(x.axis) > x.reach {
+                                        for mut s in connectors(p2, q) {
+                                            s.insert(0, (p2, octi_dir(x.axis)));
+                                            shapes.push(s);
+                                        }
+                                    }
+                                }
+                            }
+                            if j == n - 1 {
+                                if let Some(x) = exits[1] {
+                                    let q2 = q + x.axis * x.reach;
+                                    if (p - q).dot(x.axis) > x.reach {
+                                        for mut s in connectors(p, q2) {
+                                            s.push((q, octi_dir(-x.axis)));
+                                            shapes.push(s);
+                                        }
+                                    }
+                                }
+                            }
+                            // A piece of the taut path itself (any angle), between consecutive nodes on it.
+                            if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
+                                shapes.push(vec![(q, None)]);
+                            }
+                            shapes
+                                .into_iter()
+                                .map(|s| {
+                                    let mut legs = Vec::with_capacity(s.len());
+                                    let mut from = p;
+                                    for (k, &(e, dk)) in s.iter().enumerate() {
+                                        let d = e - from;
+                                        let len = d.len();
+                                        if len < 1.0 {
+                                            continue;
+                                        }
+                                        let v = d * (1.0 / len);
+                                        let rv = room(from, e);
+                                        let fv = match (dk, pull_on) {
+                                            (Some(kk), true) => follow(from, e, kk),
+                                            _ => 0.0,
+                                        };
+                                        legs.push((k, len, v, rv, fv, dk));
+                                        from = e;
+                                    }
+                                    Shape { s, legs, legal: None }
+                                })
+                                .collect()
+                        });
+                        for sh in shapes.iter_mut() {
+                            // Price.
+                            let mut c = 0.0;
+                            let (mut u, mut l) = (u_in, l_in);
+                            // One any-angle stretch pays its per-stretch price once, however many
+                            // pieces of the taut path it is made of.
+                            let mut prev_any = din == 8 && i != 0;
+                            let mut ok = true;
+                            let sn = sh.s.len();
+                            for &(k, len, v, rv, fv, dk) in &sh.legs {
+                                let b = bend(u, l, v);
+                                if !b.is_finite() {
+                                    ok = false;
+                                    break;
+                                }
+                                c += len + b + rv;
+                                if let (Some(_), true) = (dk, pull_on) {
+                                    c -= cfg.pull * fv;
+                                }
+                                if dk.is_none() {
+                                    c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
+                                }
+                                prev_any = dk.is_none();
+                                if i == 0 && k == 0 {
+                                    c += axis_price(&exits[0], v, len);
+                                }
+                                if j == n - 1 && k == sn - 1 {
+                                    c += axis_price(&exits[1], v, len);
+                                }
+                                u = v;
+                                l = len;
+                            }
+                            if !ok {
+                                continue;
+                            }
+                            let dout = sh.s.last().and_then(|x| x.1).unwrap_or(8);
+                            if d0 + c >= dist[j][dout] {
+                                continue;
+                            }
+                            // Legality (the taut segment is legal as drawn).
+                            let leg_ok = *sh.legal.get_or_insert_with(|| {
+                                let mut from = p;
+                                for &(e, dk) in &sh.s {
+                                    if (e - from).len2() >= 1.0 && dk.is_some() && !legal(from, e) {
+                                        return false;
+                                    }
+                                    from = e;
+                                }
+                                true
+                            });
+                            if !leg_ok {
+                                continue;
+                            }
+                            dist[j][dout] = d0 + c;
+                            last[j][dout] = (u, l);
+                            back[j][dout] = Some((i, din, sh.s.clone()));
+                        }
                     }
                 }
             }
@@ -815,8 +977,7 @@ impl Drawer<'_> {
                 }
             }
         }
-        let boxes = tris.iter().map(|t| bbox_of(t)).collect();
-        Strip { tris, boxes, walls }
+        Strip::new(tris, walls)
     }
 
     /// Octagon vertices (edges at 0/45/90 degrees) around the corners of object `id` inside `bb`:

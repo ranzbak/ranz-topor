@@ -41,20 +41,96 @@ pub(super) struct Strip {
     pub(super) tris: Vec<[Vec2; 3]>,
     pub(super) boxes: Vec<Aabb>,
     pub(super) walls: Vec<(Vec2, Vec2)>,
+    /// Triangle ids per cell (empty: few triangles, `contains` scans them all).
+    grid: TriGrid,
+}
+
+/// A uniform grid over the strip's triangles: a triangle sits in every cell its box grown by
+/// [`TRI_PAD`] overlaps. `contains` accepts `p` only inside a box grown by 1 nm, and the cell of
+/// a coordinate is monotone in it, so every triangle that can hold `p` is in `p`'s cell: the
+/// grid skips only triangles the box test of the scan rejects (the result is the same; `any`
+/// does not depend on the order).
+#[derive(Default)]
+struct TriGrid {
+    lo: Vec2,
+    hi: Vec2,
+    cell: f64,
+    nx: usize,
+    ny: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+/// Below this many triangles `contains` scans them all.
+const TRI_GRID_MIN: usize = 16;
+/// Grow of a triangle box in the grid (nm), more than the 1 nm of the box test.
+const TRI_PAD: f64 = 2.0;
+
+impl TriGrid {
+    fn new(boxes: &[Aabb]) -> TriGrid {
+        if boxes.len() < TRI_GRID_MIN {
+            return TriGrid::default();
+        }
+        let mut lo = Vec2 { x: f64::INFINITY, y: f64::INFINITY };
+        let mut hi = Vec2 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY };
+        for b in boxes {
+            lo = Vec2 { x: lo.x.min(b.min.x - TRI_PAD), y: lo.y.min(b.min.y - TRI_PAD) };
+            hi = Vec2 { x: hi.x.max(b.max.x + TRI_PAD), y: hi.y.max(b.max.y + TRI_PAD) };
+        }
+        if !(lo.x.is_finite() && lo.y.is_finite() && hi.x.is_finite() && hi.y.is_finite()) {
+            return TriGrid::default();
+        }
+        let side = (hi.x - lo.x).max(hi.y - lo.y).max(1.0);
+        let cell = (side / (boxes.len() as f64).sqrt()).max(1.0);
+        let nx = (((hi.x - lo.x) / cell).ceil() as usize).clamp(1, 256);
+        let ny = (((hi.y - lo.y) / cell).ceil() as usize).clamp(1, 256);
+        let mut g = TriGrid { lo, hi, cell, nx, ny, cells: vec![Vec::new(); nx * ny] };
+        for (i, b) in boxes.iter().enumerate() {
+            for y in g.slot(b.min.y - TRI_PAD, lo.y, ny)..=g.slot(b.max.y + TRI_PAD, lo.y, ny) {
+                for x in g.slot(b.min.x - TRI_PAD, lo.x, nx)..=g.slot(b.max.x + TRI_PAD, lo.x, nx) {
+                    g.cells[y * nx + x].push(i as u32);
+                }
+            }
+        }
+        g
+    }
+
+    /// The cell index of coordinate `v` (monotone in `v`, clamped to the grid).
+    fn slot(&self, v: f64, lo: f64, n: usize) -> usize {
+        (((v - lo) / self.cell).floor().max(0.0) as usize).min(n - 1)
+    }
 }
 
 impl Strip {
+    pub(super) fn new(tris: Vec<[Vec2; 3]>, walls: Vec<(Vec2, Vec2)>) -> Strip {
+        let boxes: Vec<Aabb> = tris.iter().map(|t| bbox_of(t)).collect();
+        let grid = TriGrid::new(&boxes);
+        Strip { tris, boxes, walls, grid }
+    }
+
+    /// `p` lies in (or on the boundary of) triangle `i` of the sleeve.
+    #[inline]
+    fn in_tri(&self, i: usize, p: Vec2) -> bool {
+        let (t, bb) = (&self.tris[i], &self.boxes[i]);
+        if p.x < bb.min.x - 1.0 || p.x > bb.max.x + 1.0 || p.y < bb.min.y - 1.0 || p.y > bb.max.y + 1.0 {
+            return false;
+        }
+        let d = |a: Vec2, b: Vec2| (b - a).cross(p - a);
+        let (d1, d2, d3) = (d(t[0], t[1]), d(t[1], t[2]), d(t[2], t[0]));
+        let tol = -2.0 * (t[1] - t[0]).len().max((t[2] - t[1]).len()).max(1.0);
+        d1 >= tol && d2 >= tol && d3 >= tol
+    }
+
     /// `p` lies in (or on the boundary of) a triangle of the sleeve.
     pub(super) fn contains(&self, p: Vec2) -> bool {
-        self.tris.iter().zip(&self.boxes).any(|(t, bb)| {
-            if p.x < bb.min.x - 1.0 || p.x > bb.max.x + 1.0 || p.y < bb.min.y - 1.0 || p.y > bb.max.y + 1.0 {
-                return false;
-            }
-            let d = |a: Vec2, b: Vec2| (b - a).cross(p - a);
-            let (d1, d2, d3) = (d(t[0], t[1]), d(t[1], t[2]), d(t[2], t[0]));
-            let tol = -2.0 * (t[1] - t[0]).len().max((t[2] - t[1]).len()).max(1.0);
-            d1 >= tol && d2 >= tol && d3 >= tol
-        })
+        let g = &self.grid;
+        if g.cells.is_empty() {
+            return (0..self.tris.len()).any(|i| self.in_tri(i, p));
+        }
+        if p.x < g.lo.x || p.x > g.hi.x || p.y < g.lo.y || p.y > g.hi.y {
+            return false;
+        }
+        let c = g.slot(p.y, g.lo.y, g.ny) * g.nx + g.slot(p.x, g.lo.x, g.nx);
+        g.cells[c].iter().any(|&i| self.in_tri(i as usize, p))
     }
 
     /// The segment `a-b` lies at least partly in the sleeve.
@@ -285,8 +361,7 @@ impl Drawer<'_> {
                 }
             }
         }
-        let boxes = tris.iter().map(|t| bbox_of(t)).collect();
-        Strip { tris, boxes, walls }
+        Strip::new(tris, walls)
     }
 
     /// Objects the wire must clear that may reach into `bb`.
@@ -1193,5 +1268,149 @@ mod tests {
             pts = np;
         }
         None
+    }
+
+    /// `Strip::contains` before the triangle grid: every triangle, box test first.
+    fn contains_ref(s: &Strip, p: Vec2) -> bool {
+        s.tris.iter().zip(&s.boxes).any(|(t, bb)| {
+            if p.x < bb.min.x - 1.0 || p.x > bb.max.x + 1.0 || p.y < bb.min.y - 1.0 || p.y > bb.max.y + 1.0 {
+                return false;
+            }
+            let d = |a: Vec2, b: Vec2| (b - a).cross(p - a);
+            let (d1, d2, d3) = (d(t[0], t[1]), d(t[1], t[2]), d(t[2], t[0]));
+            let tol = -2.0 * (t[1] - t[0]).len().max((t[2] - t[1]).len()).max(1.0);
+            d1 >= tol && d2 >= tol && d3 >= tol
+        })
+    }
+
+    /// The triangle grid of [`Strip`] answers `contains` like the scan of every triangle, on
+    /// random fans and strips (shared vertices, zero-area and needle triangles, triangles of a
+    /// few nm and of many mm) and query points on vertices, on edges, at +-1 / +-2 nm of the
+    /// boxes and far away.
+    #[test]
+    fn strip_grid_matches_the_scan_of_every_triangle() {
+        let mut g = Rng(0x9e37_79b9_7f4a_7c15);
+        let (mut hits, mut grids) = (0usize, 0usize);
+        for case in 0..300 {
+            let n = [3usize, 15, 16, 17, 40, 120, 400][case % 7];
+            let scale = [5.0, 1e4, 1e6, 2e7][g.int(0, 3) as usize];
+            let mut pts: Vec<Vec2> = Vec::new();
+            let mut tris: Vec<[Vec2; 3]> = Vec::new();
+            let o = Vec2 { x: 1e8 * g.f(), y: -1e8 * g.f() };
+            for k in 0..n {
+                let rnd = |g: &mut Rng| o + Vec2 { x: (g.f() * 30.0).round() * scale, y: (g.f() * 30.0).round() * scale };
+                let t = match g.int(0, 4) {
+                    // A strip: shares an edge with the last triangle.
+                    0 | 1 if k > 0 => {
+                        let l = tris[k - 1];
+                        [l[1], l[2], rnd(&mut g)]
+                    }
+                    // Zero area: three points on a line.
+                    2 => {
+                        let (a, b) = (rnd(&mut g), rnd(&mut g));
+                        [a, b, a + (b - a) * 0.5]
+                    }
+                    // A needle / a point triangle.
+                    3 => {
+                        let a = rnd(&mut g);
+                        [a, a, a + Vec2 { x: scale * g.f(), y: 0.0 }]
+                    }
+                    _ => [rnd(&mut g), rnd(&mut g), rnd(&mut g)],
+                };
+                pts.extend(t);
+                tris.push(t);
+            }
+            let s = Strip::new(tris, Vec::new());
+            grids += usize::from(!s.grid.cells.is_empty());
+            for _ in 0..400 {
+                let p = match g.int(0, 5) {
+                    0 => pts[g.int(0, pts.len() as i64 - 1) as usize],
+                    1 => {
+                        let t = s.tris[g.int(0, s.tris.len() as i64 - 1) as usize];
+                        let (a, b) = (t[g.int(0, 2) as usize], t[g.int(0, 2) as usize]);
+                        a + (b - a) * g.f()
+                    }
+                    2 => {
+                        let bb = s.boxes[g.int(0, s.boxes.len() as i64 - 1) as usize];
+                        let d = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5][g.int(0, 8) as usize];
+                        let (x, y) = if g.int(0, 1) == 0 { (bb.min.x - d, bb.min.y + (bb.max.y - bb.min.y) * g.f()) } else { (bb.max.x + d, bb.max.y + d) };
+                        Vec2 { x, y }
+                    }
+                    3 => o + Vec2 { x: (g.f() * 34.0 - 2.0) * scale, y: (g.f() * 34.0 - 2.0) * scale },
+                    4 => o + Vec2 { x: (g.f() - 0.5) * 1e9, y: (g.f() - 0.5) * 1e9 },
+                    _ => {
+                        let t = s.tris[g.int(0, s.tris.len() as i64 - 1) as usize];
+                        (t[0] + t[1] + t[2]) * (1.0 / 3.0) + Vec2 { x: g.f() * 4.0 - 2.0, y: g.f() * 4.0 - 2.0 }
+                    }
+                };
+                let want = contains_ref(&s, p);
+                hits += usize::from(want);
+                assert_eq!(s.contains(p), want, "case {case} p {p:?}");
+            }
+        }
+        assert!(grids > 150 && hits > 20_000, "{grids} {hits}");
+    }
+
+    /// Fields like [`with_fields`], the drawn copper of nets 2 and 3 octilinear (0 / 45 / 90
+    /// degree tracks, the bundle neighbours `follow` prices) and any angle.
+    fn with_octi_fields(f: &mut dyn FnMut(&Drawer, &mut Rng)) {
+        for seed in 1..=4u64 {
+            let mut g = Rng(0x2f_1c_93_aa_51_08_6d_e3 ^ seed);
+            let m = field(&mut g);
+            let b = board::build(&m, &BuildOpts::default()).unwrap();
+            let conns = b.connections(&m);
+            let mut st = State::new(&b.proj);
+            let c = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
+            st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+            let opts = Options::default();
+            let checker = Checker::new(&m, &opts);
+            let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+            for _ in 0..40 {
+                let a = pt(&mut g);
+                let e = match g.int(0, 2) {
+                    0 => pt(&mut g),
+                    _ => a + super::super::octi::dir(g.int(0, 7) as usize) * (0.5 + 4.0 * g.f()) * MM,
+                };
+                let net = g.int(2, 3) as i32;
+                dr.commit(&track_item(net, [0u32, 2][g.int(0, 1) as usize], 150_000.0 + 200_000.0 * g.f(), a, e, None));
+            }
+            f(&dr, &mut g);
+        }
+    }
+
+    /// `octilinear` with its per-pair shape cache returns the same run as the DP loop that builds
+    /// and prices every connector shape for every arrival state (`OCTI_REF`), on random any-angle
+    /// runs of the routed wire with and without pad exits.
+    #[test]
+    fn octilinear_shape_cache_matches_the_reference_loop() {
+        use super::super::octi::OCTI_REF;
+        let (mut some, mut runs) = (0, 0);
+        with_octi_fields(&mut |dr, g| {
+            let wi = &dr.st.wires[0];
+            let k1 = wi.passes.len();
+            let poly = dr.st.polyline(0);
+            for _ in 0..10 {
+                let mut pts = poly.clone();
+                for p in pts.iter_mut().skip(1).take(poly.len().saturating_sub(2)) {
+                    *p = *p + Vec2 { x: (g.f() - 0.5) * 0.4 * MM, y: (g.f() - 0.5) * 0.4 * MM };
+                }
+                let exits = match g.int(0, 2) {
+                    0 => [None, None],
+                    _ => [dr.pad_exit(0, 0, pts[1]), dr.pad_exit(0, 1, pts[pts.len() - 2])],
+                };
+                let layer = g.int(0, 1) as usize;
+                let relax = [0.0, 20_000.0][g.int(0, 1) as usize];
+                OCTI_REF.with(|f| f.set(false));
+                let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
+                OCTI_REF.with(|f| f.set(true));
+                let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
+                OCTI_REF.with(|f| f.set(false));
+                runs += 1;
+                some += usize::from(want.is_some());
+                let bits = |v: &Option<super::super::octi::OctiOut>| v.as_ref().map(|o| o.pts.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>());
+                assert_eq!(bits(&got), bits(&want));
+            }
+        });
+        assert!(some > 10, "{some} of {runs}");
     }
 }
