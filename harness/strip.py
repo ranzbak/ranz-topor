@@ -97,8 +97,10 @@ def upgrade_copy(pcb: Path) -> bool:
     return True
 
 
-def prepare(board: str, out_dir: Path, *, whole_project: bool = False, name: str | None = None) -> tuple[ProjectCopy, ProjectCopy, StripReport]:
-    """(hand copy, stripped input copy, report); the source is verified unchanged."""
+def prepare(board: str, out_dir: Path, *, whole_project: bool = False, name: str | None = None,
+            keep_copper: bool = False) -> tuple[ProjectCopy, ProjectCopy, StripReport]:
+    """(hand copy, stripped input copy, report); the source is verified unchanged. `keep_copper`
+    (exist-term: a half-routed board): the input keeps its tracks and vias (nothing stripped)."""
     src, default_name = _src(board)
     name = name or default_name
     out_dir = Path(out_dir)
@@ -108,8 +110,11 @@ def prepare(board: str, out_dir: Path, *, whole_project: bool = False, name: str
     upgraded = upgrade_copy(hand.pcb)  # old-format boards: both copies, never the source
     if upgraded:
         upgrade_copy(inp.pcb)
-    text, rep = strip_text(inp.pcb.read_text())
-    inp.pcb.write_text(text)
+    if keep_copper:
+        rep = StripReport()
+    else:
+        text, rep = strip_text(inp.pcb.read_text())
+        inp.pcb.write_text(text)
     assert_unchanged(src.parent, hand.src_hashes)
     return hand, inp, rep
 

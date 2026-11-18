@@ -105,7 +105,7 @@ def board_netclasses(pc) -> tuple:
 
 def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, timeout_s: float | None = None,
                 clock: str | None = None, whole_project: bool = False, png: bool = True, name: str | None = None,
-                declared_layers: bool = False, expected: Path | None = None) -> dict:
+                declared_layers: bool = False, expected: Path | None = None, keep_copper: bool = False) -> dict:
     import topor_engine
     strip = _load_strip()
     from harness.model import export_model, load_board
@@ -120,7 +120,7 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     t_start = time.monotonic()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    hand, inp, srep = strip.prepare(board, out_dir, whole_project=whole_project, name=name)
+    hand, inp, srep = strip.prepare(board, out_dir, whole_project=whole_project, name=name, keep_copper=keep_copper)
     name = Path(inp.pcb).parent.name.removesuffix("-input")
 
     hb = load_board(hand)
@@ -366,6 +366,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--declared-layers", action="store_true",
                     help="route every copper layer the board declares as signal (default: the plugin's layer roles)")
     ap.add_argument("--name", default=None, help="board name in file names (default: key or pcb stem)")
+    ap.add_argument("--keep-copper", action="store_true",
+                    help="route the board as it is (a half-routed board: its tracks and vias stay; nothing is stripped)")
     ap.add_argument("--expected", type=Path, default=None,
                     help="expected.json whose rules_assumed the validity gate uses (default: the pattern's own, "
                          "next to or one level above the board; none: the board's own files)")
@@ -376,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     m = route_board(a.board, a.out_dir, overrides=dict(_kv(s) for s in a.set), timeout_s=a.timeout, clock=a.clock,
                     whole_project=a.whole_project, png=not a.no_png, name=a.name,
-                    declared_layers=a.declared_layers, expected=a.expected)
+                    declared_layers=a.declared_layers, expected=a.expected, keep_copper=a.keep_copper)
     print(summary(m))
     return 0
 

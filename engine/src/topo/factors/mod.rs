@@ -39,7 +39,7 @@ mod via;
 mod via_squeeze;
 mod violation;
 
-pub use branch::junction_psi;
+pub use branch::{dangling_turn_shape, junction_psi};
 pub use necking::necking_amount;
 pub use squeeze::squeeze_amount;
 pub use violation::violation_amount;
@@ -94,6 +94,10 @@ pub enum Event {
     /// trace of its net) at `deg` degrees to the nearest arm already there; `ws_mm` is the new
     /// trace's width plus clearance (mm), the scale of the wedge it leaves.
     JunctionAngle { at: Vec2, deg: f64, ws_mm: f64 },
+    /// exist-term: a new trace leaves a continued dangling end (`[search] dangling_ends =
+    /// "continue"`) at `deg` degrees off the direction the hand-started track asks for; `ws_mm`
+    /// is the trace's width plus clearance (mm).
+    DanglingTurn { at: Vec2, deg: f64, ws_mm: f64 },
     /// Written copper breaks a KiCad rule (M-B1 never drop): `kind` (`clearance`, `short`,
     /// `hole_clearance`, `edge_clearance`, `connection_width`), the place, the layer name,
     /// `depth_nm` below the rule over `len_nm`, the object it is too close to, and the `cause` (why
@@ -270,6 +274,8 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         // Last: the fluctuation draws and the per-factor oscillation phases of the factors
         // before it stay as they were (one draw per factor in registry order).
         Box::new(shrinkage::Shrinkage),
+        // exist-term: after the last, so the draws of every factor before it stay as they were.
+        Box::new(branch::DanglingTurn),
     ]
 }
 
@@ -562,8 +568,10 @@ mod tests {
         assert_eq!(w(&[]), Some(30.0), "default = the necking default");
         assert_eq!(w(&[("necking", 12.0)]), Some(12.0), "follows the necking setting");
         assert_eq!(w(&[("necking", 12.0), ("shrinkage", 4.0)]), Some(4.0), "its own setting wins");
-        // It prices no P2 event (the cut model reads the weight), and it is the last factor.
+        // It prices no P2 event (the cut model reads the weight); factors after it are appended
+        // (exist-term: dangling_turn), so the earlier factors' fluctuation draws stay the same.
         assert_eq!(Registry::standard().price(&ev_cross(), &WireCtx::default()), 20.0);
-        assert_eq!(standard_factors().last().map(|f| f.name()), Some("shrinkage"));
+        let names: Vec<&str> = standard_factors().iter().map(|f| f.name()).collect();
+        assert_eq!(&names[names.len() - 2..], ["shrinkage", "dangling_turn"]);
     }
 }

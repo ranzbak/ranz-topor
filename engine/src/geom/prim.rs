@@ -167,7 +167,9 @@ impl Arc {
         let u = m - s;
         let v = e - s;
         let cr = u.cross(v);
-        if cr.abs() < 1e-6 * v.len2() {
+        // collinear, and (exist-term r2, the kept-track fuzz) start == end: `v` = 0 made the
+        // test `0 < 0` false and the centre 0 / 0 = NaN (a zero-length arc gave NaN copper)
+        if cr.abs() < 1e-6 * v.len2() || cr == 0.0 {
             return None;
         }
         let u2 = u.len2();
@@ -294,6 +296,17 @@ mod split_tests {
             }
             assert!((tot - a.sweep).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn three_points_with_start_on_end_is_no_arc() {
+        // exist-term r2: a zero-length arc (start = mid = end) and a closed one (start = end) are
+        // no arc (None), not an arc with a NaN centre
+        let p = Vec2 { x: 3e6, y: -1e6 };
+        assert!(Arc::from_three_points(p, p, p).is_none());
+        assert!(Arc::from_three_points(p, Vec2 { x: 4e6, y: -1e6 }, p).is_none());
+        let a = Arc::from_three_points(p, Vec2 { x: 4e6, y: 0.0 }, Vec2 { x: 5e6, y: -1e6 }).expect("a real arc");
+        assert!(a.c.x.is_finite() && a.r.is_finite() && a.sweep > 0.0);
     }
 
     #[test]

@@ -113,6 +113,12 @@ struct LoopCtr {
     local_changed: std::cell::Cell<usize>,
     /// `TOPO_LOCALCHECK` (debug): partner links of the local layerings that point nowhere.
     local_faults: std::cell::Cell<usize>,
+    /// `TOPO_LOCALCHECK`: the held-held crossings the local layerings leave unpriced
+    /// ([`layers::unpriced_crossings`]; 0 when the judge is exact).
+    local_unpriced: std::cell::Cell<usize>,
+    /// `TOPO_LOCALCHECK`: the held events whose crossing partner the move killed
+    /// ([`layers::stale_held_events`]; 0 when the judge is exact).
+    local_stale: std::cell::Cell<usize>,
 }
 
 impl LoopCtr {
@@ -348,7 +354,11 @@ fn nothing_to_draw(model: &BoardModel, opts: &Options, ctl: &RunControl, why: &s
 /// (a Cancel leaves its own). `None` without a limit. O(connections).
 fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option<crate::route::LimitReport> {
     let limit_s = ctl.limit.seconds()?;
-    let runtime_s = r.runtime_s;
+    // The limit's own clock (its `start`, taken when the caller built the RunControl), not `r.runtime_s`
+    // (from `route_topo`'s `t0`, later): a limit reached just before the run ended would read "not
+    // reached" while a stop test had already cut a step on it (limit-flake 2026-11-18: cut_steps
+    // named the via reduction with reached = false and no step).
+    let runtime_s = ctl.limit.elapsed_s().max(r.runtime_s);
     let mode = if opts.timeout_mode == "hard" { "hard" } else { "soft" };
     let reached = runtime_s >= limit_s;
     let step = if reached { ctl.snapshot().limit_step } else { String::new() };
@@ -1682,6 +1692,18 @@ pub fn fuse_line(fused: &[(f64, f64)]) -> String {
     )
 }
 
+/// The octilinear polish's report line: `n` segments redrawn as an elbow or Z, which changed the
+/// copper's length by `added_mm` (an elbow is never shorter than the straight segment it
+/// replaces: after many fuses the polish gives back part of the length the fuse line reports
+/// saved, e.g. 3.0 of 8.5 mm on the esp USB crop with 48 fuses, hotfix-main 2026-11-18). O(1).
+pub fn polish_line(n: usize, added_mm: f64) -> String {
+    format!(
+        "octilinear polish after drawing: {n} segments not at 0/45/90 degrees (fused branch ends) redrawn as an elbow or Z: {:.1} mm {} in length",
+        added_mm.abs(),
+        if added_mm >= 0.0 { "added" } else { "saved" }
+    )
+}
+
 /// Start of the line (`[optimize] loop = "cycles"` only) that says what a whole-route cycle hands
 /// the next one: room hints, connections with their own history, edges with history (M6 R2: the
 /// TopoR loop computes none of it).
@@ -1817,7 +1839,144 @@ pub fn probe(model: &BoardModel, opts: &Options) -> Probe {
 /// The projection's build options of a route: `[search] steiner` adds the Steiner grid (4.2).
 fn build_opts(opts: &Options) -> BuildOpts {
     let d = BuildOpts::default();
-    BuildOpts { steiner_mm: if opts.steiner { d.steiner_mm } else { 0.0 }, existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, ..d }
+    BuildOpts { steiner_mm: if opts.steiner { d.steiner_mm } else { 0.0 }, existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, kept_tracks: true, lead_margin_nm: opts.margin_nm.max(0) as f64 + super::pack::DRAW_TOL_NM, ..d }
+}
+
+/// The failure reason of a connection whose ends the topological core does not route: an end on
+/// a pour other than a pad's (pads join pours through plane stubs, 4.4), or a branch point. Names
+/// what the two ends are (exist-term r2: the text was "an existing via or track end joined to a
+/// pour" for every pour pair). O(1).
+fn unsupported_ends(ta: &TermKind, tb: &TermKind) -> String {
+    let what = |t: &TermKind| match t {
+        TermKind::Pad(_) => "a pad",
+        TermKind::Via(_) => "an existing via",
+        TermKind::Copper(_) => "an existing track end",
+        TermKind::Dangling(..) => "a dangling track end",
+        TermKind::Pour(_) => "a pour",
+        TermKind::Junction => "a branch point on a routed trace",
+    };
+    let pour = |t: &TermKind| matches!(t, TermKind::Pour(_));
+    match (pour(ta), pour(tb)) {
+        (true, true) => "a pour joined to another pour: not routed by the topological core (a pour joins its net through pads, plane stubs and its own copper)".to_string(),
+        (true, false) if matches!(tb, TermKind::Pad(_)) => "a pour joined to a pad with the pour as the first end: not routed by the topological core (it wires a pad to its pour only as pad -> pour, through a plane stub)".to_string(),
+        (true, _) | (_, true) => format!(
+            "{} joined to a pour: not supported by the topological core yet (existing vias and track ends are terminals towards pads, vias and tracks; a pad joins its pour through a plane stub)",
+            what(if pour(ta) { tb } else { ta })
+        ),
+        _ => format!("{} to {}: a branch point is no terminal the topological core routes from", what(ta), what(tb)),
+    }
+}
+
+/// exist-term: where a connection end on existing copper attaches (design note
+/// docs/dev/design/exist-term.md). TopoR grows new wires from fixed wires and vias (6.3 manual
+/// pp. 110-111: "an unfixed wire is created between the object you are moving and the fixed
+/// wire").
+#[derive(Clone, Debug, PartialEq)]
+enum ExistEnd {
+    /// A kept-track end inside an own-net pad (index into `model.pads`): that pad.
+    Pad(usize),
+    /// An existing via, or a kept-track end inside an own-net via (index into `model.vias`).
+    Via(usize),
+    /// A kept-track end elsewhere, on the track `kept` (index into `model.kept`) at `at` on its
+    /// layer. `dangling`: a free end of a hand-started track (the connection starts there);
+    /// `dir`: the direction to continue it (`[search] dangling_ends = "continue"`).
+    Kept { kept: usize, at: Vec2, dangling: bool, dir: Option<Vec2> },
+}
+
+/// exist-term: the [`ExistEnd`] of connection end `t` of net `net`; `None` for a pad, a pour, a
+/// junction or a kept item the model does not have. O(pads + vias of the model).
+fn exist_end(m: &BoardModel, net: i32, t: &TermRef) -> Option<ExistEnd> {
+    let (uuid, dangling, dir) = match &t.kind {
+        TermKind::Via(i) => return Some(ExistEnd::Via(*i)),
+        TermKind::Copper(u) => (u, false, None),
+        TermKind::Dangling(u, d) => (u, true, d.map(|d| Vec2 { x: d[0], y: d[1] })),
+        _ => return None,
+    };
+    let kept = m.kept.iter().position(|k| &k.uuid == uuid)?;
+    let layer = m.kept[kept].layer;
+    let at = t.at;
+    let dot = crate::geom::Prim::Seg(crate::geom::Seg { a: at, b: at });
+    if let Some(i) = m.pads.iter().position(|p| p.net == net && p.layers.contains(&layer) && crate::geom::dist::dist_prim_skeleton(&dot, &m.skeleton(p, layer)) <= 0.0) {
+        return Some(ExistEnd::Pad(i));
+    }
+    let all = m.all_layer_ids();
+    if let Some(i) = m.vias.iter().position(|v| v.net == net && crate::model::via_layers(&v.layers, &all).contains(&layer) && (v.at.to_vec2() - at).len() <= 0.5 * v.d as f64) {
+        return Some(ExistEnd::Via(i));
+    }
+    Some(ExistEnd::Kept { kept, at, dangling, dir })
+}
+
+/// exist-term: the terminals on existing copper the projection gets ([`board::Extra::KeptEnd`])
+/// and, per copper cluster of the decomposition (`Decomposition::kept_cluster`), the points of
+/// them that lie on that cluster (the candidates a connection from it may start at). A dangling
+/// end is one terminal (with its lead when it is continued); a connection from any other kept
+/// end may join its cluster's kept copper anywhere (lead 2026-11-17: the whole own-net track is
+/// the terminal, a free T at the cheapest point; memory through-own-pad-routing): one disc every
+/// `2 (w + s)` along each kept track of the cluster, the track ends included, none inside an
+/// own-net pad or via (that copper is a terminal itself). O(kept tracks of the clusters x
+/// samples x pads of the net).
+fn exist_requests(m: &BoardModel, opts: &Options, dec: &crate::decompose::Decomposition, layers: &[u32]) -> (Vec<board::Extra>, BTreeMap<usize, Vec<Vec2>>) {
+    let mut out: Vec<board::Extra> = Vec::new();
+    let mut seen: Vec<(i32, Vec2)> = Vec::new();
+    let mut cands: BTreeMap<usize, Vec<Vec2>> = BTreeMap::new();
+    let mut push = |out: &mut Vec<board::Extra>, x: board::Extra, net: i32, at: Vec2| {
+        if !seen.iter().any(|&(n, q)| n == net && (q - at).len() <= 2.0) {
+            seen.push((net, at));
+            out.push(x);
+        }
+    };
+    let all = m.all_layer_ids();
+    let own_copper = |net: i32, layer: u32, p: Vec2, r: f64| {
+        let dot = crate::geom::Prim::Seg(crate::geom::Seg { a: p, b: p });
+        m.pads.iter().any(|q| q.net == net && q.layers.contains(&layer) && crate::geom::dist::dist_prim_skeleton(&dot, &m.skeleton(q, layer)) <= r)
+            || m.vias.iter().any(|v| v.net == net && crate::model::via_layers(&v.layers, &all).contains(&layer) && (v.at.to_vec2() - p).len() <= 0.5 * v.d as f64 + r)
+    };
+    for c in &dec.connections {
+        for t in [&c.from, &c.to] {
+            let Some(ExistEnd::Kept { kept, at, dangling, dir }) = exist_end(m, c.net, t) else { continue };
+            let k = &m.kept[kept];
+            if !layers.contains(&k.layer) {
+                continue;
+            }
+            let (w, s) = (k.width as f64, (c.clearance.max(m.rules.min_clearance)) as f64);
+            if dangling {
+                let len = if opts.dangling_lead_mm > 0.0 { opts.dangling_lead_mm * MM } else { c.width as f64 + s };
+                // r5 (`dangling_lead_via`): where on the lead a via fits, net class via first (the
+                // drawing puts it there when the plan changes layer at the lead end)
+                let via = if opts.dangling_lead_via { crate::vias::lead_via_sizes(&m.rules, c.net, opts, c.width.max(k.width)) } else { Vec::new() };
+                push(&mut out, board::Extra::KeptEnd { net: c.net, layer: k.layer, at, w, s, lead: dir.map(|d| (d, len)), via }, c.net, at);
+                continue;
+            }
+            let Some(&cl) = dec.kept_cluster.get(&kept) else { continue };
+            // The planned end itself is always a terminal (a cluster may have several).
+            push(&mut out, board::Extra::KeptEnd { net: c.net, layer: k.layer, at, w, s, lead: None, via: Vec::new() }, c.net, at);
+            if let Some(pts) = cands.get_mut(&cl) {
+                if !pts.iter().any(|&q| (q - at).len() <= 2.0) {
+                    pts.push(at);
+                }
+                continue;
+            }
+            let mut pts: Vec<Vec2> = vec![at];
+            for (kj, kk) in m.kept.iter().enumerate().filter(|(kj, kk)| dec.kept_cluster.get(kj) == Some(&cl) && layers.contains(&kk.layer)) {
+                let _ = kj;
+                let (a, b) = (kk.prim.start().to_f64(), kk.prim.end().to_f64());
+                let wk = kk.width as f64;
+                let step = 2.0 * (wk + s);
+                // An arc: its two ends only (its chord is no copper).
+                let n = if matches!(kk.prim, crate::geom::quant::TrackPrim::Arc { .. }) { 0 } else { ((b - a).len() / step).floor() as usize };
+                for i in 0..=n + 1 {
+                    let p = if i > n { b } else { a + (b - a) * (i as f64 * step / (b - a).len().max(1.0)) };
+                    if pts.iter().any(|&q| (q - p).len() < 0.8 * wk.max(w)) || own_copper(c.net, kk.layer, p, 0.5 * wk) {
+                        continue;
+                    }
+                    pts.push(p);
+                    push(&mut out, board::Extra::KeptEnd { net: c.net, layer: kk.layer, at: p, w: wk, s, lead: None, via: Vec::new() }, c.net, p);
+                }
+            }
+            cands.insert(cl, pts);
+        }
+    }
+    (out, cands)
 }
 
 /// The plane stubs of a route, placed once on the static board before any topology (D6a): the
@@ -1866,6 +2025,9 @@ struct Fixed {
     alias: Option<BoardModel>,
     board: Result<board::Board, String>,
     notes: Vec<String>,
+    /// exist-term: per copper cluster of `dec` with a connection from a kept end, the points of
+    /// its kept-end terminals ([`exist_requests`]).
+    exist_cands: BTreeMap<usize, Vec<Vec2>>,
 }
 
 impl Fixed {
@@ -1876,6 +2038,7 @@ impl Fixed {
         let pairs: Pairs = if opts.diffpair_route { diffpair::plan(model, &mut dec) } else { Pairs::default() };
         let alias = (!pairs.coupled.is_empty()).then(|| diffpair::alias(model, &pairs, opts));
         let mut notes = Vec::new();
+        let mut exist_cands = BTreeMap::new();
         let board = if signal.len() < 2 {
             Err(format!("{} signal layer(s)", signal.len()))
         } else {
@@ -1885,6 +2048,10 @@ impl Fixed {
             if opts.pad_exit_stubs {
                 extra.extend(exit_requests(pm, &dec));
             }
+            // exist-term: the terminals on existing copper.
+            let (xs, cands) = exist_requests(pm, opts, &dec, &signal);
+            extra.extend(xs);
+            exist_cands = cands;
             board::build_full(pm, &build_opts(opts), &[], &extra).map(|mut b| {
                 if !b.exit_stubs.is_empty() {
                     notes.push(format!(
@@ -1909,7 +2076,7 @@ impl Fixed {
                 b
             })
         };
-        Fixed { dec, pairs, alias, board, notes }
+        Fixed { dec, pairs, alias, board, notes, exist_cands }
     }
 }
 
@@ -2430,6 +2597,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // space + track + gap + track + space ([`diffpair::Coupled::priority_width`]).
     let mut prio_w: Vec<f64> = Vec::new();
     let mut plane_reqs: Vec<planes::Req> = Vec::new();
+    // exist-term: per copper cluster with a terminal on existing copper, its net and the vertices
+    // of its copper; the dangling-end vertices; the direction each continued end asks for.
+    let mut exist_groups: BTreeMap<usize, (i32, Vec<VertId>)> = BTreeMap::new();
+    let mut exist_dang: BTreeSet<VertId> = BTreeSet::new();
+    let mut cont_dirs: BTreeMap<VertId, Vec2> = BTreeMap::new();
     for c in &dec.connections {
         let i = c.id;
         let (ta, tb) = (&c.from.kind, &c.to.kind);
@@ -2493,12 +2665,75 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }),
                 None => fail(&mut out, i, "a pad has no copper on a signal layer"),
             },
-            _ => fail(
-                &mut out,
-                i,
-                "terminal is an existing via, track end or stub: not supported by the rough topological core (S2a)",
-            ),
+            // exist-term: an end on existing copper (a via, a kept-track end) is a terminal like
+            // a pad: its pad / via obstacle or its kept-end terminal of the projection.
+            (ta, tb) if !matches!(ta, TermKind::Pour(_) | TermKind::Junction) && !matches!(tb, TermKind::Pour(_) | TermKind::Junction) => {
+                let res = |t: &TermRef| -> Result<(ObsId, VertId, Option<ExistEnd>), &'static str> {
+                    let ex = match t.kind {
+                        TermKind::Pad(p) => Some(ExistEnd::Pad(p)),
+                        _ => exist_end(model, c.net, t),
+                    };
+                    let o = match &ex {
+                        Some(ExistEnd::Pad(p)) => obs_of_pad.get(p).copied().ok_or("a pad has no copper on a signal layer")?,
+                        Some(ExistEnd::Via(v)) => b.via_obs.get(v).copied().ok_or("an existing via is not in the projection")?,
+                        Some(ExistEnd::Kept { at, .. }) => b.kept_ends.iter().find(|k| k.net == c.net && (k.at - *at).len() <= 2.0).map(|k| k.obs).ok_or("an existing track end is not on a signal layer of the projection")?,
+                        None => return Err("terminal is no copper the topological core knows"),
+                    };
+                    let v = b.centre[o].ok_or("a terminal has no net centre vertex")?;
+                    Ok((o, v, ex))
+                };
+                match (res(&c.from), res(&c.to)) {
+                    (Ok((oa, va, ea)), Ok((ob, vb, eb))) => {
+                        for (v, e) in [(va, &ea), (vb, &eb)] {
+                            if let Some(ExistEnd::Kept { kept, dangling, dir, .. }) = e {
+                                if let Some(&cl) = dec.kept_cluster.get(kept) {
+                                    exist_groups.entry(cl).or_insert_with(|| (c.net, Vec::new())).1.push(v);
+                                }
+                                if *dangling {
+                                    exist_dang.insert(v);
+                                    if let Some(d) = dir {
+                                        cont_dirs.insert(v, *d);
+                                    }
+                                }
+                            }
+                        }
+                        conn_of.push(i);
+                        conns.push(Conn { net: c.net, pa: oa, pb: ob, a: va, b: vb, w: c.width as f64, s: c.clearance as f64 });
+                        prio_w.push(c.width as f64);
+                    }
+                    (Err(e), _) | (_, Err(e)) => fail(&mut out, i, e),
+                }
+            }
+            (ta, tb) => fail(&mut out, i, unsupported_ends(ta, tb)),
         }
+    }
+    // exist-term: the copper clusters with terminals on existing copper are one piece of their
+    // net's copper before any wire (the hand copper joins them): every kept-end terminal on the
+    // cluster, its pads and vias. A connection from it starts at any of them (net trees, D5),
+    // except one whose planned end is a dangling end: that one continues the end. The
+    // decomposition picks the end only when it is the cluster's nearest port to the goal; a
+    // nearer pad or via of the cluster takes the connection and the hand stub stays dangling
+    // (known gap, decision D2; test known_gap_a_nearer_cluster_pad_takes_the_root).
+    for (&cl, g) in exist_groups.iter_mut() {
+        if let Some(pts) = fx.exist_cands.get(&cl) {
+            for p in pts {
+                if let Some(k) = b.kept_ends.iter().find(|k| k.net == g.0 && (k.at - *p).len() <= 2.0) {
+                    g.1.extend(b.centre[k.obs]);
+                }
+            }
+        }
+        for (&pi, _) in dec.pad_cluster.iter().filter(|(_, &x)| x == cl) {
+            if let Some(&o) = obs_of_pad.get(&pi) {
+                g.1.extend(b.centre[o]);
+            }
+        }
+        for (&vi, _) in dec.via_cluster.iter().filter(|(_, &x)| x == cl) {
+            if let Some(&o) = b.via_obs.get(&vi) {
+                g.1.extend(b.centre[o]);
+            }
+        }
+        g.1.sort_unstable();
+        g.1.dedup();
     }
     // 4.3 `initial = "once"`: the connections' pad pairs as the plan of the cycle before left them.
     if let Some(pl) = mem.plan.as_ref().filter(|_| opts.initial == "once") {
@@ -2515,6 +2750,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let proj = &b.proj;
     let mut st = State::new(proj);
     st.cross_vias = opts.crossing_vias == "via";
+    // exist-term: the hand copper's connectivity and the continued ends' directions.
+    for g in exist_groups.values() {
+        st.pre_join.extend(g.1.windows(2).map(|x| (x[0], x[1])));
+    }
+    st.cont_dir = cont_dirs.clone();
     // 4.3: the length the search prices (`[search] length`).
     st.taut_len = opts.search_length == "taut";
     // M-C: the plan necks a wire where its nominal width does not fit (width in P2).
@@ -2556,6 +2796,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut pad_verts: BTreeMap<i32, Vec<(VertId, ObsId)>> = BTreeMap::new();
     for c in &conns {
         pad_verts.entry(c.net).or_default().extend([(c.a, c.pa), (c.b, c.pb)]);
+    }
+    // exist-term: every vertex of the existing copper a connection may start at is an end too.
+    for (net, vs) in exist_groups.values() {
+        for &v in vs {
+            if let VertKind::Centre(o) = proj.vkind[v] {
+                pad_verts.entry(*net).or_default().push((v, o));
+            }
+        }
     }
     for v in pad_verts.values_mut() {
         v.sort_unstable();
@@ -2606,8 +2854,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let comp = tree::components(st, c.net);
             let (ca, cb) = (tree::comp_of(&comp, c.a), tree::comp_of(&comp, c.b));
             if ca != cb {
-                let src = tree::ends_of(st, &ecx, c.net, &comp, ca, c.w, c.s, [c.a, c.b]);
-                let dst = tree::ends_of(st, &ecx, c.net, &comp, cb, c.w, c.s, [c.a, c.b]);
+                let mut src = tree::ends_of(st, &ecx, c.net, &comp, ca, c.w, c.s, [c.a, c.b]);
+                let mut dst = tree::ends_of(st, &ecx, c.net, &comp, cb, c.w, c.s, [c.a, c.b]);
+                // exist-term: a connection whose planned end is a dangling end (the decomposition
+                // picked it as the cluster's nearest port) continues that end: the search starts
+                // at its lead alone, not at another vertex of the cluster that may be cheaper
+                // (test a_dangling_end_the_decomposition_picked_stays_the_root_behind_a_wall).
+                if exist_dang.contains(&c.a) {
+                    src.retain(|e| e.v == c.a);
+                }
+                if exist_dang.contains(&c.b) {
+                    dst.retain(|e| e.v == c.b);
+                }
                 // The branch reward, the SMD assembly cost and the junction angle are priced in the
                 // search (social factors): a sharp or costly branch loses to a separate path.
                 if std::env::var("TOPO_TREEDBG").is_ok() {
@@ -3449,6 +3707,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
             }
+            // A double-crossing swap of the placing (`State::uncross_from_touched`, also when the
+            // relay after it keeps the old lay) changes the pass order of the wires that took part
+            // and so their crossings with held wires, path and passes unchanged: each is laid out
+            // again too, or a held-held crossing would keep its stale events (an unpriced crossing).
+            let mut took: Vec<WireId> = st.took_part.iter().copied().filter(|&w| w < nw && w < saved.wires().len() && saved.wires()[w].alive && st.wires[w].alive).collect();
+            took.sort_unstable();
+            took.dedup();
+            for w in took {
+                if !gone_v.contains(&w) {
+                    if local_check {
+                        eprintln!("LOOPLOCAL changed wire {w} (net {}): order; move gone {gone:?} new {new:?}", st.wires[w].net);
+                    }
+                    changed += 1;
+                    gone_v.push(w);
+                    new_v.push(w);
+                }
+            }
             LoopCtr::add(&lctr.local_changed, changed);
             let (gone, new) = (&gone_v[..], &new_v[..]);
             let mut free = vec![false; nw];
@@ -3545,6 +3820,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             if local_check {
                 let f = layers::partner_faults(st, &lr);
                 LoopCtr::add(&lctr.local_faults, f.len());
+                let (_, hh) = layers::unpriced_crossings(st, &lr, bottom, Some(&free));
+                LoopCtr::add(&lctr.local_unpriced, hh);
+                let stale = layers::stale_held_events(st, prev, &free);
+                LoopCtr::add(&lctr.local_stale, stale);
+                if stale > 0 {
+                    eprintln!("LOOPLOCAL stale held events {stale}; gone {gone:?} new {new:?} changed {changed}");
+                }
+                if hh > 0 {
+                    eprintln!("LOOPLOCAL unpriced held-held crossings {hh}; gone {gone:?} new {new:?} changed {changed}");
+                }
                 if !f.is_empty() {
                     eprintln!("LOOPLOCAL partner faults {} (first {:?}); gone {gone:?} new {new:?} changed {changed}", f.len(), &f[..f.len().min(5)]);
                 }
@@ -3635,6 +3920,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 cis.sort_by_key(|&ci| self.rank[ci]);
                 cis.dedup();
                 self.saved = Some(self.forced.borrow().clone());
+                // loop-local: the wires this placing's double-crossing swaps take part in.
+                st.took_part.clear();
                 for &ci in &cis {
                     self.forced.borrow_mut().remove(&self.conn_of[ci]);
                 }
@@ -4122,6 +4409,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
                 let n0 = self.st.wires.len();
+                // loop-local: the wires this placing's double-crossing swaps take part in.
+                self.st.took_part.clear();
                 let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
                 let mut kept = false;
                 if placed {
@@ -4721,7 +5010,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 mean(st_.local_free),
                 mean(st_.local_model),
                 lctr.local_changed.get(),
-                if local_check { format!("; TOPO_LOCALCHECK: {} partner faults", lctr.local_faults.get()) } else { String::new() },
+                if local_check { format!("; TOPO_LOCALCHECK: {} partner faults, {} unpriced held-held crossings, {} stale held events", lctr.local_faults.get(), lctr.local_unpriced.get(), lctr.local_stale.get()) } else { String::new() },
                 if st_.shadow_n > 0 {
                     format!("; shadow check ([optimize] loop_shadow = {}): {} moves also judged by the whole board (its change after - before, both layered whole), {} kept alike ({:.1} %), mean |local change - whole-board change| graded violations {:.4}, vias {:.2}, unlayerable crossings {:.2}; mean |whole-board layering - present layering| before the move, graded {:.4}", opts.loop_shadow, st_.shadow_n, st_.shadow_agree, 100.0 * st_.shadow_agree as f64 / st_.shadow_n as f64, st_.shadow_err_graded / st_.shadow_n as f64, st_.shadow_err_vias as f64 / st_.shadow_n as f64, st_.shadow_unl_diff as f64 / st_.shadow_n as f64, st_.shadow_base_graded / st_.shadow_n as f64)
                 } else {
@@ -6147,19 +6436,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // becomes an elbow or Z where the checker accepts it.
     if octi_on {
         let ids: Vec<WireId> = drawn.keys().copied().collect();
-        let mut n_pol = 0usize;
+        let (mut n_pol, mut pol_nm) = (0usize, 0.0);
         for w in ids {
             let mut wo = drawn.remove(&w).expect("drawn wire");
+            let len0 = wo.length_nm;
             let k = dr.octi_polish(&mut wo);
             if k > 0 {
                 n_pol += k;
+                pol_nm += wo.length_nm - len0;
                 let ci = conn_of[wire_conn[w]];
                 necking.retain(|(c, _)| *c != ci);
                 settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
             }
             drawn.insert(w, wo);
         }
-        warnings.push(format!("octilinear polish after drawing: {n_pol} segments not at 0/45/90 degrees (fused branch ends) redrawn as an elbow or Z"));
+        warnings.push(polish_line(n_pol, pol_nm / MM));
         // Bundles (M-45 item 4): bends a wire takes together with a parallel neighbour, and the
         // skew each such bend gives the outer wire (2 d tan(a/2): 0.83 x pitch per 45 degrees).
         let wires = &st.wires;
@@ -6741,6 +7032,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let result = RouteResult {
         items,
+        remove_uuids: Vec::new(),
         connections_total: reports.len(),
         routed: routed_n,
         partial: 0,
@@ -6973,6 +7265,8 @@ fn with_parts(r: &RouteResult, a: Assembled) -> RouteResult {
     let routed = a.reports.iter().filter(|c| c.status == "routed").count();
     RouteResult {
         items: a.items,
+        // the tidy that fills it runs after (route.rs finish_copper), on the result handed back
+        remove_uuids: Vec::new(),
         item_conn: a.item_conn,
         connections_total: a.reports.len(),
         routed,
@@ -7484,7 +7778,7 @@ mod tests {
             assert_eq!(lent, 0, "free slots while a run waits (first {first}, waiting {waiting}): no lane borrows");
         }
         assert_eq!(slots.try_take(8), 2, "nobody waits: the lanes borrow both free slots");
-        let (begun, done) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let (begun, done, tried) = (AtomicUsize::new(0), AtomicBool::new(false), AtomicBool::new(false));
         std::thread::scope(|s| {
             let run = || {
                 slots.acquire_first(); // a run waits for its first slot
@@ -7512,6 +7806,12 @@ mod tests {
             let run1 = s.spawn(|| {
                 // run 1 is stable: it gives its slot to run 3 and waits to go on
                 let gave = slots.yield_to_first();
+                // run 1 goes on: it keeps its slot until the lane below has tried (CI 2026-11-18:
+                // a run 1 that went on and ended at once gave the slot back, and the lane rightly
+                // borrowed that free slot)
+                while !tried.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
                 slots.release();
                 gave
             });
@@ -7520,6 +7820,7 @@ mod tests {
             }
             slots.give(1); // the other lane ends: its slot is for run 1
             let lent1 = slots.try_take(8);
+            tried.store(true, Ordering::SeqCst);
             slots.give(lent1);
             let gave = run1.join().expect("run 1");
             done.store(true, Ordering::SeqCst);
@@ -7534,6 +7835,72 @@ mod tests {
 
     fn eprom() -> BoardModel {
         BoardModel::from_json(include_str!("../../tests/fixtures/eprom-to-kernal-ripped.json")).expect("fixture parses")
+    }
+
+    #[test]
+    fn unsupported_ends_names_both_ends_for_every_pour_and_branch_pair() {
+        // exist-term r2 (verifier F7, DoD 13): every value the reason can take. The pour arm got
+        // "an existing via or track end joined to a pour" for (Pour, Pad), (Pour, Pour) and
+        // (Junction, Pour) too.
+        let kinds = [TermKind::Pad(0), TermKind::Via(0), TermKind::Copper("k".into()), TermKind::Dangling("k".into(), None), TermKind::Junction];
+        let names = ["a pad", "an existing via", "an existing track end", "a dangling track end", "a branch point on a routed trace"];
+        let z = TermKind::Pour(0);
+        for (k, n) in kinds.iter().zip(names) {
+            let back = unsupported_ends(k, &z);
+            if matches!(k, TermKind::Pad(_)) {
+                // (Pad, Pour) is routed by the plane-stub arms; the text exists for completeness
+                assert!(back.starts_with("a pad joined to a pour: not supported"), "{back}");
+            } else {
+                assert_eq!(back, format!("{n} joined to a pour: not supported by the topological core yet (existing vias and track ends are terminals towards pads, vias and tracks; a pad joins its pour through a plane stub)"));
+            }
+            let front = unsupported_ends(&z, k);
+            if matches!(k, TermKind::Pad(_)) {
+                assert!(front.starts_with("a pour joined to a pad with the pour as the first end"), "{front}");
+            } else {
+                assert_eq!(front, back, "the pour's position does not change the text for {n}");
+            }
+        }
+        assert!(unsupported_ends(&z, &z).starts_with("a pour joined to another pour"));
+        assert_eq!(unsupported_ends(&TermKind::Junction, &TermKind::Pad(0)), "a branch point on a routed trace to a pad: a branch point is no terminal the topological core routes from");
+        assert_eq!(unsupported_ends(&TermKind::Via(0), &TermKind::Junction), "an existing via to a branch point on a routed trace: a branch point is no terminal the topological core routes from");
+        for k in &kinds {
+            assert!(!unsupported_ends(k, &z).contains("S2a"), "no stale S2a text");
+        }
+    }
+
+    #[test]
+    fn exist_end_maps_track_ends_inside_own_copper_to_that_copper() {
+        // exist-term (docs/dev/design/exist-term.md, model 1): a kept-track end inside an own-net
+        // pad is that pad, inside an own-net via that via, elsewhere a kept-end terminal; another
+        // net's pad around the end does not take it; an existing via is itself.
+        let mm = |v: f64| (v * 1e6) as i64;
+        let s = format!(
+            r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],
+            "nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}}],
+            "pads":[{{"uuid":"p1","ref":"R1","number":"1","net":1,"attr":"smd","center":[{},{}],"rotation_deg":0.0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":1000000,"h":1000000}}}}}},
+                    {{"uuid":"p2","ref":"R2","number":"1","net":2,"attr":"smd","center":[{},{}],"rotation_deg":0.0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":1000000,"h":1000000}}}}}}],
+            "kept":[{{"uuid":"a","net":1,"layer":0,"width":250000,"prim":{{"kind":"seg","a":[{},{}],"b":[{},{}]}}}},
+                    {{"uuid":"b","net":1,"layer":0,"width":250000,"prim":{{"kind":"seg","a":[{},{}],"b":[{},{}]}}}},
+                    {{"uuid":"c","net":1,"layer":0,"width":250000,"prim":{{"kind":"seg","a":[{},{}],"b":[{},{}]}}}}],
+            "vias":[{{"uuid":"v1","net":1,"at":[{},{}],"d":600000,"drill":300000,"layers":[0,2]}}],
+            "outline":[],"rules":{{"default":{{"clearance":200000,"width":250000}},"min_connection":127000,"max_error":5000,"per_net":{{}}}}}}"#,
+            mm(3.0), mm(6.0), mm(3.0), mm(9.0),
+            mm(3.3), mm(6.0), mm(8.0), mm(6.0),
+            mm(18.1), mm(6.0), mm(12.0), mm(6.0),
+            mm(3.2), mm(9.0), mm(6.0), mm(9.0),
+            mm(18.0), mm(6.0)
+        );
+        let m = BoardModel::from_json(&s).expect("model");
+        let t = |kind: TermKind, at: Vec2| TermRef { kind, label: String::new(), at, layers: vec![0] };
+        let (a0, a1) = (m.kept[0].prim.start().to_f64(), m.kept[0].prim.end().to_f64());
+        let (b0, c0) = (m.kept[1].prim.start().to_f64(), m.kept[2].prim.start().to_f64());
+        assert_eq!(exist_end(&m, 1, &t(TermKind::Copper("a".into()), a0)), Some(ExistEnd::Pad(0)));
+        assert_eq!(exist_end(&m, 1, &t(TermKind::Copper("b".into()), b0)), Some(ExistEnd::Via(0)));
+        assert_eq!(exist_end(&m, 1, &t(TermKind::Copper("a".into()), a1)), Some(ExistEnd::Kept { kept: 0, at: a1, dangling: false, dir: None }));
+        assert!(matches!(exist_end(&m, 1, &t(TermKind::Copper("c".into()), c0)), Some(ExistEnd::Kept { kept: 2, .. })), "a foreign pad does not take the end");
+        assert_eq!(exist_end(&m, 1, &t(TermKind::Via(0), m.vias[0].at.to_vec2())), Some(ExistEnd::Via(0)));
+        let d = Vec2 { x: 1.0, y: 0.0 };
+        assert_eq!(exist_end(&m, 1, &t(TermKind::Dangling("a".into(), Some([1.0, 0.0])), a1)), Some(ExistEnd::Kept { kept: 0, at: a1, dangling: true, dir: Some(d) }));
     }
 
     #[test]

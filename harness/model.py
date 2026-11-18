@@ -180,7 +180,10 @@ def _export_pads(board, cu: list[int], tie_groups: dict):
             attr = _ATTR.get(pad.GetAttribute(), "smd")
             ds = pad.GetDrillSize()
             drill = {"w": int(ds.x), "h": int(ds.y)} if ds.x > 0 and ds.y > 0 else None
+            # KiCad PAD::GetClearanceOverrides (pcbnew/pad.cpp:1675-1681): the pad's own override, else the footprint's
             lc = pad.GetLocalClearance()
+            if lc is None:
+                lc = fp.GetLocalClearance()
             num = pad.GetNumber()
             pos = _pt(pad.GetPosition())
             pads.append(

@@ -376,7 +376,7 @@ impl Drawer<'_> {
             // track grazing one overlaps it by a sliver, which KiCad reports as a connection
             // narrower than the minimum (they are kept apart without a clearance).
             // An exit stub (5.10) is no copper: the wires of its own net pass through it freely.
-            let own_pad = e.net == Some(wp.net) && i < n_obs && !wp.own.contains(&i) && !self.is_exit_stub(i);
+            let own_pad = e.net == Some(wp.net) && i < n_obs && !wp.own.contains(&i) && !self.is_exit_stub(i) && !self.is_kept_end(i);
             e.live && (wp.layer == usize::MAX || (e.mask >> wp.layer) & 1 == 1) && (e.net != Some(wp.net) || own_pad) && (i < self.n_static || !self.only_static.get())
         });
         ids

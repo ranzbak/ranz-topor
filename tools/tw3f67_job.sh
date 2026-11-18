@@ -56,6 +56,18 @@ case ${1:-} in
       || { note "mutants $u: the unmutated tests fail (rc $?), mutants not run"; exit 1; }
     for k in "$@"; do mutrun $k $d; done
     note "mutants $u done" ;;
+  merge)  # the 4 public boards (same options as quality) + the whole release suite + clippy, at the merge with main
+    mkdir -p $R/seq
+    one qmtech-minimig $Q 4 & sleep 2
+    for b in eprom-to-kernal wiccon-2023 $E; do one $(basename $b .kicad_pcb) $b 1 & sleep 1; done
+    ( hzq run --threads 6 --name f67-suite -- bash -c "cd $ROOT/engine && { RAYON_NUM_THREADS=4 CARGO_BUILD_JOBS=6 cargo test --release --no-fail-fast 2>&1; echo \"cargo test rc \$?\"; cargo clippy --release --all-targets 2>&1; echo \"clippy rc \$?\"; } > $R/suite.log 9>&-"; note "suite unit rc $?"
+      grep -E "^test result|rc [0-9]|FAILED|panicked|^(warning|error)" $R/suite.log | sort | uniq -c | sort -rn | head -40 | while read -r l; do note "suite: $l"; done ) & sleep 1
+    wait; note "all done" ;;
+  base4)  # the 4 public boards only (run with --rev main for the copper base)
+    mkdir -p $R/seq
+    one qmtech-minimig $Q 4 & sleep 2
+    for b in eprom-to-kernal wiccon-2023 $E; do one $(basename $b .kicad_pcb) $b 1 & sleep 1; done
+    wait; note "all done" ;;
   timing)
     for rep in 1 2; do
       for n in qmtech esp; do
