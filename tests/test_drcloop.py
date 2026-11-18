@@ -56,7 +56,8 @@ def test_drcloop_matches_run_bench_on_fixture(fixture_board, tmp_path, monkeypat
     assert r["drc_loop"] == {"rounds": 1, "pinned": {}, "spots": [], "budget_exhausted": False}
     assert r["zero_slack"] == {"status": "not run", "wires": []}
     assert (len(rep["items"]), r["routed_items"], r["unchanged_items"], r["replaced"]) == (7, 7, 0, 0)
-    assert _digest(rep["items"]) == "0624057e9c4918ad9f96b50b9ae5798cf8c6ac8077532bccd9b42e99af996b2e"
+    # golden digest carries the engine (IPC) net codes: GND 1, SIG 2, VCC 3 (pcbnew file order was VCC 1, SIG 2, GND 3)
+    assert _digest(rep["items"]) == "418d48958e66ab45f7c8b7f5e494d45280aef5c39451dfa928a55d80d1f9d0ff"
 
 
 def test_drcloop_pin_round_matches_run_bench_on_fixture(fixture_board, tmp_path, monkeypatch):

@@ -7,6 +7,7 @@ import pcbnew
 import pytest
 
 from harness import bench, progress, writer
+from harness.model import engine_net_codes
 from harness.smoother import smooth_router
 
 MM = 1_000_000
@@ -39,7 +40,7 @@ def _list_router(model, options):
 
 def test_remove_items_by_uuid(fixture_board, tmp_path):
     b = pcbnew.LoadBoard(str(fixture_board.pcb))
-    net = b.GetNetcodeFromNetname("SIG")
+    net = engine_net_codes(b)["SIG"]
     ids = writer.write_items(b, [_sig_item(net, i) for i in range(3)])
     path = writer.save(b, tmp_path / "w.kicad_pcb")
     b = pcbnew.LoadBoard(str(path))
@@ -143,7 +144,7 @@ def _board_with_teardrops(fixture_board, tmp_path):
     """Fixture board with SIG tracks at y=40 and teardrop zones: on track 0 (SIG, F.Cu), far away
     (SIG, F.Cu), on track 0 but another net (GND), on track 0 but another layer (B.Cu)."""
     b = pcbnew.LoadBoard(str(fixture_board.pcb))
-    net = b.GetNetcodeFromNetname("SIG")
+    net = engine_net_codes(b)["SIG"]
     ids = writer.write_items(b, [_sig_item(net, i * 10) for i in range(3)])  # x 40-41, 50-51, 60-61
     (tmp_path / "src").mkdir()
     path = writer.save(b, tmp_path / "src" / "td.kicad_pcb")

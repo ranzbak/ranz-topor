@@ -17,7 +17,7 @@ asserts the direction, not equality:
     see the same fill: the harness model is built from a pcbnew-refilled copy (:func:`refilled_copy`), whose text
     the IPC exporter also gets, and the live board is refilled first;
   * via ``free``: exact (C23; the IPC side reads KiCad's flag from the save_as copy).
-Net codes differ between the sides (pcbnew's vs sorted-name), so everything is compared by net NAME. Polygon
+Since harness-netcodes both sides number nets by sorted name; the comparison is still by net NAME. Polygon
 areas use pcbnew SHAPE_POLY_SET (test side only)."""
 import math
 import os
