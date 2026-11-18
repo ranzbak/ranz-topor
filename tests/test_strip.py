@@ -99,3 +99,25 @@ def test_cli_helpers():
          "vias": 0, "vias_hand": 3, "detour": None, "ladder_warnings": None, "runtime_s": 1.0,
          "run_flow_s": 0.5, "router_s": 0.0, "router_cpu_s": 0.0, "timeout_s": 600, "timeout_clock": "wall", "stop_reason": "no engine", "findings": [], "png": None}
     assert "routed 0/5 (0.0 %)" in summary(m)
+
+
+def test_route_board_fails_fast_without_display():
+    """wx.App(False) without an X display aborts the process (SIGABRT, no traceback); route_board must
+    refuse with a clear message and exit code 2 before that."""
+    import os
+    import subprocess
+    import sys
+
+    from harness.route_board import require_display
+
+    root = Path(__file__).resolve().parents[1]
+    assert require_display({}, "linux") and "DISPLAY" in require_display({}, "linux")
+    assert require_display({"DISPLAY": ":0"}, "linux") is None
+    assert require_display({"WAYLAND_DISPLAY": "wayland-0"}, "linux") is None
+    assert require_display({}, "darwin") is None
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+    env["PYTHONPATH"] = f"{root}:{root / 'plugin'}"
+    r = subprocess.run([sys.executable, "-P", str(root / "harness" / "route_board.py"), "nonexistent", "/nonexistent-out"],
+                       env=env, capture_output=True, text=True, timeout=120, cwd=root)
+    assert r.returncode == 2, (r.returncode, r.stderr[-500:])
+    assert "no display" in r.stderr
