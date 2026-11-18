@@ -108,6 +108,19 @@ tests3() {  # fix round 3 (verify 2026-11-18): V-2 fuse line on a routed board, 
         if sec not in SECTIONS' | pymut v5b_removed_section_line $P tests/plugin/test_config.py -k m6_removed
   note "tests3 done"
 }
+tests3py() {  # fix round 3b: the plugin half again (3a's pytest file did not parse, so its python mutants proved nothing)
+  cd $ROOT; CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_messages.py > $R/pytest3.log 2>&1
+  local rc=$?; note "pytest3 rc $rc"; tail -1 $R/pytest3.log | while read -r l; do note "pytest3: $l"; done
+  [ $rc -eq 0 ] || { note "tests3py: pytest red, mutants skipped"; return; }
+  local P=$ROOT/plugin/topor/config.py
+  sub '{CONFIG_NAME}{_line_text(line)} is ignored:' '{CONFIG_NAME} is ignored:' | pymut v5_removed_line $P tests/plugin/test_config.py -k m6_removed
+  sub 'findings.append(_removed(sec, key, key_line(text, sec, key)))
+            continue
+        if sec not in SECTIONS' 'findings.append(_removed(sec, key))
+            continue
+        if sec not in SECTIONS' | pymut v5b_removed_section_line $P tests/plugin/test_config.py -k m6_removed
+  note "tests3py done"
+}
 pymut() {  # name file pytest-args... ; like mut, for the plugin
   local n=$1 f=$2; shift 2
   cp $f $f.orig; python3 - $f; local pr=$?
@@ -170,6 +183,7 @@ case ${1:-} in
   tests) tests ;;
   tests2) tests2 ;;
   tests3) tests3 ;;
+  tests3py) tests3py ;;
   repro) repro ;;
   unit) shift; T=$1; shift
     { for n in $BOARDS; do for c in "$@"; do echo "$c b $n"; done; done
