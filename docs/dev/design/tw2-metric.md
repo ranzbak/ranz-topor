@@ -90,3 +90,47 @@ Plan: ~/.claude/plans/topor-way-plan.md §4 row TW2, §3 row T9. Base: main 27c3
   that comes out of that gets its own addendum to this note before I commit it.
 - Q1: is the octilinear retry sweep in scope, or should default octilinear quality wait for D11?
 - Q2: should the independent set put tier first (as proposed), or maximise the count only?
+
+## Lead decisions 2026-11-18
+- Q1: no octilinear retry sweep in TW2. When a reserved band's octilinear form hits another band, the band keeps its
+  legal any-angle form. These runs are counted as their own class (`octi_vs_band`) in route.erbs, per board, for the
+  D11 transform. If the count is large on the ladder, I report it before building anything.
+- Q2: tier first. It is an option: `[drawing] erbs_conflict_keep = "tier" | "count"`, default "tier", documented in
+  configuration.md.
+- Counter gap: forced runs go into the ERBS line and result.json.
+
+## Addendum A (draft for the lead): spokes at a passed corner (erbs_gap root cause, showcase)
+**Finding** (local dumps, serpentine_bundle smooth, main 27c36203; wt-tw2-runs/sb-sleeve.txt):
+- The 2 erbs_gap (0.136 / 0.121 mm, the 24 engine violations on M2) are at a post corner v = (9.2, -15.4). Three
+  stretches pass v on the same side.
+- The band does not wrap v. It crosses three cuts from v in turn, at 0°, 21.4° and 90°.
+- So the obstacle points round v are only the spoke tips on those cuts, at the stack radii 0.325 / 0.775 / 1.225 mm.
+  There is also v's grown outline, which holds only the innermost stretch.
+- Between the tips at 21.4° and 90° (68.6° apart, one triangle at v) the outer stretch has no point. The funnel takes
+  the chord between the two tips, and it sags r (1 − cos 34.3°) = 0.775 × 0.174 = 0.135 mm into the inner wire's room.
+- river_wrap smooth looks the same: 0.019-0.021 mm sags between consecutive tips of one vertex, and 0.114 mm on R3-R4.
+  I will confirm this with the fix.
+- This is not a cascade and not order. It is the ERBS model, and the plan predicts it nowhere (cuts: 0 over-full).
+
+**Rule.** When a stretch's band crosses two consecutive cuts A and B of one triangle, and both cuts have the same end
+vertex v on the same side of the band, the stretch gets arc points round v. The radius is the smaller of its two tip
+radii there (equal when one stack passes both cuts, as here). The points lie strictly between the directions of A and
+B. They are the same samples as a wrap's (octagon vertices in the octagonal norm, the circumscribed `arc_step_deg`
+polygon otherwise). They carry v's side label and detour like grown points (`Detour::Auto`). Only this point set
+changes. The check, tips and radii stay as they are.
+
+**Source.** Dayan 1997, PDF p. 32 (printed 21): spoke creation "pushes wires away from fixed objects ... The number of
+spokes required at each point is related to the final geometry (Figure 11) ... octilinear uses up to eight". PDF p. 33,
+Fig. 11: for any-angle routing "the octilinear spokes [are] an approximation to the arc". So the spokes belong to the
+point, in every direction the wire passes it, not only along the triangulation's cuts. Popov & Popov 2012 p. 2,
+Fig. 1: the taut thread runs along the arcs round the circles.
+
+**Invariant.** For a stretch that passes v between A and B, the path's distance to v is at least the smaller of its
+two tip radii there, so the arc and the tips agree. A wire is never pushed past either tip.
+
+**Tests.**
+- Unit, erbs.rs: three stretches past a corner across cuts 68° apart. The outer path stays ≥ r − 1 nm from v, and
+  `check_layer` finds no erbs_gap. Before the fix: 0.135 mm.
+- Showcase: serpentine_bundle and river_wrap smooth go to 0 erbs_gap.
+- Mutants: the point set dropped, the radius as max, the wedge bounds inclusive.
+- Boards later: the number of erbs_gap per board before and after.
