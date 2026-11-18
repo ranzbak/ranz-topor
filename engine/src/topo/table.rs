@@ -50,16 +50,32 @@ pub struct View<V> {
     /// The fingerprint every other run's state had at the end of the cycle before (runs still in
     /// their loop that offered it).
     pub fps_before: Vec<(usize, u64)>,
-    /// The table's four bests gained nothing over the last `window` committed cycles and at least
-    /// two restarts fell in them (D6: the headless stable stop).
+    /// The table's four bests gained nothing for at least `window` committed cycles and, since
+    /// their last gain, two period checks found a free descent (D6: the headless stable stop).
     pub stable: bool,
+}
+
+/// What a cycle began with: no period check, a check that found the descent free but no other row
+/// to go to, a restart from a row. O(1).
+pub const CHECK_NONE: u8 = 0;
+pub const CHECK_FREE: u8 = 1;
+pub const CHECK_RESTART: u8 = 2;
+
+/// D6 stable over the first `n` committed cycles: the four bests gained nothing for at least
+/// `window` cycles, and since their last gain at least two period checks found a free descent
+/// (restarted, or nothing else to go to). Counting the checks since the last gain, not inside
+/// the window: a run's checks are at least `restart_min_cycles` apart, so two of them never fall
+/// in a window of that length. O(n).
+fn stable_upto(gain: &[bool], checks: &[usize], n: usize, window: usize) -> bool {
+    let from = gain[..n].iter().rposition(|&x| x).map_or(0, |i| i + 1);
+    n - from >= window && checks[from..n].iter().sum::<usize>() >= 2
 }
 
 struct Pending<V> {
     label: String,
     crit: Criteria,
     row: Row<V>,
-    restarted: bool,
+    check: u8,
 }
 
 struct Inner<V> {
@@ -112,15 +128,16 @@ impl<V> SharedTable<V> {
         self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Run `run` offers its state after cycle `cycle` (0 = the initial plan); `restarted`: the
-    /// cycle began with a restart. Commits what is ready. O(log pending) + the commits.
-    pub fn offer(&self, run: usize, cycle: usize, label: String, crit: Criteria, row: Row<V>, restarted: bool) {
+    /// Run `run` offers its state after cycle `cycle` (0 = the initial plan); `check`: what the
+    /// cycle began with ([`CHECK_NONE`], [`CHECK_FREE`], [`CHECK_RESTART`]). Commits what is
+    /// ready. O(log pending) + the commits.
+    pub fn offer(&self, run: usize, cycle: usize, label: String, crit: Criteria, row: Row<V>, check: u8) {
         let mut g = self.lock();
         if run >= g.done.len() || g.ended[run] {
             return;
         }
         g.fps.insert((cycle, run), row.fp);
-        g.pending.insert((cycle, run), Pending { label, crit, row, restarted });
+        g.pending.insert((cycle, run), Pending { label, crit, row, check });
         g.done[run] = Some(cycle);
         self.commit(&mut g);
         drop(g);
@@ -157,8 +174,8 @@ impl<V> SharedTable<V> {
             let keys: Vec<(usize, usize)> = g.pending.range((c, 0)..(c + 1, 0)).map(|(k, _)| *k).collect();
             for k in keys {
                 let p = g.pending.remove(&k).expect("key");
-                restarted += usize::from(p.restarted);
-                if p.restarted {
+                restarted += usize::from(p.check >= CHECK_FREE);
+                if p.check == CHECK_RESTART {
                     g.restart_at.insert((k.1, k.0));
                 }
                 g.offers += 1;
@@ -182,12 +199,7 @@ impl<V> SharedTable<V> {
 
     /// The headless stable test over the committed cycles (D6). O(window).
     fn stable_now(&self, g: &Inner<V>) -> bool {
-        let n = g.gain.len();
-        if n <= self.window {
-            return false;
-        }
-        let w = n - self.window..n;
-        !g.gain[w.clone()].iter().any(|&x| x) && g.restarts[w].iter().sum::<usize>() >= 2
+        stable_upto(&g.gain, &g.restarts, g.gain.len(), self.window)
     }
 
     /// Run `run` at the start of cycle `cycle` reads the table: waits (calling `before_wait` once
@@ -229,7 +241,7 @@ impl<V> SharedTable<V> {
         // `stable` over the committed cycles up to `need` (later commits are not this run's view).
         let stable = {
             let n = (need + 1).min(g.gain.len());
-            n > self.window && !g.gain[n - self.window..n].iter().any(|&x| x) && g.restarts[n - self.window..n].iter().sum::<usize>() >= 2
+            stable_upto(&g.gain, &g.restarts, n, self.window)
         };
         Some(View { rows, mine_accepted, fps_before, stable })
     }
@@ -319,7 +331,7 @@ mod tests {
         let run_table = |order: &[(usize, usize, Criteria)]| {
             let t: SharedTable<usize> = SharedTable::new(3, 3, obj, 4);
             for &(r, cy, cr) in order {
-                t.offer(r, cy, format!("r{r}c{cy}"), cr, row(r, cy), false);
+                t.offer(r, cy, format!("r{r}c{cy}"), cr, row(r, cy), CHECK_NONE);
             }
             for r in 0..3 {
                 t.end(r);
@@ -348,10 +360,10 @@ mod tests {
     fn offers_wait_for_the_slowest_run() {
         let obj = Objective::from_options("length_vias", 25.0, "best");
         let t: SharedTable<usize> = SharedTable::new(2, 8, obj, 4);
-        t.offer(0, 0, "a0".into(), c(3, 1, 10.0), row(0, 0), false);
-        t.offer(0, 1, "a1".into(), c(1, 1, 10.0), row(0, 1), false);
+        t.offer(0, 0, "a0".into(), c(3, 1, 10.0), row(0, 0), CHECK_NONE);
+        t.offer(0, 1, "a1".into(), c(1, 1, 10.0), row(0, 1), CHECK_NONE);
         assert_eq!(t.len(), 0, "run 1 has not offered its initial plan");
-        t.offer(1, 0, "b0".into(), c(2, 1, 10.0), row(1, 0), false);
+        t.offer(1, 0, "b0".into(), c(2, 1, 10.0), row(1, 0), CHECK_NONE);
         assert_eq!(t.len(), 1, "cycle 0 committed: b0 dominates a0");
         t.end(1);
         assert_eq!(t.len(), 1, "a1 committed, dominates b0");
@@ -366,14 +378,14 @@ mod tests {
     fn sync_sees_the_commit_of_the_cycles_before() {
         let obj = Objective::from_options("length_vias", 25.0, "best");
         let t: Arc<SharedTable<usize>> = Arc::new(SharedTable::new(2, 8, obj, 4));
-        t.offer(0, 0, "a0".into(), c(3, 1, 10.0), row(0, 0), false);
-        t.offer(0, 1, "a1".into(), c(3, 0, 50.0), row(0, 1), false);
+        t.offer(0, 0, "a0".into(), c(3, 1, 10.0), row(0, 0), CHECK_NONE);
+        t.offer(0, 1, "a1".into(), c(3, 0, 50.0), row(0, 1), CHECK_NONE);
         let t2 = t.clone();
         let h = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
-            t2.offer(1, 0, "b0".into(), c(3, 2, 5.0), row(1, 0), false);
-            t2.offer(1, 1, "b1".into(), c(0, 9, 900.0), row(1, 1), false);
-            t2.offer(1, 2, "b2".into(), c(0, 1, 9.0), row(1, 2), false);
+            t2.offer(1, 0, "b0".into(), c(3, 2, 5.0), row(1, 0), CHECK_NONE);
+            t2.offer(1, 1, "b1".into(), c(0, 9, 900.0), row(1, 1), CHECK_NONE);
+            t2.offer(1, 2, "b2".into(), c(0, 1, 9.0), row(1, 2), CHECK_NONE);
         });
         let waited = std::cell::Cell::new(0);
         let v = t.sync(0, 2, &mut || false, &|| waited.set(waited.get() + 1), &|| {}).expect("view");
@@ -384,28 +396,49 @@ mod tests {
         assert_eq!(v.mine_accepted, vec![0, 1]);
         // a stop ends the wait without a view
         let t3: SharedTable<usize> = SharedTable::new(2, 8, obj, 4);
-        t3.offer(0, 0, "a0".into(), c(1, 1, 1.0), row(0, 0), false);
+        t3.offer(0, 0, "a0".into(), c(1, 1, 1.0), row(0, 0), CHECK_NONE);
         assert!(t3.sync(0, 1, &mut || true, &|| {}, &|| {}).is_none());
     }
 
-    /// Stable (headless) needs a window without a gain of the four bests and two restarts in it.
+    /// D6: the free checks are counted since the four bests' last gain, so checks spaced further
+    /// apart than the window (a run checks at most every `restart_min_cycles`) still make it stable.
+    #[test]
+    fn stable_counts_the_free_checks_since_the_last_gain() {
+        let mut gain = vec![false; 30];
+        let mut checks = vec![0usize; 30];
+        gain[0] = true;
+        checks[9] = 1;
+        checks[18] = 1;
+        assert!(!stable_upto(&gain, &checks, 18, 8), "one check since the gain");
+        assert!(stable_upto(&gain, &checks, 19, 8), "two checks 9 cycles apart, window 8");
+        gain[12] = true;
+        assert!(!stable_upto(&gain, &checks, 19, 8), "a gain after the first check resets the count");
+        assert!(!stable_upto(&gain, &checks, 30, 8), "one check since the gain at 12");
+        let mut c2 = checks.clone();
+        c2[25] = 1;
+        assert!(stable_upto(&gain, &c2, 30, 8) && !stable_upto(&gain, &c2, 19, 8));
+        // no gain for long, but fewer than two checks: not stable
+        assert!(!stable_upto(&[true, false, false, false, false], &[0, 0, 0, 1, 0], 5, 2));
+    }
+
+    /// Stable (headless) needs a window without a gain of the four bests and two free checks since.
     #[test]
     fn stable_needs_no_gain_and_two_restarts() {
         let obj = Objective::from_options("length_vias", 25.0, "best");
         for restarts in [0usize, 1, 2] {
             let t: SharedTable<usize> = SharedTable::new(1, 8, obj, 3);
-            t.offer(0, 0, "a0".into(), c(1, 1, 10.0), row(0, 0), false);
+            t.offer(0, 0, "a0".into(), c(1, 1, 10.0), row(0, 0), CHECK_NONE);
             for cy in 1..=4 {
-                t.offer(0, cy, format!("a{cy}"), c(2, 2, 20.0), row(0, cy), cy > 4 - restarts);
+                t.offer(0, cy, format!("a{cy}"), c(2, 2, 20.0), row(0, cy), if cy > 4 - restarts { CHECK_RESTART } else { CHECK_NONE });
             }
             assert_eq!(t.summary().2, restarts >= 2, "restarts {restarts}");
         }
         // a gain inside the window: not stable
         let t: SharedTable<usize> = SharedTable::new(1, 8, obj, 3);
-        t.offer(0, 0, "a0".into(), c(1, 1, 10.0), row(0, 0), true);
+        t.offer(0, 0, "a0".into(), c(1, 1, 10.0), row(0, 0), CHECK_RESTART);
         for cy in 1..=4 {
             let cr = if cy == 3 { c(0, 1, 10.0) } else { c(2, 2, 20.0) };
-            t.offer(0, cy, format!("a{cy}"), cr, row(0, cy), true);
+            t.offer(0, cy, format!("a{cy}"), cr, row(0, cy), CHECK_RESTART);
         }
         assert!(!t.summary().2);
     }

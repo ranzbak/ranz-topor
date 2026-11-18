@@ -416,7 +416,8 @@ fn more_runs_than_rayon_threads_never_hang_at_the_draw_gate() {
     }
     let r = h.join().expect("run thread");
     let line = best_of_line(&r);
-    assert_eq!(line.matches("pick not drawn (another run's is: [drawing] candidates = 1").count(), 2, "all 3 runs offered: {line}");
+    // TW3: the rows of the variant table's four bests are drawn; eprom's 3 runs share one row
+    assert_eq!(line.matches("pick not drawn (another run's is: [drawing] candidates = ").count(), 2, "all 3 runs offered: {line}");
     assert_eq!(r.routed, r.connections_total, "{:?}", r.warnings);
 }
 

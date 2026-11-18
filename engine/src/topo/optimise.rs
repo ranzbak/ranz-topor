@@ -233,7 +233,7 @@ pub trait Space {
 pub trait Shared<V> {
     /// Offer the state after cycle `cycle` (0 = the initial plan).
     #[allow(clippy::too_many_arguments)]
-    fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: V, fp: u64, restarted: bool);
+    fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: V, fp: u64, check: u8);
     /// Read the table at the start of cycle `cycle` (waits for the other runs; `None` = stopped).
     fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::table::View<V>>;
     /// This run's loop ended.
@@ -360,7 +360,8 @@ pub struct LoopReport {
 /// the last boundary, or its state equals a lower run's. A descent that still gains is never cut.
 /// The row is drawn at random (seeded) among all rows its run can restore, worse ones too, never
 /// one equal to its own state. Headless, the loop ends at "stable" only when the table's four
-/// bests gained nothing over the window and two restarts fell in it (D6). Without a table the
+/// bests gained nothing for the window and, since their last gain, two period checks found a free
+/// descent (restarted, or no other row to go to; D6). Without a table the
 /// periodic mode never restarts.
 #[allow(clippy::too_many_arguments)]
 pub fn optimise_shared<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64, on_pick: &mut dyn FnMut(usize, &Criteria, bool), shared: Option<&dyn Shared<S::Var>>) -> LoopReport {
@@ -404,16 +405,16 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
     };
     // TW3: the state goes to the shared table too (always a copy: whether it is kept is known only
     // at the commit); returns its fingerprint.
-    let share = |sp: &mut S, label: &str, gen: usize, cycle: usize, restarted: bool| -> u64 {
+    let share = |sp: &mut S, label: &str, gen: usize, cycle: usize, check: u8| -> u64 {
         let Some(sh) = shared else { return 0 };
         let fp = sp.fingerprint();
         let crit = sp.criteria();
         let var = sp.snapshot();
-        sh.offer(cycle, label.to_string(), gen, crit, var, fp, restarted);
+        sh.offer(cycle, label.to_string(), gen, crit, var, fp, check);
         fp
     };
     offer(sp, arch, "initial plan (gen 0)".into(), 0, 0, &mut rep);
-    let mut my_fp = share(sp, &format!("run {} initial plan (gen 0)", p.run + 1), 0, 0, false);
+    let mut my_fp = share(sp, &format!("run {} initial plan (gen 0)", p.run + 1), 0, 0, super::table::CHECK_NONE);
     let Some((s0, v0)) = score(arch) else { return rep };
     on_pick(0, &arch.items[arch.pick(&obj).expect("scored")].crit, false);
     meter.push(s0);
@@ -425,7 +426,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
     // the work clock since the last boundary, the cycles since it, the next boundary's work
     let (mut work, mut since_check, mut check_from) = (0.0f64, 0usize, 1usize);
     let mut boundary = period * (1.0 + p.run as f64 / p.runs.max(1) as f64);
-    let mut restarted = false;
+    let mut check = super::table::CHECK_NONE;
     for cycle in 1..=p.cycles.max(1) {
         if stop() {
             rep.stop = "time limit".into();
@@ -456,6 +457,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
                 let cands: Vec<usize> = (0..view.rows.len()).filter(|&i| view.rows[i].2.compat == compat && view.rows[i].2.fp != my_fp).collect();
                 if cands.is_empty() {
                     rep.no_row += 1;
+                    check = super::table::CHECK_FREE;
                 } else {
                     let mut rr = ChaCha8Rng::seed_from_u64(mix(p.seed, 0x7AB1_E000 ^ cycle as u64));
                     let (label, _, row) = &view.rows[cands[rr.gen_range(0..cands.len())]];
@@ -463,7 +465,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
                     gen = row.gen;
                     rep.restarts.push((cycle, label.clone()));
                     rep.restart_from.push((cycle, row.run));
-                    restarted = true;
+                    check = super::table::CHECK_RESTART;
                     since_gain = 0;
                 }
             }
@@ -502,7 +504,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         work += (cs.tried + cs.relaid + cs.pair_moved_wires) as f64;
         since_check += 1;
         let kept = offer(sp, arch, format!("cycle {cycle} (gen {gen})"), gen, cycle, &mut rep);
-        my_fp = share(sp, &format!("run {} cycle {cycle} (gen {gen})", p.run + 1), gen, cycle, std::mem::take(&mut restarted));
+        my_fp = share(sp, &format!("run {} cycle {cycle} (gen {gen})", p.run + 1), gen, cycle, std::mem::take(&mut check));
         if kept {
             rep.first_variant_s.get_or_insert_with(clock);
         }
@@ -1169,8 +1171,8 @@ mod tests {
     }
 
     impl Shared<Vec<i64>> for TP<'_> {
-        fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: Vec<i64>, fp: u64, restarted: bool) {
-            self.t.offer(self.k, cycle, label, crit, super::super::table::Row { var: std::sync::Arc::new(var), run: self.k, cycle, gen, fp, compat: 0 }, restarted);
+        fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: Vec<i64>, fp: u64, check: u8) {
+            self.t.offer(self.k, cycle, label, crit, super::super::table::Row { var: std::sync::Arc::new(var), run: self.k, cycle, gen, fp, compat: 0 }, check);
         }
         fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::super::table::View<Vec<i64>>> {
             self.t.sync(self.k, cycle, stop, &|| {}, &|| {})
@@ -1269,8 +1271,8 @@ mod tests {
     struct GP<'a>(&'a super::super::table::SharedTable<i64>);
 
     impl Shared<i64> for GP<'_> {
-        fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: i64, fp: u64, restarted: bool) {
-            self.0.offer(0, cycle, label, crit, super::super::table::Row { var: std::sync::Arc::new(var), run: 0, cycle, gen, fp, compat: 0 }, restarted);
+        fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: i64, fp: u64, check: u8) {
+            self.0.offer(0, cycle, label, crit, super::super::table::Row { var: std::sync::Arc::new(var), run: 0, cycle, gen, fp, compat: 0 }, check);
         }
         fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::super::table::View<i64>> {
             self.0.sync(0, cycle, stop, &|| {}, &|| {})

@@ -710,10 +710,33 @@ struct Port<'g> {
     slots: &'g Slots,
 }
 
+/// TW3 (condition 1 of the lead): who draws which of the four bests' distinct rows. `rows` =
+/// (origin run, pre-loop key) per row in the role order; only the first `quota` rows are drawn
+/// (`[drawing] candidates`; 1 after Cancel / OK). A row goes to its origin run when that run has
+/// the same pre-loop state (`compat`: run -> key of the runs that reached the gate) and no row yet,
+/// else to the compatible run with the fewest rows so far (lowest run first), so the drawings run
+/// in parallel where runs are free (a restored row draws the same copper on any run,
+/// tests/topo_tw3_drawonly.rs); `None` = no compatible run (undrawable). Result: one entry per
+/// drawn row (`quota` or fewer). O(rows x runs).
+fn assign_runs(rows: &[(usize, u64)], compat: &BTreeMap<usize, u64>, quota: usize) -> Vec<Option<usize>> {
+    let mut load: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut who = Vec::new();
+    for &(origin, key) in rows.iter().take(quota) {
+        let cands: Vec<usize> = compat.iter().filter(|(_, &k)| k == key).map(|(&r, _)| r).collect();
+        let free = |r: &usize| load.get(r).copied().unwrap_or(0);
+        let w = if cands.contains(&origin) && free(&origin) == 0 { Some(origin) } else { cands.iter().copied().min_by_key(|r| (free(r), *r)) };
+        if let Some(r) = w {
+            *load.entry(r).or_default() += 1;
+        }
+        who.push(w);
+    }
+    who
+}
+
 impl super::optimise::Shared<LoopVar> for Port<'_> {
-    fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: LoopVar, fp: u64, restarted: bool) {
+    fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: LoopVar, fp: u64, check: u8) {
         let row = super::table::Row { var: std::sync::Arc::new(var), run: self.k, cycle, gen, fp, compat: self.compat };
-        self.table.offer(self.k, cycle, label, crit, row, restarted);
+        self.table.offer(self.k, cycle, label, crit, row, check);
     }
     fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::table::View<LoopVar>> {
         self.table.sync(self.k, cycle, stop, &|| self.slots.release(), &|| self.slots.acquire())
@@ -917,14 +940,13 @@ impl DrawGate {
         }
         if g.rows.is_none() {
             let table = self.table.as_ref().expect("assign needs the table");
-            let mut bests = table.final_bests();
-            bests.truncate(if cancel { 1 } else { g.quota });
+            let bests = table.final_bests();
+            let keys: Vec<(usize, u64)> = bests.iter().map(|b| (b.3.run, b.3.compat)).collect();
+            let who = assign_runs(&keys, &g.compat, if cancel { 1 } else { g.quota });
             let mut out: BTreeMap<usize, Vec<Assigned>> = BTreeMap::new();
             let mut undrawable = 0;
-            for (roles, label, c, row) in bests {
-                let cands: Vec<usize> = g.compat.iter().filter(|(_, &key)| key == row.compat).map(|(&r, _)| r).collect();
-                let who = if cands.contains(&row.run) { Some(row.run) } else { cands.iter().copied().min_by_key(|r| (out.get(r).map_or(0, Vec::len), *r)) };
-                match who {
+            for ((roles, label, c, row), w) in bests.into_iter().zip(who) {
+                match w {
                     Some(r) => out.entry(r).or_default().push(Assigned { roles, label, crit: c, row }),
                     None => undrawable += 1,
                 }
@@ -2793,6 +2815,7 @@ fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
 /// TW3 `draw_row`: a draw-only round: no initial routing, no rip-up rounds, no loop; the row's
 /// state and its run's pre-loop decisions ([`PreLoop`]) are restored and drawn (a run draws the
 /// rows of the call's four bests that no other run draws, [`DrawGate::assign`]).
+#[allow(clippy::type_complexity)]
 fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective, &dyn Fn(&LiveLoop)), draw_row: Option<&Assigned>) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
@@ -8447,5 +8470,26 @@ mod tests {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.decide(0, Criteria::default(), &obj, false)));
         let msg = r.expect_err("a poisoned gate panics").downcast::<String>().map(|m| *m).unwrap_or_default();
         assert!(msg.contains("draw gate"), "{msg}");
+    }
+
+    /// TW3 condition 1: the distinct rows of the four bests go to their origin run when it is
+    /// compatible, else to the least loaded compatible run; `quota` rows at most; no compatible
+    /// run = undrawable.
+    #[test]
+    fn the_four_bests_rows_go_to_their_origin_run_first_and_quota_rows_at_most() {
+        use std::collections::BTreeMap;
+        let compat: BTreeMap<usize, u64> = [(0, 7), (1, 7), (2, 9)].into_iter().collect();
+        // rows: origin 1 (compatible), origin 3 (ended, key 7), origin 3 (key 7), origin 0 (key 5: nobody)
+        let rows = [(1usize, 7u64), (3, 7), (3, 7), (0, 5)];
+        assert_eq!(super::assign_runs(&rows, &compat, 4), vec![Some(1), Some(0), Some(0), None]);
+        // origin 2 (key 9) draws its own row; its second row has no other compatible run
+        assert_eq!(super::assign_runs(&[(2, 9), (2, 9)], &compat, 4), vec![Some(2), Some(2)]);
+        // two rows of origin 1: the second goes to the free compatible run 0 (parallel drawings)
+        assert_eq!(super::assign_runs(&[(1, 7), (1, 7), (1, 7)], &compat, 4), vec![Some(1), Some(0), Some(0)]);
+        // least loaded: run 0 gets the first foreign row, run 1 the next, then run 0 again
+        assert_eq!(super::assign_runs(&[(5, 7), (5, 7), (5, 7)], &compat, 4), vec![Some(0), Some(1), Some(0)]);
+        // the quota: candidates = 1 / Cancel draws the overall best only; 2 = the first two rows
+        assert_eq!(super::assign_runs(&rows, &compat, 1), vec![Some(1)]);
+        assert_eq!(super::assign_runs(&rows, &compat, 2).len(), 2);
     }
 }

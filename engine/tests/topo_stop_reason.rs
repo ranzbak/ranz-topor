@@ -119,18 +119,21 @@ fn check(mode: Mode, clock: Clock) {
     assert!(st.is_some_and(|s| s == n) && !r.timed_out, "{tag}: {n} {st:?}");
     no_budget_warning(&r);
     if mode == Mode::Dialog {
-        let (r, running) = run(&opts(mode, clock, r#", "topo_rounds": 100000"#), Act::OkAtStable, clock);
+        // TW3: the dialog's loop has no cycle cap (rounds = 10 is not obeyed); stable needs two
+        // period checks (each at least restart_min_cycles = 8 cycles), so it comes after cycle 10
+        let (r, running) = run(&opts(mode, clock, r#", "topo_rounds": 10"#), Act::OkAtStable, clock);
         let (n, st, by) = loop_line(&r);
         assert!(running, "{tag}: OK reached a running engine");
         assert_eq!(r.stop_reason, "stable", "{tag}: {:?}", r.warnings);
         assert_eq!(by, "Cancel", "{tag}: the loop ended by the OK ({n} cycles, stable at {st:?})");
-        assert!(st.is_some_and(|s| s <= n) && n < 100000, "{tag}: before the cap: {n} {st:?}");
+        assert!(st.is_some_and(|s| s <= n) && n > 10, "{tag}: no cycle cap in the dialog: {n} {st:?}");
         assert!(!r.timed_out && r.converged, "{tag}");
         no_budget_warning(&r);
         assert!(r.routed > 0 && r.routed == r.connections_total, "{tag}: the stable board, drawn in full: {} of {}", r.routed, r.connections_total);
     }
-    // "round cap": the cap before stable (headless) / past stable (dialog: stable recorded, not obeyed)
-    let cap = if mode == Mode::Dialog { r#", "topo_rounds": 30"# } else { r#", "topo_rounds": 2, "stable_gain_pct": 0.0"# };
+    // "round cap": the cap before stable (headless; the dialog's loop has no cycle cap since TW3,
+    // above). With restart = "stall" (the rule before TW3) the dialog still obeys rounds.
+    let cap = if mode == Mode::Dialog { r#", "topo_rounds": 30, "restart": "stall""# } else { r#", "topo_rounds": 2, "stable_gain_pct": 0.0"# };
     let (r, _) = run(&opts(mode, clock, cap), Act::Nothing, clock);
     let (n, st, by) = loop_line(&r);
     assert_eq!((r.stop_reason.as_str(), by.as_str()), ("round cap", "cycle"), "{tag}: {:?}", r.warnings);

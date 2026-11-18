@@ -35,14 +35,18 @@ parallel from one table).
    Workers = `[optimize] runs` (thread-independent, as today); threads beyond the runs stay refine
    lanes: using them as extra descents would make copper depend on the thread count (decision Q1).
    **Stop:** headless "stable" = the table's four bests gained nothing over `loop_stable_window`
-   committed cycles **and** >= 2 restarts fell in that window (D6), decided at sync points. The
+   committed cycles **and**, since their last gain, >= 2 period checks found a descent free
+   (restarted, or no other row to go to) (D6), decided at sync points. Counted since the last gain,
+   not inside the window: a run's checks are >= `restart_min_cycles` apart, so two never fall in a
+   window of 8 (found on the VM: eprom with runs = 1 never got stable). The
    dialog never stops by itself and has **no cycle cap** (`rounds` is ignored for the loop when
    `stop_when_stable` is false; the 600 s limit, OK and Cancel end it). Headless `rounds` stays the
    work cap for comparisons.
 3. **Four bests drawn (F 12; D5).** The DrawGate no longer chooses runs by their own predicted
    picks: when every loop has ended it takes the distinct rows among the four bests of the final
    table (priority overall, fewest errors, shortest, least vias) and gives each to one run
-   (origin run first, else the lowest compatible run; compatible = same pre-loop state:
+   (origin run first when it has no row yet, else the least loaded compatible run, so the
+   drawings run in parallel; compatible = same pre-loop state:
    identical set of connections failed before the loop). That run restores the row and draws it,
    so up to 4 drawings run in parallel on the existing slots. `[drawing] candidates` = how many of
    the four are drawn (new default 4; 1 = the overall best only). After Cancel / OK only the

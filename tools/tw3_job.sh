@@ -56,10 +56,10 @@ INT=(--test topo_tw3_table --test topo_tw3_drawonly --test topo_m2_draw_once --t
 tests() {
   cd $ROOT/engine
   export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2
-  { timeout 3000 cargo test --release --no-fail-fast "${LIB[@]}" 2>&1; echo "lib rc $?"
+  { timeout 3000 cargo test --release --no-fail-fast "${LIB[@]}" topo::core::tests 2>&1; echo "lib rc $?"
     timeout 3000 cargo test --release --no-fail-fast "${INT[@]}" 2>&1; echo "int rc $?"
-    cargo clippy --release --all-targets 2>&1 | grep -E "^(warning|error)" -A3 | grep -E "^ +--> " | sort | uniq -c; echo "clippy rc ${PIPESTATUS[0]}"
   } > $R/tests.log 9>&-
+  cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; note "clippy rc $? ($(grep -c '^error' $R/clippy.log) errors, $(grep -c '^warning' $R/clippy.log) warnings)"
   grep -E "test result|rc |FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
   cd $ROOT; CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_report.py > $R/pytest.log 2>&1 9>&-
   note "pytest rc $?: $(tail -1 $R/pytest.log)"
@@ -72,11 +72,13 @@ tests() {
   sub '            if c >= h {
                 break;
             }' '' | mut m3_commit_on_arrival $T "${LIB[@]}"
-  sub '!g.gain[w.clone()].iter().any(|&x| x) && g.restarts[w].iter().sum::<usize>() >= 2' '!g.gain[w].iter().any(|&x| x)' | mut m4_stable_no_restarts $T "${LIB[@]}"
+  sub 'n - from >= window && checks[from..n].iter().sum::<usize>() >= 2' 'n - from >= window' | mut m4_stable_no_checks $T "${LIB[@]}"
+  sub 'let from = gain[..n].iter().rposition(|&x| x).map_or(0, |i| i + 1);' 'let from = n.saturating_sub(window);' | mut m9_checks_in_window $T "${LIB[@]}"
   sub 'view.rows[i].2.compat == compat && view.rows[i].2.fp != my_fp' 'view.rows[i].2.compat == compat' | mut m5_restart_own_state $O "${LIB[@]}"
   sub 'if gaining && !duplicate {' 'if false {' | mut m6_cut_gaining $O "${LIB[@]}"
-  sub 'bests.truncate(if cancel { 1 } else { g.quota });' 'bests.truncate(1);' | mut m7_one_best $C --test topo_tw3_table
-  sub 'let who = if cands.contains(&row.run) { Some(row.run) } else {' 'let who = if false { Some(row.run) } else {' | mut m8_not_origin $C --test topo_tw3_table
+  sub 'for &(origin, key) in rows.iter().take(quota) {' 'for &(origin, key) in rows.iter().take(1) {' | mut m7_one_best $C --lib -- topo::core::tests::the_four_bests_rows
+  sub 'let w = if cands.contains(&origin) && free(&origin) == 0 { Some(origin) } else {' 'let w = if false { Some(origin) } else {' | mut m8_not_origin $C --lib -- topo::core::tests::the_four_bests_rows
+  sub 'let w = if cands.contains(&origin) && free(&origin) == 0 { Some(origin) } else {' 'let w = if cands.contains(&origin) { Some(origin) } else {' | mut m10_origin_serial $C --lib -- topo::core::tests::the_four_bests_rows
   rm -rf $D $CARGO_TARGET_DIR
   note "tests done"
 }
@@ -91,6 +93,15 @@ case ${1:-} in
     for nb in "eprom eprom-to-kernal 300" "wiccon wiccon-2023 150" "esp $E 30" "qmtech $Q 10"; do
       set -- $nb; unit dc-$1 1 dc-$1 $2 0 1 --set optimize.rounds=$3 --set optimize.loop_stable_window=1000 --set optimize.runs=1
     done
+    wait; note "all done" ;;
+  r2)  # fix round: the tests + mutants again, and the ladder with restart_relays = 800 (descents of ~8-15
+        # cycles on esp / wiccon, the floor of 8 on qmtech; r1 had 0 period checks on esp and qmtech)
+    mkdir -p $R/lad
+    ( hzq run --threads 4 --name tw3-tests -- bash $SELF tests-in > $R/hzq-tests.log 2>&1 9>&-; note "unit tests rc $?" ) & sleep 1
+    unit qmtech-r8 4 qmtech-r8 $Q 0 4 --set optimize.rounds=10 "${FIX[@]}" --set optimize.restart_relays=800
+    for s in 0 1 2 3 4; do unit esp-s$s-r8 2 esp-s$s-r8 $E $s 2 --set optimize.rounds=30 "${FIX[@]}" --set optimize.restart_relays=800; done
+    unit wiccon-r8 2 wiccon-r8 wiccon-2023 0 2 --set optimize.rounds=150 "${FIX[@]}" --set optimize.restart_relays=800
+    unit eprom-r8 1 eprom-r8 eprom-to-kernal 0 1 --set optimize.rounds=300 "${FIX[@]}" --set optimize.restart_relays=800
     wait; note "all done" ;;
   base)
     mkdir -p $R/lad
