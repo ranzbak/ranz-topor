@@ -459,3 +459,70 @@ fn local_judge_layers_the_board_a_few_times_per_cycle() {
         assert!(sh.contains("shadow check ([optimize] loop_shadow = 1)") && sh.contains("kept alike"), "{sh}");
     }
 }
+
+/// Step B: the free wires cross held wires that all sit on F.Cu (the free wires' own pad layer
+/// on most ends, so their cheapest layer): every such crossing still ends on two layers or is
+/// counted unlayerable (the held layer is taken out of the free event's mask, 2 and 4 layers).
+#[test]
+fn local_layering_keeps_off_the_held_layer() {
+    for n_layers in [2, 4] {
+        let (m, b, mut st) = laid(n_layers);
+        let smd = |o: usize| b.smd_layer(o);
+        let p = LayerParams { via_between: true, via_site_r: 0.5e6, ..LayerParams::default() };
+        let mut prev = layers::assign(&st, &smd, &p);
+        for ev in &mut prev.events {
+            for e in ev.iter_mut() {
+                e.2 = 0;
+            }
+        }
+        let wb = (0..st.wires.len()).find(|&w| st.wires[w].alive && st.wires[w].net == 2).unwrap();
+        topor_engine::topo::tree::remove_wire(&mut st, wb);
+        let n0 = st.wires.len();
+        st.route_conn(&conn(&m, b, 2, "B1", "B2"), &InitWeights::default(), 3.0).expect("B again");
+        let new: Vec<WireId> = (n0..st.wires.len()).collect();
+        let free = free_of(&st, &prev, &[wb], &new);
+        let loc = layers::assign_local(&st, &smd, &p, None, None, &Held { prev: &prev, free: &free });
+        let links = check_local(&st, &prev, &loc, &free, &format!("{n_layers} layers, held on F.Cu"));
+        assert!(links > 0, "{n_layers} layers: crossings of free and held wires");
+    }
+}
+
+/// Step B: a crossing two held wires left on one layer stays counted (the local layering keeps
+/// the held pairs of `prev.unlayerable` and adds its own).
+#[test]
+fn local_layering_keeps_the_held_unlayerable_crossings() {
+    for n_layers in [2, 4] {
+        let (_m, b, st) = laid(n_layers);
+        let smd = |o: usize| b.smd_layer(o);
+        let p = LayerParams { via_between: true, via_site_r: 0.5e6, ..LayerParams::default() };
+        let mut prev = layers::assign(&st, &smd, &p);
+        let live: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
+        let (w, h1, h2) = (live[0], live[live.len() - 2], live[live.len() - 1]);
+        let mut free = vec![false; st.wires.len()];
+        free[w] = true;
+        assert!(!free[h1] && !free[h2]);
+        let at = topor_engine::geom::Vec2 { x: 1.0, y: 2.0 };
+        prev.unlayerable.push(at);
+        prev.unlayerable_w.push((h1.min(h2), h1.max(h2)));
+        let loc = layers::assign_local(&st, &smd, &p, None, None, &Held { prev: &prev, free: &free });
+        assert!(loc.unlayerable_w.contains(&(h1.min(h2), h1.max(h2))) && loc.unlayerable.contains(&at), "{n_layers} layers: held pair kept: {:?}", loc.unlayerable_w);
+    }
+}
+
+/// Step B: the local capacity model's wires are the free wires and every wire with a pass on an
+/// edge a free wire passes (so the model is complete on those edges), and no other.
+#[test]
+fn neighbourhood_is_the_free_wires_and_their_edge_mates() {
+    let (_m, _b, st) = laid(2);
+    for w in (0..st.wires.len()).filter(|&w| st.wires[w].alive) {
+        let mut free = vec![false; st.wires.len()];
+        free[w] = true;
+        let nb = layers::neighbourhood(&st, &free);
+        let edges: std::collections::BTreeSet<usize> = st.wires[w].passes.iter().map(|&p| st.passes[p].edge).collect();
+        for x in (0..st.wires.len()).filter(|&x| st.wires[x].alive) {
+            let mate = x == w || st.wires[x].passes.iter().any(|&p| edges.contains(&st.passes[p].edge));
+            assert_eq!(nb[x], mate, "wire {x} for free {w}");
+        }
+        assert!(nb.iter().filter(|&&f| f).count() > 1 || edges.is_empty() || st.wires[w].passes.len() < 2, "free {w} shares an edge");
+    }
+}

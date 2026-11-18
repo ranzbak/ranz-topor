@@ -5,7 +5,7 @@
 #   looplocal_job.sh full CFG...         one hzq unit per board (eprom wiccon esp qmtech bornhack) per CFG, the loop's
 #                                        default cycles (quality ladder at 100 % drawn), then wait
 #   looplocal_job.sh tests               engine tests + clippy + plugin config tests + Step B mutants (one hzq unit, 4 threads)
-#   looplocal_job.sh both                tip: main G L SH + full G L + tests in one session
+#   looplocal_job.sh both                tip: main G SH + full G L + tests in one session
 #   looplocal_job.sh task CFG KIND NAME  one run (inside a unit); KIND b = board, p = pattern, f = board, default cycles
 # CFG: D (defaults), NOSC (TOPO_NOSCACHE=1: Step A cache off), G (optimize.loop_judge="global"), L (="local"),
 #      SH (local + shadow check every 8th re-lay).
@@ -102,9 +102,9 @@ case ${1:-} in
     wait; note "all done" ;;
   tests) hzq run --threads 4 --name tests -- bash $ROOT/tools/looplocal_job.sh tests-in ;;
   tests-in) tests ;;
-  both)
+  both)  # SH = L's copper (the shadow only observes), so L needs no own rounds=1 units
     gen
-    for c in G L SH; do
+    for c in G SH; do
       for n in bornhack qmtech esp; do ( hzq run --threads 1 --name "$c-$n" -- bash $ROOT/tools/looplocal_job.sh task $c b $n; ) & sleep 1; done
       ( hzq run --threads 1 --name "$c-small" -- bash $ROOT/tools/looplocal_job.sh small $c ) & sleep 1
     done
