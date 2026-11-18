@@ -113,3 +113,14 @@ parallel from one table).
 - **`restart_relays` 2400 -> 800** (measured: ~90 re-lays a cycle on esp, ~320 qmtech, ~57 wiccon, ~27 eprom).
 - **Comparisons at an equal re-lay budget:** `[optimize] loop_relays` (new, 0 = off) ends each run's loop
   after that many re-lays; the budget per board and seed = main's re-lays in a 600 s wall run on the ccx43.
+- **`stable_gain_pct = 0` means never stable** for the shared table too (its window is unbounded then),
+  as for the run's own meter.
+
+## Result at an equal re-lay budget (r4, 2026-11-18)
+Main dcf4c0ef vs this branch, esp s0-4 / qmtech / wiccon / eprom, wall 600 s, runs 5, budget = main's
+re-lays (report scratch/agent-wt/reports/tw3-table-20261118-1915.md). The tip's plans are better by their own
+measure (esp predicted errors 24 -> 8, vias 194 -> 147) and draw 53 fewer vias (284 -> 231) and 111 mm less copper on esp;
+KiCad DRC rises 692 -> 936 (distinct net pairs 180 -> 223). Per connection the rise sits in nets that fail
+on both sides on different seeds (drawing next to different neighbours) and in two connections: esp s3
+IO21_TX (the plan drops a via for +6.4 mm through the crowded U3/U4 area) and qmtech FPGA_SD_DATA1 (same
+plan, drawing only). Every restart was a stall restart; the 800 re-lay period never fired.

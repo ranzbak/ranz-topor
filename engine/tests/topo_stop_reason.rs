@@ -275,11 +275,15 @@ fn run_threads(o: &Options, threads: usize, when: fn(&topor_engine::control::Pro
 /// Cancel, whichever run's pick is drawn and however the other run ends after it: stop_reason
 /// "cancel", no "OK at Routes stable" and the pour stitching cut. Before the latch these seeds
 /// drew the stable run's pick and ended "stable" with the stitching in full (probe P3).
+/// TW3: `restart = "stall"` keeps each run's own stable meter. With the hybrid (default) stable is
+/// the shared table's, which both runs read at their sync points over the same committed cycles,
+/// so "1 of 2 stable" lasts only a few eprom cycles (ms) and the watcher misses it on a busy machine
+/// (VM r5: 2 of 4 seeds). The latch under test is the dialog's, not the restart's.
 #[test]
 fn cancel_at_one_of_two_runs_stable_is_a_cancel() {
     let mut hit = 0;
     for seed in [2u64, 3, 4, 8] {
-        let o = Options::from_json(&format!(r#"{{"runs": 2, "seed": {seed}, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000}}"#)).expect("options");
+        let o = Options::from_json(&format!(r#"{{"runs": 2, "seed": {seed}, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000, "restart": "stall"}}"#)).expect("options");
         let (r, at) = run_threads(&o, 2, |p| p.runs_stable >= 1 && !p.stable);
         let Some(p) = at else { continue };
         hit += 1;
