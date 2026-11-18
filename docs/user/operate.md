@@ -672,7 +672,7 @@ topor does for that (each item is a rule of KiCad's cleaner, `pcbnew/tracks_clea
 
 | Cleanup option | What KiCad removes or changes | What topor writes instead |
 |---|---|---|
-| Merge co-linear tracks | null segments, duplicate segments, two same-width segments on one line whose joint touches nothing else | no null or duplicate segments; such segments are already one |
+| Merge co-linear tracks | null segments, duplicate segments, two same-width segments on one line whose joint touches nothing else | no null or duplicate segments; such segments are already one; a new segment that continues an existing (unlocked, straight) track straight on, e.g. the lead of a continued dangling end, replaces that track by one segment over both in the same undo step |
 | Delete tracks fully inside pads | a segment with both ends inside one pad and nothing outside it | no such segment: the trace starts where it leaves the pad's copper, inside that pad |
 | Delete tracks unconnected at one end | a track end that is not on connected copper; a short segment whose both ends are reached by the same neighbour counts as connected at one end only | every junction is an exact shared vertex: a branch (T) that joins a trace in its middle splits that trace there |
 | Delete vias connected on only one layer | a via whose other layers reach nothing, e.g. a plane via in a zone whose fill is out of date | the zones come back filled for the new copper (`[run] commit_fills`, above) |

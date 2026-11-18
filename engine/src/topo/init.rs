@@ -57,6 +57,9 @@ pub struct InitWeights {
     /// or no layer left); 0 = walls closed (the normal search). The never-fail fallback of 4.3
     /// opens them at the `violation` price, so a wire with no legal path is still placed.
     pub wall_mm: f64,
+    /// `dangling_turn` price per mm of width + clearance at 90° off a continued dangling end's
+    /// direction (exist-term; the factor's weight).
+    pub dangling_turn_mm: f64,
     /// Search cap per connection.
     pub max_expansions: usize,
 }
@@ -80,6 +83,7 @@ impl InitWeights {
             neck_mm: reg.price(&Event::Necking { wire: 0, from_nm: 1.0, to_nm: 1.0, mm: 0.0 }, w),
             same_layer_mm: reg.price(&Event::Overflow { wire: 0, edge: 0 }, w),
             wall_mm: 0.0,
+            dangling_turn_mm: reg.price(&Event::DanglingTurn { at: Vec2 { x: 0.0, y: 0.0 }, deg: 90.0, ws_mm: 1.0 }, w),
             max_expansions: 2_000_000,
         }
     }
@@ -393,6 +397,27 @@ impl Search<'_, '_> {
 
     /// `junction_angle` price of a trace that leaves end `d` towards `toward`.
     fn angle_cost(&self, d: &TreeEnd, toward: Vec2) -> f64 {
+        self.turn_cost(d.v, toward) + self.junction_cost(d, toward)
+    }
+
+    /// exist-term: `dangling_turn` price of a trace that leaves the continued dangling end at
+    /// vertex `v` towards `toward` (0 at any other vertex).
+    fn turn_cost(&self, v: VertId, toward: Vec2) -> f64 {
+        let Some(&u) = self.st.cont_dir.get(&v) else { return 0.0 };
+        if self.wt.dangling_turn_mm <= 0.0 {
+            return 0.0;
+        }
+        let dv = toward - self.st.proj.pos[v];
+        let l = dv.len();
+        if l < 1.0 {
+            return 0.0;
+        }
+        let deg = (dv * (1.0 / l)).dot(u).clamp(-1.0, 1.0).acos().to_degrees();
+        self.wt.dangling_turn_mm * (self.c.w + self.c.s) / MM * super::factors::dangling_turn_shape(deg)
+    }
+
+    /// `junction_angle` price of a trace that leaves end `d` towards `toward`.
+    fn junction_cost(&self, d: &TreeEnd, toward: Vec2) -> f64 {
         if self.wt.junction_angle_mm <= 0.0 || d.arms.iter().all(Option::is_none) {
             return 0.0;
         }

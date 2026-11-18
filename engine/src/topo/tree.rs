@@ -55,6 +55,13 @@ pub fn components(st: &State, net: i32) -> BTreeMap<VertId, VertId> {
             par.insert(ra.max(rb), ra.min(rb));
         }
     };
+    // exist-term: the existing copper's joins (whatever net they are of: a vertex pair joined
+    // by copper of another net never meets a wire of this one in the search).
+    for &(a, b) in &st.pre_join {
+        if [a, b].iter().all(|&v| matches!(st.proj.vkind[v], VertKind::Centre(o) if st.proj.obstacles[o].net == Some(net))) {
+            union(&mut par, a, b);
+        }
+    }
     for wi in st.wires.iter().filter(|w| w.alive && w.net == net) {
         union(&mut par, wi.a, wi.b);
         for &(_, v) in &wi.turns {

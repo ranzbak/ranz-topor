@@ -618,6 +618,13 @@ pub struct State<'p> {
     /// ([`State::held_layers`]). Empty (default, every other caller): the stretch's own held
     /// layers only, as before.
     pub layers_now: Vec<Vec<u64>>,
+    /// exist-term: vertex pairs the board's existing copper already joins (the copper cluster of
+    /// a terminal on existing copper: its kept-end terminals, pads and vias); the net trees
+    /// ([`super::tree::components`]) start from them.
+    pub pre_join: Vec<(VertId, VertId)>,
+    /// exist-term: the direction a continued dangling end asks the new copper to leave its
+    /// terminal vertex in (unit, math frame); the `dangling_turn` factor prices the angle off it.
+    pub cont_dir: BTreeMap<VertId, Vec2>,
 }
 
 impl<'p> State<'p> {
@@ -656,6 +663,8 @@ impl<'p> State<'p> {
             relay_after_uncross: true,
             took_part: Vec::new(),
             layers_now: Vec::new(),
+            pre_join: Vec::new(),
+            cont_dir: BTreeMap::new(),
         }
     }
 

@@ -297,6 +297,22 @@ def test_run_accept_single_commit(accepted, tmp_path):
     assert any(it.get("prim", {}).get("kind") == "arc" for it in req.items)
 
 
+def _with_replaced(out_json):
+    d = json.loads(out_json)
+    d["remove_uuids"] = ["00000000-0000-4000-8000-00000000beef"]
+    return json.dumps(d)
+
+
+def test_run_commit_removes_the_hand_tracks_the_engine_replaced(app, eprom, tmp_path, reports):
+    """exist-term r2: the engine's "remove_uuids" (kept tracks merged into a new collinear segment) are removed
+    in the one commit, after the ripped items, and named in the outcome."""
+    board, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=True), engine=ProxyEngine(patch=_with_replaced))
+    assert out.status == "accepted" and len(board.commits) == 1
+    req = board.commits[0]
+    assert out.replaced == ["00000000-0000-4000-8000-00000000beef"]
+    assert req.remove_uuids == list(out.ripped) + out.replaced
+
+
 def test_run_reject_leaves_board_untouched(rejected, eprom):
     board, ui, out, _ = rejected
     assert out.status == "rejected" and out.commit is None

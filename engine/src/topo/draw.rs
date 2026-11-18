@@ -752,6 +752,8 @@ pub struct WireOut {
     /// Rules the written copper breaks (M-B1 never drop: a run or via drawn by [`Drawer::force`]
     /// on its best geometry); empty for a legal wire.
     pub viol: Vec<Viol>,
+    /// exist-term: length (nm) of the leads drawn for continued dangling ends (in `length_nm`).
+    pub lead_nm: f64,
 }
 
 /// One violation per object and layer (a via: per object, over all its layers): the stretches of a run's segments below
@@ -922,6 +924,11 @@ pub struct Drawer<'a> {
     /// The planned sites whose relocation still predicts a violation ([`super::viaopt::RelocReport::tight`]):
     /// they pass only the side test on the drawing's nominal chords, not the one on the plan's taut geometry.
     pub via_site_tight: std::collections::BTreeSet<(WireId, usize)>,
+    /// exist-term r4 (`[search] dangling_lead_via`): wire `w`'s end (0 / 1) whose layer change the
+    /// plan put at a continued dangling end's lead end: the via drawn at the lead's via end
+    /// ([`super::board::KeptEndOut::via_end`]), the lead drawn up to it, no run on the lead's layer
+    /// ([`Drawer::lead_via_site`]).
+    pub lead_via: BTreeMap<(WireId, usize), Vec2>,
     /// 5.4 `[search] branch_relocate`: a junction point the plan moved, per wire and traversal:
     /// the wire's run is split there (drawn through it), like at a via without a layer change
     /// ([`super::viaopt::relocate_junctions`]). Empty: none.
@@ -1029,6 +1036,7 @@ impl<'a> Drawer<'a> {
             pad_end: BTreeMap::new(),
             via_site: BTreeMap::new(),
             via_site_tight: Default::default(),
+            lead_via: BTreeMap::new(),
             split_at: BTreeMap::new(),
             erbs: BTreeMap::new(),
             test_no_sequential: false,
@@ -1105,14 +1113,24 @@ impl<'a> Drawer<'a> {
             b.signal_layers.iter().enumerate().filter(|(_, id)| ids.contains(id)).fold(0, |m, (i, _)| m | 1 << i)
         };
         let all = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
-        for ob in &b.proj.obstacles {
+        // Entity `o` is obstacle `o` for every obstacle (`i < n_obs` tests, `is_kept_end`,
+        // `is_exit_stub`): the obstacles are the first entities, one each.
+        assert!(self.ents.is_empty(), "static entities come first");
+        for (o, ob) in b.proj.obstacles.iter().enumerate() {
             let mask = if ob.drilled { all } else { ob.layers.0 };
+            // exist-term: a kept track's polygon is a dead entity (ids stay aligned with the
+            // obstacles); its exact segments are added below.
+            if b.kept_bodies.contains(&o) {
+                self.add_ent(Ent { core: Core::Poly(ob.poly.clone()), grow: 0.0, mask, net: ob.net, clear: ob.clear, fixed: true, live: false, shape: false });
+                continue;
+            }
             // The polygon of a rounded shape lies inside the copper by its sagitta (`sag`; 0 for a
             // rectangle). It was 2 % of the circumradius for every shape, 57 um phantom copper
             // around a 4 x 4 mm test pad (wiccon TP13: the 3.3v wire then found no path past
             // it, D1).
             self.add_ent(Ent { core: Core::Poly(ob.poly.clone()), grow: ob.sag, mask, net: ob.net, clear: ob.clear, fixed: ob.bare, live: true, shape: false });
         }
+        assert_eq!(self.ents.len(), b.proj.obstacles.len(), "one entity per obstacle");
         for (o, &pi) in b.pad_of.iter().enumerate().filter(|(_, &pi)| pi != usize::MAX) {
             let pad = &model.pads[pi];
             if let Some(d) = pad.drill {
@@ -1772,9 +1790,31 @@ impl<'a> Drawer<'a> {
         // The plan's crossings of this wire, per traversal and layer: a via site's reach may go
         // over a drawn track only where the plan crosses it ([`Drawer::via_reach`]).
         let crossed = self.class_crossings(w);
+        self.lead_via.remove(&(w, 0));
+        self.lead_via.remove(&(w, 1));
         for (i, &(ka, kb)) in plan.vias.iter().enumerate() {
             let ka = out.last().map_or(ka, |l| ka.max(l.0));
             let mut done = false;
+            // exist-term r4/r5: the plan changes layer at a continued dangling end's lead end: the
+            // via at the lead's via end, the size that end was found for (net class first,
+            // `vias::lead_via_sizes`; it fits there against the static copper, the checks below
+            // judge the copper drawn so far). Refused: the plan's site / search / force below.
+            if let Some((end, (ve, sz))) = self.lead_via_site(w, i, ka, plan) {
+                let item = via_item(net, ve, sz, Some(w));
+                let k = if end == 0 { 0 } else { self.st.wires[w].passes.len() };
+                if self.via_side_ok(w, k, ve, plan.layers[i], plan.layers[i + 1]) && self.check_ok(&item) && self.via_hole_ok(ve, sz, net) && self.via_own_pad_ok(ve, sz, net) && self.pair_via_ok(w, ve, sz, net) {
+                    let id = self.commit(&item);
+                    self.via_marks.push((w, k, ve, plan.layers[i], plan.layers[i + 1], id));
+                    ids.push(id);
+                    out.push((k, ve, sz));
+                    self.lead_via.insert((w, end), ve);
+                    self.stats.planned_sites += 1;
+                    if std::env::var_os("TOPO_KEPTDBG").is_some() {
+                        eprintln!("KEPTVIA net {net} at ({:.4}, {:.4}) mm d {} drill {}", ve.x / 1e6, -ve.y / 1e6, sz.d, sz.drill);
+                    }
+                    continue;
+                }
+            }
             // The cheapest legal site out of the plan's class ([`Drawer::via_reach`]): taken only
             // when no site in the class exists at all.
             let mut oob: Option<(f64, f64, usize, Vec2, ViaSize)> = None;
@@ -2263,6 +2303,31 @@ impl<'a> Drawer<'a> {
         c.extend(self.st.wires[o].turns.iter().filter(|x| x.0 == ok).map(|x| self.b.proj.pos[x.1]));
         c.push(self.chord_pt(o, ok + 1));
         c
+    }
+
+    /// exist-term r4: whether via `i` of wire `w` (first traversal `ka` of its class) is the
+    /// plan's layer change at a continued dangling end's lead end, and that end (0 / 1) with the
+    /// lead's via end ([`super::board::KeptEndOut::via_end`]). At the lead end = the wire's first
+    /// via with its pass interval starting at the terminal (`ka` 0: the layer may change before
+    /// the first pass), or its last with the interval reaching the end (after the last pass):
+    /// topologically the via may sit anywhere there, the via end included (the drawing keeps the
+    /// plan's interval, like the planned site's test). O(terminals).
+    fn lead_via_site(&self, w: WireId, i: usize, ka: usize, plan: &Plan) -> Option<(usize, (Vec2, ViaSize))> {
+        let wi = &self.st.wires[w];
+        let last = plan.vias.len().checked_sub(1)?;
+        for (end, ob) in [(0usize, wi.pa), (1, wi.pb)] {
+            // the layer change before the wire's first pass / after its last (no stretch of the
+            // plan's topology on the lead's layer moves to the other)
+            let n = wi.passes.len();
+            if (end == 0 && (i != 0 || ka != 0)) || (end == 1 && (i != last || plan.vias[i].1 < n)) || ob == super::state::NO_OBS {
+                continue;
+            }
+            let Some(k) = self.b.kept_ends.iter().find(|k| k.obs == ob) else { continue };
+            if let (Some(_), Some(ve)) = (k.lead, k.via_end) {
+                return Some((end, ve));
+            }
+        }
+        None
     }
 
     /// Point `j` of wire `w`'s chord polyline (0: its start terminal, `n + 1`: its end, else
@@ -2878,6 +2943,12 @@ impl<'a> Drawer<'a> {
             let k1 = if r == plan.layers.len() - 1 { n } else { vias[r].0 };
             // A branch ends on its trunk's drawn copper (D5 net trees, `end_at`), else at its vertex.
             // edge-clear: a pad end whose centre breaks a static clearance ends at its anchor (`pad_end`).
+            // exist-term r4: a run between a lead end and its via there is none (the lead is
+            // drawn up to the via below).
+            let at_lead = |end: usize, j: usize| vias.get(j).is_some_and(|v| self.lead_via.get(&(w, end)) == Some(&v.1));
+            if (r == 0 && at_lead(0, 0)) || (r == plan.layers.len() - 1 && r > 0 && at_lead(1, r - 1)) {
+                continue;
+            }
             let s = if r == 0 { self.run_end(w, 0) } else { vias[r - 1].1 };
             let e = if r == plan.layers.len() - 1 { self.run_end(w, 1) } else { vias[r].1 };
             let layer = plan.layers[r];
@@ -3406,6 +3477,29 @@ impl<'a> Drawer<'a> {
                 return out;
             }
         }
+        // exist-term: the planned leads of continued dangling ends (the wire's terminal is the
+        // lead's end; the lead joins it to the hand-started track along its direction).
+        let bd = self.b;
+        for (end, ob) in [(0usize, wi.pa), (1, wi.pb)] {
+            let Some(k) = bd.kept_ends.iter().find(|k| k.obs == ob && ob != super::state::NO_OBS) else { continue };
+            let Some((q, _)) = k.lead else { continue };
+            // r4: up to the via the plan's layer change put on the lead (none: it is the hand
+            // end itself). r5: when another wire starts at the same end, the full lead (the
+            // other wire's lead goes on to `q`; two collinear leads from one end, one shorter,
+            // are copper KiCad's Cleanup merges, badge I2C_SDA); the via sits on it.
+            let shared = self.st.wires.iter().enumerate().any(|(x, o)| x != w && o.alive && (o.pa == ob || o.pb == ob));
+            let q = if shared { q } else { self.lead_via.get(&(w, end)).copied().unwrap_or(q) };
+            if (q - k.at).len() < super::board::LEAD_MIN_NM {
+                continue;
+            }
+            let Some(layer) = bd.proj.obstacles[ob].layers.single() else { continue };
+            let it = track_item(wi.net, self.layer_id(layer), k.w, k.at, q, Some(w));
+            let id = self.commit(&it);
+            committed.push(id);
+            ids.push(id);
+            out.items.push(it);
+            out.lead_nm += (q - k.at).len();
+        }
         for &(_, p, sz) in vias.iter().filter(|v| v.2.d > 0) {
             out.items.push(via_item(wi.net, p, sz, Some(w)));
             out.vias.push((p, sz));
@@ -3416,7 +3510,7 @@ impl<'a> Drawer<'a> {
         }
         out.handles = committed;
         self.drawn_once[w] = true;
-        out.length_nm = out.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum();
+        out.length_nm = out.runs.iter().map(|(_, p)| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>()).sum::<f64>() + out.lead_nm;
         out.ok = true;
         out
     }
@@ -3878,6 +3972,13 @@ impl<'a> Drawer<'a> {
     /// Shopping list 5.10: obstacle `o` is an exit stub ([`Board::exit_stubs`]). O(log stubs).
     pub(super) fn is_exit_stub(&self, o: usize) -> bool {
         self.b.exit_stubs.binary_search_by_key(&o, |x| x.0).is_ok()
+    }
+
+    /// exist-term: obstacle `o` is a terminal on existing copper ([`Board::kept_ends`]): the
+    /// wires of its own net pass it freely (it lies on their own track copper, or is the
+    /// planned lead of one). `kept_ends` are in obstacle order. O(log terminals).
+    pub(super) fn is_kept_end(&self, o: usize) -> bool {
+        self.b.kept_ends.binary_search_by_key(&o, |k| k.obs).is_ok()
     }
 
     /// Shopping list 5.10: edge `e` lies inside the copper of `net` with an exit stub at one of its
