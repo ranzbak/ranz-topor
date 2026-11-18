@@ -21,6 +21,7 @@ use super::board::{Board, Extra};
 use super::draw::{track_item, via_item, Drawer};
 use super::state::ObsId;
 use crate::check::point_in_poly;
+use crate::geom::prim::Aabb;
 use crate::geom::Vec2;
 use crate::model::{BoardModel, Item};
 use super::factors::{Event, Registry, WireCtx};
@@ -104,6 +105,8 @@ pub struct SiteCost<'r> {
     pub mm: f64,
     pub reg: &'r Registry,
     pub live: Option<&'r crate::pourcheck::PourReach>,
+    /// The pours' fills, indexed ([`FillIndex::new`] of the same model).
+    pub fills: FillIndex,
 }
 
 impl SiteCost<'_> {
@@ -125,7 +128,7 @@ impl SiteCost<'_> {
         let mut layers: Vec<u32> = pour.fills.iter().map(|f| f.layer).collect();
         layers.sort_unstable();
         layers.dedup();
-        layers.into_iter().any(|l| in_fill_on(pour, Some(l), p, r) && self.connected(zi, l, p))
+        layers.into_iter().any(|l| self.fills.in_fill_on(zi, Some(l), p, r) && self.connected(zi, l, p))
     }
     /// The pours a stub of `rq` may end in: with `live`, every pour of its net (each one is the
     /// net's copper where it is connected; the decomposition named the nearest, which may be a
@@ -143,8 +146,8 @@ impl SiteCost<'_> {
     }
     /// A track end of half width `r` at `p` on model layer `layer` lies in connected fill of one
     /// of the pours `zs`.
-    pub fn track_ok_at(&self, model: &BoardModel, zs: &[usize], layer: u32, p: Vec2, r: f64) -> bool {
-        zs.iter().any(|&k| in_fill_on(&model.pours[k], Some(layer), p, r) && self.connected(k, layer, p))
+    pub fn track_ok_at(&self, _model: &BoardModel, zs: &[usize], layer: u32, p: Vec2, r: f64) -> bool {
+        zs.iter().any(|&k| self.fills.in_fill_on(k, Some(layer), p, r) && self.connected(k, layer, p))
     }
 }
 
@@ -177,6 +180,169 @@ pub fn in_fill_on(pour: &crate::model::Pour, layer: Option<u32>, p: Vec2, r: f64
                 h.len() < 3 || (!point_in_poly(p, &h) && far(&h))
             })
     })
+}
+
+/// F7 (profile 2026-11-18: `in_piece` / `in_fill_on` were 77 % of the plane stubs, a
+/// point-in-polygon and distance scan over every ring of every fill, its points converted on
+/// every call): one ring of a fill with its box and two edge indexes, built once. Both tests give
+/// exactly the brute-force answer ([`point_in_poly`], every edge's [`seg_dist`]); an index only
+/// leaves out edges that provably cannot change it:
+/// - point in polygon: an edge toggles the even-odd count only when `min(a.y, b.y) <= p.y <
+///   max(a.y, b.y)`, so only the edges of `p`'s horizontal band are tested (the band index is
+///   monotone in y); a point outside the ring's box is outside (above or below: no edge
+///   straddles it; left: every straddling edge toggles, an even number on a closed ring; right:
+///   the crossing x lies between the edge's ends, exact for integer nm vertices).
+/// - every edge at least `r` away: an edge whose box misses the query box (`p` grown by `r + 1`
+///   nm) is farther than `r` (the nearest point of a segment lies in its box), so only the edges
+///   of the cells the query box touches are tested.
+///
+/// Rings below [`RING_INDEX_MIN`] edges are scanned (box tests only).
+struct Ring {
+    pts: Vec<Vec2>,
+    bb: Aabb,
+    /// Horizontal bands of height `bh` from `bb.min.y`: the edges (by first vertex) whose y range
+    /// meets the band. Empty: no index.
+    bh: f64,
+    bands: Vec<Vec<u32>>,
+    /// Square cells of side `cs` from `bb.min`, `nx` per row: the edges whose box meets the cell.
+    cs: f64,
+    nx: usize,
+    ny: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+/// Rings with fewer edges are scanned without an index.
+const RING_INDEX_MIN: usize = 48;
+/// Most bands / cells per side of a ring's index.
+const RING_INDEX_SIDE: usize = 256;
+
+impl Ring {
+    fn new(src: &[crate::model::Pt]) -> Ring {
+        let pts: Vec<Vec2> = src.iter().map(|q| q.to_vec2()).collect();
+        let n = pts.len();
+        let bb = if n == 0 { Aabb { min: Vec2::default(), max: Vec2::default() } } else { super::draw::bbox_of(&pts) };
+        let mut r = Ring { pts, bb, bh: 1.0, bands: Vec::new(), cs: 1.0, nx: 0, ny: 0, cells: Vec::new() };
+        if n < RING_INDEX_MIN {
+            return r;
+        }
+        let (w, h) = (bb.max.x - bb.min.x, bb.max.y - bb.min.y);
+        let side = ((n as f64).sqrt().ceil() as usize).clamp(1, RING_INDEX_SIDE);
+        let nb = (n / 2).clamp(1, RING_INDEX_SIDE * 4);
+        r.bh = (h / nb as f64).max(1.0);
+        r.bands = vec![Vec::new(); (h / r.bh).floor() as usize + 1];
+        r.cs = (w.max(h) / side as f64).max(1.0);
+        (r.nx, r.ny) = ((w / r.cs).floor() as usize + 1, (h / r.cs).floor() as usize + 1);
+        r.cells = vec![Vec::new(); r.nx * r.ny];
+        for i in 0..n {
+            let (a, b) = (r.pts[i], r.pts[(i + 1) % n]);
+            for k in r.band(a.y.min(b.y))..=r.band(a.y.max(b.y)) {
+                r.bands[k].push(i as u32);
+            }
+            for y in r.cell_y(a.y.min(b.y))..=r.cell_y(a.y.max(b.y)) {
+                for x in r.cell_x(a.x.min(b.x))..=r.cell_x(a.x.max(b.x)) {
+                    r.cells[y * r.nx + x].push(i as u32);
+                }
+            }
+        }
+        r
+    }
+    fn len(&self) -> usize {
+        self.pts.len()
+    }
+    /// Index of `v` from `lo` in steps of `step`, clamped to `0..n` (monotone in `v`).
+    fn slot(v: f64, lo: f64, step: f64, n: usize) -> usize {
+        (((v - lo) / step).floor().max(0.0) as usize).min(n - 1)
+    }
+    fn band(&self, y: f64) -> usize {
+        Self::slot(y, self.bb.min.y, self.bh, self.bands.len())
+    }
+    fn cell_x(&self, x: f64) -> usize {
+        Self::slot(x, self.bb.min.x, self.cs, self.nx)
+    }
+    fn cell_y(&self, y: f64) -> usize {
+        Self::slot(y, self.bb.min.y, self.cs, self.ny)
+    }
+    fn edge(&self, i: usize) -> (Vec2, Vec2) {
+        (self.pts[i], self.pts[(i + 1) % self.pts.len()])
+    }
+    /// [`point_in_poly`] of `p` in the ring.
+    fn pip(&self, p: Vec2) -> bool {
+        if p.x < self.bb.min.x || p.x > self.bb.max.x || p.y < self.bb.min.y || p.y > self.bb.max.y {
+            return false;
+        }
+        if self.bands.is_empty() {
+            return point_in_poly(p, &self.pts);
+        }
+        let mut inside = false;
+        for &i in &self.bands[self.band(p.y)] {
+            let (a, b) = self.edge(i as usize);
+            if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+    /// Every edge of the ring lies at least `r` from `p` ([`seg_dist`]).
+    fn far(&self, p: Vec2, r: f64) -> bool {
+        let q = r + 1.0;
+        let (lo, hi) = (Vec2 { x: p.x - q, y: p.y - q }, Vec2 { x: p.x + q, y: p.y + q });
+        if hi.x < self.bb.min.x || lo.x > self.bb.max.x || hi.y < self.bb.min.y || lo.y > self.bb.max.y {
+            return true;
+        }
+        let n = self.pts.len();
+        if self.cells.is_empty() {
+            return (0..n).all(|i| seg_dist(p, self.pts[i], self.pts[(i + 1) % n]) >= r);
+        }
+        for y in self.cell_y(lo.y)..=self.cell_y(hi.y) {
+            for x in self.cell_x(lo.x)..=self.cell_x(hi.x) {
+                for &i in &self.cells[y * self.nx + x] {
+                    let (a, b) = self.edge(i as usize);
+                    if seg_dist(p, a, b) < r {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+/// One fill piece of a pour, indexed ([`Ring`]).
+struct FillGeo {
+    layer: u32,
+    outer: Ring,
+    holes: Vec<Ring>,
+}
+
+/// The fills of every pour of a board, indexed once (F7): [`in_piece`] and [`in_fill_on`] with the
+/// same answers, in O(edges near the point) instead of O(fill vertices) plus a conversion of
+/// every ring per call.
+pub struct FillIndex {
+    pours: Vec<Vec<FillGeo>>,
+}
+
+impl FillGeo {
+    fn new(f: &crate::model::PourFill) -> FillGeo {
+        FillGeo { layer: f.layer, outer: Ring::new(&f.outer), holes: f.holes.iter().map(|h| Ring::new(h)).collect() }
+    }
+    /// [`in_piece`] of this fill.
+    fn in_piece(&self, p: Vec2, r: f64) -> bool {
+        self.outer.len() >= 3 && self.outer.pip(p) && self.outer.far(p, r) && self.holes.iter().all(|h| h.len() < 3 || (!h.pip(p) && h.far(p, r)))
+    }
+}
+
+impl FillIndex {
+    pub fn new(model: &BoardModel) -> FillIndex {
+        FillIndex { pours: model.pours.iter().map(|z| z.fills.iter().map(FillGeo::new).collect()).collect() }
+    }
+    /// [`in_piece`] of fill `fi` of pour `zi`.
+    pub fn in_piece(&self, zi: usize, fi: usize, p: Vec2, r: f64) -> bool {
+        self.pours[zi][fi].in_piece(p, r)
+    }
+    /// [`in_fill_on`] of pour `zi`.
+    pub fn in_fill_on(&self, zi: usize, layer: Option<u32>, p: Vec2, r: f64) -> bool {
+        (0..self.pours[zi].len()).any(|fi| layer.is_none_or(|l| self.pours[zi][fi].layer == l) && self.in_piece(zi, fi, p, r))
+    }
 }
 
 /// Place the stub and via of `rq` (see the module doc); the copper is indexed in `dr`. The via
@@ -577,7 +743,9 @@ pub fn resite_ok(areas: &[crate::geom::Aabb], members: &[Vec2], p: Vec2) -> bool
 pub const FAR_CANDIDATES: usize = 24;
 
 /// Whether a disc of radius `r` at `p` lies inside the one fill piece `f` (inside its outer ring,
-/// outside its holes, at least `r` from every edge of them). O(piece vertices).
+/// outside its holes, at least `r` from every edge of them). O(piece vertices). The brute-force
+/// reference of [`FillIndex::in_piece`], which the run uses.
+#[cfg(test)]
 fn in_piece(f: &crate::model::PourFill, p: Vec2, r: f64) -> bool {
     let ring = |pts: &[crate::model::Pt]| -> Vec<Vec2> { pts.iter().map(|q| q.to_vec2()).collect() };
     let far = |ps: &[Vec2]| (0..ps.len()).all(|i| seg_dist(p, ps[i], ps[(i + 1) % ps.len()]) >= r);
@@ -677,7 +845,7 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
             let mut s = margin;
             while s <= 4.0 * margin + 0.5e6 && found.is_none_or(|(s0, _)| s < s0) {
                 let p = q + u * s;
-                if in_piece(f, p, margin) && cost.connected(zi, f.layer, p) {
+                if cost.fills.in_piece(zi, fi, p, margin) && cost.connected(zi, f.layer, p) {
                     found = Some((s, p));
                     break;
                 }
@@ -698,7 +866,7 @@ pub fn far_candidates(dr: &Drawer, rq: &Req, cost: &SiteCost) -> Vec<FarTerm> {
             .filter(|(_, z)| z.net == rq.net)
             .flat_map(|(zj, z)| {
                 let m = 0.5 * rq.w + z.min_thickness.max(0) as f64 + model.rules.net_rule(rq.net).clearance as f64;
-                z.fills.iter().filter(move |g| b.signal_layers.contains(&g.layer) && in_piece(g, at, m) && cost.connected(zj, g.layer, at)).map(|g| g.layer)
+                z.fills.iter().enumerate().filter(move |(gi, g)| b.signal_layers.contains(&g.layer) && cost.fills.in_piece(zj, *gi, at, m) && cost.connected(zj, g.layer, at)).map(|(_, g)| g.layer)
             })
             .collect::<std::collections::BTreeSet<u32>>()
             .into_iter()
@@ -910,6 +1078,211 @@ pub fn extras(b: &Board, rq: &Req, o: &Out) -> Vec<Extra> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// xorshift64* (test-only, deterministic).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % (hi - lo + 1) as u64) as i64
+        }
+        fn f(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    /// A ring for the fill-index fuzz: a star (any angle), a rectilinear comb (edges at exact
+    /// integer distances), or a degenerate one (repeated points, collinear runs, a spike).
+    fn ring(g: &mut Rng, c: (i64, i64), size: i64, n: usize) -> Vec<crate::model::Pt> {
+        let pt = |x: i64, y: i64| crate::model::Pt { x, y };
+        match g.int(0, 2) {
+            0 => (0..n)
+                .map(|i| {
+                    let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                    let rr = size as f64 * (0.3 + 0.7 * g.f());
+                    pt(c.0 + (a.cos() * rr).round() as i64, c.1 + (a.sin() * rr).round() as i64)
+                })
+                .collect(),
+            1 => {
+                // Comb: teeth along the bottom, back along the top.
+                let teeth = (n / 4).max(1) as i64;
+                let tw = (2 * size / teeth / 2).max(1);
+                let mut v = Vec::new();
+                for k in 0..teeth {
+                    let x = c.0 - size + 2 * k * tw;
+                    v.push(pt(x, c.1 - size));
+                    v.push(pt(x + tw, c.1 - size));
+                    v.push(pt(x + tw, c.1 - size / 3));
+                    v.push(pt(x + 2 * tw, c.1 - size / 3));
+                }
+                v.push(pt(c.0 - size + 2 * teeth * tw, c.1 + size));
+                v.push(pt(c.0 - size, c.1 + size));
+                v
+            }
+            _ => {
+                let mut v: Vec<crate::model::Pt> = (0..n.max(3))
+                    .map(|i| {
+                        let a = i as f64 / n.max(3) as f64 * std::f64::consts::TAU;
+                        pt(c.0 + (a.cos() * size as f64).round() as i64, c.1 + (a.sin() * size as f64).round() as i64)
+                    })
+                    .collect();
+                // repeated vertex, a zero-length edge, a spike out and back
+                let k = g.int(0, v.len() as i64 - 1) as usize;
+                v.insert(k, v[k]);
+                let s = v[0];
+                v.insert(1, pt(s.x + size / 2, s.y));
+                v.insert(2, s);
+                v
+            }
+        }
+    }
+
+    /// F7: the indexed ring tests ([`Ring::pip`], [`Ring::far`]) and [`FillIndex`] give exactly
+    /// the brute-force answers ([`point_in_poly`], every edge's [`seg_dist`], [`in_piece`],
+    /// [`in_fill_on`]) on random and adversarial rings and points: vertices, points on edges and
+    /// on the ring's box, exactly `r` from an axis-parallel edge (and 1 nm either side), rings
+    /// below and above [`RING_INDEX_MIN`] edges, holes of under 3 points, spikes and repeated
+    /// points.
+    #[test]
+    fn fill_index_matches_the_brute_force_fill_tests() {
+        let mut g = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut checked = [0usize; 4];
+        for case in 0..160 {
+            let size = g.int(200_000, 20_000_000);
+            let n = [3usize, 4, 7, 20, 47, 48, 49, 64, 150, 400][case % 10];
+            let outer = ring(&mut g, (0, 0), size, n);
+            let holes: Vec<Vec<crate::model::Pt>> = (0..g.int(0, 12))
+                .map(|_| {
+                    let c = (g.int(-size, size), g.int(-size, size));
+                    match g.int(0, 5) {
+                        0 => vec![crate::model::Pt { x: c.0, y: c.1 }, crate::model::Pt { x: c.0 + 5, y: c.1 }],
+                        _ => {
+                            let hs = g.int(1_000, size / 3 + 1_000);
+                            let hn = [4usize, 12, 60][g.int(0, 2) as usize];
+                            ring(&mut g, c, hs, hn)
+                        }
+                    }
+                })
+                .collect();
+            let f = crate::model::PourFill { layer: g.int(0, 3) as u32, outer, holes };
+            let geo = FillGeo::new(&f);
+            let rings: Vec<(&Ring, &Vec<crate::model::Pt>)> = std::iter::once((&geo.outer, &f.outer)).chain(geo.holes.iter().zip(&f.holes)).collect();
+            // Query points: random in the box (grown), every vertex, edge points, box edges, and
+            // points exactly `d` off an axis-parallel edge.
+            let bb = geo.outer.bb;
+            let mut qs: Vec<(Vec2, f64)> = Vec::new();
+            let rr = |g: &mut Rng, cs: f64| match g.int(0, 3) {
+                0 => 0.0,
+                1 => g.int(0, 5_000) as f64,
+                2 => (g.f() * 3.0 * cs).round(),
+                _ => g.f() * 1.5e6,
+            };
+            for (ring, src) in &rings {
+                let pts: Vec<Vec2> = src.iter().map(|q| q.to_vec2()).collect();
+                let cs = ring.cs;
+                for (i, &a) in pts.iter().enumerate() {
+                    let b = pts[(i + 1) % pts.len()];
+                    let r = rr(&mut g, cs);
+                    qs.push((a, r));
+                    qs.push(((a + b) * 0.5, r));
+                    if a.x == b.x || a.y == b.y {
+                        // just inside / outside the edge (a ring's box side among them)
+                        let m = (a + b) * 0.5;
+                        for d in [1.0, 500.0] {
+                            let off = if a.x == b.x { Vec2 { x: d, y: 0.0 } } else { Vec2 { x: 0.0, y: d } };
+                            qs.push((Vec2 { x: (m + off).x.round(), y: (m + off).y.round() }, rr(&mut g, cs)));
+                            qs.push((Vec2 { x: (m - off).x.round(), y: (m - off).y.round() }, rr(&mut g, cs)));
+                        }
+                        let d = g.int(0, 2_000_000) as f64;
+                        let m = (a + b) * 0.5;
+                        let off = if a.x == b.x { Vec2 { x: d, y: 0.0 } } else { Vec2 { x: 0.0, y: d } };
+                        for p in [m + off, m - off] {
+                            for r in [d - 1.0, d, d + 1.0] {
+                                qs.push((Vec2 { x: p.x.round(), y: p.y.round() }, r.max(0.0)));
+                            }
+                        }
+                    }
+                }
+                let rb = ring.bb;
+                for _ in 0..20 {
+                    let t = g.f();
+                    let r = rr(&mut g, cs);
+                    for p in [
+                        Vec2 { x: rb.min.x, y: rb.min.y + t * (rb.max.y - rb.min.y) },
+                        Vec2 { x: rb.max.x, y: rb.min.y + t * (rb.max.y - rb.min.y) },
+                        Vec2 { x: rb.min.x + t * (rb.max.x - rb.min.x), y: rb.max.y },
+                        Vec2 { x: rb.min.x - 0.5, y: rb.min.y + t * (rb.max.y - rb.min.y) },
+                        Vec2 { x: rb.min.x + t * (rb.max.x - rb.min.x), y: rb.min.y - 1.0 - r },
+                    ] {
+                        qs.push((p, r));
+                    }
+                }
+            }
+            for _ in 0..300 {
+                let gr = bb.grow(2.0e6);
+                let p = Vec2 { x: gr.min.x + g.f() * (gr.max.x - gr.min.x), y: gr.min.y + g.f() * (gr.max.y - gr.min.y) };
+                let r = rr(&mut g, geo.outer.cs);
+                qs.push((p, r));
+            }
+            for &(p, r) in &qs {
+                for (ring, src) in &rings {
+                    let pts: Vec<Vec2> = src.iter().map(|q| q.to_vec2()).collect();
+                    if pts.len() >= 3 {
+                        assert_eq!(ring.pip(p), point_in_poly(p, &pts), "case {case}: pip {p:?} in a ring of {}", pts.len());
+                        checked[0] += 1;
+                    }
+                    let far = (0..pts.len()).all(|i| seg_dist(p, pts[i], pts[(i + 1) % pts.len()]) >= r);
+                    assert_eq!(ring.far(p, r), far, "case {case}: far {p:?} r {r} of a ring of {}", pts.len());
+                    checked[1] += 1;
+                }
+                let brute = in_piece(&f, p, r);
+                assert_eq!(geo.in_piece(p, r), brute, "case {case}: in_piece {p:?} r {r}");
+                checked[2] += 1;
+                checked[3] += usize::from(brute);
+            }
+        }
+        // the fuzz reached both answers often (not a vacuous pass)
+        assert!(checked[3] > 2_000 && checked[3] + 2_000 < checked[2], "{checked:?}");
+    }
+
+    /// [`FillIndex::in_fill_on`] / [`FillIndex::in_piece`] address the model's pours and fills
+    /// by index and filter by layer like [`in_fill_on`].
+    #[test]
+    fn fill_index_in_fill_on_matches_per_pour_and_layer() {
+        let mut g = Rng(7);
+        let mut model = BoardModel::default();
+        for _ in 0..4 {
+            let fills = (0..g.int(1, 4))
+                .map(|_| {
+                    let c = (g.int(-5_000_000, 5_000_000), g.int(-5_000_000, 5_000_000));
+                    crate::model::PourFill { layer: g.int(0, 2) as u32, outer: ring(&mut g, c, 4_000_000, 60), holes: vec![ring(&mut g, c, 500_000, 12)] }
+                })
+                .collect();
+            model.pours.push(crate::model::Pour { fills, ..Default::default() });
+        }
+        let idx = FillIndex::new(&model);
+        let mut hits = 0;
+        for _ in 0..4000 {
+            let p = Vec2 { x: g.int(-10_000_000, 10_000_000) as f64, y: g.int(-10_000_000, 10_000_000) as f64 };
+            let r = g.int(0, 400_000) as f64;
+            for (zi, z) in model.pours.iter().enumerate() {
+                for layer in [None, Some(0), Some(1), Some(2)] {
+                    let want = in_fill_on(z, layer, p, r);
+                    hits += usize::from(want);
+                    assert_eq!(idx.in_fill_on(zi, layer, p, r), want, "pour {zi} layer {layer:?} {p:?} r {r}");
+                }
+                for fi in 0..z.fills.len() {
+                    assert_eq!(idx.in_piece(zi, fi, p, r), in_piece(&z.fills[fi], p, r));
+                }
+            }
+        }
+        assert!(hits > 500, "{hits}");
+    }
 
     #[test]
     fn weber_point_of_three_points_at_120_degrees_is_their_centre() {

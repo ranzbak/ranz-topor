@@ -210,7 +210,11 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     // `[run] drawing_grace_s`: how long the drawing's optional passes may (soft limit only).
     ctl.limit.set_grace(opts.limit_grace_s);
     ctl.limit.set_draw_grace(if opts.timeout_mode == "hard" { -1.0 } else { opts.drawing_grace_s });
+    let t_stubs = Instant::now();
     let stubs = place_plane_stubs(model, opts, ctl);
+    if std::env::var_os("TOPO_TIMES").is_some() {
+        eprintln!("[topo call] plane stubs: {:.3} s", t_stubs.elapsed().as_secs_f64());
+    }
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
     let t_fx = Instant::now();
     // Cancel / OK during the projection (cancel-fix; the cut room of `[capacity] model = "cuts"`
@@ -2436,7 +2440,7 @@ fn place_plane_stubs(model: &BoardModel, opts: &Options, ctl: &RunControl) -> Pl
     // net's main component is the net's copper: a stub or wire ending in a cut-off island
     // connects nothing (user 2026-11-12: "given that the pour is connected to the rest of the net").
     let live = (opts.plane_terminals && model.pours.iter().any(|z| !z.fills.is_empty())).then(|| crate::pourcheck::check_pour_reach(model, &[], &[]));
-    let cost = planes::SiteCost { mm: reg.price(&Event::Length { wire: 0, mm: 1.0, scale: 1.0 }, &WireCtx::default()), reg: &reg, live: live.as_ref() };
+    let cost = planes::SiteCost { mm: reg.price(&Event::Length { wire: 0, mm: 1.0, scale: 1.0 }, &WireCtx::default()), reg: &reg, live: live.as_ref(), fills: planes::FillIndex::new(model) };
     // A pad whose stub finds no via site inside the pour's fill is joined by a signal connection
     // instead; the decomposition then changes (connection ids), so place again until no new pad
     // drops out (each pass drops at least one pad, so at most one pass per plane pad).
