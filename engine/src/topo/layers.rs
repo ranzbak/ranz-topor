@@ -448,6 +448,9 @@ pub struct LayerReport {
     pub unlayerable_pairs: Vec<(WireId, WireId)>,
     /// Where each pair of `unlayerable_pairs` crosses (its first crossing; same order).
     pub unlayerable_at: Vec<Vec2>,
+    /// loop-local: the wire pair `(a, b)`, `a <= b`, of each entry of `unlayerable` (same order),
+    /// so a local layering can drop the entries of the wires it lays out again.
+    pub unlayerable_w: Vec<(WireId, WireId)>,
     /// Over-full edge-layers by the P1 demand model before and after the capacity refinement
     /// (measured with the same model when the refinement is off), and the moves it kept.
     pub overfull_before: usize,
@@ -568,9 +571,21 @@ fn cross_s(st: &State, polys: &[Vec<Vec2>], w: WireId, x: &super::state::Crossin
     }
 }
 
-/// Stretches, via slots and counts of `rep` from the labelled events `evl[w] = (k, s, layer)` of
-/// every wire (shared by the two-layer and the N-layer assignment). O(events).
-fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
+/// The stretches, vias and vias without a site of one wire ([`stretches_and_vias`]): the pieces
+/// `(layer, points)`, per via its point and slot, and how many vias have no plausible site.
+#[derive(Clone, Debug)]
+struct WireStretches {
+    pieces: Vec<(i32, Vec<Vec2>)>,
+    vias: Vec<(Vec2, ViaSlot)>,
+    no_site: usize,
+}
+
+/// The stretches of live wire `w` from its labelled events `ev` (the body of
+/// [`stretches_and_vias`]). Reads the wire's net, triangles, turns, pass count and polyline
+/// `polys[w]`, and the static projection ([`StretchKey`]: whether an end site exists does not
+/// depend on the crossed chords [`super::refine::end_site`] ranks its candidates by).
+/// O(events + passes x cost of `free_radius`).
+fn wire_stretches(st: &State, polys: &[Vec<Vec2>], w: WireId, ev: &[(usize, f64, i32)], p: &LayerParams) -> WireStretches {
     let pr = st.proj;
     // A plausible site: a point of the stretch (pass point or triangle centroid) whose free disc
     // against other nets' obstacles holds a via pad plus clearance (wire demand ignored).
@@ -582,6 +597,129 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
             !pr.tri_out[t] && free(c)
         }) || (k1 + 1..=k2).any(|k| free(polys[w][k]))
     };
+    let wi = &st.wires[w];
+    let pts = &polys[w];
+    let n = wi.passes.len();
+    let mut out = WireStretches { pieces: Vec::new(), vias: Vec::new(), no_site: 0 };
+    let Some(&(fk, fs, fl)) = ev.first() else {
+        // Crosses nothing: the bottom layer (TopoR's default).
+        let bottom = if p.n_signal == 0 { pr.n_layers } else { p.n_signal };
+        out.pieces.push((bottom as i32 - 1, pts.clone()));
+        return out;
+    };
+    out.pieces.push((fl, piece(pts, 0, 0.0, fk, fs)));
+    let (ranges, between) = super::refine::via_ranges(ev, p.via_between);
+    let mut vi = 0usize;
+    for x in ev.windows(2) {
+        let ((ka, sa, la), (kb, sb, lb)) = (x[0], x[1]);
+        if la == lb {
+            out.pieces.push((la, piece(pts, ka, sa, kb, sb)));
+            continue;
+        }
+        // The via in the middle of its interval: a pass point when the stretch spans one.
+        // With [vias] between_crossings the middle of the traversals strictly between the
+        // two events (`ranges`), and no site when there are none.
+        let (r, has) = (ranges[vi], between[vi]);
+        vi += 1;
+        let (km, sm) = if p.via_between && has {
+            ((r.0 + r.1).div_ceil(2), 0.0)
+        } else if kb > ka {
+            ((ka + kb).div_ceil(2), 0.0)
+        } else {
+            (ka, 0.5 * (sa + sb))
+        };
+        out.pieces.push((la, piece(pts, ka, sa, km, sm)));
+        out.pieces.push((lb, piece(pts, km, sm, kb, sb)));
+        out.vias.push((at(pts, km, sm), ViaSlot { wire: w, from: (ka, sa), to: (kb, sb), at: (km, sm) }));
+        // 5.2: without a traversal strictly between its events the via may still stand on
+        // its own side of an end event ([`super::refine::end_site`]).
+        let free = |t: TriId, q: Vec2| pr.inradius(t) >= p.via_site_r && pr.free_radius(q, wi.net) >= p.via_site_r;
+        let site_ok = if has { site(r.0, r.1, w) } else { super::refine::end_site(st, w, x[0], x[1], &free).is_some() };
+        if !site_ok {
+            out.no_site += 1;
+        }
+    }
+    let &(lk, ls, ll) = ev.last().expect("non-empty");
+    out.pieces.push((ll, piece(pts, lk, ls, n, 1.0)));
+    out
+}
+
+/// loop-local Step A (profile F9): a per-wire cache of [`wire_stretches`], so a layering that
+/// leaves most wires as they were (every TopoR-loop move is judged by one) does not search
+/// their via sites again (`Projection::free_radius` over every obstacle). Exact: an entry is
+/// used only when everything [`wire_stretches`] reads for that wire is bit-equal
+/// ([`StretchKey`]) under the same parameters and projection, so the reports are bit-identical
+/// with and without it. Shared by reference (a mutex, uncontended: one run's layerings are
+/// serial).
+#[derive(Default)]
+pub struct StretchCache {
+    inner: std::sync::Mutex<CacheInner>,
+}
+
+/// One cached wire: the inputs it was made from and its result.
+type CacheEntry = Option<(StretchKey, WireStretches)>;
+
+#[derive(Default)]
+struct CacheInner {
+    /// (projection address, via_site_r bits, n_signal, via_between) the entries were made under.
+    params: Option<(usize, u64, usize, bool)>,
+    wires: Vec<CacheEntry>,
+    hits: u64,
+    misses: u64,
+}
+
+/// Everything [`wire_stretches`] reads for one wire (f64 as bits) besides the static projection
+/// and the parameters: its net (the free radius against other nets), triangles (the site
+/// centroids, the end-site triangle), turns (an end site skips a turning traversal), polyline
+/// (the pieces, the pass-point sites; its length gives the pass count) and events. The end site
+/// ([`super::refine::end_site`]) also reads the crossed wires' chords, but only to rank the
+/// candidate centres: whether a site exists (all the stretch pass asks) does not depend on them.
+#[derive(Clone, Debug, PartialEq)]
+struct StretchKey {
+    net: i32,
+    tris: Vec<TriId>,
+    turns: Vec<(usize, usize)>,
+    poly: Vec<(u64, u64)>,
+    ev: Vec<(usize, u64, i32)>,
+}
+
+impl StretchKey {
+    /// The key of live wire `w` with events `ev`. O(passes + events).
+    fn of(st: &State, polys: &[Vec<Vec2>], w: WireId, ev: &[(usize, f64, i32)]) -> StretchKey {
+        let wi = &st.wires[w];
+        StretchKey {
+            net: wi.net,
+            tris: wi.tris.clone(),
+            turns: wi.turns.clone(),
+            poly: polys[w].iter().map(|q| (q.x.to_bits(), q.y.to_bits())).collect(),
+            ev: ev.iter().map(|&(k, s, l)| (k, s.to_bits(), l)).collect(),
+        }
+    }
+}
+
+impl StretchCache {
+    /// `(hits, misses)` so far.
+    pub fn stats(&self) -> (u64, u64) {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (g.hits, g.misses)
+    }
+}
+
+/// Stretches, via slots and counts of `rep` from the labelled events `evl[w] = (k, s, layer)` of
+/// every wire (shared by the two-layer and the N-layer assignment); with `cache`, a wire whose
+/// inputs are unchanged takes its last result ([`StretchCache`], bit-identical). O(events).
+fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport, cache: Option<&StretchCache>) {
+    let mut guard = cache.map(|c| c.inner.lock().unwrap_or_else(|e| e.into_inner()));
+    if let Some(g) = guard.as_mut() {
+        let params = (st.proj as *const _ as usize, p.via_site_r.to_bits(), p.n_signal, p.via_between);
+        if g.params != Some(params) {
+            g.params = Some(params);
+            g.wires.clear();
+        }
+        if g.wires.len() < evl.len() {
+            g.wires.resize(evl.len(), None);
+        }
+    }
     for (w, ev) in evl.iter().enumerate() {
         let wi = &st.wires[w];
         if !wi.alive {
@@ -589,60 +727,44 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
             rep.events.push(Vec::new());
             continue;
         }
-        let pts = &polys[w];
-        let n = wi.passes.len();
-        let mut pieces: Vec<(i32, Vec<Vec2>)> = Vec::new();
         rep.events.push(ev.clone());
-        let Some(&(fk, fs, fl)) = ev.first() else {
-            // Crosses nothing: the bottom layer (TopoR's default).
-            let bottom = if p.n_signal == 0 { pr.n_layers } else { p.n_signal };
-            pieces.push((bottom as i32 - 1, pts.clone()));
-            rep.stretches.push(pieces);
-            continue;
+        let ws = match guard.as_mut() {
+            None => wire_stretches(st, polys, w, ev, p),
+            Some(g) => {
+                let key = StretchKey::of(st, polys, w, ev);
+                let hit = g.wires[w].as_ref().filter(|(k, _)| *k == key).map(|(_, ws)| ws.clone());
+                match hit {
+                    Some(ws) => {
+                        g.hits += 1;
+                        ws
+                    }
+                    None => {
+                        g.misses += 1;
+                        let ws = wire_stretches(st, polys, w, ev, p);
+                        g.wires[w] = Some((key, ws.clone()));
+                        ws
+                    }
+                }
+            }
         };
-        pieces.push((fl, piece(pts, 0, 0.0, fk, fs)));
-        let (ranges, between) = super::refine::via_ranges(ev, p.via_between);
-        let mut vi = 0usize;
-        for x in ev.windows(2) {
-            let ((ka, sa, la), (kb, sb, lb)) = (x[0], x[1]);
-            if la == lb {
-                pieces.push((la, piece(pts, ka, sa, kb, sb)));
-                continue;
-            }
-            // The via in the middle of its interval: a pass point when the stretch spans one.
-            // With [vias] between_crossings the middle of the traversals strictly between the
-            // two events (`ranges`), and no site when there are none.
-            let (r, has) = (ranges[vi], between[vi]);
-            vi += 1;
-            let (km, sm) = if p.via_between && has {
-                ((r.0 + r.1).div_ceil(2), 0.0)
-            } else if kb > ka {
-                ((ka + kb).div_ceil(2), 0.0)
-            } else {
-                (ka, 0.5 * (sa + sb))
-            };
-            pieces.push((la, piece(pts, ka, sa, km, sm)));
-            pieces.push((lb, piece(pts, km, sm, kb, sb)));
+        for (q, slot) in &ws.vias {
             rep.vias += 1;
-            rep.via_pts.push(at(pts, km, sm));
-            rep.slots.push(ViaSlot { wire: w, from: (ka, sa), to: (kb, sb), at: (km, sm) });
-            // 5.2: without a traversal strictly between its events the via may still stand on
-            // its own side of an end event ([`super::refine::end_site`]).
-            let free = |t: TriId, q: Vec2| pr.inradius(t) >= p.via_site_r && pr.free_radius(q, wi.net) >= p.via_site_r;
-            let site_ok = if has { site(r.0, r.1, w) } else { super::refine::end_site(st, w, x[0], x[1], &free).is_some() };
-            if !site_ok {
-                rep.vias_no_site += 1;
-            }
+            rep.via_pts.push(*q);
+            rep.slots.push(*slot);
         }
-        let &(lk, ls, ll) = ev.last().expect("non-empty");
-        pieces.push((ll, piece(pts, lk, ls, n, 1.0)));
-        rep.stretches.push(pieces);
+        rep.vias_no_site += ws.no_site;
+        rep.stretches.push(ws.pieces);
     }
 }
 
 /// Recompute the stretches, via slots and via counts of `rep` from changed labels `evl` (the P4
 /// label moves; the wires and their events are unchanged). O(events + passes).
 pub fn relabel(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport) {
+    relabel_cached(st, evl, p, rep, None)
+}
+
+/// [`relabel`] with the per-wire stretch cache ([`StretchCache`]; bit-identical).
+pub fn relabel_cached(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport, cache: Option<&StretchCache>) {
     let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
     rep.stretches.clear();
     rep.events.clear();
@@ -650,7 +772,7 @@ pub fn relabel(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep:
     rep.via_pts.clear();
     rep.slots.clear();
     rep.vias_no_site = 0;
-    stretches_and_vias(st, &polys, evl, p, rep);
+    stretches_and_vias(st, &polys, evl, p, rep, cache);
 }
 
 /// Assign layers to the wires of `st`: the exact two-layer Polubasov solve for two signal layers,
@@ -663,14 +785,224 @@ pub fn assign(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
 /// [`assign`] with the drawing's packer: the labelling is then refined against capacity
 /// ([`refine`]) and the over-full edge-layers are counted.
 pub fn assign_with(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
+    assign_cached(st, smd_layer, p, packer, None)
+}
+
+/// [`assign_with`] with the per-wire stretch cache ([`StretchCache`]; the same report bit for
+/// bit, the untouched wires' via sites not searched again).
+pub fn assign_cached(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>, cache: Option<&StretchCache>) -> LayerReport {
     if st.proj.n_layers == 2 {
-        assign_two(st, smd_layer, p, packer)
+        assign_two(st, smd_layer, p, packer, cache, None)
     } else {
-        assign_n(st, smd_layer, p, packer)
+        assign_n(st, smd_layer, p, packer, cache, None)
     }
 }
 
-fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
+/// loop-local (docs/dev/design/loop-local.md): the layering of the wires outside `free` is held
+/// as `prev` has it (their events, labels, masks and partners), and only the free wires are
+/// laid out again: their events are built afresh, a crossing with a held wire becomes a
+/// fixed-orientation event (it must take another layer than the held event), and the same
+/// solver runs on the free events alone (two layers: the exact domain-graph solve; more: the
+/// greedy colouring and the alpha-beta swaps), then the capacity refinement on the model of the
+/// free wires and the wires sharing an edge with them ([`neighbourhood`]), the held events
+/// masked to their layers. Dayan 1997 (thesis printed pp. 55-56, PDF pp. 66-67, Algorithm 1 and
+/// fig. 34): "when a 2-Net is assigned or reassigned, only the optimal candidate assignments
+/// for the 2-Nets affected by this assignment are recomputed". `prev` is the layering of the
+/// state before the move (wire ids shared; the new wires are free). O(events of the free wires
+/// x their crossings + the local model) plus O(wires) to copy the held lists and the stretch
+/// cache's checks.
+pub fn assign_local(
+    st: &State,
+    smd_layer: &dyn Fn(usize) -> Option<usize>,
+    p: &LayerParams,
+    packer: Option<&Packer>,
+    cache: Option<&StretchCache>,
+    held: &Held,
+) -> LayerReport {
+    if st.proj.n_layers == 2 {
+        assign_two(st, smd_layer, p, packer, cache, Some(held))
+    } else {
+        assign_n(st, smd_layer, p, packer, cache, Some(held))
+    }
+}
+
+/// loop-local: the layering held outside the free wires ([`assign_local`]).
+pub struct Held<'r> {
+    /// The layering of the state before the move.
+    pub prev: &'r LayerReport,
+    /// Per wire of the state now: laid out again (a wire past `free`'s end is free).
+    pub free: &'r [bool],
+}
+
+impl Held<'_> {
+    /// Whether wire `w` is laid out again.
+    pub fn is_free(&self, w: WireId) -> bool {
+        self.free.get(w).copied().unwrap_or(true)
+    }
+
+    /// The held event of wire `o`'s traversal `ok` at its crossing with free wire `w`'s traversal
+    /// `k` (`w` kept its path, so `prev` has the pair: o's event whose partner is w's event at
+    /// `k`) and its label; without it (the pair was not an event, e.g. it could not be layered)
+    /// the label `o` has at `ok` by its events. O(events of `o`).
+    fn at(&self, o: WireId, ok: usize, w: WireId, k: usize, bottom: i32) -> (Option<usize>, i32) {
+        let ev = self.prev.events.get(o).map_or(&[][..], |e| &e[..]);
+        let pt = self.prev.partner.get(o).map_or(&[][..], |e| &e[..]);
+        for (i, e) in ev.iter().enumerate().filter(|(_, e)| e.0 == ok) {
+            if let Some(Some((pw, pj))) = pt.get(i) {
+                if *pw == w && self.prev.events.get(w).and_then(|x| x.get(*pj)).is_some_and(|x| x.0 == k) {
+                    return (Some(i), e.2);
+                }
+            }
+        }
+        let mut l = ev.first().map_or(bottom, |e| e.2);
+        for e in ev.iter().filter(|e| e.0 <= ok) {
+            l = e.2;
+        }
+        (None, l)
+    }
+}
+
+/// loop-local (debug, tests): the partner links of `rep` that do not point at an existing event of
+/// a live wire of `st` pointing back (`(wire, event, partner)`). O(events).
+pub fn partner_faults(st: &State, rep: &LayerReport) -> Vec<(WireId, usize, (WireId, usize))> {
+    let mut out = Vec::new();
+    for (w, list) in rep.partner.iter().enumerate() {
+        for (i, x) in list.iter().enumerate() {
+            if let Some((w2, i2)) = *x {
+                let ok = st.wires.get(w2).is_some_and(|x| x.alive)
+                    && rep.events.get(w2).is_some_and(|e| i2 < e.len())
+                    && rep.partner.get(w2).and_then(|p| p.get(i2)).copied().flatten() == Some((w, i));
+                if !ok {
+                    out.push((w, i, (w2, i2)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// loop-local: the free wires and every wire with a pass on an edge one of them passes (the
+/// wires whose packing a free wire's layers can change; [`assign_local`]'s capacity model).
+/// O(passes of the free wires x passes per edge).
+pub fn neighbourhood(st: &State, free: &[bool]) -> Vec<bool> {
+    let mut out = vec![false; st.wires.len()];
+    for (w, wi) in st.wires.iter().enumerate().filter(|(w, wi)| wi.alive && free.get(*w).copied().unwrap_or(true)) {
+        out[w] = true;
+        for &pid in &wi.passes {
+            for &q in &st.edge_order[st.passes[pid].edge] {
+                out[st.passes[q].wire] = true;
+            }
+        }
+    }
+    out
+}
+
+/// The free wires' part of a local layering ([`assign_local`]), before it is merged with the
+/// held one: per wire (empty for held ones) the labelled events, the refinement's masks and
+/// partners (inside the free set), the reported masks (a crossing with a held wire may take
+/// either layer in the report), the (free event, held event) crossing pairs, and the crossings
+/// left on one layer `((a, b), point)`.
+/// The capacity refinement of a local layering: (labels, masks, partners, model wires).
+type LocalRefine<'f> = dyn Fn(&mut [Vec<(usize, f64, i32)>], &[Vec<u64>], &[Vec<Option<(WireId, usize)>>], &[bool]) -> super::refine::RefineStats + 'f;
+/// One event of a triangle in `assign_n`: (s, mask, crossing key, held partner and its mask).
+type HereEv = (f64, u64, Option<CrossKey>, Option<((WireId, usize), u64)>);
+
+struct LocalParts {
+    evl: Vec<Vec<(usize, f64, i32)>>,
+    rmask: Vec<Vec<u64>>,
+    rpartner: Vec<Vec<Option<(WireId, usize)>>>,
+    omask: Vec<Vec<u64>>,
+    links: Vec<((WireId, usize), (WireId, usize))>,
+    unl: Vec<((WireId, WireId), Vec2)>,
+}
+
+/// Merge the free wires' layering `lp` with the held one, refine it on the local model and fill
+/// the report (stretches through `cache`). `same_unl`: a crossing left on one layer after the
+/// refinement is also an unlayerable entry (the N-layer report's rule). O(wires + local model).
+#[allow(clippy::too_many_arguments)]
+fn finish_local(
+    st: &State,
+    polys: &[Vec<Vec2>],
+    h: &Held,
+    mut lp: LocalParts,
+    p: &LayerParams,
+    cache: Option<&StretchCache>,
+    same_unl: bool,
+    rep: &mut LayerReport,
+    refine_fn: &LocalRefine,
+) {
+    let nw = st.wires.len();
+    let held = |w: WireId| st.wires[w].alive && !h.is_free(w);
+    for w in 0..nw {
+        if held(w) {
+            let ev = h.prev.events.get(w).cloned().unwrap_or_default();
+            lp.rmask[w] = ev.iter().map(|e| 1u64 << e.2.clamp(0, 63)).collect();
+            lp.rpartner[w] = vec![None; ev.len()];
+            lp.evl[w] = ev;
+        }
+    }
+    let only = neighbourhood(st, h.free);
+    let rs = refine_fn(&mut lp.evl, &lp.rmask, &lp.rpartner, &only);
+    rep.overfull_before = rs.before;
+    rep.overfull_after = rs.after;
+    rep.refine_moves = rs.moves;
+    rep.refine_stream = (rs.evals, rs.stream, rs.memo);
+    rep.fin_cap = None;
+    // The reported masks and partners: the free wires' own, the held wires' as before with the
+    // partners on free wires found again through the crossing pairs.
+    let mut mask = lp.omask;
+    let mut partner = lp.rpartner;
+    for w in 0..nw {
+        if held(w) {
+            mask[w] = h.prev.mask.get(w).cloned().unwrap_or_default();
+            // Only the partners on held wires stay (a free or dead one's events are new).
+            partner[w] = h.prev.partner.get(w).cloned().unwrap_or_default().into_iter().map(|x| x.filter(|&(t, _)| t < nw && held(t))).collect();
+            mask[w].resize(lp.evl[w].len(), 0);
+            partner[w].resize(lp.evl[w].len(), None);
+        }
+    }
+    for &((fw, fi), (hw, hi)) in &lp.links {
+        partner[fw][fi] = Some((hw, hi));
+        if let Some(x) = partner.get_mut(hw).and_then(|v| v.get_mut(hi)) {
+            *x = Some((fw, fi));
+        }
+    }
+    // Crossings on one layer: the held wires' own entries, the free ones' and (N layers) the
+    // partner pairs the refinement left on one layer.
+    let mut unl: Vec<((WireId, WireId), Vec2)> = Vec::new();
+    for (i, &(a, b)) in h.prev.unlayerable_w.iter().enumerate() {
+        if a < nw && b < nw && held(a) && held(b) {
+            unl.push(((a, b), h.prev.unlayerable[i]));
+        }
+    }
+    unl.append(&mut lp.unl);
+    let mut same = 0usize;
+    for w in 0..nw {
+        for (i, x) in partner[w].iter().enumerate() {
+            if let Some((w2, i2)) = *x {
+                if (w, i) < (w2, i2) && lp.evl[w2].get(i2).is_some_and(|e| e.2 == lp.evl[w][i].2) {
+                    same += 1;
+                    if same_unl && (h.is_free(w) || h.is_free(w2)) {
+                        unl.push(((w.min(w2), w.max(w2)), at(&polys[w], lp.evl[w][i].0, lp.evl[w][i].1)));
+                    }
+                }
+            }
+        }
+    }
+    rep.same_layer = same;
+    stretches_and_vias(st, polys, &lp.evl, p, rep, cache);
+    rep.mask = mask;
+    rep.partner = partner;
+    let mut pairs: BTreeMap<(WireId, WireId), Vec2> = BTreeMap::new();
+    for &(ab, q) in &unl {
+        rep.unlayerable.push(q);
+        rep.unlayerable_w.push(ab);
+        pairs.entry(ab).or_insert(q);
+    }
+    (rep.unlayerable_pairs, rep.unlayerable_at) = pairs.into_iter().unzip();
+}
+
+fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>, cache: Option<&StretchCache>, held: Option<&Held>) -> LayerReport {
     let pr = st.proj;
     let mut rep = LayerReport::default();
     let mut dom: BTreeMap<(WireId, usize, WireId, usize), usize> = BTreeMap::new();
@@ -682,7 +1014,15 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     // is a node of its own, nodes 1..=nt: an event on the trunk at its turn and one at the
     // branch's end, both with parity 0, so the solver puts the trunk's two arms and the branch on
     // one layer there and pays a via on whichever arm must leave it.
-    let tees = super::tree::junctions(st);
+    let mut tees = super::tree::junctions(st);
+    // loop-local: only the free wires' tees (a tree is free or held as a whole).
+    let is_held = |w: WireId| held.is_some_and(|h| st.wires[w].alive && !h.is_free(w));
+    if held.is_some() {
+        tees.retain(|t| !is_held(t.0) && !is_held(t.2));
+    }
+    let bottom = (if p.n_signal == 0 { pr.n_layers } else { p.n_signal }) as i32 - 1;
+    // loop-local: (free event, held event) per crossing of a free wire with a held one.
+    let mut links: Vec<((WireId, usize), (WireId, usize))> = Vec::new();
     let nt = tees.len();
     let mut tee_trunk: BTreeMap<(WireId, usize), Vec<usize>> = BTreeMap::new();
     let mut tee_branch: BTreeMap<(WireId, usize), usize> = BTreeMap::new();
@@ -693,7 +1033,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     let mut events: Vec<Vec<Event>> = Vec::with_capacity(st.wires.len());
     for (w, wi) in st.wires.iter().enumerate() {
         let mut ev = Vec::new();
-        if !wi.alive {
+        if !wi.alive || is_held(w) {
             events.push(ev);
             continue;
         }
@@ -710,9 +1050,10 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             // A wire placed through another net's wall (4.3 `initial = "once"`, `State::any_path`:
             // placed anyway, its foreign copper priced, Q14b) is restricted to no layer there.
             let mask = pr.allowed(t, wi.net).unwrap_or(super::state::LayerMask::all(pr.n_layers));
-            let mut here: Vec<Event> = Vec::new();
+            // Events with, for a crossing with a held wire (loop-local), the held event.
+            let mut here: Vec<(Event, Option<(WireId, usize)>)> = Vec::new();
             if let Some(l) = mask.single() {
-                here.push(Event { node: 0, pi: l as u8, k, s: 0.0 });
+                here.push((Event { node: 0, pi: l as u8, k, s: 0.0 }, None));
             }
             for x in xs.iter().filter(|x| x.k == k) {
                 let o = x.other;
@@ -730,17 +1071,22 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
                             unl.insert(key);
                         }
                     }
-                    (Some(a), None) => here.push(Event { node: 0, pi: a as u8, k, s }),
-                    (None, Some(b)) => here.push(Event { node: 0, pi: 1 - b as u8, k, s }),
+                    (Some(a), None) => here.push((Event { node: 0, pi: a as u8, k, s }, None)),
+                    (None, Some(b)) => here.push((Event { node: 0, pi: 1 - b as u8, k, s }, None)),
+                    (None, None) if is_held(o) => {
+                        // loop-local: the held wire keeps its layer here, this one takes the other.
+                        let (i_o, lo) = held.map_or((None, 0), |h| h.at(o, x.other_k, w, k, bottom));
+                        here.push((Event { node: 0, pi: (1 - lo.clamp(0, 1)) as u8, k, s }, i_o.map(|i| (o, i))));
+                    }
                     (None, None) => {
                         let next = dom.len() + 1 + nt;
                         let d = *dom.entry(key).or_insert(next);
-                        here.push(Event { node: d, pi: (w > o) as u8, k, s });
+                        here.push((Event { node: d, pi: (w > o) as u8, k, s }, None));
                     }
                 }
             }
             for &d in tee_trunk.get(&(w, k)).into_iter().flatten() {
-                here.push(Event { node: d, pi: 0, k, s: 0.5 });
+                here.push((Event { node: d, pi: 0, k, s: 0.5 }, None));
             }
             // A pass through a gap too narrow on some layer for this wire alone excludes it.
             if k < n {
@@ -749,11 +1095,16 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
                 let fits: Vec<usize> =
                     (0..pr.n_layers).filter(|&l| pr.fits_alone(e, l, Item { net: wi.net, w: pw, s: wi.s })).collect();
                 if let [l] = fits[..] {
-                    here.push(Event { node: 0, pi: l as u8, k, s: 1.0 });
+                    here.push((Event { node: 0, pi: l as u8, k, s: 1.0 }, None));
                 }
             }
-            here.sort_by(|a, b| a.s.total_cmp(&b.s));
-            ev.extend(here);
+            here.sort_by(|a, b| a.0.s.total_cmp(&b.0.s));
+            for (e, link) in here {
+                if let Some(hl) = link {
+                    links.push(((w, ev.len()), hl));
+                }
+                ev.push(e);
+            }
         }
         if let Some(&d) = tee_branch.get(&(w, 1)) {
             ev.push(Event { node: d, pi: 0, k: n, s: 1.0 });
@@ -789,8 +1140,51 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     for ev in events.iter() {
         evl.push(ev.iter().map(|e| (e.k, e.s, (o[e.node] ^ e.pi) as i32)).collect());
     }
+    if let Some(h) = held {
+        // loop-local: the free wires' masks and partners, then the merge with the held layering.
+        let mut rmask: Vec<Vec<u64>> = Vec::with_capacity(events.len());
+        let mut rpartner: Vec<Vec<Option<(WireId, usize)>>> = events.iter().map(|ev| vec![None; ev.len()]).collect();
+        let mut by_node: BTreeMap<usize, Vec<(WireId, usize)>> = BTreeMap::new();
+        for (w, ev) in events.iter().enumerate() {
+            rmask.push(ev.iter().enumerate().map(|(i, e)| if e.node <= nt { 1u64 << evl[w][i].2 } else { 0b11 }).collect());
+            for (i, e) in ev.iter().enumerate().filter(|(_, e)| e.node > nt) {
+                by_node.entry(e.node).or_default().push((w, i));
+            }
+        }
+        for v in by_node.values().filter(|v| v.len() == 2) {
+            rpartner[v[0].0][v[0].1] = Some(v[1]);
+            rpartner[v[1].0][v[1].1] = Some(v[0]);
+        }
+        let mut omask = rmask.clone();
+        for &((fw, fi), _) in &links {
+            omask[fw][fi] = 0b11;
+        }
+        let unl: Vec<((WireId, WireId), Vec2)> = unl.iter().map(|&(w, k, o, _)| ((w, o), at(&polys[w], k, 0.5))).collect();
+        let lp = LocalParts { evl, rmask, rpartner, omask, links, unl };
+        let via = p.via_mm;
+        let refine_fn = |evl: &mut [Vec<(usize, f64, i32)>], mask: &[Vec<u64>], partner: &[Vec<Option<(WireId, usize)>>], only: &[bool]| {
+            packer
+                .map(|pk| {
+                    super::refine::refine_only(
+                        st,
+                        pk,
+                        &pk.taut_dirs_only(st, only),
+                        evl,
+                        mask,
+                        partner,
+                        bottom,
+                        &|a, b| if a == b { 0.0 } else { via },
+                        &|_, _, _| 0.0,
+                        &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
+                        Some(only),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        finish_local(st, &polys, h, lp, p, cache, false, &mut rep, &refine_fn);
+        return rep;
+    }
     // Capacity-aware refinement: node 0 events are fixed, domain events flip with their partner.
-    let bottom = (if p.n_signal == 0 { pr.n_layers } else { p.n_signal }) as i32 - 1;
     let mut mask: Vec<Vec<u64>> = Vec::with_capacity(events.len());
     let mut partner: Vec<Vec<Option<(WireId, usize)>>> = events.iter().map(|ev| vec![None; ev.len()]).collect();
     let mut by_node: BTreeMap<usize, Vec<(WireId, usize)>> = BTreeMap::new();
@@ -841,12 +1235,13 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             }
         }
     }
-    stretches_and_vias(st, &polys, &evl, p, &mut rep);
+    stretches_and_vias(st, &polys, &evl, p, &mut rep, cache);
     rep.same_layer = dom_labels.values().filter(|l| l.len() == 2 && l[0] == l[1]).count();
     let mut pairs: BTreeMap<(WireId, WireId), Vec2> = BTreeMap::new();
     for &(w, k, o, _) in &unl {
         let p = at(&polys[w], k, 0.5);
         rep.unlayerable.push(p);
+        rep.unlayerable_w.push((w, o));
         pairs.entry((w, o)).or_insert(p);
     }
     (rep.unlayerable_pairs, rep.unlayerable_at) = pairs.into_iter().unzip();
@@ -928,7 +1323,7 @@ fn n_cost(wev: &[Vec<usize>], ev: &[NEv], lab: &[u8], c: &Costs) -> f64 {
 /// 3. the swap is kept when the total cost drops; repeated until a full sweep improves nothing.
 ///
 /// Complexity: O(events · L²) per greedy wire pass; a sweep is L² / 2 domain-graph solves.
-pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>) -> LayerReport {
+pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>, cache: Option<&StretchCache>, held: Option<&Held>) -> LayerReport {
     let pr = st.proj;
     let nl = pr.n_layers;
     let full: u64 = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
@@ -938,8 +1333,14 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     let mut wev: Vec<Vec<usize>> = vec![Vec::new(); st.wires.len()];
     let mut open: BTreeMap<CrossKey, usize> = BTreeMap::new();
     let mut unl: BTreeSet<CrossKey> = BTreeSet::new();
+    // loop-local: held wires, the bottom label, (free event id, held event) per crossing with a
+    // held wire, and each free event's mask in the report (before a held partner narrowed it).
+    let is_held = |w: WireId| held.is_some_and(|h| st.wires[w].alive && !h.is_free(w));
+    let bottom_l = (if p.n_signal == 0 { nl } else { p.n_signal }) as i32 - 1;
+    let mut links_id: Vec<(usize, (WireId, usize))> = Vec::new();
+    let mut allowed: Vec<u64> = Vec::new();
     for (w, wi) in st.wires.iter().enumerate() {
-        if !wi.alive {
+        if !wi.alive || is_held(w) {
             continue;
         }
         let n = wi.passes.len();
@@ -957,10 +1358,12 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             // A wire placed through another net's wall (4.3 `initial = "once"`, `State::any_path`:
             // placed anyway, its foreign copper priced, Q14b) is restricted to no layer there.
             let tm = pr.allowed(t, wi.net).map_or(full, |m| m.0);
-            // (s, mask, crossing key) of the events of this triangle, in order along the wire.
-            let mut here: Vec<(f64, u64, Option<CrossKey>)> = Vec::new();
+            // (s, mask, crossing key) of the events of this triangle, in order along the wire;
+            // loop-local: a crossing with a held wire carries its held event and the mask
+            // without the held layer instead of a key.
+            let mut here: Vec<HereEv> = Vec::new();
             if tm != full {
-                here.push((0.0, tm, None));
+                here.push((0.0, tm, None, None));
             }
             for x in xs.iter().filter(|x| x.k == k) {
                 let o = x.other;
@@ -969,8 +1372,16 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                 let key = if w < o { (w, k, o, x.other_k) } else { (o, x.other_k, w, k) };
                 if tm == mo && tm.count_ones() == 1 {
                     unl.insert(key);
+                } else if is_held(o) {
+                    let (i_o, lo) = held.map_or((None, 0), |h| h.at(o, x.other_k, w, k, bottom_l));
+                    let m = tm & !(1u64 << lo.clamp(0, 63));
+                    if m == 0 {
+                        unl.insert(key);
+                    } else {
+                        here.push((s, m, None, i_o.map(|i| ((o, i), tm))));
+                    }
                 } else {
-                    here.push((s, tm, Some(key)));
+                    here.push((s, tm, Some(key), None));
                 }
             }
             if k < n {
@@ -980,12 +1391,19 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                     .filter(|&l| pr.fits_alone(e, l, Item { net: wi.net, w: pw, s: wi.s }))
                     .fold(0u64, |m, l| m | 1 << l);
                 if fits != full && fits != 0 {
-                    here.push((1.0, fits, None));
+                    here.push((1.0, fits, None, None));
                 }
             }
             here.sort_by(|a, b| a.0.total_cmp(&b.0));
-            for (s, mask, key) in here {
+            for (s, mask, key, link) in here {
                 let id = push(&mut ev, NEv { k, s, mask, partner: None });
+                if held.is_some() {
+                    allowed.resize(id + 1, 0);
+                    allowed[id] = link.map_or(mask, |l| l.1);
+                    if let Some((hl, _)) = link {
+                        links_id.push((id, hl));
+                    }
+                }
                 if let Some(key) = key {
                     match open.remove(&key) {
                         Some(q) => {
@@ -1163,6 +1581,38 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     let mask: Vec<Vec<u64>> = wev.iter().map(|l| l.iter().map(|&e| ev[e].mask).collect()).collect();
     let partner: Vec<Vec<Option<(WireId, usize)>>> =
         wev.iter().map(|l| l.iter().map(|&e| ev[e].partner.map(|q| at_ev[q])).collect()).collect();
+    if let Some(h) = held {
+        // loop-local: the merge with the held layering (the masks in the report without the
+        // held partners' narrowing).
+        allowed.resize(ev.len(), 0);
+        let omask: Vec<Vec<u64>> = wev.iter().map(|l| l.iter().map(|&e| if allowed[e] != 0 { allowed[e] } else { ev[e].mask }).collect()).collect();
+        let links: Vec<((WireId, usize), (WireId, usize))> = links_id.iter().map(|&(id, hl)| (at_ev[id], hl)).collect();
+        let unl: Vec<((WireId, WireId), Vec2)> = unl.iter().map(|&(w, k, o, _)| ((w, o), at(&polys[w], k, 0.5))).collect();
+        rep.domains = ev.iter().enumerate().filter(|(i, e)| e.partner.is_some_and(|q| q > *i)).count() + links.len();
+        let lp = LocalParts { evl, rmask: mask, rpartner: partner, omask, links, unl };
+        let bottom = costs.plane_from.min(nl) as i32 - 1;
+        let refine_fn = |evl: &mut [Vec<(usize, f64, i32)>], mask: &[Vec<u64>], partner: &[Vec<Option<(WireId, usize)>>], only: &[bool]| {
+            packer
+                .map(|pk| {
+                    super::refine::refine_only(
+                        st,
+                        pk,
+                        &pk.taut_dirs_only(st, only),
+                        evl,
+                        mask,
+                        partner,
+                        bottom,
+                        &|a, b| costs.trans(a, b),
+                        &|w, i, l| wev.get(w).and_then(|x| x.get(i)).map_or(0.0, |&e| costs.unary(e, l)),
+                        &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
+                        Some(only),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        finish_local(st, &polys, h, lp, p, cache, true, &mut rep, &refine_fn);
+        return rep;
+    }
     let h_in = super::rtrace::on().then(|| super::rtrace::hash(&evl));
     let rs = packer
         .map(|pk| {
@@ -1207,14 +1657,16 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             pairs.entry((wa.min(wb), wa.max(wb))).or_insert(p);
             rep.same_layer += 1;
             rep.unlayerable.push(p);
+            rep.unlayerable_w.push((wa.min(wb), wa.max(wb)));
         }
     }
     for &(w, k, o, _) in &unl {
         let p = at(&polys[w], k, 0.5);
         rep.unlayerable.push(p);
+        rep.unlayerable_w.push((w, o));
         pairs.entry((w, o)).or_insert(p);
     }
     (rep.unlayerable_pairs, rep.unlayerable_at) = pairs.into_iter().unzip();
-    stretches_and_vias(st, &polys, &evl, p, &mut rep);
+    stretches_and_vias(st, &polys, &evl, p, &mut rep, cache);
     rep
 }

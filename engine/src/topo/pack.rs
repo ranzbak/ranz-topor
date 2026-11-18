@@ -420,6 +420,12 @@ impl<'a> Packer<'a> {
         (0..st.wires.len()).map(|w| if st.wires[w].alive { self.taut(st, w).dir.clone() } else { Vec::new() }).collect()
     }
 
+    /// [`Packer::taut_dirs`] for the wires `only[w]`, empty for the others (loop-local: the
+    /// directions [`super::refine::CapModel::new_only`] reads).
+    pub fn taut_dirs_only(&self, st: &State, only: &[bool]) -> Vec<Vec<Vec2>> {
+        (0..st.wires.len()).map(|w| if st.wires[w].alive && only.get(w).copied().unwrap_or(false) { self.taut(st, w).dir.clone() } else { Vec::new() }).collect()
+    }
+
     fn taut_raw(&self, st: &State, w: WireId) -> Taut {
         let pr = self.pr;
         let wi = &st.wires[w];

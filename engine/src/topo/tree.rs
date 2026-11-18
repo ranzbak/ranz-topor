@@ -250,6 +250,20 @@ pub fn fix_layers(
     partner: &mut [Vec<Option<(WireId, usize)>>],
     bottom: i32,
 ) -> usize {
+    fix_layers_only(st, events, mask, partner, bottom, None)
+}
+
+/// [`fix_layers`] at the junctions whose branch or trunk is `only[w]` (loop-local: the trees laid
+/// out again; the held trees keep their pins). `None` = every junction.
+pub fn fix_layers_only(
+    st: &State,
+    events: &mut [Vec<(usize, f64, i32)>],
+    mask: &mut [Vec<u64>],
+    partner: &mut [Vec<Option<(WireId, usize)>>],
+    bottom: i32,
+    only: Option<&[bool]>,
+) -> usize {
+    let on = |w: WireId| only.is_none_or(|o| o.get(w).copied().unwrap_or(true));
     let label_at = |ev: &[(usize, f64, i32)], k: usize, s: f64| -> i32 {
         // The label of the last event at or before (k, s), else of the first event, else bottom.
         let mut l = ev.first().map_or(bottom, |e| e.2);
@@ -272,6 +286,9 @@ pub fn fix_layers(
         }
     };
     for (b, end, t, k, _) in junctions(st) {
+        if !on(b) && !on(t) {
+            continue;
+        }
         let l = label_at(&events[t], k, 0.5);
         // Pin the trunk at the turn.
         let pos = events[t].iter().position(|e| (e.0, e.1) > (k, 0.5)).unwrap_or(events[t].len());
