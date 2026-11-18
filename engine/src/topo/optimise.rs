@@ -76,6 +76,11 @@ impl Emphasis {
     }
 }
 
+/// A seed mixed from two (the loop's streams; TW5 escapes). O(1).
+pub fn mix_seed(a: u64, b: u64) -> u64 {
+    mix(a, b)
+}
+
 fn mix(a: u64, b: u64) -> u64 {
     // SplitMix64 finaliser of a ^ golden-ratio multiple of b.
     let mut z = a ^ b.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -173,6 +178,21 @@ pub struct CycleStats {
     /// The shadow's sum of |graded violations of the whole-board layering - of the present one|
     /// of the state before each sampled move (the offset the global judge would charge).
     pub shadow_base_graded: f64,
+    /// TW5 (b) the layering escapes run (`[optimize] escape = "layering"`), over them the free
+    /// positions (wire, traversal with more than one allowed layer) and how many of them changed
+    /// layer, the board's vias before / after, and escapes after which the predicted violations
+    /// rose (taken all the same with `escape_take = "always"`).
+    pub escapes: usize,
+    pub esc_free: usize,
+    pub esc_diff: usize,
+    pub esc_vias_before: usize,
+    pub esc_vias_after: usize,
+    pub esc_viol_up: usize,
+    /// TW5 (d) floating up per wire: tried / kept.
+    pub float_w_tried: usize,
+    pub float_w_kept: usize,
+    /// TW5 (c) loop history updates.
+    pub hist_updates: usize,
 }
 
 impl CycleStats {
@@ -206,6 +226,15 @@ impl CycleStats {
         self.shadow_err_vias += o.shadow_err_vias;
         self.shadow_unl_diff += o.shadow_unl_diff;
         self.shadow_base_graded += o.shadow_base_graded;
+        self.escapes += o.escapes;
+        self.esc_free += o.esc_free;
+        self.esc_diff += o.esc_diff;
+        self.esc_vias_before += o.esc_vias_before;
+        self.esc_vias_after += o.esc_vias_after;
+        self.esc_viol_up += o.esc_viol_up;
+        self.float_w_tried += o.float_w_tried;
+        self.float_w_kept += o.float_w_kept;
+        self.hist_updates += o.hist_updates;
     }
 }
 

@@ -395,6 +395,117 @@ impl DomainGraph {
     }
 }
 
+impl DomainGraph {
+    /// TW5 (b), the layering escape (docs/dev/design/tw5-escape.md): a seeded walk over the
+    /// layerings with the same number of vias as `o` (Polubasov 2010 «Оптимизация расслоения»,
+    /// figs. 8-10: "layerings with the same number of vias are unexpectedly many"; of 12 optimal
+    /// ones only 2 lead out of the local minimum, so the layering "should be chosen at random";
+    /// the gain comes "from a radical change of the topological situation", also with 0 vias).
+    /// Call it on the graph as built (before [`DomainGraph::solve_ties`] reduces it), with `o` an
+    /// orientation of it (at least `adj.len()` long, `o[0] = 0`). First every connected part of
+    /// the graph that does not reach node 0 (no SMD pad, no one-layer triangle fixes it) is
+    /// flipped as a whole with probability 1/2: every stretch of its wires on the other layer, the
+    /// vias the same (Polubasov 2001 p. 4: only the parity along a wire counts). Then `tries`
+    /// cluster moves: a random domain, grown across the edges that carry no via under `o`, each
+    /// taken with probability 1/2 (node 0 never), is flipped when that adds no via (the cut value
+    /// of its boundary does not rise: the vias move to other stretches of the same wires, or fall
+    /// when `o` was no optimum). The cut value never rises, so an optimum stays an optimum.
+    /// Returns the domains flipped (a domain may count more than once). Deterministic per `seed`.
+    /// O(nodes + edges) for the parts plus O(tries x cluster boundary).
+    pub fn plateau_walk(&self, o: &mut [u8], tries: usize, seed: u64) -> usize {
+        let n = self.adj.len();
+        if n <= 1 || o.len() < n {
+            return 0;
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(seed ^ 0x7E5C_A9E5_0000_0001);
+        let mut flipped = 0usize;
+        // Whole parts without node 0.
+        let mut part = vec![usize::MAX; n];
+        let mut free_nodes: Vec<usize> = Vec::new();
+        for s in 1..n {
+            if part[s] != usize::MAX || self.adj[s].is_empty() {
+                continue;
+            }
+            let mut stack = vec![s];
+            let mut members = Vec::new();
+            let mut reaches0 = false;
+            part[s] = s;
+            while let Some(v) = stack.pop() {
+                members.push(v);
+                for &u in self.adj[v].keys() {
+                    if u == 0 {
+                        reaches0 = true;
+                    } else if part[u] == usize::MAX {
+                        part[u] = s;
+                        stack.push(u);
+                    }
+                }
+            }
+            if !reaches0 && rng.gen_range(0..2u8) == 1 {
+                for &v in &members {
+                    o[v] ^= 1;
+                }
+                flipped += members.len();
+            }
+            free_nodes.extend(members);
+        }
+        free_nodes.sort_unstable();
+        if free_nodes.is_empty() {
+            return flipped;
+        }
+        let cost = |o: &[u8], u: usize, v: usize, w: f64, flip_u: bool| edge_cost(w, (o[u] ^ flip_u as u8) != o[v]);
+        let mut in_s = vec![false; n];
+        for _ in 0..tries {
+            let v = free_nodes[rng.gen_range(0..free_nodes.len())];
+            let mut s = vec![v];
+            in_s[v] = true;
+            let mut i = 0;
+            while i < s.len() {
+                let x = s[i];
+                i += 1;
+                for (&u, &w) in &self.adj[x] {
+                    if u != 0 && !in_s[u] && cost(o, x, u, w, false) == 0.0 && rng.gen_range(0..2u8) == 1 {
+                        in_s[u] = true;
+                        s.push(u);
+                    }
+                }
+            }
+            // The change of the cut value on the boundary of `s` when it is flipped.
+            let mut delta = 0.0;
+            for &x in &s {
+                for (&u, &w) in &self.adj[x] {
+                    if !in_s[u] {
+                        delta += cost(o, x, u, w, true) - cost(o, x, u, w, false);
+                    }
+                }
+            }
+            if delta <= EPS {
+                for &x in &s {
+                    o[x] ^= 1;
+                }
+                flipped += s.len();
+            }
+            for &x in &s {
+                in_s[x] = false;
+            }
+        }
+        flipped
+    }
+
+    /// The cut value of orientation `o` on the graph as built (tests, the escape's check). O(edges).
+    pub fn value(&self, o: &[u8]) -> f64 {
+        let mut f = 0.0;
+        for (u, m) in self.adj.iter().enumerate() {
+            for (&v, &w) in m {
+                if u < v {
+                    f += edge_cost(w, o[u] != o[v]);
+                }
+            }
+        }
+        f
+    }
+}
+
 /// Cost of an edge of weight `w`, cut or not.
 pub fn edge_cost(w: f64, cut: bool) -> f64 {
     if (w > 0.0) == cut {
@@ -428,6 +539,8 @@ pub struct Event {
 #[derive(Clone, Debug, Default)]
 pub struct LayerReport {
     pub domains: usize,
+    /// TW5 (b): domains the layering escape's plateau walk flipped (0 without a walk).
+    pub walked: usize,
     pub before: GraphSize,
     pub after: GraphSize,
     pub vias: usize,
@@ -495,6 +608,10 @@ pub struct LayerParams {
     /// the TopoR loop's layer re-optimisation, shopping list 5.2); 0 = the first optimum, as
     /// before.
     pub ties: u64,
+    /// TW5 (b) `[optimize] escape_walk`: the layering escape's plateau walk, tries per domain
+    /// ([`DomainGraph::plateau_walk`], with `ties` as its seed); 0 = off (every layering but the
+    /// loop's escapes).
+    pub walk: usize,
     /// 5.4 `[vias] between_crossings`: a via sits strictly between its two events
     /// ([`super::refine::via_ranges`]); an interval without a traversal there has no site.
     pub via_between: bool,
@@ -518,6 +635,7 @@ impl Default for LayerParams {
             cap_evals: 200_000,
             cap_vias: false,
             ties: 0,
+            walk: 0,
             via_between: false,
             cap_reference: false,
         }
@@ -1177,7 +1295,11 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     let mut reduced = g.clone();
     reduced.reduce();
     rep.after = reduced.size();
-    let o = g.solve_ties(p.exact_max, p.restarts, p.seed, p.ties);
+    let g0 = (p.walk > 0 && p.ties != 0 && held.is_none()).then(|| g.clone());
+    let mut o = g.solve_ties(p.exact_max, p.restarts, p.seed, p.ties);
+    if let Some(g0) = g0 {
+        rep.walked = g0.plateau_walk(&mut o, p.walk.saturating_mul(rep.domains.max(1)), p.ties);
+    }
     if std::env::var("TOPO_TEEDBG").is_ok() {
         for &(bw, end, tw, k, v) in &tees {
             eprintln!("TEEDBG tee branch {bw} end {end} trunk {tw} k {k} v ({:.3},{:.3}) node {}", pr.pos[v].x / 1e6, -pr.pos[v].y / 1e6, tee_branch[&(bw, end)]);
@@ -1721,4 +1843,87 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     (rep.unlayerable_pairs, rep.unlayerable_at) = pairs.into_iter().unzip();
     stretches_and_vias(st, &polys, &evl, p, &mut rep, cache);
     rep
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every orientation (o[0] = 0) of `n` nodes with its cut value.
+    fn all_values(g: &DomainGraph, n: usize) -> Vec<(u64, f64)> {
+        (0..(1u64 << (n - 1)))
+            .map(|m| {
+                let o: Vec<u8> = (0..n).map(|i| if i == 0 { 0 } else { ((m >> (i - 1)) & 1) as u8 }).collect();
+                (m, g.value(&o))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_plateau_walk_keeps_the_optimum_and_reaches_other_optima() {
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let (mut multi, mut reached_other) = (0, 0);
+        for case in 0..300 {
+            let n = rng.gen_range(3..=10);
+            let m = rng.gen_range(1..=2 * n);
+            let mut g = DomainGraph::new(n);
+            for _ in 0..m {
+                let w = if rng.gen_bool(0.5) { 25.0 } else { -25.0 };
+                g.add_edge(rng.gen_range(0..n), rng.gen_range(0..n), w);
+            }
+            let vals = all_values(&g, n);
+            let best = vals.iter().map(|v| v.1).fold(f64::INFINITY, f64::min);
+            let optima = vals.iter().filter(|v| (v.1 - best).abs() < 1e-6).count();
+            let g0 = g.clone();
+            let mut o = g.clone().solve_ties(16, 4, 1, 0);
+            o.truncate(n);
+            assert!((g0.value(&o) - best).abs() < 1e-6, "case {case}: the solver's optimum");
+            let start = o.clone();
+            let mut seen_other = false;
+            for seed in 1..=20u64 {
+                let mut w = start.clone();
+                g0.plateau_walk(&mut w, 4 * n, seed);
+                assert_eq!(w[0], 0, "node 0 is fixed");
+                assert!((g0.value(&w) - best).abs() < 1e-6, "case {case} seed {seed}: the walk left the optimum ({} vs {best})", g0.value(&w));
+                seen_other |= w != start;
+                let mut again = start.clone();
+                g0.plateau_walk(&mut again, 4 * n, seed);
+                assert_eq!(again, w, "deterministic per seed");
+            }
+            if optima > 1 {
+                multi += 1;
+                reached_other += usize::from(seen_other);
+            }
+        }
+        assert!(multi > 50, "{multi} cases with several optima");
+        assert!(reached_other * 10 >= multi * 9, "the walk reached another optimum in {reached_other} of {multi}");
+    }
+
+    #[test]
+    fn the_plateau_walk_never_raises_a_non_optimum() {
+        let mut rng = ChaCha8Rng::seed_from_u64(5);
+        for _ in 0..200 {
+            let n = rng.gen_range(3..=9);
+            let mut g = DomainGraph::new(n);
+            for _ in 0..rng.gen_range(1..=3 * n) {
+                g.add_edge(rng.gen_range(0..n), rng.gen_range(0..n), 25.0 * rng.gen_range(1..=2) as f64 * if rng.gen_bool(0.5) { 1.0 } else { -1.0 });
+            }
+            let mut o: Vec<u8> = (0..n).map(|i| if i == 0 { 0 } else { rng.gen_range(0..2) }).collect();
+            let v0 = g.value(&o);
+            g.plateau_walk(&mut o, 5 * n, rng.gen());
+            assert!(g.value(&o) <= v0 + 1e-6);
+        }
+        // A part without node 0 flips as a whole at random: same vias, every domain moved.
+        let mut g = DomainGraph::new(4);
+        g.add_edge(1, 2, 25.0);
+        g.add_edge(2, 3, -25.0);
+        let mut flips = 0;
+        for seed in 0..40 {
+            let mut o = vec![0u8, 0, 0, 1];
+            g.plateau_walk(&mut o, 0, seed);
+            assert_eq!(g.value(&o), 0.0);
+            flips += usize::from(o == vec![0, 1, 1, 0]);
+        }
+        assert!((8..=32).contains(&flips), "about half the seeds flip the part: {flips}");
+    }
 }

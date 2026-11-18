@@ -1466,6 +1466,14 @@ impl<'a> CapModel<'a> {
         (0..self.cost.len()).filter(|&i| self.cost[i] > 0.0).map(|i| (i / nl, i % nl)).collect()
     }
 
+    /// TW5 (c): the over-full edges with their graded depth (the per-edge price factor minus 1:
+    /// how far over, in pitches), one entry per over-full edge-layer, ascending.
+    pub fn overfull_depths(&self) -> Vec<(usize, f64)> {
+        let nl = self.fx.nl;
+        let pr = self.fx.price.max(1e-12);
+        (0..self.cost.len()).filter(|&i| self.cost[i] > 0.0).map(|i| (i / nl, (self.cost[i] / pr - 1.0).max(0.0))).collect()
+    }
+
     /// Wires with a via that has no site in its interval, ascending.
     pub fn nosite_wires(&self) -> Vec<WireId> {
         (0..self.nosite.len()).filter(|&w| self.nosite[w] > 0).collect()

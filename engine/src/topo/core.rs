@@ -3077,9 +3077,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // loop-local: the deterministic work counters of the TopoR loop (whole-board layerings and
     // measures, local layerings and their sizes, the shadow check), read per cycle.
     let lctr = LoopCtr::default();
-    let assign_t = |st: &State, ties: u64| {
+    // TW5 (b): `walk` > 0 = the layering escape's plateau walk (tries per domain).
+    let assign_tw = |st: &State, ties: u64, walk: usize| {
         lctr.layer_global.set(lctr.layer_global.get() + 1);
-        let lp = LayerParams { ties, ..lp };
+        let lp = LayerParams { ties, walk, ..lp };
         let mut lr = layers::assign_cached(st, &|ob| b.smd_layer(ob), &lp, Some(&packer), scache_ref);
         if tree_free && proj.n_layers != 2 && st.wires.iter().any(|w| w.alive && !w.turns.is_empty()) {
             let mut evl = lr.events.clone();
@@ -3092,6 +3093,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         lr
     };
+    let assign_t = |st: &State, ties: u64| assign_tw(st, ties, 0);
+    let assign_esc = |st: &State, ties: u64| assign_tw(st, ties, opts.escape_walk);
     // loop-local Step B: the layering of a state whose wires outside `held.free` keep the layers of
     // `held.prev` ([`layers::assign_local`]); the junction fix-up only on the free trees.
     let assign_l = |st: &State, ties: u64, held: &layers::Held| {
@@ -3298,7 +3301,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let first_score = score(&st, &lr);
     let mut best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), first_score);
     let (mut p4_rounds, mut p4_stall, mut p4_ripped) = (0usize, 0usize, 0usize);
-    for _round in 0..opts.reroute_rounds {
+    // TW5 (e) `[optimize] preloop_p4` (D9): with the TopoR loop the negotiated rip-up rounds
+    // before it are folded into the loop (its fading history on over-full edges and the layering
+    // escapes do their work, docs/dev/design/tw5-escape.md); `true` runs them as before TW5.
+    let p4_rounds_max = if opts.opt_loop == "topor" && !opts.preloop_p4 { 0 } else { opts.reroute_rounds };
+    for _round in 0..p4_rounds_max {
         if expired() {
             timed_out = true;
             break;
@@ -3611,6 +3618,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if topor {
         use super::optimise::{criteria_of, evaluation, foreign_copper, foreign_copper_only, k_osc, layers_now, layers_now_only, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
         let t_loop = Instant::now();
+        /// TW5 (a): the factor index of the violation weight's own oscillation (apart from the
+        /// registry's factors).
+        const VIOL_FACTOR: usize = 1 << 20;
         // The loop's own emergency stop: a share of the time left (the rest is the drawing's).
         let loop_deadline = ctl.deadline().map(|d| {
             let now = Instant::now();
@@ -3976,6 +3986,30 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             len: f64,
             price: f64,
         }
+        /// TW5 ESCAPE (docs/dev/design/tw5-escape.md): the loop's escape settings and its
+        /// loop-wide memory (not part of a variant: a restore keeps it).
+        struct Tw5<'a, 'p> {
+            /// (a) `[optimize] oscillation = "bounded"` and its amplitude bounds.
+            bounded: bool,
+            amp_lo: f64,
+            amp_hi: f64,
+            /// (b) `[optimize] escape = "layering"`, its layering (with the plateau walk) and the
+            /// work throttle; `escape_take = "always"`.
+            escape: bool,
+            assign_e: AssignFn<'a, 'p>,
+            throttle: super::escape::Throttle,
+            take_always: bool,
+            /// The re-lay counter's fading price per connection (`relay_count_fade` < 1; None =
+            /// the plain counter, as before TW5).
+            relay_w: Option<(Vec<f64>, f64)>,
+            /// (c) the loop history and the history the loop started with.
+            hist: Option<super::escape::History>,
+            hist_base: Vec<f64>,
+            /// (d) floating up per wire.
+            float_wire: bool,
+            /// Escapes so far in this run (their seeds).
+            n_esc: u64,
+        }
         /// The real topology of this route as the loop's [`Space`].
         struct Sp<'a, 'p> {
             st: &'a mut State<'p>,
@@ -4039,6 +4073,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             dbg_tag: u64,
             /// The run's control: the test hook's markers between the cycle's stages.
             ctl: &'a RunControl,
+            /// TW5 ESCAPE.
+            tw5: Tw5<'a, 'p>,
         }
         impl<'p> Sp<'_, 'p> {
             /// Debug: the criteria now as one short text.
@@ -4101,14 +4137,54 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             /// The search registry of a try on wire `w`: [`Sp::conn_reg`] of its connection.
             fn try_reg(&self, w: WireId, seed: u64, amp: f64, via_w: f64) -> (Registry, f64) {
-                self.conn_reg(self.wire_conn[w], seed, amp, via_w)
+                self.conn_reg_w(self.wire_conn[w], Some(w), seed, amp, via_w)
+            }
+            /// TW5 (a): the badness of wire `w` (connection `ci`): its detour, the loop history on
+            /// its passes, its fruitless tries ([`super::escape::badness`]).
+            fn badness(&self, ci: usize, w: WireId) -> f64 {
+                let wi = &self.st.wires[w];
+                let straight = (self.st.proj.pos[wi.b] - self.st.proj.pos[wi.a]).len();
+                let crowd = self.tw5.hist.as_ref().map_or(0.0, |h| h.mean_on(wi.passes.iter().map(|&p| self.st.passes[p].edge)));
+                super::escape::badness(self.st.wire_len(w), straight, crowd, self.stuck[ci])
+            }
+            /// The amplitude of a try on connection `ci` (wire `w` when known): TW5 bounded and
+            /// graded by its badness, or the cycle's width widened by its fruitless tries.
+            fn amp_of(&self, ci: usize, w: Option<WireId>, amp: f64) -> f64 {
+                if !self.tw5.bounded {
+                    return wire_amp(amp, self.stuck[ci]);
+                }
+                let w = w.or_else(|| (0..self.st.wires.len()).find(|&x| self.st.wires[x].alive && self.wire_conn.get(x) == Some(&ci)));
+                let b = w.map_or_else(|| { let s = f64::from(self.stuck[ci]); s / (1.0 + s) }, |w| self.badness(ci, w));
+                super::escape::bounded_amp(self.tw5.amp_lo, self.tw5.amp_hi, b)
+            }
+            /// TW5 (a): the violation weight of a try (mm per graded violation): oscillating with the
+            /// wire's coefficients when bounded (Polubasov 2010: all the k_i oscillate), else the
+            /// constant weight. The table / archive keeps the constant one.
+            fn viol_k(&self, ci: usize, seed: u64, amp_i: f64) -> f64 {
+                if !self.tw5.bounded {
+                    return self.viol_mm;
+                }
+                self.viol_mm * k_osc(seed, self.conn_of[ci], VIOL_FACTOR, self.tries[ci], amp_i)
+            }
+            /// TW5 (b): work units of the local steps since `k0` (the counters `local_free`,
+            /// `local_model`, `layer_global`), a global layering at `kappa` per alive wire.
+            fn work_since(&self, k0: (usize, usize, usize)) -> f64 {
+                let alive = self.st.wires.iter().filter(|w| w.alive).count();
+                let l = self.lctr;
+                (l.local_free.get() - k0.0 + l.local_model.get() - k0.1) as f64 + self.tw5.throttle.kappa * ((l.layer_global.get() - k0.2) * alive) as f64
+            }
+            fn work_mark(&self) -> (usize, usize, usize) {
+                (self.lctr.local_free.get(), self.lctr.local_model.get(), self.lctr.layer_global.get())
             }
             /// The search registry of a try on connection `ci`: its oscillating coefficients (the
             /// amplitude widened by its fruitless tries) with the via weight `via_w`, and that
             /// amplitude.
             fn conn_reg(&self, ci: usize, seed: u64, amp: f64, via_w: f64) -> (Registry, f64) {
+                self.conn_reg_w(ci, None, seed, amp, via_w)
+            }
+            fn conn_reg_w(&self, ci: usize, w: Option<WireId>, seed: u64, amp: f64, via_w: f64) -> (Registry, f64) {
                 let id = self.conn_of[ci];
-                let (amp_i, visit) = (wire_amp(amp, self.stuck[ci]), self.tries[ci]);
+                let (amp_i, visit) = (self.amp_of(ci, w, amp), self.tries[ci]);
                 // The search: a pass over the room of its passage (on all layers together) is a
                 // likely violation, so the search steers away from it at the `violation` weight
                 // ("the errors have the highest weight; once gone they are very unlikely to come
@@ -4154,8 +4230,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 set.sort_by_key(|&x| (self.rank[self.wire_conn[x]], x));
                 let extra: f64 = set.iter().map(|&x| {
                     let c = self.wire_conn[x];
-                    reg_w.price(&Event::Rerouted { wire: x, count: self.reroutes[c] }, &WireCtx { net: self.conns[c].net, tier: self.tiers[c] })
+                    let ctx = WireCtx { net: self.conns[c].net, tier: self.tiers[c] };
+                    match self.tw5.relay_w.as_ref() {
+                        // TW5: the counter's price is linear in the count, here a fading count.
+                        Some((rw, _)) => reg_w.price(&Event::Rerouted { wire: x, count: 1 }, &ctx) * rw.get(c).copied().unwrap_or(0.0),
+                        None => reg_w.price(&Event::Rerouted { wire: x, count: self.reroutes[c] }, &ctx),
+                    }
                 }).sum();
+                let viol_mm = self.viol_k(ci, seed, amp_i);
                 topo.reg = reg_w;
                 let cis: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).collect();
                 let reg_place = topo.reg.clone();
@@ -4184,8 +4266,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     forced: self.forced,
                     conn_of: self.conn_of,
                     saved: None,
-                    viol_mm: self.viol_mm,
-                    viol_old: self.pred.price(self.viol_mm),
+                    viol_mm,
+                    viol_old: self.pred.price(viol_mm),
                     via_mm,
                     vias_old: self.lr.vias,
                     assign_t: self.assign_t,
@@ -4270,6 +4352,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     self.pred_local = self.local.is_some();
                     for c in cis {
                         self.reroutes[c] += 1;
+                        if let Some((rw, _)) = self.tw5.relay_w.as_mut() {
+                            if let Some(x) = rw.get_mut(c) {
+                                *x += 1.0;
+                            }
+                        }
                     }
                     self.stuck[ci] = 0;
                 } else {
@@ -4279,6 +4366,121 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
         impl<'p> Sp<'_, 'p> {
+            /// A whole-board layering move (floating up, layer re-optimisation): TW5
+            /// `escape_take = "always"` takes it as it comes (Appendix F 2-3; the table keeps the
+            /// bests), else [`Sp::try_layers`] (undone when the evaluation rises). Whether taken.
+            fn take_layers(&mut self, lr: layers::LayerReport, ties: u64) -> bool {
+                if !self.tw5.take_always {
+                    return self.try_layers(lr, ties);
+                }
+                self.set_lr(lr, None);
+                self.ties = ties;
+                true
+            }
+            /// TW5 (c): one update of the loop history from the present layering's over-full edges
+            /// (per-edge model: the over-full edge-layers with their graded depth; cut model: the
+            /// edges where an over-full cut's wires cross it, depth = its overflow in default
+            /// pitches), written onto the search's per-edge history.
+            fn history_step(&mut self, cs: &mut CycleStats) {
+                if self.tw5.hist.is_none() {
+                    return;
+                }
+                let dirs = self.packer.taut_dirs(self.st);
+                let over: Vec<(usize, f64)> = if self.cuts_on {
+                    let cm = CapModel::new_cut(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm);
+                    let mut v = Vec::new();
+                    if let Some(c) = cm.cut.as_ref() {
+                        for (l, ci, slack) in c.overfull_list() {
+                            let d = (-slack / self.ws0.max(1.0)).max(0.0);
+                            v.extend(item_edges(self.st, &c.items_at(l, ci)).into_iter().map(|e| (e, d)));
+                        }
+                    }
+                    v
+                } else {
+                    CapModel::new(self.st, self.packer, &dirs, &self.lr.events, self.bottom, self.overflow_mm).overfull_depths()
+                };
+                let Some(h) = self.tw5.hist.as_mut() else { return };
+                h.update(&over);
+                h.apply(&self.tw5.hist_base, &mut self.st.history);
+                cs.hist_updates += 1;
+            }
+            /// TW5 (b): one layering escape (Polubasov 2010 «Оптимизация расслоения»): a random
+            /// via-optimal layering of the whole board (the plateau walk,
+            /// [`layers::DomainGraph::plateau_walk`]), taken as it comes (`escape_take`); the wires
+            /// whose via count rose go to `front`, laid again first; then the history update.
+            fn escape(&mut self, c: &CycleCtx, cs: &mut CycleStats, front: &mut std::collections::VecDeque<WireId>) {
+                self.resync();
+                self.tw5.n_esc += 1;
+                let seed = super::optimise::mix_seed(c.seed, 0xE5C0_0000 + self.tw5.n_esc) | 1;
+                let vias0 = self.via_counts();
+                let (now0, v0, p0) = (self.st.layers_now.clone(), self.lr.vias, self.pred.count);
+                let tl = Instant::now();
+                let lr = (self.tw5.assign_e)(self.st, seed);
+                cs.layer_kept += usize::from(self.take_layers(lr, seed));
+                cs.layer_runs += 1;
+                cs.escapes += 1;
+                let pr = self.st.proj;
+                let free: Vec<Vec<bool>> = self
+                    .st
+                    .wires
+                    .iter()
+                    .map(|wi| if !wi.alive { Vec::new() } else { wi.tris.iter().map(|&t| pr.allowed(t, wi.net).map_or(pr.n_layers, |m| m.0.count_ones() as usize) > 1).collect() })
+                    .collect();
+                let (nf, nd) = super::escape::free_diff(&now0, &self.st.layers_now, &free);
+                cs.esc_free += nf;
+                cs.esc_diff += nd;
+                cs.esc_vias_before += v0;
+                cs.esc_vias_after += self.lr.vias;
+                cs.esc_viol_up += usize::from(self.pred.count > p0);
+                self.history_step(cs);
+                cs.layer_s += tl.elapsed().as_secs_f64();
+                let vias1 = self.via_counts();
+                for w in 0..self.st.wires.len() {
+                    if let Some(&ci) = self.wire_conn.get(w).filter(|&&ci| ci != usize::MAX && self.st.wires[w].alive) {
+                        if vias1.get(&ci).copied().unwrap_or(0) > vias0.get(&ci).copied().unwrap_or(0) && !front.contains(&w) {
+                            front.push_back(w);
+                        }
+                    }
+                }
+                let alive = self.st.wires.iter().filter(|w| w.alive).count();
+                self.tw5.throttle.ran(alive);
+                if self.dbg {
+                    let t = self.dbg_crit();
+                    eprintln!("LOOPDBG[{}] cycle {} escape {}: free {nf} changed {nd}, vias {v0} -> {}, {} wires via-rose: {t}", self.dbg_tag, c.cycle, self.tw5.n_esc, self.lr.vias, front.len());
+                }
+            }
+            /// TW5 (d): floating up of wire `w` (Polubasov 2010 «Процедура всплытия»: the wire's
+            /// stretches and the stretches it crosses may go to any layer): tried with the graded
+            /// probability `b / (1 + b)` of its badness; the local layering of `w` and the wires it
+            /// crosses (random among equal ones) kept when its price at the wire's coefficients
+            /// (violations at the oscillating weight, vias at its via weight) drops.
+            fn float_up(&mut self, w: WireId, seed: u64, amp: f64, via_w: f64, cs: &mut CycleStats) {
+                let Some(local) = self.local else { return };
+                let Some(&ci) = self.wire_conn.get(w).filter(|&&ci| ci != usize::MAX) else { return };
+                if !self.st.wires[w].alive {
+                    return;
+                }
+                let b = self.badness(ci, w);
+                let u = (super::optimise::mix_seed(seed ^ 0xF10A_7000, (w as u64) << 20 | u64::from(self.tries[ci])) >> 11) as f64 / (1u64 << 53) as f64;
+                if u >= b / (1.0 + b) {
+                    return;
+                }
+                cs.float_w_tried += 1;
+                let (reg_w, amp_i) = self.try_reg(w, seed, amp, via_w);
+                let via_mm = reg_w.weight("via").unwrap_or(0.0);
+                let kv = self.viol_k(ci, seed ^ 0xF10A, amp_i);
+                let saved = self.st.topology();
+                self.st.took_part.clear();
+                let ties = super::optimise::mix_seed(seed, 0xF1 << 32 | w as u64) | 1;
+                let (lr, p) = local(self.st, &saved, &[w], &[w], &*self.lr, &self.pred, ties);
+                let old = self.pred.price(kv) + via_mm * self.lr.vias as f64;
+                let new = p.price(kv) + via_mm * lr.vias as f64;
+                if new < old - 1e-6 {
+                    self.set_lr(lr, Some(p));
+                    self.pred_local = true;
+                    cs.float_w_kept += 1;
+                }
+            }
             /// 5.8: the obstructed via pairs of wire `w` (Luzin, Popov & Popov 2013 p. 134 steps
             /// 1-8): a stretch of events `i..=j` on layer `l` between two layer changes `v`
             /// (from `Lv`, the layer of event `i-1`) and `u` (to `Lu`, event `j+1`; an SMD pad end
@@ -4517,18 +4719,51 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 ws.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
                 let n = ws.len().max(1);
                 let mut ripped = 0usize;
-                for (j, &(_, w)) in ws.iter().enumerate() {
+                // TW5: the re-lay counter's price fades per cycle; the wires whose via count rose in
+                // a layering escape inside the sweep are laid again first (`front`).
+                if let Some((rw, f)) = self.tw5.relay_w.as_mut() {
+                    for x in rw.iter_mut() {
+                        *x *= *f;
+                    }
+                }
+                let mut front: std::collections::VecDeque<WireId> = std::collections::VecDeque::new();
+                let mut j = 0usize;
+                loop {
+                    let (w, rose) = match front.pop_front() {
+                        Some(w) => (w, true),
+                        None if j < ws.len() => {
+                            j += 1;
+                            (ws[j - 1].1, false)
+                        }
+                        None => break,
+                    };
                     if ripped >= self.max_ripped || stop() {
                         break;
                     }
                     if !self.st.wires[w].alive {
                         continue;
                     }
-                    let via_w = c.emphasis.via_at(j as f64 / n as f64);
-                    cs.tried += 1;
+                    let via_w = c.emphasis.via_at(j.saturating_sub(usize::from(!rose)) as f64 / n as f64);
+                    let k0 = self.work_mark();
                     ripped += 1;
-                    if self.reroute(&mut topo, w, c.seed, c.amp, via_w) {
-                        cs.kept += 1;
+                    let kept = if rose {
+                        cs.relaid += 1;
+                        let k = self.reroute(&mut topo, w, c.seed ^ 0xA5A5, c.amp, via_w);
+                        cs.relaid_kept += usize::from(k);
+                        k
+                    } else {
+                        cs.tried += 1;
+                        let k = self.reroute(&mut topo, w, c.seed, c.amp, via_w);
+                        cs.kept += usize::from(k);
+                        k
+                    };
+                    if !kept && self.tw5.float_wire && self.st.wires[w].alive {
+                        self.float_up(w, c.seed, c.amp, via_w, &mut cs);
+                    }
+                    let units = self.work_since(k0);
+                    self.tw5.throttle.add(units);
+                    if self.tw5.escape && self.tw5.throttle.due() && !stop() {
+                        self.escape(c, &mut cs, &mut front);
                     }
                 }
                 if self.dbg {
@@ -4557,6 +4792,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // rose in the re-layering (Polubasov 2010, «Оптимизация расслоения»: «Хорошими
                 // кандидатами на перекладку выступают те проводники, на которых увеличилось число
                 // переходов», fig. 9a), not the ones that paid a via in the sweep.
+                // TW5 (b): with the layering escape the layer re-optimisation runs inside the sweep
+                // (above), as often as its share of the work allows; this per-cycle one is the
+                // escape = "ties" stage.
+                if !self.tw5.escape {
                 let vias0 = self.via_counts();
                 let tl = Instant::now();
                 let lr = (self.assign_t)(self.st, c.seed | 1);
@@ -4564,7 +4803,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let p = (self.measure)(self.st, &lr);
                     eprintln!("LOOPDBG[{}] cycle {} layer re-opt candidate: vias {} pred {} graded {:.3}", self.dbg_tag, c.cycle, lr.vias, p.count, p.graded);
                 }
-                cs.layer_kept += usize::from(self.try_layers(lr, c.seed | 1));
+                cs.layer_kept += usize::from(self.take_layers(lr, c.seed | 1));
+                self.history_step(&mut cs);
                 if self.dbg {
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} after layer re-opt (taken {}): {t}", self.dbg_tag, c.cycle, cs.layer_kept);
@@ -4601,9 +4841,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let tl = Instant::now();
                     let t = (c.seed ^ 0x5A5A) | 1;
                     let lr = (self.assign_t)(self.st, t);
-                    cs.layer_kept += usize::from(self.try_layers(lr, t));
+                    cs.layer_kept += usize::from(self.take_layers(lr, t));
                     cs.layer_runs += 1;
                     cs.layer_s += tl.elapsed().as_secs_f64();
+                }
                 }
                 self.ctl.test_point("loop stage 2 check");
                 if stop() {
@@ -4648,7 +4889,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     if moved > 0 {
                         let mut lr = self.lr.clone();
                         layers::relabel_cached(self.st, &evl, &self.lp, &mut lr, self.scache);
-                        if self.try_layers(lr, self.ties) {
+                        let t = self.ties;
+                        if self.take_layers(lr, t) {
                             cs.float_kept = moved - lifted;
                             cs.pair_lifts = lifted;
                         } else {
@@ -4677,7 +4919,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 if (self.xkept)() > x0 {
                     let lr = self.lr.clone();
                     self.set_lr(lr, None);
-                    if self.eval_now() <= e0 + 1e-6 {
+                    if self.tw5.take_always || self.eval_now() <= e0 + 1e-6 {
                         cs.cross_kept = (self.xkept)() - x0;
                         self.ties = 0;
                     } else {
@@ -4761,6 +5003,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         let place_ref = &place;
         let assign_ref = &assign_t;
+        let assign_esc_ref = &assign_esc;
         let measure_ref = &measure;
         let local_ref: LocalFn = &local_judge;
         let cross_ref = &crossing_pass;
@@ -4771,6 +5014,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.cross_vias = true;
         st.layers_now = layers_now(&st, &lr.events, bottom);
         let pred0 = measure(&st, &lr);
+        // TW5: the board's alive wires (the throttle's first escape), the re-lay counts and the
+        // history the loop starts from.
+        let st_alive = st.wires.iter().filter(|w| w.alive).count();
+        let reroutes0 = reroutes.clone();
+        let hist_base0 = st.history.clone();
         // The connections in the plan: every one not failed so far is drawn (M-B1 never drop), so
         // the live Best so far counts them as routed (predicted).
         let planned = out.iter().filter(|o| o.reason.is_empty()).count();
@@ -4823,15 +5071,32 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             shadow: (0, 0, 0.0, 0, 0, 0.0),
             dbg: std::env::var_os("TOPO_LOOPDBG").is_some(),
             dbg_tag: opts.seed,
+            tw5: Tw5 {
+                bounded: opts.oscillation == "bounded",
+                amp_lo: opts.osc_amp_min,
+                amp_hi: opts.osc_amp_max,
+                escape: opts.escape == "layering",
+                assign_e: assign_esc_ref,
+                throttle: super::escape::Throttle::new(opts.escape_share, opts.escape_kappa, st_alive),
+                take_always: opts.escape_take == "always",
+                relay_w: (opts.relay_count_fade < 1.0).then(|| (reroutes0.iter().map(|&r| f64::from(r)).collect(), opts.relay_count_fade.max(0.0))),
+                hist: opts.loop_history.then(|| super::escape::History::new(proj.edges.len(), opts.loop_history_fade)),
+                hist_base: hist_base0,
+                float_wire: opts.float_wire && judge_local,
+                n_esc: 0,
+            },
         };
+        let bounded_osc = opts.oscillation == "bounded";
         let params = LoopParams {
             cycles: opts.topo_rounds.max(1),
             restart_after: opts.loop_restart,
             seed: seed_of(opts.seed, round, 5000),
             fluctuation: fluct0,
-            narrowing: opts.fluctuation_narrowing,
+            // TW5 (a): bounded oscillation = no cooling, no reheat (the per-wire amplitude is
+            // graded and bounded instead).
+            narrowing: if bounded_osc { 1.0 } else { opts.fluctuation_narrowing },
             stuck: opts.fluctuation_stuck,
-            reheat: opts.fluctuation_reheat,
+            reheat: if bounded_osc { 0.0 } else { opts.fluctuation_reheat },
             stable_window: opts.loop_stable_window.max(1),
             stable_gain_pct: opts.stable_gain_pct,
             // headless: stop at stable (+ stable_patience); dialog: only with finish_when_stable (+ finish_patience)
@@ -4908,6 +5173,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ctl.idle(); // waiting at the gate computes nothing: the soft limit names the runs still computing (F6)
         let skip_draw = gate.1.offer(gate.0, arch.items[pick].crit, gate.2, stop_now());
         sp.restore(&arch.items[pick].payload.var);
+        let esc_share = sp.tw5.throttle.measured_share();
+        let esc_work = (sp.tw5.throttle.esc_work, sp.tw5.throttle.relay_work, sp.st.wires.iter().filter(|w| w.alive).count());
         drop(sp);
         if std::env::var_os("TOPO_LOOPDBG").is_some() {
             let dirs = dirs_of(&st);
@@ -5006,10 +5273,55 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             ));
         }
+        {
+            // TW5 ESCAPE: what the escapes did (docs/dev/design/tw5-escape.md).
+            let st_ = &rep.stats;
+            let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
+            warnings.push(format!(
+                "TopoR loop escapes (TW5): oscillation \"{}\" (amplitude {:.2}-{:.2}); layering escape \"{}\": {} escapes ({} archived variants over {} layerings), {:.1} % of the free positions changed layer per escape, vias {} -> {} over them, {} with more predicted violations (taken: {}); work share of the escapes {:.1} % (target {:.0} %); floating up per wire {} of {} kept; loop history {} updates; pre-loop P4 rounds {}",
+                opts.oscillation,
+                opts.osc_amp_min,
+                opts.osc_amp_max,
+                opts.escape,
+                st_.escapes,
+                rep.archived,
+                st_.layer_runs,
+                pct(st_.esc_diff, st_.esc_free),
+                st_.esc_vias_before,
+                st_.esc_vias_after,
+                st_.esc_viol_up,
+                opts.escape_take,
+                100.0 * esc_share,
+                100.0 * opts.escape_share.clamp(0.0, 0.5),
+                st_.float_w_kept,
+                st_.float_w_tried,
+                st_.hist_updates,
+                if opts.preloop_p4 { "on" } else { "folded into the loop" }
+            ));
+        }
         if time_hit {
             warnings.push(format!("TopoR loop: the time limit ended the loop before its plan was stable ({TIME_HIT})"));
         }
         loop_json = Some(serde_json::json!({
+            "escape": {
+                "oscillation": opts.oscillation,
+                "mode": opts.escape,
+                "take": opts.escape_take,
+                "escapes": rep.stats.escapes,
+                "free_positions": rep.stats.esc_free,
+                "changed_positions": rep.stats.esc_diff,
+                "vias_before": rep.stats.esc_vias_before,
+                "vias_after": rep.stats.esc_vias_after,
+                "viol_up": rep.stats.esc_viol_up,
+                "work_share": (esc_share * 1e4).round() / 1e4,
+                "work_units": [(esc_work.0 * 10.0).round() / 10.0, (esc_work.1 * 10.0).round() / 10.0],
+                "layer_s": (rep.stats.layer_s * 1e3).round() / 1e3,
+                "busy_s": (rep.stats.busy_s * 1e3).round() / 1e3,
+                "alive": esc_work.2,
+                "float_wire": [rep.stats.float_w_kept, rep.stats.float_w_tried],
+                "history_updates": rep.stats.hist_updates,
+                "preloop_p4": opts.preloop_p4,
+            },
             "cycles": rep.cycles,
             "stop": rep.stop,
             "stable_at": rep.stable_at,

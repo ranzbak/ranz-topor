@@ -1149,6 +1149,47 @@ pub struct Options {
     /// `[optimize] local_depth` (loop-local): the rings of crossing partners round the moved wires
     /// laid again with them (1 = the wires they cross; 2 = also the wires those cross).
     pub local_depth: usize,
+    /// TW5 (a) `[optimize] oscillation` (docs/dev/design/tw5-escape.md): `"bounded"` (default) =
+    /// the TopoR loop's coefficients oscillate with a per-wire amplitude in
+    /// [`osc_amp_min`, `osc_amp_max`] graded by the wire's detour, the loop history on its passes
+    /// and its fruitless tries, the same in every cycle, the violation price of a re-lay
+    /// included (Polubasov 2010 «Перекладка проводников»); `"cooling"` = the width narrows by
+    /// `fluctuation_narrowing` per cycle and reheats (before TW5).
+    pub oscillation: String,
+    pub osc_amp_min: f64,
+    pub osc_amp_max: f64,
+    /// TW5 (b) `[optimize] escape`: `"layering"` (default) = the layering escape: a random
+    /// via-optimal layering (plateau walk, `escape_walk` tries per domain) inside the sweep, as
+    /// often as `escape_share` of the loop's work allows, the wires whose vias rose laid again
+    /// first (Polubasov 2010 «Оптимизация расслоения»); `"ties"` = one re-optimisation per cycle
+    /// with random ties (before TW5).
+    pub escape: String,
+    pub escape_walk: usize,
+    pub escape_share: f64,
+    /// Work units of a global layering per alive wire against a re-lay's units per wire its local
+    /// judge layers (calibrated from a TW0 profile; deterministic, never the clock).
+    pub escape_kappa: f64,
+    /// TW5 `[optimize] escape_take`: `"always"` (default) = the whole-board moves (layering
+    /// escape, floating up, crossing passes) are taken as they come, the variant table keeps the
+    /// bests (Appendix F 2-4); `"not_worse"` = each is undone when the board's evaluation rises
+    /// (before TW5).
+    pub escape_take: String,
+    /// TW5 `[optimize] relay_count_fade`: the re-lay counter's price (the `reroute` factor) per
+    /// connection fades by this per cycle (fig. 11: damps an oscillation without freezing a wire
+    /// for the rest of the run); 1 = it never fades (before TW5).
+    pub relay_count_fade: f64,
+    /// TW5 (c) `[optimize] loop_history`: edges that stay over-full get a fading history price
+    /// inside the loop (PathFinder, McMurchie & Ebeling 1995 eq. 1), fading by
+    /// `loop_history_fade` per update.
+    pub loop_history: bool,
+    pub loop_history_fade: f64,
+    /// TW5 (d) `[optimize] float_wire`: floating up per wire in the sweep (Polubasov 2010
+    /// «Процедура всплытия»).
+    pub float_wire: bool,
+    /// TW5 (e) `[optimize] preloop_p4`: with `loop = "topor"`, run the negotiated rip-up rounds
+    /// (`[search] reroute_rounds`) before the loop (true, before TW5) or leave their work to the
+    /// loop's history and escapes (false, default).
+    pub preloop_p4: bool,
     /// Tests (engine only): every refinement epoch evaluates at least this many candidates, also
     /// past a kept one ([`crate::topo::refine_par::lanes::with_window`]); 0 = off.
     pub refine_test_window: usize,
@@ -1570,6 +1611,19 @@ impl Default for Options {
             loop_judge: "local".into(),
             loop_shadow: 0,
             local_depth: 1,
+            oscillation: "bounded".into(),
+            osc_amp_min: 0.1,
+            osc_amp_max: 0.4,
+            escape: "layering".into(),
+            escape_walk: 4,
+            escape_share: 0.35,
+            escape_kappa: 1.0,
+            escape_take: "always".into(),
+            relay_count_fade: 0.8,
+            loop_history: true,
+            loop_history_fade: 0.8,
+            float_wire: true,
+            preloop_p4: false,
             refine_test_window: 0,
             loop_crossing: 0.25,
             crossing_vias: "crossing".into(),
