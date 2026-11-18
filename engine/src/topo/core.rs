@@ -1438,6 +1438,22 @@ impl RoundOut {
     }
 }
 
+/// The fuse pass's report line (M6 F-3): the length the moved ends saved in mm, and apart from it
+/// the drop of the `junction_angle` price (a price: it grows without bound for a branch that
+/// leaves its trunk tangentially, so it is never added to a length). O(1).
+pub fn fuse_line(n_fused: usize, len_gain_mm: f64, angle_gain: f64) -> String {
+    format!(
+        "fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part: {} mm {} in length, junction-angle price ([factors] junction_angle) {} by {:.1}",
+        format!("{:.1}", len_gain_mm.abs()),
+        if len_gain_mm >= 0.0 { "saved" } else { "added" },
+        if angle_gain >= 0.0 { "lower" } else { "higher" },
+        angle_gain.abs()
+    )
+}
+
+/// Warning when `drawing_feedback` is set with the TopoR loop, where it has no effect (M6, 6b).
+pub const FEEDBACK_IGNORED: &str = "[search] drawing_feedback is ignored with [optimize] loop = \"topor\": the picked plan is drawn once, no blocker is ripped and redrawn (only loop = \"cycles\" redraws them; M6, 2026-11-18)";
+
 /// Warning when the time budget, the emergency stop, ended any part of the run.
 pub const TIME_HIT: &str = "time budget hit: result may differ between runs";
 
@@ -4699,10 +4715,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         dr.set_wire_layers(w, pl, &ks, &ds);
     }
     dr.compute_intervals();
-    // P6 (a): the crossing partners follow the vias as placed.
-    if !super::m6_off("follow") {
-        dr.follow_vias();
-    }
     // edge-clear: a pad end whose centre breaks a static clearance (a track wider than its pad
     // beside the board edge) ends at the nearest legal point inside the pad, for ERBS and drawing
     // alike (`padend`; static only, so independent of the draw order).
@@ -4893,8 +4905,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     // ---- Feedback (plan S2c item 4): a wire the drawing could not fit is drawn before the
     // wires that block its sleeve, which are then redrawn around it; at most one round per wire.
+    // M6 (6b, user 2026-11-18): only the whole-route cycles redraw blockers (`[optimize] loop =
+    // "cycles"`). With the TopoR loop the picked plan is drawn once (M2 draw once, Polubasov 2010:
+    // the drawing realises the plan); `drawing_feedback = true` there is ignored with a warning.
     let (mut fb_tried, mut fb_rescued) = (0usize, 0usize);
-    if opts.drawing_feedback {
+    let feedback = opts.drawing_feedback && opts.opt_loop == "cycles";
+    if opts.drawing_feedback && !feedback {
+        warnings.push(FEEDBACK_IGNORED.to_string());
+    }
+    if feedback {
         let rejected: Vec<Diag> = dr.diag.clone();
         // M-B2: whether the blockers are ripped is a graded price, not a count cutoff: ripping
         // costs the `reroute` price per blocker (more for one redrawn before in this cycle);
@@ -5391,7 +5410,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let u = ((p - x[0]).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
             (x[0] + ab * u - p).len() < 1_000.0
         });
-        let (mut n_fused, mut gain_mm) = (0usize, 0.0f64);
+        let (mut n_fused, mut len_gain_mm, mut angle_gain) = (0usize, 0.0f64, 0.0f64);
         let ids: Vec<WireId> = drawn.keys().copied().collect();
         let pad_nm = opts.junction_pad_mm * MM;
         for &w in &ids {
@@ -5424,7 +5443,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let Some(uo) = drawn.get(&u) else { continue };
                     let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
                     let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
-                    for (gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw).into_iter().take(8) {
+                    for (gain, len_gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw).into_iter().take(8) {
                         let cut = &run[..=i];
                         if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, cut))) {
                             continue;
@@ -5447,7 +5466,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         drawn.insert(w, wo);
                         if ok {
                             n_fused += 1;
-                            gain_mm += gain;
+                            len_gain_mm += len_gain;
+                            angle_gain += gain - len_gain;
                             fused_at.insert((w, end));
                             anchors.entry(u).or_default().push(q);
                             if std::env::var("TOPO_FUSEDBG").is_ok() {
@@ -5463,7 +5483,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
         }
-        warnings.push(format!("fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part, {gain_mm:.1} mm cheaper (length and junction angle)"));
+        warnings.push(fuse_line(n_fused, len_gain_mm, angle_gain));
     }
     // M-45: what the steps after the drawing left not at 0/45/90 degrees (a fused branch end)
     // becomes an elbow or Z where the checker accepts it.
@@ -5529,13 +5549,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // History for the next whole route (M-B2: fading, Dr. CU §IV-C): what came in fades by
     // `history_fade`, this cycle's P4 increments and every edge that was over-full under the
     // drawing's packer are added in full.
+    // M6 (6b, 2026-11-18): only `[optimize] loop = "cycles"` routes again from this memory (and
+    // from the room hints below); with the TopoR loop a run is one route_round, so none of it is
+    // computed there (F1-F5 of the 6b inventory: drawing feedback into a later plan).
+    let cycles = opts.opt_loop == "cycles";
     let fade = opts.history_fade.clamp(0.0, 1.0);
-    let mut hist_out: Vec<f64> = history.iter().enumerate().map(|(e, &h)| {
+    let mut hist_out: Vec<f64> = if !cycles { Vec::new() } else { history.iter().enumerate().map(|(e, &h)| {
         let h0 = hist0.get(e).copied().unwrap_or(0.0);
         let v = fade * h0 + (h - h0);
         if v < HIST_EPS { 0.0 } else { v }
-    }).collect();
-    {
+    }).collect() };
+    if cycles {
         let nl = proj.n_layers;
         let mut over_edges: Vec<usize> = dr.over.iter().enumerate().filter(|(_, &o)| o).map(|(i, _)| i / nl).collect();
         over_edges.dedup();
@@ -5557,7 +5581,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // (Dr. CU §IV-C: "the intervals with violations"), each pass weighted by its distance to the
     // nearest violation (1 on it, falling smoothly; at most 1 per pass and cycle).
     let mut own_out: BTreeMap<usize, BTreeMap<usize, f64>> = BTreeMap::new();
-    for (&ci, m) in &mem.own {
+    for (&ci, m) in mem.own.iter().filter(|_| cycles) {
         let m2: BTreeMap<usize, f64> = m.iter().map(|(&e, &h)| (e, h * fade)).filter(|&(_, h)| h >= HIST_EPS).collect();
         if !m2.is_empty() {
             own_out.insert(ci, m2);
@@ -5566,13 +5590,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Per connection: the places (point, radius) where its copper breaks a rule or its drawing
     // was rejected.
     let mut spots: BTreeMap<WireId, Vec<(Vec2, f64)>> = BTreeMap::new();
-    for (w, wo) in &drawn {
+    for (w, wo) in drawn.iter().filter(|_| cycles) {
         let pitch = st.wires[*w].w + st.wires[*w].s;
         for v in &wo.viol {
             spots.entry(*w).or_default().push((v.at, (0.5 * v.len_nm).max(pitch)));
         }
     }
-    for d in &diag {
+    for d in diag.iter().filter(|_| cycles) {
         let ci = conn_of[wire_conn[d.wire]];
         if !out[ci].clean() && d.passes > 0 && !drawn.contains_key(&d.wire) {
             let pitch = st.wires[d.wire].w + st.wires[d.wire].s;
@@ -5595,7 +5619,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
     }
     own_out.retain(|_, m| !m.is_empty());
-    for d in &diag {
+    for d in diag.iter().filter(|_| cycles) {
         let ci = conn_of[wire_conn[d.wire]];
         // A connection drawn with violations (never drop) feeds back like an unrouted one.
         if out[ci].clean() || d.passes == 0 {
@@ -5730,7 +5754,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let plane_vias = plane_res.iter().filter(|(_, r)| r.as_ref().is_ok_and(|o| o.via.is_some())).count();
         let lost: usize = plans.iter().filter(|(w, _)| !drawn.contains_key(w)).map(|(_, p)| p.vias.len()).sum();
         warnings.push(format!(
-            "vias, plan vs drawn: plan {plan_vias} wire vias, drawn {drawn_vias} wire vias (+ {plane_vias} plane stub vias decided before the topology); placements: {} at the planned site, {} by the drawing's site search ({} of them where the planned site was not free), {} by force (never drop); {} out of the plan's class (no site in it); {} added joining a branch to its trunk by force; {} removed by the via reduction; {} planned vias on wires not drawn; {} crossing partners re-read from a via as placed (P6 a); {} corners removed by the taut pull of the drawn runs (P6 c, [drawing] pull_taut)",
+            "vias, plan vs drawn: plan {plan_vias} wire vias, drawn {drawn_vias} wire vias (+ {plane_vias} plane stub vias decided before the topology); placements: {} at the planned site, {} by the drawing's site search ({} of them where the planned site was not free), {} by force (never drop); {} out of the plan's class (no site in it); {} added joining a branch to its trunk by force; {} removed by the via reduction; {} planned vias on wires not drawn; {} corners removed by the taut pull of the drawn runs (P6 c, [drawing] pull_taut)",
             dr.stats.planned_sites,
             dr.stats.via_searched,
             dr.stats.planned_sites_missed,
@@ -5739,15 +5763,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             junction_join_vias,
             vias_reduced,
             lost,
-            dr.stats.partners_moved,
             dr.stats.pulled
         ));
-        if dr.stats.partners_unfixed > 0 {
-            warnings.push(format!(
-                "vias: {} crossing partner(s) of a placed via could not be led past it on the planned side (neither the packed nor the plan's taut crossing keeps them there; P6 a, Polubasov 2001 p. 4): they may cross the via wire on their own layer; the drawing's checker decides, any violation is reported with its connection",
-                dr.stats.partners_unfixed
-            ));
-        }
     }
     if let Ok(path) = std::env::var("TOPO_DIAG") {
         let rows: Vec<String> = diag
@@ -6105,7 +6122,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }),
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
-    let vias_out: BTreeMap<usize, usize> = plans.iter().map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
+    let vias_out: BTreeMap<usize, usize> = plans.iter().filter(|_| cycles).map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
     (RoundOut { result, crit: crit_main, pre, lp: loop_end, skipped: None, nothing: None, draw_exempt: draw_exempt.get() }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
 }
 

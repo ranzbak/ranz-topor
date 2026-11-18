@@ -215,7 +215,7 @@ The planner now decides what the drawing used to find out the hard way (TopoR's 
   neck_from_pad`), the search pays the graded *necking* factor once per stretch (TopoR 6.3 pp. 72–73: shrinkages
   are a criterion), and the layer assignment, rip-up and drawing pack the planned widths. The drawing draws the
   full width where it fits and the planned minimum only inside the planned stretches; it no longer narrows on its
-  own (`[search] neck_in_drawing`).
+  own (the option `[search] neck_in_drawing` was removed in M6, 2026-11-18).
 - **Via room.** A via the plan puts at a layer change takes its spot: another net's via planned in the same small
   triangle has no site, so layer assignment and rip-up move it or reroute its trace (`[vias] reserve_sites`;
   Polubasov 2001 via intervals).
@@ -339,8 +339,8 @@ layers are assigned by via minimisation with the per-edge room as the capacity p
 "edges"`, `edges_test = "price"`; the method's per-layer cut test, `model = "cuts"`, is an option for now: on a
 large board its prices take the whole time limit before TopoR's loop starts, user decision 2026-11-13); TopoR's loop then works on the topology only (`[optimize] loop = "topor"`: single-wire rip-up and reroute
 with oscillating weights, layer re-optimisation, vias relocated between their crossings, crossing rules, an archive
-of variants with restarts); the picked variant is drawn once, without drawing feedback (`[search] drawing_feedback
-= "auto"`). Every judgement is one price (S = Σ weight × amount): an over-full passage, a crossing on one layer or a
+of variants with restarts); the picked variant is drawn once, without drawing feedback (`[search] drawing_feedback`
+only acts with `loop = "cycles"` since M6, 2026-11-18). Every judgement is one price (S = Σ weight × amount): an over-full passage, a crossing on one layer or a
 trace through foreign copper is costly, never a refusal (the per-edge model's hard move tests and its lexicographic
 P4 pick are `[capacity] edges_test = "refuse"`, an option). The routing before M0 is still there, value for value:
 `loop = "cycles"`, `initial = "per_cycle"`, `length = "even"`, `[capacity] model = "edges"`, `edges_test = "refuse"`

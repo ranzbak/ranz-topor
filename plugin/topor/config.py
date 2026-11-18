@@ -19,7 +19,7 @@ from pathlib import Path
 from .findings import Finding
 from .layers import ROLES
 from . import schema as _schema
-from .schema import (BACKLOG_VALUES, CONFIG_VERSION, CURRENT_VERSION, KICAD_ONLY, REMOVED, REMOVED_IN, SECTIONS,
+from .schema import (BACKLOG_VALUES, CONFIG_VERSION, CURRENT_VERSION, KICAD_ONLY, REMOVED, REMOVED_IN, REMOVED_WHEN, SECTIONS,
                      SETTINGS, SETTINGS_BY_KEY, Setting, available)
 
 CONFIG_NAME = "topor.toml"
@@ -292,7 +292,7 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
     """Load ``<project_dir>/topor.toml``; create it with all defaults when missing (CFG_CREATED).
 
     Findings: CFG_CREATED (info), CFG_PARSE, CFG_VERSION, CFG_UNKNOWN_KEY, CFG_REMOVED_KEY (a key removed in
-    the CL cleanup: ignored), CFG_VALUE, CFG_VALUE_BACKLOG (warnings; the default is used for the offending value)
+    the CL cleanup or M6: ignored), CFG_VALUE, CFG_VALUE_BACKLOG (warnings; the default is used for the offending value)
     and CFG_WRITE (could not create the file).
     """
     path = Path(project_dir) / CONFIG_NAME
@@ -391,7 +391,7 @@ def _removed(sec: str, key: str) -> Finding:
     """CFG_REMOVED_KEY for a key of ``schema.REMOVED``: ignored, with why, never an error. O(1)."""
     full = f"{sec}.{key}"
     return Finding("CFG_REMOVED_KEY", "warning",
-                   f"'{full}' in {CONFIG_NAME} is ignored: removed in {REMOVED_IN} ({REMOVED[(sec, key)]}).",
+                   f"'{full}' in {CONFIG_NAME} is ignored: removed in {REMOVED_WHEN.get((sec, key), REMOVED_IN)} ({REMOVED[(sec, key)]}).",
                    f"Delete the line from {CONFIG_NAME}; {DOCS_HINT}.", (full,))
 
 

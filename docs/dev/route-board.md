@@ -70,7 +70,8 @@ and the feedback counts. Environment variables of the engine (debugging only, no
   lane (wires, spacing, drawn crossings).
 
 Without Python: `cargo run --release --example topo_route -- <input.json>` on a `harness.g0 export` model.
-Settings that steer it: `[search] drawing_feedback`, `feedback_max_rip`, `[vias] offset_sites`.
+Settings that steer it: `[search] drawing_feedback`, `feedback_max_rip` (both with `[optimize] loop = "cycles"`
+only, M6), `[vias] offset_sites`.
 
 ## Validity first (M0v)
 

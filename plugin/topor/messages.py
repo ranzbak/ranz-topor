@@ -50,7 +50,7 @@ MESSAGES: dict[str, Msg] = {
         "topor.toml contains a section or key topor does not know (usually a typo); it is ignored.",
         "Correct the spelling against docs/user/configuration.md (e.g. run.timeout_s), or remove the entry."),
     "CFG_REMOVED_KEY": Msg("warning",
-        "topor.toml sets a key that was removed (a setting the topological core never read, most of them from the classic router); it is ignored.",
+        "topor.toml sets a key that was removed (a setting the topological core never read, most of them from the classic router, or a drawing-side stand-in removed in M6, 2026-11-18); it is ignored.",
         "Delete the line from topor.toml; the finding names what takes its place, and docs/user/configuration.md lists the current keys (e.g. optimize.runs)."),
     "CFG_PINNED_OLD_DEFAULT": Msg("warning",
         "topor.toml has an option as an active line with a value that was the default in an older version; the value is kept (never changed silently) but the default has changed since.",
