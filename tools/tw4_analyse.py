@@ -20,7 +20,19 @@ Per run:
   (pad that is no neighbour pin, board edge), else ERBS band vs foreign track (packing in the joint drawing);
 - with an allow_violations=false run of the same board (cfg ending in F): the open connections = the forced ones,
   classified like route-improve-plan-20261118 §1 (pair half > via site reason > legal in the forced run (near miss)
-  > capacity classes > pad exit >= drawing loss (pad exit) > rest (drawing order)) against the forced run's compass.
+  > capacity classes > pad exit >= drawing loss (pad exit) > rest (drawing order)) against the forced run's compass;
+- KiCad's view (with ``*--drc-routed.json`` and ``*--drc-hand.json`` beside the compass): each new routing item of KiCad
+  (type in toporlib.drc.ROUTING_TYPES, (type, item uuids) not in the hand board's DRC) joined to the nearest drawn
+  violation like the compass does (nets and layer it names, the compass join radius), then split into the unseen
+  classes neck_loss, pad_exit, drawing_crowding (a drawing loss against another net's track where the plan said
+  fits: the wire is drawn through an area its plan did not see as crowded; sub-classes "ERBS band vs foreign track"
+  and "sequential run"), via_room (via of another net, wrong side of a via), static, model_gap, seen (the measure's
+  classes), kicad_only, other; their counts and shares of KiCad's new routing items; ``pour_island`` = new
+  unconnected items (not in the hand board) with a zone among their items (a pour piece cut off); per connection
+  with a KiCad item in a drawing-loss class (drawing_crowding, via_room, static, other: the plan said fits; sorted by
+  that count, ``crowding_conns``): the KiCad and drawn counts, planned / drawn / reference length, detour, vias planned / drawn,
+  the plan's own items on it, its KiCad items of every class and the foreign nets KiCad names (tw3 r4: esp s3 IO21_TX,
+  planned 0 errors, KiCad 33).
 """
 from __future__ import annotations
 
@@ -35,6 +47,13 @@ import sys
 PRED = ("planner_overfull", "via_site", "unlayerable", "foreign_copper", "forced_path")
 UNSEEN_PLAN = ("pad_exit", "drawing_loss", "model_gap", "neck_loss")  # neck_loss: located necks (TW4 meter), was inside drawing_loss
 DL = ("drawing_loss", "model_gap", "neck_loss")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from toporlib.drc import ROUTING_TYPES  # noqa: E402  (the routing types of KiCad's DRC the compass counts)
+CROWD = ("ERBS band vs foreign track (joint packing)", "sequential run")
+DLK = ("drawing_crowding", "via_room", "static", "other")  # drawing losses where the plan said fits (per-connection view)
+KSPLIT = ("neck_loss", "pad_exit", "drawing_crowding", "via_room", "static", "model_gap", "seen", "kicad_only", "other")
+_NET = re.compile(r"\[([^\]]+)\]")
+_LAYER = re.compile(r"\b([A-Za-z0-9_]+\.Cu)\b")
 
 
 def load_runs(root):
@@ -51,8 +70,9 @@ def load_runs(root):
             cand = os.path.join(os.path.dirname(os.path.dirname(d)), f"{board}-{os.path.basename(d)}.log")
             log = cand if os.path.exists(cand) else None
         met = glob.glob(f"{d}/*--metrics.json")
+        drc = {k: (json.load(open(g[0])) if (g := glob.glob(f"{d}/*--drc-{k}.json")) else None) for k in ("routed", "hand")}
         out[(cfg, board, seed)] = {"compass": json.load(open(f)), "result": json.load(open(res[0])) if res else None,
-                                   "metrics": json.load(open(met[0])) if met else {}, "log": log, "dir": d}
+                                   "metrics": json.load(open(met[0])) if met else {}, "log": log, "dir": d, "drc": drc}
     return out
 
 
@@ -132,6 +152,95 @@ def dl_sub(row, v, runs, nobands, forced=frozenset()):
     return "ERBS band vs foreign track (joint packing)"
 
 
+def _vkey(v):
+    return (v.get("type"), tuple(sorted(str(i.get("uuid", "")) for i in v.get("items") or [])))
+
+
+def kicad_new(drc):
+    """KiCad's new routing items and new unconnected items of a run (against the hand board's DRC)."""
+    routed, hand = drc.get("routed"), drc.get("hand")
+    if not routed:
+        return None, None
+    seen = {_vkey(v) for v in (hand or {}).get("violations") or []}
+    new = [v for v in routed.get("violations") or [] if v.get("type") in ROUTING_TYPES and _vkey(v) not in seen]
+    ukey = lambda u: tuple(sorted(str(i.get("uuid", "")) for i in u.get("items") or []))
+    useen = {ukey(u) for u in (hand or {}).get("unconnected_items") or []}
+    unew = [u for u in routed.get("unconnected_items") or [] if ukey(u) not in useen]
+    return new, unew
+
+
+def kicad_split(r, eruns, nob, fset):
+    """KiCad's new routing items split into the unseen classes (module doc), the per-connection crowding rows and
+    the pour islands. None without the DRC files."""
+    new, unew = kicad_new(r.get("drc") or {})
+    if new is None:
+        return None
+    c = r["compass"]
+    route = (r["result"] or {}).get("route") or {}
+    viols = route.get("violations") or []
+    rad = ((c.get("join") or {}).get("radius_mm") or 0.5) * 1e6
+    rows = c.get("violations") or []
+    cnt, per = collections.Counter(), collections.defaultdict(lambda: {"kicad": 0, "foreign_nets": set()})
+    allk = collections.defaultdict(collections.Counter)  # per connection: its KiCad items by class
+    for dv in new:
+        pts = [(it["pos"]["x"] * 1e6, it["pos"]["y"] * 1e6) for it in dv.get("items") or [] if "pos" in it]
+        descs = [it.get("description") or "" for it in dv.get("items") or []]
+        nets = {n for d in descs for n in _NET.findall(d) if n != "<no net>"}
+        layers = {l for d in descs for l in _LAYER.findall(d)}
+        best = None
+        for row in rows:
+            if nets and row.get("name") not in nets:
+                continue
+            if layers and row.get("layer") not in layers and row.get("layer") != "all layers":
+                continue
+            at = (row["at_mm"][0] * 1e6, row["at_mm"][1] * 1e6)
+            dd = min((math.hypot(px - at[0], py - at[1]) for px, py in pts), default=math.inf) - row["half_len_mm"] * 1e6
+            if dd <= rad and (best is None or dd < best[0]):
+                best = (dd, row)
+        if best is None:
+            cnt["kicad_only"] += 1
+            continue
+        row = best[1]
+        cls = row["class"]
+        if cls in ("neck_loss", "pad_exit", "model_gap"):
+            k = cls
+        elif cls in PRED:
+            k = "seen"
+        elif cls == "drawing_loss" and row["i"] < len(viols):
+            sub = dl_sub(row, viols[row["i"]], eruns, nob, fset)
+            k = ("drawing_crowding" if sub.startswith(CROWD) else "via_room" if "via" in sub
+                 else "static" if sub.startswith("static") else "other")
+        else:
+            k = "other"
+        cnt[k] += 1
+        allk[(row.get("conn"), row.get("name"), row.get("from"), row.get("to"))][k] += 1
+        if k in DLK:
+            p = per[(row.get("conn"), row.get("name"), row.get("from"), row.get("to"))]
+            p["kicad"] += 1
+            p["foreign_nets"].update(nets - {row.get("name")})
+    conn = {x.get("conn"): x for x in c.get("connections") or []}
+    drawn = collections.Counter((x.get("conn"), x["class"]) for x in rows)
+    planned = collections.Counter(cc for it in ((route.get("compass") or {}).get("items") or []) for cc in it.get("conns") or [])
+    crowd = []
+    for (cid, name, fr, to), p in sorted(per.items(), key=lambda kv: -kv[1]["kicad"]):
+        x = conn.get(cid, {})
+        crowd.append({"conn": [name, fr, to], "kicad_drawing_loss": p["kicad"], "kicad_all": dict(allk[(cid, name, fr, to)]), "drawn_drawing_loss": drawn[(cid, "drawing_loss")],
+                      "plan_items": planned.get(cid, 0), "planned_mm": x.get("planned_mm"), "length_mm": x.get("length_mm"),
+                      "ref_mm": x.get("ref_mm"), "detour": x.get("detour"), "detour_vs_plan": x.get("detour_vs_plan"),
+                      "vias_planned": x.get("vias_planned"), "vias_drawn": x.get("vias_drawn"),
+                      "foreign_nets": sorted(p["foreign_nets"])})
+    isl = [u for u in unew if any((it.get("description") or "").startswith("Zone") for it in u.get("items") or [])]
+    zones = collections.Counter(next(d for d in (it.get("description") or "" for it in u["items"]) if d.startswith("Zone"))
+                                .split(",")[0] for u in isl)
+    tot = len(new)
+    dl = sum(cnt[k] for k in DLK)
+    return {"kicad_new": tot, "by_class": {k: cnt[k] for k in KSPLIT if cnt[k]},
+            "drawing_loss_all": dl, "drawing_loss_all_share": round(dl / tot, 3) if tot else None,
+            "drawing_loss_conns": len(crowd), "drawing_loss_conns_plan_clean": sum(1 for x in crowd if not x["plan_items"]),
+            "share": {k: round(cnt[k] / tot, 3) for k in KSPLIT if cnt[k]} if tot else {},
+            "unconnected_new": len(unew), "pour_island": len(isl), "pour_island_zones": dict(zones), "crowding_conns": crowd}
+
+
 def forced_set(runs, key):
     """(name, from, to) of the connections open in the <cfg>F run of `key` (a <cfg>K run): the forced ones."""
     cfg, board, seed = key
@@ -185,6 +294,9 @@ def summarise(runs):
         dlsub[key] = dict(cnt.most_common())
         dlsub_conns[key] = {k: sorted(map(list, v)) for k, v in conns.items()}
         rows[key]["erbs_debug"] = bool(eruns)
+        ks = kicad_split(r, eruns, nob, fset)
+        if ks is not None:
+            rows[key]["kicad_split"] = ks
     return rows, dlsub, dlsub_conns
 
 
@@ -248,6 +360,12 @@ def main():
               f"unc {r['unconnected']} vias {r['vias']} cyc {r['cycles']} stop {r['stop']} cpu {r['cpu_s']}")
         if dlsub.get(k):
             print("         drawing-loss sub-classes:", dlsub[k])
+        if r.get("kicad_split"):
+            ks = r["kicad_split"]
+            print(f"         KiCad new {ks['kicad_new']}: {ks['by_class']} share {ks['share']}; pour_island "
+                  f"{ks['pour_island']} of {ks['unconnected_new']} new unconnected {ks['pour_island_zones']}")
+            for p in ks["crowding_conns"][:5] if "--conns" in sys.argv else []:
+                print("           crowding", p)
     for k in sorted(fc):
         print("FORCED", k, fc[k]["open"], fc[k]["by_class"])
         if "--conns" in sys.argv:

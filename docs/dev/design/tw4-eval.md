@@ -92,6 +92,43 @@ and those cut the pour. The loop's measure does not see pour islands: only the `
 drawing's fuse-pour check / GND island stitching. This is an unseen class of its own ("pour_island"). It is not fixed
 in TW4. Owner: a pour-cut term in the measure (a later stage), or the existing stitching.
 
+## Unseen class found in phase 2: drawing crowding (TW3 equal-budget input, 2026-11-18)
+TW3 r4 (reports/tw3-table-20261118-1915.md): esp s3 IO21_TX U3.31->U4.14 went 0 -> 33 KiCad items because the plan
+traded its via for length (48.9 mm / 1 via -> 55.4 mm / 0 vias) through the crowded U3/U4 area, and the drawing does
+not fit there; the plan's own errors do not follow KiCad (s3 applied row predicts 1, KiCad 192). The measure prices a
+via at 25 mm and sees no cost in a route that passes many foreign items with room "just enough" per edge. Class
+"drawing_crowding": a KiCad item on a drawing loss against another net's track (ERBS joint packing or a sequential
+run) where the plan said fits. Not fixed in TW4 (no new code beyond the meter); it feeds the T-stage order.
+
+Meter (`tools/tw4_analyse.py`, with `*--drc-routed.json` / `*--drc-hand.json`): every new KiCad routing item (not in the
+hand board's DRC; the count = the compass's `kicad_routing_new`) joined to the nearest drawn violation as the compass
+joins, then split into neck_loss / pad_exit / drawing_crowding / via_room (a via of another net, wrong side of a via) /
+static (a pad that is no neighbour pin) / model_gap / seen / kicad_only; `pour_island` = new unconnected items with a
+zone (a pour piece cut off); per connection with drawing-loss items: KiCad items by class, the plan's own items on it,
+planned / drawn / reference length, vias planned / drawn, foreign nets.
+
+| run (KiCad new routing items) | crowding (tracks) | via room | static | all plan-said-fits | pad exit | neck | pour islands / new unconn. |
+|---|---|---|---|---|---|---|---|
+| TW3 r4 main, esp 5 seeds (389) | 76 (20 %) | 141 | 54 | 272 (70 %) | 45 | –¹ | 43 / 51 |
+| TW3 r4 tip, esp 5 seeds (586) | 124 (21 %) | 202 | 122 | 459 (78 %) | 84 | –¹ | 40 / 50 |
+| TW3 r4 main, qmtech (303) | 79 (26 %) | 40 | 9 | 130 (43 %) | 140 | –¹ | 7 / 20 |
+| TW3 r4 tip, qmtech (350) | 89 (25 %) | 67 | 10 | 168 (48 %) | 145 | –¹ | 6 / 19 |
+| TW4 base rounds=1 (JK), esp (274) | 11 (4 %) | 1 | 0 | 15 (5 %) | 31 | 55 | 7 / 9 |
+| TW4 base rounds=1 (JK), qmtech (473) | 78 (16 %) | 16 | 0 | 111 (23 %) | 54 | 157 | 10 / 21 |
+| TW4 r16 s0, esp (216) / via_cuts (84) | 19 / 32 | 3 / 14 | 21 / 5 | 43 / 51 | 19 / 4 | 22 / 2 | 6 / 6, 11 / 11 |
+
+¹ main has no located necks (T1 part 1 is on this branch): its neck losses sit inside the plan-said-fits columns.
+
+Reading: at rounds=1 the neck and the pad exit carry the unseen part (T1's order holds); the longer the loop runs,
+the more of KiCad's count moves into drawing losses on connections the plan rates clean (esp r4: 28 of 31 such
+connections have no plan item; 70-78 % of KiCad's items), most of them in the U3/U4 area (IO20_RX, IO21_TX, IO7,
+USB_D+/-, ENABLE on every seed). Via room is the largest part of it on esp (T2's class, predicted only with
+`[capacity] via_cuts`); tracks are a fifth on both boards. IO21_TX s3 tip: 70 items = via room 28, static pads 31,
+tracks 8, pad exit 3, plan items 0, 0 vias planned / drawn, detour 1.56: the crowding is all three kinds at once.
+Literature: TopoR 6.3 manual pp. 72-73 keeps variants by four criteria for the user to pick and says nothing about
+a measure that misses crowding, so this is our model gap (as TW3 concluded); Polubasov 2010 «Пространство решений»
+(the evaluation must correlate with the result) is the measure this meter checks.
+
 ## T3 as built (phase 2, option `[search] dangling_lead_choice`, default off)
 - The lead stays one terminal obstacle (the full cut stadium, so other nets keep away from all of it: conservative;
   freeing the unused part needs a re-triangulation, out of scope). With the option the build adds the lead's points
