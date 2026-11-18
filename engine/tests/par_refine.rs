@@ -70,6 +70,7 @@ fn first_diff(a: &str, b: &str) -> String {
 }
 
 #[test]
+#[ignore = "70 s > 60 s; per-call coverage in par_refine_dense.rs; run on VM with --ignored"]
 fn every_lane_count_keeps_the_serial_plan_and_copper() {
     let e0 = stats::EPOCHS.load(Ordering::Relaxed);
     let w0 = stats::WASTED.load(Ordering::Relaxed);
