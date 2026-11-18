@@ -339,6 +339,18 @@ def _kv(s: str):
     return (sec, key), val
 
 
+def require_display(env=None, platform: str | None = None) -> str | None:
+    """None when a GUI session is reachable, else the reason. wx.App() without an X display aborts the whole
+    process in C ("Unable to access the X Display"), before any try/except can run, so check first."""
+    env = os.environ if env is None else env
+    if (platform or sys.platform) != "linux":
+        return None
+    if env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"):
+        return None
+    return ("no display: neither DISPLAY nor WAYLAND_DISPLAY is set, and the run flow's wx.App would abort the "
+            "process. Run under a display (e.g. `xvfb-run -a tools/route_board.sh ...`).")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("board", help="BENCH_BOARDS key or .kicad_pcb path")
@@ -358,6 +370,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="expected.json whose rules_assumed the validity gate uses (default: the pattern's own, "
                          "next to or one level above the board; none: the board's own files)")
     a = ap.parse_args(argv)
+    why = require_display()
+    if why:
+        print(f"route_board: {why}", file=sys.stderr)
+        return 2
     m = route_board(a.board, a.out_dir, overrides=dict(_kv(s) for s in a.set), timeout_s=a.timeout, clock=a.clock,
                     whole_project=a.whole_project, png=not a.no_png, name=a.name,
                     declared_layers=a.declared_layers, expected=a.expected)
