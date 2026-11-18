@@ -183,8 +183,11 @@ struct CrewShared<J, U> {
     cv: std::sync::Condvar,
 }
 
-/// Spins of a waiting lane before it sleeps on the condvar (~0.1-0.3 ms).
-const CREW_SPIN: u32 = 4096;
+/// Spins of a waiting lane before it sleeps on the condvar, and of a round's caller before it
+/// yields: none. Measured (paosp-ce417bb, exclusive ccx43, runs 5, 8 threads, 3 samples): with
+/// 0 and with 256 spins the whole run is faster than `draw_lanes = 1` (qmtech 57.2 / 57.1 s vs
+/// 65.1 s, esp 18.0 / 18.8 s vs 21.5 s); the earlier 4096 took CPU from the other runs.
+const CREW_SPIN: u32 = 0;
 
 /// The spins of a waiting lane and of a round's caller: [`CREW_SPIN`], or the debug environment
 /// `TOPO_CREW_SPIN` (a count; 0 = a lane sleeps on the condvar and the caller yields at once).

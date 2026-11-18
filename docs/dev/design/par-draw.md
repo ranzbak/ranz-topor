@@ -226,7 +226,7 @@ Lanes: the run's lease (`par::lease`, from `refine_par::lanes`: the run's spare 
 the same rayon pool and lane source as `refine_lanes` and the A units; no pool of its own; a unit never fans out
 again. A first version forked per node (`par::map`): about 250 us of fork / join per node against nodes of about
 0.5 ms, little gain (qmtech sequential, 8 threads: octilinear 4.0 -> 3.8 s with chunked runs). Now one **crew** per
-call (`par::crew`): the leased lanes stay for the whole call, wait between nodes (a short spin, then a condvar) and
+call (`par::crew`): the leased lanes stay for the whole call, wait between nodes (on a condvar at once, `CREW_SPIN` = 0, section 16) and
 take the node's runs (about three per lane, `Crew::round`), results by unit index. Work-size rules only, never
 timing: a node goes to the crew from `OCTI_LANE_MIN_PAIRS` = 64 (finite state, successor) pairs; a call gets a crew
 from `OCTI_CREW_MIN_NODES` = 24 nodes; below either the calling thread does it alone.
@@ -251,3 +251,16 @@ with unchanged code there, so cross-VM whole-run seconds are not comparable. Who
 l1 at runs=4: esp -1.2 / -1.7 s, qmtech sequential -1.9 s, qmtech erbs +4.0 s (one sample; CPU +25 s: waiting
 lanes spin, `CREW_SPIN` and the caller's yield loop, a follow-up to check). Copper: all 16 configs equal between
 base and tip, l1 and auto equal.
+
+## 16. Crew spin (lead 2026-11-18: the whole run at the default runs = 5 counts, not the drawing alone)
+Exclusive ccx43 (paosp-ce417bb), runs 5 (default), 8 threads, rounds 1, seed 0, realise erbs; 3 samples each,
+interleaved; `TOPO_CREW_SPIN` sets the spins of a waiting lane / a round's caller (debug environment).
+
+| board | spin 0: whole / drawing (s) | spin 256 | `draw_lanes = 1` |
+|---|---|---|---|
+| qmtech | 57.7 59.2 54.6 (mean 57.2) / 10.6 | 58.1 59.9 53.4 (57.1) / 10.4 | 64.0 65.1 66.3 (65.1) / 16.8 |
+| esp | 16.8 18.9 18.4 (18.0) / 3.5 | 18.9 18.9 18.8 (18.8) / 3.6 | 22.3 20.3 22.1 (21.5) / 6.5 |
+
+Both spin settings are faster than `draw_lanes = 1` outside the noise; CPU is the same (qmtech 220 / 221 / 218 s).
+Default `CREW_SPIN` = 0: no busy wait, esp best, qmtech equal. Copper: 9 of 9 the same per board.
+
