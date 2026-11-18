@@ -291,3 +291,23 @@ def test_teardrops_and_copper_shapes_carry_engine_code(fixture_board):
     assert [t["net"] for t in m["teardrops"]] == [eng]
     mine = [c for c in m["copper_shapes"] if c["uuid"] == str(r.m_Uuid.AsString())]
     assert mine and all(c["net"] == eng for c in mine)
+
+
+def test_footprint_clearance_override_inherited_by_pads(tmp_path):
+    """KiCad PAD::GetClearanceOverrides (pcbnew/pad.cpp:1675-1681): pad override, else the footprint's. The
+    export used the pad's only, so the engine checked the net class clearance (bornhack U6, F-6)."""
+    pcb = make_fixture_board(tmp_path / "fx.kicad_pcb", fp_clearance_mm=0.127, pad_clearance_mm=0.3)
+    m = export_model(pcbnew.LoadBoard(str(pcb)), {}, name="fx")
+    lc = {p["number"]: p["local_clearance"] for p in m["pads"] if p["ref"] == "U1" and p["number"]}
+    assert lc["3"] == 300_000  # own override wins
+    assert {lc[n] for n in ("1", "2", "4", "5", "6")} == {127_000}  # inherited from the footprint
+    nt = make_fixture_board(tmp_path / "nt.kicad_pcb", net_tie=True)
+    assert all(p["local_clearance"] is None for p in export_model(pcbnew.LoadBoard(str(nt)), {}, name="x")["pads"])
+
+
+def test_footprint_clearance_pad_explicit_zero_wins(tmp_path):
+    """A pad's own explicit 0 is an override (has_value in KiCad), not "unset": it must not inherit the footprint's."""
+    pcb = make_fixture_board(tmp_path / "z.kicad_pcb", fp_clearance_mm=0.127, pad_clearance_mm=0.0)
+    m = export_model(pcbnew.LoadBoard(str(pcb)), {}, name="fx")
+    lc = {p["number"]: p["local_clearance"] for p in m["pads"] if p["ref"] == "U1" and p["number"]}
+    assert lc["3"] == 0 and lc["1"] == 127_000

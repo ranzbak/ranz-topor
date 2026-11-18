@@ -255,10 +255,11 @@ def pad_polygon_rings(pwh, max_err: int) -> list:
 
 
 def pad_from_kipy(pad, *, ref: str, net_codes: dict, cu_ids: set, poly_fn=None, fp_zone_connection: int | None = None,
-                  tie_group: int | None = None) -> tuple[dict, dict | None]:
+                  fp_clearance: int | None = None, tie_group: int | None = None) -> tuple[dict, dict | None]:
     """One footprint pad -> (model pad dict, hole dict or None). `net_codes`: net name -> code (``""`` -> 0);
     `cu_ids`: enabled engine copper ids; `fp_zone_connection`: the footprint's zone connection override (pcbnew
-    ZONE_CONNECTION value, None = inherited); `tie_group`: index of the net-tie group containing this pad number. O(layers)."""
+    ZONE_CONNECTION value, None = inherited); `fp_clearance`: the footprint's copper clearance override in nm
+    (None = none; used when the pad has no own, as KiCad's PAD::GetClearanceOverrides, pcbnew/pad.cpp:1675-1681); `tie_group`: index of the net-tie group containing this pad number. O(layers)."""
     ps = pad.padstack
     layers = []
     shapes = {}
@@ -285,7 +286,7 @@ def pad_from_kipy(pad, *, ref: str, net_codes: dict, cu_ids: set, poly_fn=None, 
         "shapes": shapes,
         "drill": drill,
         "local_clearance": int(p.copper_clearance_override.value_nm) if p.HasField("copper_clearance_override")
-        else None,
+        else (int(fp_clearance) if fp_clearance is not None else None),
         "net_tie_group": tie_group,
     }
     zs = ps.zone_settings.proto
@@ -643,10 +644,11 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
             for n in g:
                 by_num.setdefault(n, gi)
         fpc = _ZC_TO_KICAD.get(fp.overrides.zone_connection)
+        fpcl = fp.overrides.copper_clearance  # None = inherited
         fpads = [it for it in fp.definition.items if isinstance(it, Pad)]
         for pad in fpads:
             pd, hole = pad_from_kipy(pad, ref=ref, net_codes=codes, cu_ids=cu_ids, poly_fn=poly_fn,
-                                     fp_zone_connection=fpc, tie_group=by_num.get(pad.number) if groups else None)
+                                     fp_zone_connection=fpc, fp_clearance=fpcl, tie_group=by_num.get(pad.number) if groups else None)
             pads.append(pd)
             if hole is not None:
                 holes.append(hole)
