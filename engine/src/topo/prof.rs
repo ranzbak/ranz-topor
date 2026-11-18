@@ -3,6 +3,8 @@
 //! Switch: the environment variable `TOPO_PROF` (any value; read once) or [`set_on`] (tests).
 //! Off, every hook is one relaxed load of a static flag and nothing else (no clock read, no
 //! allocation, no lock): the copper never depends on it, and the overhead stays under 3 %.
+//! Arguments of a hook are evaluated before the call: a costly argument (an O(wires) count) is
+//! computed under `if prof::on()` at the call site, so off costs nothing beyond the load.
 //! On, a run records
 //!   * inclusive time, call and unit counts per [`K`] key (guards `g(K::..)`, `units`, `lap`),
 //!     summed over all threads (a key inside the refine lanes can exceed the wall time);
@@ -66,8 +68,6 @@ pub enum K {
     Dependents,
     RrSetLr,
     PathPrice,
-    CrossSPolys,
-    AssignCore,
     AnyPath,
     TopoSetup,
 }
@@ -116,8 +116,6 @@ const NAMES: &[&str] = &[
     "dependents",        // tree::dependents
     "rr_set_lr",         // set_lr after a kept re-lay
     "path_price",        // Topo::path_price
-    "cross_s_polys",     // assign_two polylines
-    "assign_core",       // layer solve without refine (assign minus refine)
     "any_path",          // State::any_path
     "topo_setup",        // cycle lap: Topo clone + potentials + sort
 ];
@@ -211,11 +209,22 @@ struct St {
 }
 static ST: Mutex<St> = Mutex::new(St { last: None, mono_last: 0.0, rows: Vec::new(), cycles: Vec::new() });
 
+/// Set when [`mono_now`] could not read the clock (the `Instant` Debug format changed): the report then
+/// says `"mono_ok": false` and the flame-graph stage folding must not trust `mono0` / `mono1`.
+static MONO_BAD: AtomicBool = AtomicBool::new(false);
+
 /// CLOCK_MONOTONIC seconds (Instant's clock on Linux), to match `perf record -k mono` samples.
+/// Parsed from the `Instant` Debug text (no libc dependency); `None` when the text has no
+/// `tv_sec` / `tv_nsec` numbers (the unit test `mono_now_reads_the_instant_debug_format` fails first).
+fn mono_parse(dbg: &str) -> Option<f64> {
+    let num = |key: &str| dbg.split(key).nth(1).and_then(|r| r.trim_start_matches([':', ' ']).split(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse::<f64>().ok());
+    Some(num("tv_sec")? + num("tv_nsec")? * 1e-9)
+}
 fn mono_now() -> f64 {
-    let dbg = format!("{:?}", Instant::now());
-    let num = |key: &str| dbg.split(key).nth(1).and_then(|r| r.trim_start_matches([':', ' ']).split(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
-    num("tv_sec") + num("tv_nsec") * 1e-9
+    mono_parse(&format!("{:?}", Instant::now())).unwrap_or_else(|| {
+        MONO_BAD.store(true, Relaxed);
+        0.0
+    })
 }
 
 /// Stage of the window a mark label ends (the windows partition the engine's time).
@@ -331,12 +340,26 @@ pub fn report() -> Option<Value> {
     let stages: Vec<Value> = s.rows.iter().map(|r| json!({"stage": r.stage, "labels": r.labels, "wall_s": r.wall_s, "mono0": r.mono0, "mono1": r.mono1, "keys": keys_json(&r.keys)})).collect();
     let cycles: Vec<Value> = s.cycles.iter().map(|c| json!({"n": c.n, "wall_s": c.wall_s, "tried": c.tried, "kept": c.kept, "relaid": c.relaid, "pair_moved": c.pair_moved, "pair_relaid": c.pair_relaid, "archived": c.archived})).collect();
     let engine_s: f64 = s.rows.iter().map(|r| r.wall_s).sum();
-    Some(json!({"version": 1, "engine_s": engine_s, "stages": stages, "cycles": cycles}))
+    Some(json!({"version": 1, "mono_ok": !MONO_BAD.load(Relaxed), "engine_s": engine_s, "stages": stages, "cycles": cycles}))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::stage_of;
+    use super::{mono_parse, stage_of};
+    use std::time::Instant;
+
+    /// The monotone clock is read from `Instant`'s Debug text: it parses today (Linux), and a bad text is None
+    /// (reported as `mono_ok: false`, not a silent 0).
+    #[test]
+    fn mono_now_reads_the_instant_debug_format() {
+        if cfg!(target_os = "linux") {
+            let a = mono_parse(&format!("{:?}", Instant::now())).expect("Instant Debug format changed: fix mono_parse");
+            let b = mono_parse(&format!("{:?}", Instant::now())).unwrap();
+            assert!(a > 0.0 && b >= a, "{a} {b}");
+        }
+        assert_eq!(mono_parse("Instant { t: 5 }"), None);
+        assert_eq!(mono_parse("Instant { tv_sec: 12, tv_nsec: 500000000 }"), Some(12.5));
+    }
 
     /// Every mark label the engine uses has a named stage (an unnamed window would hide time in "other").
     #[test]

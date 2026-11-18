@@ -27,7 +27,7 @@ Locally the tool is a smoke test (load changes every second).
 Rows partition the run's wall time: python before the engine, the engine stages (plane stubs, projection, P2-P4, TopoR
 loop, via/branch relocation, drawing + feedback, via reduction, tail), the engine job's own overhead, python after the
 engine. The shares sum to 100 % (the `sum of the rows` line). "of it" rows are parts of the row above: the loop split
-(judge, search, layering, crossing, pair, cycle setup, other; laps on the loop thread, they add up to the loop row) and
+(judge - only with `loop_judge = "global"`, the default local judge counts inside search -, search, layering, crossing, pair, cycle setup, other; laps on the loop thread, they add up to the loop row) and
 the python split from `log.txt` (baseline DRC, DRC after, refill, commit). The counter keys of the loop (`rr_viol_after`,
 `assign_with`, `refine`, `search_tree`, ...) are inclusive and summed over all threads: they overlap each other and can
 exceed the wall time inside the refine lanes. Per 600 s of loop time: cycles and re-lays (`reroute` calls = Sp::reroute).

@@ -56,6 +56,17 @@ fn counters_do_not_touch_the_copper_and_add_up() {
         // the cycle laps partition the cycle: together they never exceed the loop window
         let laps: f64 = ["topo_setup", "st_sweep", "st_uncross_reopt", "st_viarose", "st_float", "st_cross", "st_pairrelay", "st_pairmove"].iter().map(|k| lp["keys"][*k][1].as_f64().unwrap_or(0.0)).sum();
         let loop_s = lp["wall_s"].as_f64().unwrap();
+        // every lap runs once per cycle that reaches the end of cycle_body (early returns skip the later laps)
+        let calls = |k: &str| lp["keys"][k][0].as_u64().unwrap_or(0);
+        for k in ["topo_setup", "st_sweep", "st_uncross_reopt", "st_viarose", "st_float", "st_cross", "st_pairrelay", "st_pairmove"] {
+            assert!(calls(k) > 0 && calls(k) <= calls("cycle"), "{f}: lap {k} has {} calls for {} cycles", calls(k), calls("cycle"));
+        }
+        // the loop-local judge (the default) is counted as a layering: one call per local layering at least
+        // as many as the judged re-lays' price calls
+        assert!(calls("assign_with") >= calls("rr_viol_after"), "{f}: assign_with {} < rr_viol_after {} (local layering not counted?)", calls("assign_with"), calls("rr_viol_after"));
+        // the closing mark("finish") of report() is in the tail window
+        let tail = stages.iter().find(|s| s["stage"] == "tail").unwrap();
+        assert!(tail["labels"].as_array().unwrap().iter().any(|l| l == "finish"), "{f}: tail labels {:?}", tail["labels"]);
         assert!(laps <= loop_s * 1.001 && laps >= 0.5 * loop_s, "{f}: laps {laps} s of the loop window {loop_s} s");
     }
 }

@@ -109,7 +109,7 @@ def build(prof: dict) -> dict:
     sec = lambda n: k.get(n, [0, 0.0, 0])[1]
     judge = sec("rr_viol_after")
     laps = {r: sum(sec(x) for x in ks) for r, ks in LOOP_LAPS.items()}
-    split = [("judge (whole-board layering + measure per re-lay)", judge), ("search (sweep minus judge: price, place, keep)", max(0.0, laps["sweep"] - judge)),
+    split = [("judge (loop_judge=global only: whole-board layering + measure per re-lay; the local judge is in search)", judge), ("search (sweep minus judge: price, place, keep)", max(0.0, laps["sweep"] - judge)),
              ("layering (uncross, layer re-optimisation, via-rose, floating up)", laps["layering"]), ("crossing rules", laps["crossing"]),
              ("pair (pair_min relay, pair_move)", laps["pair"]), ("cycle setup (Topo clone, potentials, sort)", laps["setup"])]
     rest = max(0.0, lp["wall_s"] - sum(x[1] for x in split))

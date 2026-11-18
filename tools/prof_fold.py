@@ -19,6 +19,8 @@ d = json.load(open(sys.argv[1]))
 st = (d.get("profile") or {}).get("stages") or []
 if not st:
     sys.exit("no profile.stages in " + sys.argv[1])
+if (d.get("profile") or {}).get("mono_ok") is False:
+    sys.exit("profile.mono_ok is false: the engine could not read CLOCK_MONOTONIC, the stage windows cannot be folded")
 BEFORE, AFTER = "python before the engine", "python after the engine"
 ends = [s["mono1"] for s in st]
 names = [s["stage"] for s in st]

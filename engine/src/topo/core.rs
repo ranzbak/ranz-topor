@@ -4485,7 +4485,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             fn cycle(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats {
                 let _pg = super::prof::g(super::prof::K::Cycle);
-                super::prof::units(super::prof::K::Cycle, self.st.wires.iter().filter(|w| w.alive).count());
+                if super::prof::on() {
+                    super::prof::units(super::prof::K::Cycle, self.st.wires.iter().filter(|w| w.alive).count());
+                }
                 let t0 = Instant::now();
                 let k0 = (self.lctr.layer_global.get(), self.lctr.measure_global.get(), self.lctr.layer_local.get(), self.lctr.local_free.get(), self.lctr.local_model.get(), self.shadow);
                 let mut cs = self.cycle_body(c, stop, t0);

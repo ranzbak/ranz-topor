@@ -793,7 +793,9 @@ pub fn assign_with(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &L
 /// bit, the untouched wires' via sites not searched again).
 pub fn assign_cached(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>, cache: Option<&StretchCache>) -> LayerReport {
     let _pg = super::prof::g(super::prof::K::AssignWith);
-    super::prof::units(super::prof::K::AssignWith, st.wires.iter().filter(|w| w.alive).count());
+    if super::prof::on() {
+        super::prof::units(super::prof::K::AssignWith, st.wires.iter().filter(|w| w.alive).count());
+    }
     if st.proj.n_layers == 2 {
         assign_two(st, smd_layer, p, packer, cache, None)
     } else {
@@ -823,7 +825,9 @@ pub fn assign_local(
     held: &Held,
 ) -> LayerReport {
     let _pg = super::prof::g(super::prof::K::AssignWith);
-    super::prof::units(super::prof::K::AssignWith, st.wires.iter().filter(|w| w.alive).count());
+    if super::prof::on() {
+        super::prof::units(super::prof::K::AssignWith, st.wires.iter().filter(|w| w.alive).count());
+    }
     if st.proj.n_layers == 2 {
         assign_two(st, smd_layer, p, packer, cache, Some(held))
     } else {
