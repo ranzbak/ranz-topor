@@ -173,7 +173,8 @@ struct CrewShared<J, U> {
     out: std::sync::RwLock<Vec<std::sync::Mutex<Option<U>>>>,
     n: AtomicUsize,
     next: AtomicUsize,
-    done: AtomicUsize,
+    /// Units of the round finished (their result stored).
+    fin: AtomicUsize,
     epoch: std::sync::atomic::AtomicU64,
     stop: AtomicBool,
     failed: AtomicBool,
@@ -198,11 +199,22 @@ fn crew_work<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)
         if rev && i < 8 {
             std::thread::sleep(std::time::Duration::from_millis(8 - i as u64));
         }
+        // a panicking unit fails the round (its caller panics; the scope passes the panic on)
+        struct Flag<'b>(&'b AtomicBool);
+        impl Drop for Flag<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        let _g = Flag(&sh.failed);
         let u = with_mode(None, false, || unit(jb, i));
         let slot = i;
         if let Ok(mut c) = out[slot].lock() {
             *c = Some(u);
         }
+        sh.fin.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -227,17 +239,9 @@ fn crew_lane<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)
         if sh.stop.load(Ordering::SeqCst) {
             return;
         }
-        // counted done also when the unit panics (the round's caller then stops the crew)
-        struct Done<'b, J, U>(&'b CrewShared<J, U>);
-        impl<J, U> Drop for Done<'_, J, U> {
-            fn drop(&mut self) {
-                if std::thread::panicking() {
-                    self.0.failed.store(true, Ordering::SeqCst);
-                }
-                self.0.done.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        let _d = Done(sh);
+        // A lane joins the rounds it gets to (a lane that never starts, or starts late, because
+        // the pool's threads are busy, holds nothing up: the round's caller takes every unit
+        // nobody took).
         crew_work(sh, unit);
     }
 }
@@ -251,7 +255,7 @@ pub fn crew<J: Send + Sync, U: Send, R>(lease: lanes::Lease, unit: impl Fn(&J, u
         out: std::sync::RwLock::new(Vec::new()),
         n: AtomicUsize::new(0),
         next: AtomicUsize::new(0),
-        done: AtomicUsize::new(0),
+        fin: AtomicUsize::new(0),
         epoch: std::sync::atomic::AtomicU64::new(0),
         stop: AtomicBool::new(false),
         failed: AtomicBool::new(false),
@@ -292,12 +296,17 @@ impl<J, U> Crew<'_, J, U> {
     /// One round: units `0..n` of `job` on the lanes; the job back and the results in unit order.
     pub fn round(&mut self, job: J, n: usize) -> (J, Vec<U>) {
         let sh = self.sh;
-        *sh.job.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
-        *sh.out.write().unwrap_or_else(std::sync::PoisonError::into_inner) = (0..n).map(|_| std::sync::Mutex::new(None)).collect();
-        sh.n.store(n, Ordering::SeqCst);
-        sh.next.store(0, Ordering::SeqCst);
-        sh.done.store(0, Ordering::SeqCst);
-        sh.rev.store(reverse_round(), Ordering::SeqCst);
+        {
+            // the round's state under the write locks: a lane reads it only after them
+            let mut jw = sh.job.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ow = sh.out.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *jw = Some(job);
+            *ow = (0..n).map(|_| std::sync::Mutex::new(None)).collect();
+            sh.n.store(n, Ordering::SeqCst);
+            sh.next.store(0, Ordering::SeqCst);
+            sh.fin.store(0, Ordering::SeqCst);
+            sh.rev.store(reverse_round(), Ordering::SeqCst);
+        }
         UNITS_LANED.fetch_add(n, Ordering::Relaxed);
         meter::count(meter::MAP_LANED, 1);
         meter::count(meter::MAP_LANES, self.k as u64);
@@ -308,8 +317,9 @@ impl<J, U> Crew<'_, J, U> {
             sh.cv.notify_all();
         }
         crew_work(sh, self.unit);
+        // the units the lanes took are running on live threads: wait for them only
         let mut spins = 0u32;
-        while sh.done.load(Ordering::SeqCst) < self.k - 1 {
+        while sh.fin.load(Ordering::SeqCst) < n && !sh.failed.load(Ordering::SeqCst) {
             if spins < CREW_SPIN {
                 std::hint::spin_loop();
                 spins += 1;
@@ -411,6 +421,27 @@ mod tests {
                     for (r, g) in got.iter().enumerate() {
                         let want: Vec<u64> = (0..(r as u64 + 5)).map(|x| (x + r as u64) * 3 + x).collect();
                         assert_eq!(g, &want, "lanes {k} round {r}");
+                    }
+                })
+            });
+        }
+    }
+
+    /// More crew lanes than pool threads (a fixed `draw_lanes` above the threads, or a pool busy
+    /// elsewhere): the lanes that never start hold no round up, the results stay in unit order.
+    #[test]
+    fn a_crew_with_more_lanes_than_threads_finishes() {
+        for (threads, lanes) in [(1usize, 8usize), (2, 5), (3, 8)] {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("pool");
+            pool.install(|| {
+                with_mode(Some(Mode::Fixed(lanes)), true, || {
+                    let unit = |j: &Vec<u64>, i: usize| j[i] * 3 + i as u64;
+                    let l = lease(2).expect("lanes");
+                    let got = crew(l, unit, |c| (0..60u64).map(|r| c.round((0..(r % 7 + 1)).map(|x| x + r).collect::<Vec<u64>>(), (r % 7 + 1) as usize).1).collect::<Vec<_>>());
+                    for (r, g) in got.iter().enumerate() {
+                        let r = r as u64;
+                        let want: Vec<u64> = (0..(r % 7 + 1)).map(|x| (x + r) * 3 + x).collect();
+                        assert_eq!(g, &want, "threads {threads} lanes {lanes} round {r}");
                     }
                 })
             });
