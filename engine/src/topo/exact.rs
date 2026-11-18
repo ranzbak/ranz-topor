@@ -82,6 +82,43 @@ impl Strip {
     }
 }
 
+/// F6 (profile 2026-11-18: `seg_clear_w` was 22-26 % of the drawing, every segment test of a
+/// search looping over all its objects): the objects of one search in a loose uniform grid, by the
+/// cell of their box's low corner (boxes wider than [`NEAR_BIG`] cells are tested always). A
+/// segment test visits only the cells whose objects can reach the segment: an object is skipped
+/// only when its box misses the segment's box grown by `c + sw / 2 + 1 nm`, where `c` is the
+/// largest clearance need of the set at width 0 (a need grows by exactly `sw / 2` with the
+/// width), so the exact per-object test ([`Drawer::ent_clear`]) would have passed it by its own
+/// box test. The answer is that of [`Drawer::seg_clear`] (an `all` over the objects, order-free).
+pub(super) struct Near {
+    wp: Wp,
+    ids: Vec<usize>,
+    c: f64,
+    big: Vec<usize>,
+    /// Largest box side of the objects in `cells`.
+    ext: f64,
+    lo: Vec2,
+    cell: f64,
+    nx: usize,
+    ny: usize,
+    /// Empty: fewer than [`NEAR_MIN`] objects, every test scans them.
+    cells: Vec<Vec<usize>>,
+}
+
+/// Sets with fewer objects are scanned without a grid.
+const NEAR_MIN: usize = 24;
+/// Smallest cell of a [`Near`] grid (nm).
+const NEAR_CELL_MIN: f64 = 0.05e6;
+/// Objects whose box is wider than this many cells are tested by every query.
+const NEAR_BIG: f64 = 4.0;
+
+impl Near {
+    /// Cell index of `v` (clamped to `0..n`; monotone in `v`).
+    fn slot(&self, v: f64, lo: f64, n: usize) -> usize {
+        (((v - lo) / self.cell).floor().max(0.0) as usize).min(n - 1)
+    }
+}
+
 /// Heap entry: ordered by `f` ascending, then node id.
 struct Open {
     f: f64,
@@ -293,22 +330,87 @@ impl Drawer<'_> {
     /// [`Drawer::seg_clear`] of one piece at width `sw`.
     fn seg_clear_w(&self, ents: &[usize], wp: &Wp, a: Vec2, b: Vec2, sw: f64) -> bool {
         let bb = bbox_of(&[a, b]);
-        ents.iter().all(|&i| {
-            let e = &self.ents[i];
-            let need = self.need_of(i, wp, sw);
-            let (lo, hi) = match &e.core {
-                Core::Poly(p) => {
-                    let eb = bbox_of(p);
-                    (eb.min, eb.max)
-                }
-                Core::Seg(c, d) => (Vec2 { x: c.x.min(d.x), y: c.y.min(d.y) }, Vec2 { x: c.x.max(d.x), y: c.y.max(d.y) }),
-                Core::Pt(c) => (*c, *c),
-            };
-            if bb.min.x > hi.x + need || bb.max.x < lo.x - need || bb.min.y > hi.y + need || bb.max.y < lo.y - need {
-                return true;
+        ents.iter().all(|&i| self.ent_clear(i, wp, a, b, &bb, sw))
+    }
+
+    /// The segment `a-b` (box `bb`) at width `sw` keeps the clearance to object `i`.
+    #[inline]
+    fn ent_clear(&self, i: usize, wp: &Wp, a: Vec2, b: Vec2, bb: &Aabb, sw: f64) -> bool {
+        let e = &self.ents[i];
+        let need = self.need_of(i, wp, sw);
+        // The core's box (cached at `add_ent`; the same min/max of its points).
+        let (lo, hi) = (self.ent_box[i].min, self.ent_box[i].max);
+        if bb.min.x > hi.x + need || bb.max.x < lo.x - need || bb.min.y > hi.y + need || bb.max.y < lo.y - need {
+            return true;
+        }
+        seg_core(a, b, &e.core).0 >= need - TOL
+    }
+
+    /// The objects `ents` of one search (the window of [`Self::local_path`], the region of
+    /// [`Drawer::octilinear`]) indexed for the many segment tests it makes ([`Near`]).
+    pub(super) fn near(&self, ents: Vec<usize>, wp: &Wp) -> Near {
+        let n = ents.len();
+        let c = ents.iter().map(|&i| self.need_of(i, wp, 0.0)).fold(0.0, f64::max);
+        let mut nr = Near { wp: *wp, ids: ents, c, big: Vec::new(), ext: 0.0, lo: Vec2::default(), cell: 1.0, nx: 0, ny: 0, cells: Vec::new() };
+        if n < NEAR_MIN {
+            return nr;
+        }
+        let mut u = self.ent_box[nr.ids[0]];
+        for &i in &nr.ids {
+            u = u.union(&self.ent_box[i]);
+        }
+        let (w, h) = (u.max.x - u.min.x, u.max.y - u.min.y);
+        nr.cell = (w.max(h) / (n as f64).sqrt()).max(NEAR_CELL_MIN);
+        nr.lo = u.min;
+        (nr.nx, nr.ny) = ((w / nr.cell).floor() as usize + 1, (h / nr.cell).floor() as usize + 1);
+        nr.cells = vec![Vec::new(); nr.nx * nr.ny];
+        for k in 0..n {
+            let i = nr.ids[k];
+            let bx = self.ent_box[i];
+            let side = (bx.max.x - bx.min.x).max(bx.max.y - bx.min.y);
+            if side > NEAR_BIG * nr.cell {
+                nr.big.push(i);
+                continue;
             }
-            seg_core(a, b, &e.core).0 >= need - TOL
-        })
+            nr.ext = nr.ext.max(side);
+            let (x, y) = (nr.slot(bx.min.x, nr.lo.x, nr.nx), nr.slot(bx.min.y, nr.lo.y, nr.ny));
+            nr.cells[y * nr.nx + x].push(i);
+        }
+        nr
+    }
+
+    /// [`Drawer::seg_clear`] against the objects of `nr` (the same answer, testing only the objects
+    /// near the segment; see [`Near`]).
+    pub(super) fn seg_clear_near(&self, nr: &Near, a: Vec2, b: Vec2) -> bool {
+        let wp = &nr.wp;
+        if wp.neck.is_some() {
+            return wp.pieces(a, b).into_iter().all(|(u, v, w)| self.seg_clear_w_near(nr, u, v, self.seg_width(wp.wire, wp.layer, u, v, w)));
+        }
+        self.seg_clear_w_near(nr, a, b, self.seg_width(wp.wire, wp.layer, a, b, wp.w))
+    }
+
+    fn seg_clear_w_near(&self, nr: &Near, a: Vec2, b: Vec2, sw: f64) -> bool {
+        if nr.cells.is_empty() {
+            return self.seg_clear_w(&nr.ids, &nr.wp, a, b, sw);
+        }
+        let bb = bbox_of(&[a, b]);
+        let wp = &nr.wp;
+        if !nr.big.iter().all(|&i| self.ent_clear(i, wp, a, b, &bb, sw)) {
+            return false;
+        }
+        // Every object whose box meets the segment's box grown by the largest need (plus 1 nm)
+        // has its box's low corner in this range (boxes up to `ext` wide, plus 1 nm).
+        let g = nr.c + 0.5 * sw + 1.0;
+        let (x0, x1) = (nr.slot(bb.min.x - g - nr.ext - 1.0, nr.lo.x, nr.nx), nr.slot(bb.max.x + g, nr.lo.x, nr.nx));
+        let (y0, y1) = (nr.slot(bb.min.y - g - nr.ext - 1.0, nr.lo.y, nr.ny), nr.slot(bb.max.y + g, nr.lo.y, nr.ny));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if !nr.cells[y * nr.nx + x].iter().all(|&i| self.ent_clear(i, wp, a, b, &bb, sw)) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Candidate nodes around the corners of object `id` that fall in `bb`.
@@ -396,6 +498,7 @@ impl Drawer<'_> {
     fn local_path(&self, strip: &Strip, wp: &Wp, a: Vec2, b: Vec2, bb: Aabb) -> Option<Vec<Vec2>> {
         let reach = self.qgrow;
         let ents = self.local_ents(wp, bb.grow(reach));
+        let nr = self.near(ents.clone(), wp);
         let mut cand: Vec<Vec2> = Vec::new();
         for &id in &ents {
             self.corner_nodes(id, wp, &bb, &mut cand);
@@ -411,7 +514,7 @@ impl Drawer<'_> {
             if p.x < bb.min.x || p.x > bb.max.x || p.y < bb.min.y || p.y > bb.max.y {
                 continue;
             }
-            if strip.contains(p) && self.seg_clear(&ents, wp, p, p) {
+            if strip.contains(p) && self.seg_clear_near(&nr, p, p) {
                 nodes.push(p);
             }
         }
@@ -440,7 +543,7 @@ impl Drawer<'_> {
                 }
                 let (p, q) = (nodes[u], nodes[v]);
                 let mid = (p + q) * 0.5;
-                if strip.crosses_wall(p, q) || !strip.contains(mid) || !self.seg_clear(&ents, wp, p, q) {
+                if strip.crosses_wall(p, q) || !strip.contains(mid) || !self.seg_clear_near(&nr, p, q) {
                     continue;
                 }
                 g[v] = g[u] + d;
@@ -530,11 +633,20 @@ impl Drawer<'_> {
         let n_walls = strip.walls.len();
         strip.walls.extend(self.via_walls(w, k0, k1, layer));
         let via_wall = |a: Vec2, b: Vec2| strip.walls[n_walls..].iter().any(|&(c, d)| super::draw::seg_proper(a, b, c, d));
+        // F6: whether a segment breaks a clearance or a via wall depends only on its two ends in
+        // this call (the sleeve and the objects stay); a repair changes one stretch, so the
+        // segments before and after it are not tested again. Keyed by the ends' bits.
+        let mut seg_ok: crate::fxhash::FxHashMap<[u64; 4], bool> = crate::fxhash::map();
         for _ in 0..24 {
             let mut bad = None;
             for i in 0..pts.len() - 1 {
-                let ents = self.local_ents(&wp, bbox_of(&[pts[i], pts[i + 1]]).grow(self.qgrow));
-                if !self.seg_clear(&ents, &wp, pts[i], pts[i + 1]) || via_wall(pts[i], pts[i + 1]) {
+                let (a, b) = (pts[i], pts[i + 1]);
+                let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
+                let ok = *seg_ok.entry(key).or_insert_with(|| {
+                    let ents = self.local_ents(&wp, bbox_of(&[a, b]).grow(self.qgrow));
+                    self.seg_clear(&ents, &wp, a, b) && !via_wall(a, b)
+                });
+                if !ok {
                     bad = Some(i);
                     break;
                 }
@@ -657,3 +769,429 @@ impl Drawer<'_> {
 
 /// Most extra via sites tried per via.
 const MAX_VIA_SITES: usize = 60;
+
+#[cfg(test)]
+mod tests {
+    //! F6: the indexed / memoised clearance searches against their brute-force originals on a
+    //! random pad field (rect, rounded, round and oval pads at any angle, three nets, drawn copper).
+    use super::*;
+    use crate::check::Checker;
+    use crate::model::{BoardModel, Options};
+    use crate::topo::board::{self, BuildOpts};
+    use crate::topo::draw::{track_item, via_item};
+    use crate::topo::init::InitWeights;
+    use crate::topo::state::State;
+    use crate::vias::ViaSize;
+    use std::collections::BTreeMap;
+
+    const MM: f64 = 1e6;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn f(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn int(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + (self.next() % (hi - lo + 1) as u64) as i64
+        }
+    }
+
+    /// A 24 x 24 mm two-layer board: net 1's end pads at (2, 12) and (22, 12), a 6 x 6 field of
+    /// jittered, rotated pads of nets 1-3 between them.
+    fn field(g: &mut Rng) -> BoardModel {
+        let p = |v: f64| (v * MM) as i64;
+        let mut pads: Vec<String> = Vec::new();
+        let mut pad = |net: i32, x: f64, y: f64, rot: f64, sh: String| {
+            let i = pads.len();
+            pads.push(format!(
+                r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":{net},"attr":"smd","center":[{},{}],"rotation_deg":{rot},"layers":[0],"shapes":{{"0":{sh}}},"drill":null}}"#,
+                p(x),
+                p(y)
+            ));
+        };
+        pad(1, 2.0, 12.0, 0.0, format!(r#"{{"kind":"rect","w":{0},"h":{0}}}"#, p(0.6)));
+        pad(1, 22.0, 12.0, 0.0, format!(r#"{{"kind":"rect","w":{0},"h":{0}}}"#, p(0.6)));
+        for i in 0..6 {
+            for j in 0..6 {
+                let (x, y) = (5.0 + 2.8 * i as f64 + 0.6 * g.f(), 4.0 + 2.8 * j as f64 + 0.6 * g.f());
+                let (w, h) = (0.3 + 1.1 * g.f(), 0.3 + 1.1 * g.f());
+                let sh = match g.int(0, 3) {
+                    0 => format!(r#"{{"kind":"rect","w":{},"h":{}}}"#, p(w), p(h)),
+                    1 => format!(r#"{{"kind":"roundrect","w":{},"h":{},"rc":{}}}"#, p(w), p(h), p(0.25 * w.min(h))),
+                    2 => format!(r#"{{"kind":"circle","d":{}}}"#, p(w)),
+                    _ => format!(r#"{{"kind":"oval","w":{},"h":{}}}"#, p(w), p(h)),
+                };
+                let rot = [0.0, 45.0, 30.0, 90.0, 17.0][g.int(0, 4) as usize];
+                pad(g.int(1, 3) as i32, x, y, rot, sh);
+            }
+        }
+        let c = [(0.0, 0.0), (24.0, 0.0), (24.0, 24.0), (0.0, 24.0)];
+        let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+        let s = format!(
+            r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}},{{"code":3,"name":"C"}}],"pads":[{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+            pads.join(","),
+            segs.join(",")
+        );
+        BoardModel::from_json(&s).unwrap()
+    }
+
+    /// The brute-force clearance test of before F6: every object, its box from its points.
+    fn seg_clear_ref(dr: &Drawer, ents: &[usize], wp: &Wp, a: Vec2, b: Vec2) -> bool {
+        let one = |u: Vec2, v: Vec2, sw: f64| {
+            let bb = bbox_of(&[u, v]);
+            ents.iter().all(|&i| {
+                let e = &dr.ents[i];
+                let need = dr.need_of(i, wp, sw);
+                let (lo, hi) = match &e.core {
+                    Core::Poly(p) => {
+                        let eb = bbox_of(p);
+                        (eb.min, eb.max)
+                    }
+                    Core::Seg(c, d) => (Vec2 { x: c.x.min(d.x), y: c.y.min(d.y) }, Vec2 { x: c.x.max(d.x), y: c.y.max(d.y) }),
+                    Core::Pt(c) => (*c, *c),
+                };
+                if bb.min.x > hi.x + need || bb.max.x < lo.x - need || bb.min.y > hi.y + need || bb.max.y < lo.y - need {
+                    return true;
+                }
+                seg_core(u, v, &e.core).0 >= need - TOL
+            })
+        };
+        if wp.neck.is_some() {
+            return wp.pieces(a, b).into_iter().all(|(u, v, w)| one(u, v, dr.seg_width(wp.wire, wp.layer, u, v, w)));
+        }
+        one(a, b, dr.seg_width(wp.wire, wp.layer, a, b, wp.w))
+    }
+
+    fn pt(g: &mut Rng) -> Vec2 {
+        Vec2 { x: (1.0 + 22.0 * g.f()) * MM, y: -(1.0 + 22.0 * g.f()) * MM }
+    }
+
+    /// Run `f` on a few random fields, each with one routed net-1 wire (wire 0) and random
+    /// drawn copper of nets 2 and 3 committed.
+    fn with_fields(f: &mut dyn FnMut(&Drawer, &mut Rng)) {
+        for seed in 1..=4u64 {
+            let mut g = Rng(0x51_7c_c1_b7_27_22_0a_95 ^ seed);
+            let m = field(&mut g);
+            let b = board::build(&m, &BuildOpts::default()).unwrap();
+            let conns = b.connections(&m);
+            let mut st = State::new(&b.proj);
+            let c = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
+            st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+            let opts = Options::default();
+            let checker = Checker::new(&m, &opts);
+            let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
+            for _ in 0..40 {
+                let (a, e) = (pt(&mut g), pt(&mut g));
+                let e = if g.int(0, 1) == 0 { a + (e - a) * 0.15 } else { a };
+                let net = g.int(2, 3) as i32;
+                if g.int(0, 4) == 0 {
+                    dr.commit(&via_item(net, a, ViaSize { d: 600_000, drill: 300_000 }, None));
+                } else {
+                    dr.commit(&track_item(net, [0u32, 2][g.int(0, 1) as usize], 150_000.0 + 200_000.0 * g.f(), a, e, None));
+                }
+            }
+            f(&dr, &mut g);
+        }
+    }
+
+    fn rand_wp(dr: &Drawer, g: &mut Rng) -> Wp {
+        let wi = &dr.st.wires[0];
+        let neck = (g.int(0, 2) == 0).then(|| {
+            let mut ends = [None; NECK_ZONES];
+            ends[0] = Some((pt(g), 3.0 * MM * g.f()));
+            ends[1] = Some((pt(g), 3.0 * MM * g.f()));
+            Neck { min_w: 100_000.0, ends }
+        });
+        let relax = [0.0, 0.0, 20_000.0, 1e9][g.int(0, 3) as usize];
+        Wp { wire: 0, net: g.int(1, 3) as i32, w: 100_000.0 + 400_000.0 * g.f(), s: 100_000.0 + 200_000.0 * g.f(), layer: g.int(0, 1) as usize, own: [wi.pa, wi.pb], neck, relax }
+    }
+
+    /// [`Drawer::seg_clear_near`] (the [`Near`] grid) and [`Drawer::seg_clear`] (the cached
+    /// boxes) give the brute-force answer for random and adversarial segments: zero length, along
+    /// a pad's box side, and exactly at / just inside / just outside an object's need.
+    #[test]
+    fn near_and_cached_boxes_match_the_brute_force_clearance_test() {
+        let mut n = [0usize; 3];
+        with_fields(&mut |dr, g| {
+            for _ in 0..60 {
+                let wp = rand_wp(dr, g);
+                let c = pt(g);
+                let half = [0.3, 1.5, 4.0, 12.0][g.int(0, 3) as usize] * MM;
+                let ents = dr.local_ents(&wp, Aabb { min: c - Vec2 { x: half, y: half }, max: c + Vec2 { x: half, y: half } }.grow(dr.qgrow));
+                // also a random subset (sets on both sides of NEAR_MIN)
+                let ents: Vec<usize> = if g.int(0, 3) == 0 { ents.into_iter().filter(|_| g.int(0, 2) == 0).collect() } else { ents };
+                let nr = dr.near(ents.clone(), &wp);
+                n[0] += usize::from(!nr.cells.is_empty());
+                for k in 0..80 {
+                    let a = c + Vec2 { x: (2.0 * g.f() - 1.0) * half, y: (2.0 * g.f() - 1.0) * half };
+                    let b = match k % 4 {
+                        0 => a,
+                        1 => a + Vec2 { x: (g.f() - 0.5) * 2.0 * half, y: 0.0 },
+                        _ => c + Vec2 { x: (2.0 * g.f() - 1.0) * half, y: (2.0 * g.f() - 1.0) * half },
+                    };
+                    let want = seg_clear_ref(dr, &ents, &wp, a, b);
+                    assert_eq!(dr.seg_clear(&ents, &wp, a, b), want, "cached boxes: {a:?}-{b:?}");
+                    assert_eq!(dr.seg_clear_near(&nr, a, b), want, "near: {a:?}-{b:?} ({} objects)", ents.len());
+                    n[1 + usize::from(want)] += 1;
+                }
+                // At an object's need: a segment parallel to the side of its box at need - 100 nm,
+                // need, need + 100 nm (zero length too).
+                for &i in ents.iter().take(12) {
+                    let bx = dr.ent_box[i];
+                    let need = dr.need_of(i, &wp, wp.w);
+                    for off in [need - 100.0, need, need + 100.0] {
+                        let y = bx.max.y + off;
+                        for (a, b) in [(Vec2 { x: bx.min.x, y }, Vec2 { x: bx.max.x, y }), (Vec2 { x: bx.min.x - off, y: bx.min.y }, Vec2 { x: bx.min.x - off, y: bx.min.y })] {
+                            let want = seg_clear_ref(dr, &ents, &wp, a, b);
+                            assert_eq!(dr.seg_clear(&ents, &wp, a, b), want);
+                            assert_eq!(dr.seg_clear_near(&nr, a, b), want, "near at need offset {off}: {a:?}-{b:?}");
+                            n[1 + usize::from(want)] += 1;
+                        }
+                    }
+                }
+            }
+        });
+        assert!(n[0] > 50 && n[1] > 2_000 && n[2] > 2_000, "{n:?}");
+    }
+
+    /// The repair of before F6 (every segment searched again in every sweep).
+    fn repair_ref(dr: &Drawer, net: i32, w: f64, s: f64, layer: usize, mut pts: Vec<Vec2>) -> Vec<Vec2> {
+        let mut bumps: BTreeMap<usize, u32> = BTreeMap::new();
+        for _ in 0..60 {
+            let mut fixes: Vec<(usize, usize, Vec2, Vec2, f64)> = Vec::new();
+            for i in 0..pts.len() - 1 {
+                let (a, b) = (pts[i], pts[i + 1]);
+                let mut ids = dr.grid.query(bbox_of(&[a, b]).grow(dr.qgrow));
+                ids.sort_unstable();
+                ids.dedup();
+                let mut worst: Option<(f64, usize, Vec2, Vec2, f64)> = None;
+                for id in ids {
+                    let e = &dr.ents[id];
+                    if !e.live || (e.mask >> layer) & 1 == 0 || e.net == Some(net) {
+                        continue;
+                    }
+                    let need = e.grow + if e.fixed { e.clear } else { e.clear.max(s) } + 0.5 * w + dr.eps;
+                    let (d, q, c) = seg_core(a, b, &e.core);
+                    let short = need - d;
+                    if short > 0.5 && worst.as_ref().is_none_or(|x| short > x.0) {
+                        let centre = match &e.core {
+                            Core::Poly(p) => p.iter().fold(Vec2 { x: 0.0, y: 0.0 }, |acc, &v| acc + v) * (1.0 / p.len() as f64),
+                            Core::Seg(u, v) => (*u + *v) * 0.5,
+                            Core::Pt(p) => *p,
+                        };
+                        let n = if d > 1e-6 { (c - q) * (1.0 / d) } else { (q - centre) * (1.0 / (q - centre).len().max(1e-9)) };
+                        worst = Some((short, id, q, n, need));
+                    }
+                }
+                if let Some((_, id, q, n, need)) = worst {
+                    fixes.push((i, id, q, n, need));
+                }
+            }
+            if fixes.is_empty() {
+                break;
+            }
+            let mut progressed = false;
+            for &(i, id, q, n, need) in fixes.iter().rev() {
+                let k = bumps.entry(id).or_insert(0);
+                *k += 1;
+                if *k > 8 {
+                    continue;
+                }
+                progressed = true;
+                let o = q + n * ((need + 3_000.0) * (1.0 + 0.12 * f64::from(*k - 1)));
+                pts.insert(i + 1, o);
+            }
+            if !progressed {
+                break;
+            }
+        }
+        pts
+    }
+
+    /// The memoised repair returns the reference's polyline bit for bit (random polylines across
+    /// the pad field, repeated points included).
+    #[test]
+    fn memoised_repair_matches_the_reference() {
+        let mut bumped = 0;
+        with_fields(&mut |dr, g| {
+            for _ in 0..40 {
+                let mut pts: Vec<Vec2> = (0..g.int(2, 7)).map(|_| pt(g)).collect();
+                if g.int(0, 3) == 0 {
+                    let k = g.int(0, pts.len() as i64 - 1) as usize;
+                    pts.insert(k, pts[k]);
+                }
+                let (net, w, s, layer) = (g.int(1, 3) as i32, 100_000.0 + 300_000.0 * g.f(), 100_000.0 + 200_000.0 * g.f(), g.int(0, 1) as usize);
+                let want = repair_ref(dr, net, w, s, layer, pts.clone());
+                let got = dr.repair(net, w, s, layer, pts.clone());
+                bumped += usize::from(want.len() > pts.len());
+                let bits = |v: &[Vec2]| v.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>();
+                assert_eq!(bits(&got), bits(&want));
+            }
+        });
+        assert!(bumped > 40, "{bumped}");
+    }
+
+    /// The A* window search of before F6 (every object tested per edge).
+    fn local_path_ref(dr: &Drawer, strip: &Strip, wp: &Wp, a: Vec2, b: Vec2, bb: Aabb) -> Option<Vec<Vec2>> {
+        let ents = dr.local_ents(wp, bb.grow(dr.qgrow));
+        let mut cand: Vec<Vec2> = Vec::new();
+        for &id in &ents {
+            dr.corner_nodes(id, wp, &bb, &mut cand);
+        }
+        let mut nodes: Vec<Vec2> = vec![a, b];
+        for p in cand {
+            if nodes.len() > MAX_NODES {
+                return None;
+            }
+            if p.x < bb.min.x || p.x > bb.max.x || p.y < bb.min.y || p.y > bb.max.y {
+                continue;
+            }
+            if strip.contains(p) && seg_clear_ref(dr, &ents, wp, p, p) {
+                nodes.push(p);
+            }
+        }
+        let n = nodes.len();
+        let (mut gs, mut from, mut done) = (vec![f64::INFINITY; n], vec![usize::MAX; n], vec![false; n]);
+        let mut heap = BinaryHeap::new();
+        gs[0] = 0.0;
+        heap.push(Open { f: (b - a).len(), n: 0 });
+        while let Some(Open { n: u, .. }) = heap.pop() {
+            if done[u] {
+                continue;
+            }
+            done[u] = true;
+            if u == 1 {
+                break;
+            }
+            for v in 0..n {
+                if done[v] || v == u {
+                    continue;
+                }
+                let d = (nodes[v] - nodes[u]).len();
+                if gs[u] + d >= gs[v] {
+                    continue;
+                }
+                let (p, q) = (nodes[u], nodes[v]);
+                if strip.crosses_wall(p, q) || !strip.contains((p + q) * 0.5) || !seg_clear_ref(dr, &ents, wp, p, q) {
+                    continue;
+                }
+                gs[v] = gs[u] + d;
+                from[v] = u;
+                heap.push(Open { f: gs[v] + (b - nodes[v]).len(), n: v });
+            }
+        }
+        if !done[1] {
+            return None;
+        }
+        let mut path = vec![b];
+        let mut c = 1;
+        while from[c] != usize::MAX {
+            c = from[c];
+            path.push(nodes[c]);
+        }
+        path.reverse();
+        Some(path)
+    }
+
+    /// `local_path` (with [`Near`]) returns the reference's path bit for bit, for windows round
+    /// random stretches of the routed wire's sleeve.
+    #[test]
+    fn local_path_with_near_matches_the_reference() {
+        let mut found = 0;
+        with_fields(&mut |dr, g| {
+            let wi = &dr.st.wires[0];
+            let k1 = wi.passes.len();
+            let strip = dr.strip(0, 0, k1);
+            let poly = dr.st.polyline(0);
+            for _ in 0..12 {
+                let mut wp = rand_wp(dr, g);
+                wp.net = wi.net;
+                let i = g.int(0, poly.len() as i64 - 2) as usize;
+                let j = g.int(i as i64 + 1, poly.len() as i64 - 1) as usize;
+                let (a, b) = (poly[i], poly[j]);
+                let bb = bbox_of(&poly[i..=j]).grow([0.5, 2.0][g.int(0, 1) as usize] * MM);
+                let want = dr.local_path(&strip, &wp, a, b, bb);
+                let rf = local_path_ref(dr, &strip, &wp, a, b, bb);
+                found += usize::from(rf.is_some());
+                let bits = |v: &Option<Vec<Vec2>>| v.as_ref().map(|v| v.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>());
+                assert_eq!(bits(&want), bits(&rf));
+            }
+        });
+        assert!(found > 5, "{found}");
+    }
+
+    /// `exact_fix_relaxed` with its segment memo returns, for random funnel-like polylines of the
+    /// routed wire, the same polyline as the brute-force loop over its parts (the reference below
+    /// re-tests every segment every round).
+    #[test]
+    fn exact_fix_memo_matches_the_reference_loop() {
+        let mut fixed = 0;
+        with_fields(&mut |dr, g| {
+            let wi = &dr.st.wires[0];
+            let k1 = wi.passes.len();
+            let poly = dr.st.polyline(0);
+            for _ in 0..10 {
+                let mut pts = poly.clone();
+                for p in pts.iter_mut().skip(1).take(poly.len().saturating_sub(2)) {
+                    *p = *p + Vec2 { x: (g.f() - 0.5) * 1.0 * MM, y: (g.f() - 0.5) * 1.0 * MM };
+                }
+                let layer = g.int(0, 1) as usize;
+                let relax = [0.0, 30_000.0][g.int(0, 1) as usize];
+                let got = dr.exact_fix_relaxed(0, 0, k1, layer, pts.clone(), None, relax);
+                let want = exact_fix_ref(dr, 0, 0, k1, layer, pts.clone(), relax);
+                fixed += usize::from(want.is_some());
+                let bits = |v: &Option<Vec<Vec2>>| v.as_ref().map(|v| v.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>());
+                assert_eq!(bits(&got), bits(&want));
+            }
+        });
+        assert!(fixed > 4, "{fixed}");
+    }
+
+    fn exact_fix_ref(dr: &Drawer, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, relax: f64) -> Option<Vec<Vec2>> {
+        let wi = &dr.st.wires[w];
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck: None, relax };
+        let mut strip = dr.strip(w, k0, k1);
+        let n_walls = strip.walls.len();
+        strip.walls.extend(dr.via_walls(w, k0, k1, layer));
+        let via_wall = |a: Vec2, b: Vec2| strip.walls[n_walls..].iter().any(|&(c, d)| super::super::draw::seg_proper(a, b, c, d));
+        for _ in 0..24 {
+            let mut bad = None;
+            for i in 0..pts.len() - 1 {
+                let ents = dr.local_ents(&wp, bbox_of(&[pts[i], pts[i + 1]]).grow(dr.qgrow));
+                if !seg_clear_ref(dr, &ents, &wp, pts[i], pts[i + 1]) || via_wall(pts[i], pts[i + 1]) {
+                    bad = Some(i);
+                    break;
+                }
+            }
+            let Some(i) = bad else { return Some(dr.drop_backtracks(&strip, &wp, pts)) };
+            let (mut l, mut r) = (if via_wall(pts[i], pts[i + 1]) { i.saturating_sub(1) } else { i }, i + 1);
+            while l > 0 && !dr.vertex_ok(&strip, &wp, pts[l]) {
+                l -= 1;
+            }
+            while r < pts.len() - 1 && !dr.vertex_ok(&strip, &wp, pts[r]) {
+                r += 1;
+            }
+            let base = bbox_of(&pts[l..=r]);
+            let mut sub = None;
+            for m in [2.0e6, 8.0e6] {
+                sub = local_path_ref(dr, &strip, &wp, pts[l], pts[r], base.grow(m));
+                if sub.is_some() {
+                    break;
+                }
+            }
+            let sub = sub?;
+            let mut np: Vec<Vec2> = pts[..l].to_vec();
+            np.extend(sub);
+            np.extend_from_slice(&pts[r + 1..]);
+            np.dedup_by(|a, b| (*a - *b).len2() < 1.0);
+            pts = np;
+        }
+        None
+    }
+}

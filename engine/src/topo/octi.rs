@@ -35,7 +35,7 @@ use super::exact::{Neck, Strip, Wp};
 use super::state::{WireId, NO_OBS};
 use crate::geom::prim::Aabb;
 use crate::geom::Vec2;
-use std::collections::HashMap;
+use crate::fxhash::FxHashMap;
 use std::f64::consts::FRAC_PI_4;
 
 const MM: f64 = 1e6;
@@ -349,6 +349,7 @@ impl Drawer<'_> {
         let pitch = wi.w + wi.s;
         let region: Aabb = bbox_of(&taut).grow(2.0 * MM + 4.0 * pitch);
         let ents = self.local_ents(&wp, region.grow(self.qgrow));
+        let nr = self.near(ents.clone(), &wp);
         // Cumulative length of the taut path, for the node order.
         let mut cum = vec![0.0];
         for p in taut.windows(2) {
@@ -400,7 +401,7 @@ impl Drawer<'_> {
             if nodes.iter().any(|n| (n.0 - p).len2() < 100.0) {
                 continue;
             }
-            if strip.contains(p) && self.seg_clear(&ents, &wp, p, p) {
+            if strip.contains(p) && self.seg_clear_near(&nr, p, p) {
                 nodes.push((p, t, None, false));
                 if !nodes.iter().any(|n| n.3 && (n.1 - t).abs() < foot_gap) {
                     nodes.push((f, t, None, true));
@@ -437,7 +438,7 @@ impl Drawer<'_> {
             Vec::new()
         };
         let tol = 0.05 * pitch + 1_000.0;
-        let mut follow_cache: HashMap<[u64; 4], f64> = HashMap::new();
+        let mut follow_cache: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
         // Length of the leg `a-b` (direction `k`) that runs beside a drawn neighbour at its
         // clearance (the overlap of their projections).
         let mut follow = |a: Vec2, b: Vec2, k: usize| -> f64 {
@@ -466,7 +467,7 @@ impl Drawer<'_> {
         // `planned_room` price of the leg `a-b`: its length inside the planned room of an undrawn
         // lane neighbour (`zones`), each piece weighted by `x + x^2`, `x` = depth over the pitch
         // (midpoint rule, pieces of at most a quarter pitch or 1/24 of the leg).
-        let mut room_cache: HashMap<[u64; 4], f64> = HashMap::new();
+        let mut room_cache: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
         let mut room = |a: Vec2, b: Vec2| -> f64 {
             if (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0 {
                 return 0.0;
@@ -524,7 +525,7 @@ impl Drawer<'_> {
             room_cache.insert(key, v);
             v
         };
-        let mut legal_cache: HashMap<[u64; 4], bool> = HashMap::new();
+        let mut legal_cache: FxHashMap<[u64; 4], bool> = crate::fxhash::map();
         let mut legal = |a: Vec2, b: Vec2| -> bool {
             let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
             if let Some(&v) = legal_cache.get(&key) {
@@ -538,7 +539,7 @@ impl Drawer<'_> {
                 && strip.contains(b)
                 && strip.contains((a + b) * 0.5)
                 && !strip.crosses_wall(a, b)
-                && self.seg_clear(&ents, &wp, a, b);
+                && self.seg_clear_near(&nr, a, b);
             legal_cache.insert(key, v);
             v
         };

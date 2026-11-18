@@ -869,6 +869,9 @@ pub struct Drawer<'a> {
     /// the packing gives the via room on every layer ([`layer_items`]), as P3/P4 do.
     pub pass_disc: Vec<Disc>,
     pub(super) ents: Vec<Ent>,
+    /// The box of every object's core, by ent id (F6: the clearance tests took it from the
+    /// polygon's vertices on every call; a core never changes once added).
+    pub(super) ent_box: Vec<Aabb>,
     pub(super) grid: Grid<usize>,
     /// `(ItemIndex id, ent id)` per committed item; the handle is the position.
     handles: Vec<(usize, usize)>,
@@ -1009,6 +1012,7 @@ impl<'a> Drawer<'a> {
             diag: Vec::new(),
             stats: DrawStats::default(),
             ents: Vec::new(),
+            ent_box: Vec::new(),
             grid: Grid::new(2.0e6),
             handles: Vec::new(),
             qgrow: 0.0,
@@ -1093,6 +1097,7 @@ impl<'a> Drawer<'a> {
         let id = self.ents.len();
         self.grid.insert(core_box.grow(e.grow + e.clear + 1.0), id);
         self.ents.push(e);
+        self.ent_box.push(core_box);
         id
     }
 
@@ -4070,13 +4075,25 @@ impl<'a> Drawer<'a> {
     /// object's nearest point pushed out along the line from the object to the segment. Repeats
     /// (the push grows by 12 % per repeat at one object) until clean or the cap is reached; the
     /// result is judged by the [`Checker`] anyway. O(rounds x segments x neighbours).
-    fn repair(&self, net: i32, w: f64, s: f64, layer: usize, mut pts: Vec<Vec2>) -> Vec<Vec2> {
+    pub(super) fn repair(&self, net: i32, w: f64, s: f64, layer: usize, mut pts: Vec<Vec2>) -> Vec<Vec2> {
         let mut bumps: BTreeMap<usize, u32> = BTreeMap::new();
+        // F6: the worst violation of a segment is a pure function of its two ends here (the objects
+        // do not change during the repair), and a sweep changes only the segments it bumps: the
+        // other segments' results are reused, not searched again. Keyed by the ends' bits.
+        type Worst = Option<(f64, usize, Vec2, Vec2, f64)>;
+        let mut memo: crate::fxhash::FxHashMap<[u64; 4], Worst> = crate::fxhash::map();
         for _ in 0..60 {
             // The worst violation of every segment: (segment, short, object, nearest point, push, need).
             let mut fixes: Vec<(usize, usize, Vec2, Vec2, f64)> = Vec::new();
             for i in 0..pts.len() - 1 {
                 let (a, b) = (pts[i], pts[i + 1]);
+                let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
+                if let Some(&worst) = memo.get(&key) {
+                    if let Some((_, id, q, n, need)) = worst {
+                        fixes.push((i, id, q, n, need));
+                    }
+                    continue;
+                }
                 let mut ids = self.grid.query(bbox_of(&[a, b]).grow(self.qgrow));
                 ids.sort_unstable();
                 ids.dedup();
@@ -4099,6 +4116,7 @@ impl<'a> Drawer<'a> {
                         worst = Some((short, id, q, n, need));
                     }
                 }
+                memo.insert(key, worst);
                 if let Some((_, id, q, n, need)) = worst {
                     fixes.push((i, id, q, n, need));
                 }
