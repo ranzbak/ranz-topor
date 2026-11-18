@@ -275,18 +275,35 @@ fn run_threads(o: &Options, threads: usize, when: fn(&topor_engine::control::Pro
 /// Cancel, whichever run's pick is drawn and however the other run ends after it: stop_reason
 /// "cancel", no "OK at Routes stable" and the pour stitching cut. Before the latch these seeds
 /// drew the stable run's pick and ended "stable" with the stitching in full (probe P3).
-/// TW3: `restart = "stall"` keeps each run's own stable meter. With the hybrid (default) stable is
-/// the shared table's, which both runs read at their sync points over the same committed cycles,
-/// so "1 of 2 stable" lasts only a few eprom cycles (ms) and the watcher misses it on a busy machine
-/// (VM r5: 2 of 4 seeds). The latch under test is the dialog's, not the restart's.
+/// Deterministic (TW3 test fix round, lead 2026-11-18): no watcher polling the progress, no wall
+/// clock. One engine thread = one compute slot, so run 1's loop runs alone until it is stable while
+/// run 2 has not begun; the test hook at its first "stable yield check" (before the next cycle,
+/// after the progress showed it stable) presses the button there, synchronously: the moment
+/// "1 of 2 stable" by construction. `restart = "stall"`: each run's own stable meter (with the
+/// hybrid, stable is the shared table's, and the table waits for run 2); the latch under test is
+/// the dialog's, the same for every restart mode.
 #[test]
 fn cancel_at_one_of_two_runs_stable_is_a_cancel() {
-    let mut hit = 0;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     for seed in [2u64, 3, 4, 8] {
         let o = Options::from_json(&format!(r#"{{"runs": 2, "seed": {seed}, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000, "restart": "stall"}}"#)).expect("options");
-        let (r, at) = run_threads(&o, 2, |p| p.runs_stable >= 1 && !p.stable);
-        let Some(p) = at else { continue };
-        hit += 1;
+        let mut ctl = RunControl::new();
+        let (press, once) = (ctl.clone(), Arc::new(AtomicBool::new(false)));
+        let at = Arc::new(Mutex::new(None));
+        let a2 = at.clone();
+        ctl.set_test_hook(move |p| {
+            if p == "stable yield check" && !once.swap(true, Ordering::SeqCst) {
+                *a2.lock().unwrap() = Some(press.snapshot());
+                press.request_cancel(); // the button reads Cancel: not every run is stable
+            }
+            false
+        });
+        let r = {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().expect("pool");
+            pool.install(|| route_with(&eprom(), &o, &ctl))
+        };
+        let p = at.lock().unwrap().clone().unwrap_or_else(|| panic!("seed {seed}: no run reached its stable yield check: {:?}", r.warnings));
         assert!(p.runs == 2 && p.runs_stable == 1 && !p.stable, "seed {seed}: premise {p:?}");
         assert_eq!(r.stop_reason, "cancel", "seed {seed}: {:?}", r.warnings);
         assert!(!r.warnings.iter().any(|w| w.starts_with("OK at Routes stable")), "seed {seed}: {:?}", r.warnings);
@@ -294,7 +311,6 @@ fn cancel_at_one_of_two_runs_stable_is_a_cancel() {
             assert_eq!(after, before, "seed {seed}: a Cancel before stable cuts the stitching");
         }
     }
-    assert!(hit >= 3, "the moment 1 of 2 stable was seen for only {hit} of 4 seeds");
 }
 
 /// User 2026-11-17 "free the slot" (verify-sl2 V2): with fewer engine threads than runs a run whose
