@@ -62,6 +62,14 @@ fn opts(via_cuts: bool) -> Options {
     Options { via_cuts, ..Options::default() }
 }
 
+/// tw4 merge round (2026-11-19): CM1 is the default after the equal-time A/B, and a JSON options
+/// object without the key (a direct engine call, the harness) gets it too.
+#[test]
+fn via_cuts_is_the_default() {
+    assert!(Options::default().via_cuts);
+    assert!(Options::from_json("{}").expect("options parse").via_cuts);
+}
+
 /// The picked plan predicts what the drawing hits: with via cuts the drawing of the pick is
 /// clean (RST goes round a pad or the via leaves the gap), and the plan's prediction equals 0.
 #[test]
