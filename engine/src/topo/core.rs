@@ -6533,6 +6533,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let n_copper = b.signal_layers.len().max(1);
     let crit_main = criteria(model, dec, &asm, &out, warn_n(&necking), n_copper, &reg, opts);
+    if std::env::var("TOPO_FUSEDBG").is_ok() {
+        // Debug: the connections each variant counts as an error (open or violating), to compare.
+        let errs = |o: &[Outcome]| -> Vec<usize> { o.iter().enumerate().filter(|(_, x)| !x.routed || !x.viol.is_empty()).map(|(i, _)| i).collect() };
+        eprintln!("VARIANT reduced+fused errors {:?}", errs(&out));
+        if let Some((o, _)) = pre_snap.as_ref() {
+            eprintln!("VARIANT as drawn errors {:?}", errs(o));
+        }
+    }
     let pre_parts = pre_snap.as_ref().map(|(o, nk)| {
         let a = assemble(model, dec, o, &term_over, first_layer, &reg);
         let c = criteria(model, dec, &a, o, warn_n(nk), n_copper, &reg, opts);
