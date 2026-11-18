@@ -354,14 +354,16 @@ fn ok_at_stable_then_a_hard_limit_cuts_the_drawing_is_a_timeout() {
             let h = std::thread::spawn(move || route_with(&m, &o2, &c2));
             let t = Instant::now();
             let bound = Duration::from_secs(if cfg!(debug_assertions) { 300 } else { 60 });
-            while dialog {
-                assert!(!h.is_finished(), "{board}: the run ended before Routes stable");
-                if ctl.snapshot().stable {
-                    ctl.request_stop(Some(true));
-                    break;
+            if dialog {
+                loop {
+                    assert!(!h.is_finished(), "{board}: the run ended before Routes stable");
+                    if ctl.snapshot().stable {
+                        ctl.request_stop(Some(true));
+                        break;
+                    }
+                    assert!(t.elapsed() < bound, "{board}: never stable in {bound:?}");
+                    std::thread::sleep(Duration::from_millis(1));
                 }
-                assert!(t.elapsed() < bound, "{board}: never stable in {bound:?}");
-                std::thread::sleep(Duration::from_millis(1));
             }
             let r = h.join().expect("run thread");
             let case = format!("{mode:?} {board}");
