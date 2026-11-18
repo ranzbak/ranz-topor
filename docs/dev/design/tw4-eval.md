@@ -149,6 +149,35 @@ a measure that misses crowding, so this is our model gap (as TW3 concluded); Pol
 - With `dangling_turn` at its default 0 the length alone decides (a lead is cut where the target lies behind the
   lead's end point by projection); the pattern `dangling_lead_away` names weight 4.
 
+## Merge round (2026-11-19): via_cuts on by default, what is left for the next TW4 round
+- **via_cuts default = true** (user dropped the 10 % per-cycle cap; judged at equal time). Run tw4eq-1001852 (rev
+  10018529; the later commits keep the copper at fixed rounds), wall 300 s, 4 threads, one exclusive ccx43:
+  esp s0-s4 KiCad new 977 -> 753, drawn 319 -> 293, detour > 1.5 91 -> 71, vias +33, length about +5 %;
+  qmtech KiCad new 356 -> 255, drawn 127 -> 80. Unconnected esp 36 -> 48, qmtech 22 -> 20.
+- The unconnected rise is the pour_island class, per connection (rebuilt pour connectivity of each routed board,
+  matched against KiCad's counts; report tw4-merge):
+  - GND C1.2/C2.2/C3.2 cut off in 5 of 5 seeds with via_cuts, 0 of 5 without: the +3V3 tree changes (edge C2.1-C1.1,
+    3.6 mm on F.Cu, instead of U2.8-U2.5; U2.5-C3.1 2.3 -> 4.6 mm) and the two +3V3 paths ring the three capacitor
+    GND pads, which reach GND only through the F.Cu pour (planes are terminals);
+  - VBUS D3.2/D6.1 in 4 of 5 (0 of 5): IO8_SCL, IO10_SDA and +BATT move to B.Cu (more vias) and cross the B.Cu VBUS
+    pour around the two pads' vias;
+  - GND SW2.2 3/5 (0/5), R3.2 4/5 (2/5), U1.4/U1.5 2/5 (0/5); the islands present without via_cuts (U2.6/U2.7 5/5,
+    /Buck_Coil U5.3, +5V D4.1/Q1.2) stay or fall.
+  Cause: the plan has no pour-connectivity term, so a tree edge or a layer change that encloses a plane-terminal pad
+  costs nothing. Owner: a graded pour-cut term in the measure (a cut-off plane terminal priced like an open end;
+  next TW4 round or the stitching), not the via-cut model.
+- **Detour finding** (no direct-path detours rule): IO6 U3.20-U4.11 detour 1.01-1.17 -> 1.75-1.95 in 4 of 5 esp
+  seeds; the plan itself chooses it (planned 44.6 mm vs 24.1 mm, via moved from the U3 pin side (148.6, 82.6), drawn
+  clean without via_cuts, to (150.8, 80.1)), and the drawing then crosses others (8 crossing items, s3). CM1 prices
+  the via gap next to the U3 QFN corner as over-full where the drawing realises it clean: CM1 is pessimistic there.
+  qmtech: MAX_I2S0 U4.U251-U7.3 8.8 -> 34 mm, FPGA_UART1_CTS 1.07 -> 1.77. Next round: a pattern of a via in a QFN
+  corner gap with one crosser (expected: the short path, via at the pin) and the CM1 gap width checked against the
+  drawing's real clearance there.
+- **neck_depth** stays opt-in (weight 0) until its equal-time A/B on via_cuts (tw4_job.sh eqn) wins.
+- **T1 part 2 (pad exit as a plan object)** is the next TW4 round: approved patterns exit_tip_from_plan and
+  neck_or_detour (harness/fit_patterns.py) as failing tests first; the exit side read from the plan's leaving
+  triangle; the stub a feature with CM1's cut machinery (the via-cut code, now on by default, is the base).
+
 ## Meter, invariants, tests
 - Meter (the stage's own): unseen count and share per board at rounds=1 and esp r64/r200, qmtech r16; gain ratio
   pooled r1→r16 seeds 0–4 and s0 r1→r64 / r1→r200 (ratio ≥ 0.5 on all three); CM1 cycle cost on the local judge.
