@@ -1448,8 +1448,8 @@ pub fn fuse_line(fused: &[(f64, f64)]) -> String {
     let len_gain_mm: f64 = fused.iter().map(|f| f.1).sum();
     let angle_gain: f64 = fused.iter().map(|f| f.0 - f.1).sum();
     format!(
-        "fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part: {} mm {} in length, junction-angle price ([factors] junction_angle) {} by {:.1}",
-        format!("{:.1}", len_gain_mm.abs()),
+        "fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part: {:.1} mm {} in length, junction-angle price ([factors] junction_angle) {} by {:.1}",
+        len_gain_mm.abs(),
         if len_gain_mm >= 0.0 { "saved" } else { "added" },
         if angle_gain >= 0.0 { "lower" } else { "higher" },
         angle_gain.abs()

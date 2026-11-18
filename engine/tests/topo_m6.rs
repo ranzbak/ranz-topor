@@ -66,11 +66,11 @@ fn fuse_line_keeps_length_and_angle_price_apart() {
 #[test]
 fn the_cycles_memory_is_kept_with_the_cycles_loop_only() {
     // The narrow gap's connection is drawn with violations (never drop): with whole-route cycles
-    // its violation becomes a room hint and its own history for the next cycle; the TopoR loop
-    // routes once per run and keeps nothing (M6 R2).
+    // its violation becomes its own history for the next cycle (no over-full edge here, so 0 room
+    // hints and 0 edges with history); the TopoR loop routes once per run and keeps nothing (M6 R2).
     let mem = |json: &str| -> Option<String> { route(&gap(), &opts(json)).warnings.into_iter().find(|w| w.starts_with(CYCLES_MEMORY)) };
     let l = mem(r#"{"runs": 1, "wall_clock_s": 60.0, "opt_loop": "cycles", "topo_rounds": 1}"#).expect("cycles memory line");
     let n = |key: &str| -> usize { l.split(key).next().and_then(|t| t.rsplit(' ').find(|x| !x.is_empty())).and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("{key}: {l}")) };
-    assert!(n(" room hints") >= 1 && n(" connections with their own history") >= 1, "{l}");
+    assert!(n(" room hints") == 0 && n(" connections with their own history") >= 1, "{l}");
     assert!(mem(r#"{"runs": 1, "wall_clock_s": 60.0, "opt_loop": "topor"}"#).is_none());
 }
