@@ -24,7 +24,9 @@ answer assumes (a pattern's expected.json ``rules_assumed``, else the board's ow
 "board"``, the default; a rule fallback for a field the board lacks is reported); a difference makes the run INVALID (`<name>--validity.json`, metrics ``valid``, the summary's first line):
 its faults are then not router faults.
 `TOPOR_TREE` / `TOPOR_ENGINE_SITE` (see tools/route_board.sh) select the code tree and engine wheel, which is
-how the frozen classic reference is run from a worktree of main @ 64b3979.
+how the frozen classic reference is run from a worktree of main @ 64b3979. `TOPOR_UNRELEASED_SETTINGS=1`: settings
+of a later release (schema ``since``, e.g. ``[search] dangling_lead_choice``) reach the engine (without it a --set of
+one is ignored by design, see Config.engine_options).
 """
 from __future__ import annotations
 
@@ -116,6 +118,15 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     from topor import run as run_mod
     from topor.config import Config
     from topor.fake import FakeBoard, ScriptedUi
+
+    if os.environ.get("TOPOR_UNRELEASED_SETTINGS") == "1":
+        # Measurement switch (tw4 T3): the settings of a later release (schema `since` > CURRENT_VERSION, e.g. the
+        # exist-term [search] dangling_* keys of 0.5.0) are left out of the engine options by design
+        # (Config.engine_options), so a --set of one is listed under NON_DEFAULTS and then silently ignored. With
+        # this switch they reach the engine; at their defaults the engine options are unchanged (same defaults).
+        import topor.config as _cfg
+        _cfg.available = lambda s: True
+        print("route_board: TOPOR_UNRELEASED_SETTINGS=1: settings of later releases reach the engine", file=sys.stderr)
 
     t_start = time.monotonic()
     out_dir = Path(out_dir)

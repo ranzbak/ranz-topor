@@ -1267,6 +1267,13 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
                 .filter(|x| x.0 == ki)
                 .filter_map(|&(_, p, t)| proj.vertex_at(p, 1.0).filter(|&v| v != vq && proj.vkind[v] == VertKind::Centre(k.obs)).map(|v| (v, t)))
                 .collect();
+            if std::env::var_os("TOPO_T3DBG").is_some() {
+                for &(_, p, t) in lead_pts.iter().filter(|x| x.0 == ki) {
+                    let hit = proj.vertex_at(p, 1.0);
+                    let near = (0..proj.pos.len()).filter(|&v| proj.vkind[v] == VertKind::Centre(k.obs)).map(|v| ((proj.pos[v] - p).len(), v)).min_by(|a, b| a.0.total_cmp(&b.0));
+                    eprintln!("T3DBG build lead pt t {:.0} nm at ({:.1}, {:.1}) vertex_at {:?} kind {:?} nearest own centre {:?} main {vq} path {:?}", t, p.x, -p.y, hit, hit.map(|v| proj.vkind[v]), near, proj.cdt.path);
+                }
+            }
             if ch.is_empty() {
                 continue;
             }

@@ -129,7 +129,7 @@ case ${1:-} in
       cd) A+=(--set search.dangling_lead_choice=true --set 'factors.weight={"dangling_turn": 4}') ;;
       d) A+=(--set 'factors.weight={"dangling_turn": 4}') ;;
     esac
-    TOPO_T3DBG=1 TOPO_KEPTDBG=${KEPTDBG:-} tools/route_board.sh "$BADGE" $R/badge/$2 "${A[@]}" > $R/badge-$2.txt 2>&1 9>&- ;;
+    TOPOR_UNRELEASED_SETTINGS=1 TOPO_T3DBG=1 TOPO_KEPTDBG=${KEPTDBG:-} tools/route_board.sh "$BADGE" $R/badge/$2 "${A[@]}" > $R/badge-$2.txt 2>&1 9>&- ;;
   t3c)
     # T3 round c: badge c with the T3DBG counts and TOPO_KEPTDBG (is the debug env seen at all?)
     ( KEPTDBG=1 hzq run --threads 2 --name t3c-badge-c -- bash tools/tw4_job.sh badge c > $R/badge-c.log 2>&1; note "badge c rc $?" ) & sleep 1
@@ -154,6 +154,7 @@ for kind in ('problem', 'reference'):
     print(kind, 'DRC violations', [(getattr(v, 'type', ''), v.description) for v in r.violations], 'unconnected', len(r.unconnected))
 "
     PB=$P/dangling_lead_away/problem/dangling_lead_away.kicad_pcb
+    export TOPOR_UNRELEASED_SETTINGS=1  # the [search] dangling_* settings are of 0.5.0 (route_board doc)
     tools/route_board.sh $PB $P/routed-cd --keep-copper --set optimize.rounds=1 --set search.dangling_lead_mm=1.5 \
       --set search.dangling_lead_choice=true --set 'factors.weight={"dangling_turn": 4}' > $P/routed-cd.txt 2>&1; echo "routed cd rc $?"
     tools/route_board.sh $PB $P/routed-off15 --keep-copper --set optimize.rounds=1 --set search.dangling_lead_mm=1.5 \
