@@ -386,3 +386,36 @@ fn ok_at_stable_then_a_hard_limit_cuts_the_drawing_is_a_timeout() {
         }
     }
 }
+
+/// Lead 2026-11-18 (limit-wait's bounded waits meet stable-label's "free the slot"): a stable run
+/// past the time limit never gives its compute slot away (the yield waits for a slot again,
+/// unbounded by `[run] limit_grace_s`). Two engine threads, three runs: run 3 waits for its first
+/// slot while a loop is stable; the limit is reached at that run's yield check, so no yield.
+#[test]
+fn a_stable_run_past_the_limit_keeps_its_slot() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let o = Options::from_json(r#"{"runs": 3, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000}"#).expect("options");
+    let mut ctl = RunControl::new();
+    let (l2, once) = (ctl.limit.clone(), Arc::new(AtomicBool::new(false)));
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let s2 = seen.clone();
+    ctl.set_test_hook(move |p| {
+        if p == "stable yield check" && !once.swap(true, Ordering::SeqCst) {
+            l2.reach(); // the limit passes while the run is stable and run 3 waits for a slot
+        }
+        if p.starts_with("stable ") {
+            s2.lock().unwrap().push(p.to_string());
+        }
+        false
+    });
+    let r = {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().expect("pool");
+        pool.install(|| route_with(&eprom(), &o, &ctl))
+    };
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.first().is_some_and(|p| p == "stable yield check"), "premise: a stable run reached its yield check: {seen:?}");
+    assert!(!seen.iter().any(|p| p == "stable slot given"), "a yield past the limit: {seen:?}");
+    assert!(!r.warnings.iter().any(|w| w.contains("gave its compute slot")), "{:?}", r.warnings);
+    assert_eq!(r.stop_reason, "timeout", "{:?}", r.warnings);
+}

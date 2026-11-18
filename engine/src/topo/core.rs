@@ -4144,13 +4144,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // run never ends by itself at stable), so before each further cycle it gives its compute
         // slot to a run not yet begun, if one waits, and goes on when a slot is free again; with
         // fewer engine threads than runs every run can so become stable while the loops run. Its
-        // own result does not change (the cycles depend only on the run's state).
+        // own result does not change (the cycles depend only on the run's state). Never past the
+        // time limit (limit-wait: bounded waits): the loop stops at this check then, and a yield
+        // would wait for a slot, unbounded by `[run] limit_grace_s`.
         let stable_seen = std::cell::Cell::new(false);
         let (yields, yield_s) = (std::cell::Cell::new(0usize), std::cell::Cell::new(0.0f64));
         let mut stop = || {
             if stable_seen.get() && !stop_now() {
+                ctl.test_point("stable yield check");
                 let t_y = Instant::now();
-                if gate.1.slots.yield_to_first() {
+                if !ctl.over_limit() && gate.1.slots.yield_to_first() {
+                    ctl.test_point("stable slot given");
                     yields.set(yields.get() + 1);
                     yield_s.set(yield_s.get() + t_y.elapsed().as_secs_f64());
                 }
