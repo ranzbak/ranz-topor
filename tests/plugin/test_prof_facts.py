@@ -7,3 +7,9 @@ def test_plugin_completes_the_python_split():
     py = _profile_facts(out)["python"]
     assert py["after_s"] == 20.0 and py["total_s"] == 130.0
     assert _profile_facts(RunOutcome("accepted")) is None
+
+
+def test_rejected_run_has_no_after_time():
+    out = RunOutcome("rejected", wall_s=0.0, profile={"stages": [], "python": {"before_s": 10.0, "job_s": 100.0}})
+    py = _profile_facts(out)["python"]
+    assert py["after_s"] == 0.0 and py["total_s"] == 110.0

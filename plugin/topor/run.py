@@ -489,8 +489,10 @@ def _profile_facts(out: RunOutcome) -> dict | None:
         return None
     py = dict(p.get("python") or {})
     if "before_s" in py:
-        py["total_s"] = round(out.wall_s, 3)
-        py["after_s"] = round(max(0.0, out.wall_s - py["before_s"] - py.get("job_s", 0.0)), 3)
+        # a rejected run's result.json is written before wall_s is set (0): the split then ends at the job's end
+        done = py["before_s"] + py.get("job_s", 0.0)
+        py["total_s"] = round(max(out.wall_s, done), 3)
+        py["after_s"] = round(max(0.0, out.wall_s - done), 3)
     return {**p, "python": py}
 
 
