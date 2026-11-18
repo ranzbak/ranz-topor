@@ -2293,7 +2293,9 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     let t0 = std::time::Instant::now();
     let none: Vec<Vec<usize>> = Vec::new();
     let plan = super::cutflow::Plan { st, events, via_k: &none, bottom, packer, conn, placed: Some(placed), ends: Some(ends) };
+    let t_m = std::time::Instant::now();
     let m = super::cutflow::measure(&plan, outline, mo, layers)?;
+    super::par::meter::time(super::par::meter::ERBS_MEASURE, t_m);
     let ords = super::radii::from_measure(&m, &|p| st.proj.regime_at(p));
     let mut out = Realised::default();
     let mut before: BTreeSet<(usize, usize)> = BTreeSet::new();
@@ -2304,7 +2306,9 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     for (lf, o) in m.layers.iter().zip(&ords) {
         out.unbanded += lf.walk_failed;
         let eo = ErbsOpts { fail_first: inject, margin: m.opts.margin, ..stops.clone() };
+        let t_s = std::time::Instant::now();
         let le = erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
+        super::par::meter::time(super::par::meter::ERBS_STRETCHES, t_s);
         if !le.es.is_empty() || !le.failed.is_empty() {
             inject = false;
         }

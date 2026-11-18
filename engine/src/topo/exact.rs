@@ -1389,7 +1389,8 @@ mod tests {
     /// runs of the routed wire with and without pad exits.
     #[test]
     fn octilinear_shape_cache_matches_the_reference_loop() {
-        use super::super::octi::{OCTI_HITS, OCTI_REF};
+        use super::super::octi::{OCTI_HITS, OCTI_LANE_MIN, OCTI_NODES_LANED, OCTI_REF};
+        let l0 = OCTI_NODES_LANED.load(std::sync::atomic::Ordering::Relaxed);
         let (mut some, mut runs) = (0, 0);
         with_octi_fields(&mut |dr, g| {
             let wi = &dr.st.wires[0];
@@ -1408,6 +1409,17 @@ mod tests {
                 let relax = [0.0, 20_000.0][g.int(0, 1) as usize];
                 OCTI_REF.with(|f| f.set(false));
                 let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
+                // par-draw: every node's successors on 1/2/4/8 lanes (pair rule 1, the reverse
+                // hook: the first successors finish last)
+                OCTI_LANE_MIN.with(|f| f.set(1));
+                let laned: Vec<_> = [1usize, 2, 4, 8]
+                    .iter()
+                    .map(|&k| {
+                        let pool = rayon::ThreadPoolBuilder::new().num_threads(k).build().expect("pool");
+                        pool.install(|| super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax)))
+                    })
+                    .collect();
+                OCTI_LANE_MIN.with(|f| f.set(0));
                 OCTI_REF.with(|f| f.set(true));
                 let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
                 OCTI_REF.with(|f| f.set(false));
@@ -1415,9 +1427,13 @@ mod tests {
                 some += usize::from(want.is_some());
                 let bits = |v: &Option<super::super::octi::OctiOut>| v.as_ref().map(|o| o.pts.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>());
                 assert_eq!(bits(&got), bits(&want));
+                for (k, l) in [1usize, 2, 4, 8].iter().zip(&laned) {
+                    assert_eq!(bits(l), bits(&want), "{k} lanes");
+                }
             }
         });
         let hits = OCTI_HITS.with(|h| h.get());
         assert!(some > 10 && hits[0] > 20, "{some} of {runs}, hits {hits:?}");
+        assert!(OCTI_NODES_LANED.load(std::sync::atomic::Ordering::Relaxed) > l0, "no node ran on lanes");
     }
 }

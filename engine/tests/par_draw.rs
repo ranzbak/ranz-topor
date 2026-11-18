@@ -1,7 +1,7 @@
 //! par-draw phase A (docs/dev/design/par-draw.md): the drawing's order-free units (the extended
 //! rubber band of every stretch, the cut measurement of every layer) run on lanes and are folded
 //! in unit order, so the copper is the same bits for every thread count, every `[drawing]
-//! draw_lanes` and every completion order. The reverse hook (`draw_test_reverse`) makes the first
+//! draw_lanes` and every completion order. The octilinear DP's successors of a node are units too. The reverse hook (`draw_test_reverse`) makes the first
 //! units of every call finish last; a fold in completion order would change the result.
 //!
 //! Boards: eprom-to-kernal (2 layers) and the esp-rust-board / qmtech-minimig USB corners when
@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::route::{route_with, RouteResult};
-use topor_engine::topo::par;
+use topor_engine::topo::{octi, par};
 
 fn fixture(name: &str) -> Option<BoardModel> {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -59,10 +59,12 @@ fn check(name: &str) {
     let reference = key(&run(&m, &opts(r#", "draw_lanes": 1"#), 1));
     for threads in [1usize, 2, 4, 8] {
         let l0 = par::UNITS_LANED.load(Ordering::Relaxed);
+        let o0 = octi::OCTI_NODES_LANED.load(Ordering::Relaxed);
         let k = key(&run(&m, &opts(r#", "draw_test_reverse": true"#), threads));
         assert!(k == reference, "{name}: {threads} threads (draw_lanes auto, reverse hook) differ from one lane, {}", first_diff(&reference, &k));
         if threads > 1 {
             assert!(par::UNITS_LANED.load(Ordering::Relaxed) > l0, "{name}: {threads} threads ran no unit on lanes (the test would prove nothing)");
+            assert!(octi::OCTI_NODES_LANED.load(Ordering::Relaxed) > o0, "{name}: {threads} threads ran no octilinear node on lanes");
         }
     }
     // a fixed lane count above the threads (lanes wait for each other)

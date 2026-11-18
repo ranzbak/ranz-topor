@@ -6316,6 +6316,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let causes_before = causes(&plans, &drawn);
     tlog("drawing + feedback", t_draw);
+    if super::par::meter::on() {
+        eprintln!("[topo round {round}] {}", super::par::meter::report());
+    }
     ctl.stage(rnd, rnds, "via reduction and fuse");
     let t_red = Instant::now();
     // The result as drawn is a variant of its own (more vias, maybe shorter).
