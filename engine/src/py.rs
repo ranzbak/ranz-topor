@@ -103,7 +103,7 @@ fn via_sizes(rules_json: String, net: i32, options_json: String) -> PyResult<Str
     serde_json::to_string(&out).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// A routing run on its own thread: `progress()` (JSON of `control::Progress`), `cancel()`,
+/// A routing run on its own thread: `progress()` (JSON of `control::Progress`), `cancel(ok=None)`,
 /// `reach_limit()` (M2.TL: the caller's clock reached the limit),
 /// `set_time_limit(seconds)` / `time_limit()` (the live wall-clock limit, seconds since the job
 /// started, `0` / `None` = no limit; `control::TimeLimit`), `done()`, `wait()` (blocks with the GIL
@@ -124,8 +124,13 @@ impl RouteJob {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
-    fn cancel(&self) {
-        self.ctl.request_cancel();
+    /// Stop the run. `ok` (user 2026-11-17): the dialog's button read OK when pressed ("Routes
+    /// stable": keep the result, labelled stable, the pour stitching in full) or Cancel; `None` =
+    /// the engine's own progress at the request. The first request is latched
+    /// (`RunControl::request_stop`). O(1).
+    #[pyo3(signature = (ok=None))]
+    fn cancel(&self, ok: Option<bool>) {
+        self.ctl.request_stop(ok);
     }
 
     /// Change the wall-clock limit while the job runs: seconds since the job started (`0` = no

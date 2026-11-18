@@ -265,7 +265,7 @@ def _wall_pcb(tmp_path):
                               locked_track=False, arc=False)
 
 
-@pytest.mark.xfail(strict=False, reason="PT1 parked: the wall fixture now routes 1/1 around the wall, so the expected failed connection never happens (fixture premise stale)")
+@pytest.mark.xfail(strict=False, reason="PT1(2): partial_routes is not wired in the topo core (engine/src has no such option; plugin/topor/schema.py:399 lists run.partial_routes as removed: the core always keeps every routed connection, never drop). Both PT1(2) tests assume the classic option; the wall fixture also routes 1/1 now. Revive only if a real never-drop opt-out is planned.")
 def test_partial_routes_off_leaves_net_unconnected(engine, tmp_path):
     pcb = _wall_pcb(tmp_path)
     r = bench.run_bench("wall", tmp_path / "o", router=route_router, rip="all", pcb_override=pcb,
@@ -274,7 +274,7 @@ def test_partial_routes_off_leaves_net_unconnected(engine, tmp_path):
     assert r["routed_drc"]["incomplete"]["unconnected_items"] == 1 and r["routed_drc"]["routing_new"] == 0
 
 
-@pytest.mark.xfail(strict=False, reason="PT1 parked: the wall fixture now routes 1/1 around the wall, so no partial stubs are written (fixture premise stale; partial_routes wiring in the topo core unchecked)")
+@pytest.mark.xfail(strict=False, reason="PT1(2): partial_routes is not wired in the topo core (engine/src has no such option; plugin/topor/schema.py:399 lists run.partial_routes as removed: the core always keeps every routed connection, never drop). Both PT1(2) tests assume the classic option; the wall fixture also routes 1/1 now. Revive only if a real never-drop opt-out is planned.")
 def test_partial_routes_on_writes_grouped_stubs(engine, tmp_path):
     pcb = _wall_pcb(tmp_path)
     r = bench.run_bench("wall", tmp_path / "o", router=route_router, rip="all", pcb_override=pcb,

@@ -15,6 +15,8 @@ rand = "0.8"
 rayon = "1.10"
 rand_chacha = "0.3"
 spade = "2.15.1"
+# Exact orientation signs (Shewchuk) for the crossing parity (draw.rs seg_cross_sos); already in the tree via spade.
+robust = "1.2"
 pyo3 = { version = "0.23", features = ["abi3-py39", "extension-module"], optional = true }
 
 [dev-dependencies]

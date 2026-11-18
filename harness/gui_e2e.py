@@ -1018,9 +1018,11 @@ def run(a) -> int:
             log_txt = (report_dir / "log.txt").read_text() if (report_dir / "log.txt").is_file() else ""
             mo = _re.search(r"OK at Routes stable: best so far (\d+)/(\d+) routed", log_txt)
             res = json.loads(rds[-1].read_text())
+            # "Routes stable" waits for a pick (user 2026-11-17): Best so far is never empty at the OK; with the TopoR
+            # loop it is the loops' predicted pick (every planned connection is drawn: never drop), so routed matches
             e.check("OK keeps the best result shown (stop: stable, not cancelled)",
-                    bool(mo) and int(mo.group(1)) == res.get("routed") and res.get("stop_reason") == "stable"
-                    and not res.get("cancelled"),
+                    bool(mo) and int(mo.group(2)) > 0 and int(mo.group(1)) == res.get("routed")
+                    and res.get("stop_reason") == "stable" and not res.get("cancelled"),
                     f"shown {mo.group(0) if mo else None}; result routed {res.get('routed')}, stop {res.get('stop_reason')}, "
                     f"cancelled {res.get('cancelled')}")
         e.check("result accepted, routing_new 0", m.get("status") == "accepted" and m["routing_new"] == 0,

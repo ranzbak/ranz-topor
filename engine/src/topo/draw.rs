@@ -119,12 +119,72 @@ pub(super) fn seg_proper(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     t > 1e-9 && t < 1.0 - 1e-9 && u > 1e-9 && u < 1.0 - 1e-9
 }
 
-/// Proper crossings of the polyline `poly` with the segment `a b` ([`seg_proper`], orientation
-/// signs, no distance threshold). Mod 2 it is the side invariant of an undrawn wire's path: the
-/// taut pull ([`Drawer::pull_taut`]) and the round-i class test ([`competitor_keeps_class`]).
-/// O(|poly|).
+/// Exact sign of the orientation of `c` against the line `a -> b` (+1 left, -1 right, 0 on it):
+/// Shewchuk's adaptive `orient2d` (robust crate), exact for every f64 input. O(1).
+fn orient_sign(a: Vec2, b: Vec2, c: Vec2) -> i8 {
+    let o = robust::orient2d(robust::Coord { x: a.x, y: a.y }, robust::Coord { x: b.x, y: b.y }, robust::Coord { x: c.x, y: c.y });
+    if o > 0.0 {
+        1
+    } else if o < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn sgn(x: f64) -> i8 {
+    if x > 0.0 {
+        1
+    } else if x < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+/// Round j: the segment `p0 p1`, translated by the infinitesimal vector `(e, e^2)`, crosses the
+/// segment `q0 q1`. A symbolic perturbation (simulation of simplicity, Edelsbrunner & Muecke 1990,
+/// ACM TOG 9(1) pp. 66-104, not in docs/literature): the orientation signs are exact
+/// ([`orient_sign`], Shewchuk 1997 pp. 36-40, docs/literature/shewchuk1997-robust-predicates.pdf);
+/// a zero one is decided by the translation's leading term, so afterwards no end point lies on the
+/// other segment and no two segments are collinear. A whole polyline translated this way gives
+/// every contact one answer: a crossing through a vertex of either polyline counts once, a
+/// touch-and-return or a collinear stretch an even number of times. So the count of a closed loop
+/// (two runs with the same ends) against a path, mod 2, is exact: the even-odd rule of the loop at
+/// the path's two ends (Erickson, docs/literature/erickson-shortest-homotopic.html, "Crossing
+/// Sequences", paths in general position). [`seg_proper`]'s tolerance window is not (verifier
+/// round i: a crossing through a vertex counted 0). Zero-length segments never cross. O(1).
+pub(super) fn seg_cross_sos(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> bool {
+    // A zero-length segment gets one side for both ends (0 both before and after the translation
+    // of a point segment's own line), so it never crosses: no special case.
+    let (dp, dq) = (p1 - p0, q1 - q0);
+    // orient(q0, q1, p + t) = orient(q0, q1, p) + dq.x e^2 - dq.y e
+    let side_q = |p: Vec2| match orient_sign(q0, q1, p) {
+        0 if dq.y != 0.0 => -sgn(dq.y),
+        0 => sgn(dq.x),
+        s => s,
+    };
+    // orient(p0 + t, p1 + t, q) = orient(p0, p1, q) + dp.y e - dp.x e^2
+    let side_p = |q: Vec2| match orient_sign(p0, p1, q) {
+        0 if dp.y != 0.0 => sgn(dp.y),
+        0 => -sgn(dp.x),
+        s => s,
+    };
+    side_q(p0) != side_q(p1) && side_p(q0) != side_p(q1)
+}
+
+/// Crossings of the polyline `poly` with the segment `a b` ([`seg_cross_sos`]: `poly` translated
+/// by an infinitesimal vector, exact signs, no distance threshold). Mod 2 it is the side invariant
+/// of an undrawn wire's path between two runs with the same end points: the round-i class test
+/// ([`competitor_keeps_class`]; the reference paths are whole polylines whose ends are the other
+/// wire's terminals, which no run touches), so the comparison is exact. Not (yet) the seq
+/// drawing's parity readers, which keep [`seg_proper`] (round j, parked, design note needed):
+/// the via side test ([`Drawer::via_side_ok`]) asks on which side of a chord a free point (a via
+/// site) lies, and the taut pull's guards ([`Drawer::pull_taut`]) are single segments whose ends
+/// (pass points, via centres) a run may touch; there the translation decides a contact at a
+/// segment's end arbitrarily (esp and qmtech via sites, bornhack +3V3 at main 385e043). O(|poly|).
 pub(super) fn proper_crossings(poly: &[Vec2], a: Vec2, b: Vec2) -> usize {
-    poly.windows(2).filter(|x| seg_proper(x[0], x[1], a, b)).count()
+    poly.windows(2).filter(|x| seg_cross_sos(x[0], x[1], a, b)).count()
 }
 
 pub(super) fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
@@ -534,9 +594,11 @@ pub fn erbs_vs_sequential(pe: f64, lb: f64, g: f64, ls: Option<f64>) -> Option<b
     Some(ls.is_some_and(|ls| ls * (1.0 + g) < pe))
 }
 
-/// Proper crossings of the run `run` with each path of `others` (wire, path), per wire (the wires
-/// it crosses at least once). O(|run| x sum |path|), boxes first.
-pub fn crossings_per_wire(run: &[Vec2], others: &[(WireId, &[Vec2])]) -> BTreeMap<WireId, usize> {
+/// Crossings ([`proper_crossings`]) of the run `run` with each path of `others` (key, path), per
+/// key (the keys it crosses at least once; paths with the same key add up). The class test keys
+/// by (wire, path): the parity of each path is its own invariant, two odd paths of one wire must
+/// not cancel (verifier round i). O(|run| x sum |path|), boxes first.
+pub fn crossings_per_wire<K: Ord + Copy>(run: &[Vec2], others: &[(K, &[Vec2])]) -> BTreeMap<K, usize> {
     let mut out = BTreeMap::new();
     if run.len() < 2 {
         return out;
@@ -572,18 +634,41 @@ pub fn crossings_per_wire(run: &[Vec2], others: &[(WireId, &[Vec2])]) -> BTreeMa
 /// 2010: the drawing realises the topology, it does not change it). The taut pull holds the same
 /// invariant against undrawn chords ([`Drawer::pull_taut`]). Sound, not complete: a different
 /// parity proves a different class, an equal one does not prove the same. O(wires crossed).
-pub fn competitor_keeps_class(seq: &BTreeMap<WireId, usize>, erbs: &BTreeMap<WireId, usize>) -> bool {
+pub fn competitor_keeps_class<K: Ord>(seq: &BTreeMap<K, usize>, erbs: &BTreeMap<K, usize>) -> bool {
     seq.keys().chain(erbs.keys()).all(|o| seq.get(o).copied().unwrap_or(0) % 2 == erbs.get(o).copied().unwrap_or(0) % 2)
 }
 
 /// Round i: the reference paths of the class test ([`competitor_keeps_class`]): per wire and
 /// layer its ERBS runs, or, where the wire has no ERBS on that layer (its sleeve failed, the time
-/// limit), its planned path (the chords through its passes' nominal crossings and its turns),
-/// so no undrawn wire is skipped; segments in a grid of their boxes (a competitor is tested
-/// against the paths whose boxes it meets only).
+/// limit), its planned path (the chords through its passes' nominal crossings and its turns; a
+/// passless wire's terminal-to-terminal chord on its plan's layers, round j), so no undrawn wire
+/// is skipped; segments in a grid of their boxes (a competitor is tested against the paths whose
+/// boxes it meets only).
 pub(super) struct ClassRef {
     paths: Vec<(WireId, usize, Vec<Vec2>)>,
     grid: Grid<(usize, usize)>,
+}
+
+/// Round i: the wires a run of wire `w` (net `net_w`) is class-tested against: every other wire
+/// `o` that is alive, of another net (a same-net wire may cross it) and not drawn yet (a drawn
+/// wire's reference path is not its copper; the checker sees the copper). O(1).
+pub(super) fn class_test_wire(w: WireId, net_w: i32, o: WireId, o_alive: bool, o_net: i32, o_drawn: bool) -> bool {
+    o != w && !o_drawn && o_alive && o_net != net_w
+}
+
+/// Round i/j: the layers of traversal `ok` (`0..=n`) of a wire with `n` passes on which its
+/// planned chord is a reference path: the layers of the passes either side (`lay(j)`, `< 0` =
+/// open or none), for a passless wire (`n == 0`) the layers of its plan (`plan`: terminal to
+/// terminal), each once. O(plan layers).
+pub(super) fn ref_trav_layers(n: usize, ok: usize, lay: &dyn Fn(usize) -> i32, plan: &[usize]) -> Vec<usize> {
+    let mut ls: Vec<usize> = if n == 0 {
+        plan.to_vec()
+    } else {
+        [if ok > 0 { lay(ok - 1) } else { -2 }, if ok < n { lay(ok) } else { -2 }].into_iter().filter(|&l| l >= 0).map(|l| l as usize).collect()
+    };
+    ls.sort_unstable();
+    ls.dedup();
+    ls
 }
 
 fn aabb_of(a: Vec2, b: Vec2) -> Aabb {
@@ -591,13 +676,24 @@ fn aabb_of(a: Vec2, b: Vec2) -> Aabb {
 }
 
 impl ClassRef {
-    /// Proper crossings of `run` (on `layer`) with the reference paths of the wires `keep` admits,
-    /// per wire. O(segments of the run x paths in their cells).
-    fn crossings(&self, run: &[Vec2], layer: usize, keep: &dyn Fn(WireId) -> bool) -> BTreeMap<WireId, usize> {
+    /// The reference paths `(wire, layer, path)` in a grid of their segments' boxes. O(segments).
+    pub(super) fn new(paths: Vec<(WireId, usize, Vec<Vec2>)>) -> Self {
+        let mut grid = Grid::new(1.0e6);
+        for (i, p) in paths.iter().enumerate() {
+            for (k, s) in p.2.windows(2).enumerate() {
+                let _ = grid.try_insert(aabb_of(s[0], s[1]), (i, k));
+            }
+        }
+        ClassRef { paths, grid }
+    }
+
+    /// Crossings of `run` (on `layer`) with the reference paths on that layer of the wires `keep`
+    /// admits, per (wire, path index). O(segments of the run x paths in their cells).
+    fn crossings(&self, run: &[Vec2], layer: usize, keep: &dyn Fn(WireId) -> bool) -> BTreeMap<(WireId, usize), usize> {
         let mut ids: Vec<usize> = run.windows(2).flat_map(|s| self.grid.query(aabb_of(s[0], s[1]))).map(|(i, _)| i).collect();
         ids.sort_unstable();
         ids.dedup();
-        let others: Vec<(WireId, &[Vec2])> = ids.into_iter().filter_map(|i| self.paths.get(i)).filter(|p| p.1 == layer && keep(p.0)).map(|p| (p.0, p.2.as_slice())).collect();
+        let others: Vec<((WireId, usize), &[Vec2])> = ids.into_iter().filter_map(|i| self.paths.get(i).map(|p| (i, p))).filter(|(_, p)| p.1 == layer && keep(p.0)).map(|(i, p)| ((p.0, i), p.2.as_slice())).collect();
         crossings_per_wire(run, &others)
     }
 }
@@ -786,6 +882,9 @@ pub struct Drawer<'a> {
     /// via interval leaves it open or the wire is not drawn); exact for a wire once its vias are
     /// placed. Empty: no via side test (see [`Drawer::via_side_ok`]).
     pub prov_layer: Vec<i32>,
+    /// Round j: the layers of every wire's plan (`Plan::layers`, set with `prov_layer`; empty = not
+    /// known): a passless wire's reference path in the class test ([`ref_trav_layers`]).
+    pub plan_layers: Vec<Vec<usize>>,
     /// Every via placed: `(wire, traversal, centre, layer before, layer after, handle)`; it
     /// counts while its copper is committed (see [`Drawer::via_walls`]).
     via_marks: Vec<(WireId, usize, Vec2, usize, usize, usize)>,
@@ -909,6 +1008,7 @@ impl<'a> Drawer<'a> {
             widths: None,
             tight: false,
             prov_layer: Vec::new(),
+            plan_layers: Vec::new(),
             via_marks: Vec::new(),
             drawn_once: vec![false; st.wires.len()],
             slot: vec![None; st.passes.len()],
@@ -2991,7 +3091,7 @@ impl<'a> Drawer<'a> {
                                 self.class_ref = Some(self.build_class_ref());
                             }
                             let (st, drawn) = (self.st, &self.drawn_once);
-                            let keep = |o: WireId| o != w && !drawn[o] && st.wires[o].alive && st.wires[o].net != wi.net;
+                            let keep = |o: WireId| class_test_wire(w, wi.net, o, st.wires[o].alive, st.wires[o].net, drawn[o]);
                             let cr = self.class_ref.as_ref().expect("built");
                             let (xs, xe) = (cr.crossings(&pts, layer, &keep), cr.crossings(&k.2, layer, &keep));
                             if std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
@@ -3355,9 +3455,10 @@ impl<'a> Drawer<'a> {
             // Its planned path on the layers it has no ERBS on.
             let n = oi.passes.len();
             let lay = |j: usize| -> i32 { oi.passes.get(j).map_or(-2, |&q| self.prov_layer.get(q).copied().unwrap_or(-2)) };
+            let plan = self.plan_layers.get(o).map_or(&[][..], |v| v.as_slice());
             let mut cur: BTreeMap<usize, Vec<Vec2>> = BTreeMap::new();
             for ok in 0..=n {
-                let ls: Vec<usize> = [if ok > 0 { lay(ok - 1) } else { -2 }, lay(ok)].into_iter().filter(|&l| l >= 0).map(|l| l as usize).filter(|l| !runs.iter().any(|rb| rb.layer == *l)).collect();
+                let ls: Vec<usize> = ref_trav_layers(n, ok, &lay, plan).into_iter().filter(|l| !runs.iter().any(|rb| rb.layer == *l)).collect();
                 for l in cur.keys().copied().collect::<Vec<_>>() {
                     if !ls.contains(&l) {
                         if let Some(p) = cur.remove(&l) {
@@ -3374,13 +3475,7 @@ impl<'a> Drawer<'a> {
             }
             paths.extend(cur.into_iter().map(|(l, p)| (o, l, p)));
         }
-        let mut grid = Grid::new(1.0e6);
-        for (i, p) in paths.iter().enumerate() {
-            for (k, s) in p.2.windows(2).enumerate() {
-                let _ = grid.try_insert(aabb_of(s[0], s[1]), (i, k));
-            }
-        }
-        ClassRef { paths, grid }
+        ClassRef::new(paths)
     }
 
     /// P6 (c): the drawn run `pts` of wire `w` (traversals `k0..=k1`, on `layer`) pulled taut
@@ -3428,7 +3523,10 @@ impl<'a> Drawer<'a> {
                 guards.extend(c.windows(2).map(|x| (x[0], x[1])));
             }
         }
-        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| proper_crossings(poly, g.0, g.1) % 2;
+        // `seg_proper`, not the exact `proper_crossings` (round j, parked): the guards are single
+        // segments whose ends (pass points, via centres) a run may touch, where the translation
+        // of the run decides arbitrarily (bornhack +3V3 at main 385e043).
+        let cross = |poly: &[Vec2], g: &(Vec2, Vec2)| poly.windows(2).filter(|x| seg_proper(x[0], x[1], g.0, g.1)).count() % 2;
         // The planned room of those wires (reserve planned room): a shortcut that reaches deeper
         // into the corridor of an undrawn wire's planned path (its taut and packed chords, half
         // its width plus the clearance either side) than the two legs it replaces is not taken.
@@ -4061,12 +4159,15 @@ mod tests {
     fn class_test_counts_proper_crossings_per_wire() {
         let run = [v(0.0, 0.0), v(10.0, 0.0)];
         let zig = [v(2.0, -1.0), v(3.0, 1.0), v(4.0, -1.0)];
+        // Round j: a path that ends on the run counts by the side the run's translation (e, e^2)
+        // puts it on: from above 1, from below 0 (one consistent answer for both compared runs).
         let touch = [v(5.0, 0.0), v(5.0, 3.0)];
+        let touch_below = [v(5.5, 0.0), v(5.5, -3.0)];
         let along = [v(6.0, 0.0), v(8.0, 0.0)];
         let near = [v(1.0, 1e-6), v(9.0, 1e-6)];
         let far = [v(20.0, -1.0), v(20.0, 1.0)];
-        let xs = crossings_per_wire(&run, &[(1, &zig), (2, &touch), (3, &along), (4, &near), (5, &far)]);
-        assert_eq!(xs, BTreeMap::from([(1, 2)]));
+        let xs = crossings_per_wire(&run, &[(1, &zig[..]), (2, &touch), (3, &along), (4, &near), (5, &far), (6, &touch_below)]);
+        assert_eq!(xs, BTreeMap::from([(1, 2), (2, 1)]));
         assert!(crossings_per_wire(&run[..1], &[(1, &zig)]).is_empty());
         let m = |v: &[(WireId, usize)]| v.iter().copied().collect::<BTreeMap<_, _>>();
         assert!(competitor_keeps_class(&m(&[]), &m(&[])));
@@ -4103,6 +4204,177 @@ mod tests {
         let (xw, xc) = (crossings_per_wire(&wrap, &[(7, &b2)]), crossings_per_wire(&short, &[(7, &b2)]));
         assert_eq!((xw.get(&7), xc.get(&7)), (None, Some(&1)));
         assert!(!competitor_keeps_class(&xc, &xw));
+    }
+
+    /// Round j (verifier round i): the degenerate contacts of the crossing count. A crossing through
+    /// a vertex of the reference path, at the run's own vertex, or vertex on vertex counts once
+    /// (the tolerance window of `seg_proper` counted 0: the parity flipped); a touch-and-return and
+    /// a collinear stretch that leaves on the side it came from count an even number, one that
+    /// leaves on the other side an odd one. The same at nm coordinates (exact signs, no tolerance).
+    #[test]
+    fn crossing_count_degenerate_cases() {
+        let par = |run: &[Vec2], path: &[Vec2]| path.windows(2).map(|b| proper_crossings(run, b[0], b[1])).sum::<usize>() % 2;
+        let old = |run: &[Vec2], path: &[Vec2]| path.windows(2).map(|b| run.windows(2).filter(|x| seg_proper(x[0], x[1], b[0], b[1])).count()).sum::<usize>() % 2;
+        let run = [v(0.0, 0.0), v(10.0, 0.0)];
+        let bent = [v(0.0, -1.0), v(5.0, 0.0), v(10.0, 1.0)];
+        let kinked = [v(0.0, 0.0), v(5.0, 0.0), v(10.0, 0.0)];
+        let cases: [(&str, &[Vec2], Vec<Vec2>, usize); 9] = [
+            ("through a path vertex", &run, vec![v(4.0, -1.0), v(5.0, 0.0), v(6.0, 1.0)], 1),
+            ("through a path vertex, square", &run, vec![v(5.0, -1.0), v(5.0, 0.0), v(5.0, 1.0)], 1),
+            ("at the run's own vertex", &bent, vec![v(5.0, -5.0), v(5.0, 5.0)], 1),
+            ("vertex on vertex", &kinked, vec![v(5.0, -1.0), v(5.0, 0.0), v(5.0, 1.0)], 1),
+            ("touch and return (path)", &run, vec![v(4.0, 1.0), v(5.0, 0.0), v(6.0, 1.0)], 0),
+            ("touch and return (run)", &[v(4.0, 1.0), v(5.0, 0.0), v(6.0, 1.0)], vec![v(0.0, 0.0), v(10.0, 0.0)], 0),
+            ("along and back", &run, vec![v(-1.0, 1.0), v(2.0, 0.0), v(6.0, 0.0), v(11.0, 1.0)], 0),
+            ("along and across", &run, vec![v(-1.0, 1.0), v(2.0, 0.0), v(6.0, 0.0), v(11.0, -1.0)], 1),
+            ("generic", &run, vec![v(3.0, -1.0), v(3.5, 1.0)], 1),
+        ];
+        let mut old_wrong = 0;
+        for (name, r, path, want) in &cases {
+            assert_eq!(par(r, path), *want, "{name}");
+            // nm coordinates, off the origin: exact signs, the same answer
+            let nm = |p: &[Vec2]| p.iter().map(|q| v(12_345_678.0 + q.x * 1e6, -98_765_432.0 + q.y * 1e6)).collect::<Vec<_>>();
+            assert_eq!(par(&nm(r), &nm(path)), *want, "{name} at nm");
+            // and with the roles swapped (the path translated instead): the parity of a crossing is symmetric
+            if !name.starts_with("touch") && !name.starts_with("along") {
+                assert_eq!(par(path, r), *want, "{name} swapped");
+            }
+            old_wrong += usize::from(old(r, path) != *want);
+        }
+        assert!(old_wrong >= 4, "the old predicate dropped the vertex crossings: {old_wrong}");
+        // exact signs: three nm points the plain f64 cross product calls collinear (0) lie right
+        // of the line (Shewchuk 1997, section 1: roundoff in the naive determinant)
+        let (a, b, c) = (v(12345678.613484412, -9876542.838622024), v(12377094.539984412, -9849360.020622024), v(12401723.373432381, -9828049.775413485));
+        assert_eq!((b - a).cross(c - a), 0.0, "the naive determinant rounds to 0");
+        assert_eq!(orient_sign(a, b, c), -1);
+        // zero-length segments never cross; a run of one point crosses nothing
+        assert!(!seg_cross_sos(v(5.0, 0.0), v(5.0, 0.0), v(5.0, -1.0), v(5.0, 1.0)));
+        assert!(!seg_cross_sos(v(0.0, 0.0), v(10.0, 0.0), v(5.0, 0.0), v(5.0, 0.0)));
+    }
+
+    /// Round j, DoD 2: the crossing parity against an exact integer reference. Two runs with the
+    /// same ends make a closed loop L; a path Q whose ends are off L crosses L an odd number of
+    /// times iff exactly one end is inside L (even-odd rule, computed in i128). Modes: a 5 x 5
+    /// lattice (vertex hits, collinear stretches everywhere), octilinear walks on it (the drawing's
+    /// 0/45/90 runs), the lattice at nm scale off the origin, generic integers up to 1e9. The new
+    /// count has no mismatch in any mode; the old `seg_proper` count's mismatches are printed.
+    #[test]
+    fn crossing_parity_fuzz_against_exact_reference() {
+        use rand::{Rng, SeedableRng};
+        type P = (i64, i64);
+        let on_seg = |a: P, b: P, q: P| {
+            let c = (b.0 - a.0) as i128 * (q.1 - a.1) as i128 - (b.1 - a.1) as i128 * (q.0 - a.0) as i128;
+            c == 0 && q.0 >= a.0.min(b.0) && q.0 <= a.0.max(b.0) && q.1 >= a.1.min(b.1) && q.1 <= a.1.max(b.1)
+        };
+        let inside = |l: &[P], q: P| {
+            let mut c = false;
+            for e in l.windows(2) {
+                let (a, b) = (e[0], e[1]);
+                if (a.1 > q.1) != (b.1 > q.1) {
+                    // x of the edge at height q.1 > q.x, without division
+                    let lhs = (b.0 - a.0) as i128 * (q.1 - a.1) as i128;
+                    let rhs = (q.0 - a.0) as i128 * (b.1 - a.1) as i128;
+                    if (b.1 > a.1 && lhs > rhs) || (b.1 < a.1 && lhs < rhs) {
+                        c = !c;
+                    }
+                }
+            }
+            c
+        };
+        let walk = |rng: &mut rand_chacha::ChaCha8Rng, s: P, n: usize, octi: bool, m: i64| -> Vec<P> {
+            let mut out = vec![s];
+            for _ in 0..n {
+                let q = if octi {
+                    let d = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)][rng.gen_range(0..8)];
+                    let k = rng.gen_range(1..3);
+                    let p = *out.last().unwrap();
+                    ((p.0 + d.0 * k).clamp(0, m), (p.1 + d.1 * k).clamp(0, m))
+                } else {
+                    (rng.gen_range(0..=m), rng.gen_range(0..=m))
+                };
+                out.push(q);
+            }
+            out
+        };
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(20261117);
+        for (mode, m, scale, off, octi) in [("lattice", 4i64, 1.0, (0.0, 0.0), false), ("octilinear", 6, 1.0, (0.0, 0.0), true), ("lattice-nm", 4, 1e6, (12_345_678.0, -98_765_432.0), false), ("generic", 1_000_000_000, 1.0, (0.0, 0.0), false)] {
+            let (mut cases, mut new_bad, mut old_bad) = (0usize, 0usize, 0usize);
+            while cases < 20_000 {
+                let (s, n1, n2) = ((rng.gen_range(0..=m), rng.gen_range(0..=m)), rng.gen_range(1..4), rng.gen_range(0..3));
+                let (q0, nq) = ((rng.gen_range(0..=m), rng.gen_range(0..=m)), rng.gen_range(1..4));
+                let r1 = walk(&mut rng, s, n1, octi, m);
+                let t = *r1.last().unwrap();
+                let mut r2 = walk(&mut rng, s, n2, false, m);
+                r2.push(t);
+                let q = walk(&mut rng, q0, nq, octi, m);
+                let lp: Vec<P> = r1.iter().copied().chain(r2.iter().rev().copied().skip(1)).collect();
+                let (q0, q1) = (q[0], *q.last().unwrap());
+                if lp.windows(2).any(|e| on_seg(e[0], e[1], q0) || on_seg(e[0], e[1], q1)) {
+                    continue;
+                }
+                cases += 1;
+                let want = usize::from(inside(&lp, q0) != inside(&lp, q1));
+                let f = |p: &[P]| p.iter().map(|&(x, y)| v(x as f64 * scale + off.0, y as f64 * scale + off.1)).collect::<Vec<_>>();
+                let (a, b, qf) = (f(&r1), f(&r2), f(&q));
+                let k = |r: &[Vec2]| crossings_per_wire(r, &[(0usize, &qf[..])]).get(&0).copied().unwrap_or(0);
+                new_bad += usize::from((k(&a) + k(&b)) % 2 != want);
+                // the class decision: the two runs keep the class iff Q's ends are on one side of L
+                let (xa, xb) = (crossings_per_wire(&a, &[(0usize, &qf[..])]), crossings_per_wire(&b, &[(0usize, &qf[..])]));
+                assert_eq!(competitor_keeps_class(&xa, &xb), want == 0, "{mode}: {r1:?} {r2:?} {q:?}");
+                let ko = |r: &[Vec2]| qf.windows(2).map(|c| r.windows(2).filter(|x| seg_proper(x[0], x[1], c[0], c[1])).count()).sum::<usize>();
+                old_bad += usize::from((ko(&a) + ko(&b)) % 2 != want);
+            }
+            eprintln!("crossing parity fuzz {mode}: {cases} cases, new mismatches {new_bad}, old (seg_proper) mismatches {old_bad}");
+            assert_eq!(new_bad, 0, "{mode}");
+        }
+    }
+
+    /// Round j (verifier round i, mutants x_no_net_filter / x_drawn_too / x_any_layer): the class
+    /// test looks at undrawn, alive, other-net wires only, and at their paths on the run's layer.
+    /// Each path's parity counts on its own: two odd paths of one wire do not cancel.
+    #[test]
+    fn class_test_filters_and_per_path_parity() {
+        // (w, net_w, o, alive, net_o, drawn)
+        assert!(class_test_wire(0, 1, 1, true, 2, false));
+        assert!(!class_test_wire(0, 1, 1, true, 1, false), "same net");
+        assert!(!class_test_wire(0, 1, 1, true, 2, true), "drawn");
+        assert!(!class_test_wire(0, 1, 1, false, 2, false), "dead");
+        assert!(!class_test_wire(1, 1, 1, true, 2, false), "itself");
+        let run = vec![v(0.0, 0.0), v(10.0e6, 0.0)];
+        let across = |x: f64| vec![v(x * 1e6, -1.0e6), v(x * 1e6, 1.0e6)];
+        let cr = ClassRef::new(vec![(1, 1, across(2.0)), (2, 0, across(3.0)), (3, 0, across(5.0)), (3, 0, across(7.0))]);
+        let all = |_: WireId| true;
+        assert_eq!(cr.crossings(&run, 0, &all), BTreeMap::from([((2, 1), 1), ((3, 2), 1), ((3, 3), 1)]), "layer 0 only");
+        assert_eq!(cr.crossings(&run, 1, &all), BTreeMap::from([((1, 0), 1)]), "layer 1 only");
+        assert!(cr.crossings(&run, 0, &|o| o == 1).is_empty(), "keep filters");
+        // wire 3 crossed once on each of its two paths by the competitor, not at all by the ERBS:
+        // another class (summed per wire it would be 2, even, and pass)
+        let none = vec![v(0.0, 5.0e6), v(10.0e6, 5.0e6)];
+        let xs = cr.crossings(&run, 0, &|o| o == 3);
+        let xe = cr.crossings(&none, 0, &|o| o == 3);
+        assert!(!competitor_keeps_class(&xs, &xe));
+        let per_wire = |m: &BTreeMap<(WireId, usize), usize>| m.iter().fold(BTreeMap::<WireId, usize>::new(), |mut a, (k, n)| {
+            *a.entry(k.0).or_insert(0) += n;
+            a
+        });
+        assert!(competitor_keeps_class(&per_wire(&xs), &per_wire(&xe)), "summed per wire the two odd paths cancel");
+    }
+
+    /// Round j (verifier round i): the layers of a traversal's planned chord in the class test; a
+    /// passless wire (its sleeve failed) gets its plan's layers, so it is never skipped.
+    #[test]
+    fn class_ref_layers_of_a_traversal() {
+        let none = |_: usize| -2;
+        assert_eq!(ref_trav_layers(0, 0, &none, &[1]), vec![1], "passless: its plan's layer");
+        assert_eq!(ref_trav_layers(0, 0, &none, &[1, 0]), vec![0, 1]);
+        assert!(ref_trav_layers(0, 0, &none, &[]).is_empty(), "no plan known");
+        let lay = |j: usize| [0, 1, -1, 1][j];
+        assert_eq!(ref_trav_layers(4, 0, &lay, &[0]), vec![0], "start: the first pass's layer");
+        assert_eq!(ref_trav_layers(4, 1, &lay, &[0]), vec![0, 1], "a via between: both");
+        assert_eq!(ref_trav_layers(4, 2, &lay, &[0]), vec![1], "an open pass is no layer");
+        assert_eq!(ref_trav_layers(4, 4, &lay, &[0]), vec![1], "end: the last pass's layer");
+        let same = |_: usize| 0;
+        assert_eq!(ref_trav_layers(2, 1, &same, &[0]), vec![0], "one layer once");
     }
 
     #[test]

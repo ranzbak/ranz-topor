@@ -102,10 +102,11 @@ fn cancel_before_a_run_begins_skips_it() {
     // more runs than threads: the runs not begun when Cancel comes have no result of their own
     let (r, s) = cancel_after(opts(r#", "runs": 64"#), After::Routing, Duration::from_millis(200));
     assert!(s < BOUND_S, "took {s:.2} s");
-    // Release: some run has a result by the Cancel, so the best-of line names the runs not begun.
-    // Debug (PK-DBG, vm-load 2026-11-17): the first runs are still in the initial routing 200 ms in and no run has a result, so the
-    // same facts (runs 9..64 "not begun", none run) are in the loud "nothing to draw yet" line instead.
-    let line = r.warnings.iter().find(|w| w.starts_with("best of 64 seeded runs") || (cfg!(debug_assertions) && w.starts_with("ERROR: nothing to draw yet")))
+    // Some run has a result by the Cancel: the best-of line names the runs not begun. None has
+    // (debug build, or a release one under VM load, PK-DBG / verifier radii-m3 round i: the first
+    // runs are still in the initial routing 200 ms in, before any plan): the same facts (runs
+    // 9..64 "not begun", none run) are in the loud "nothing to draw yet" line instead.
+    let line = r.warnings.iter().find(|w| w.starts_with("best of 64 seeded runs") || w.starts_with("ERROR: nothing to draw yet"))
         .unwrap_or_else(|| panic!("best-of line: {} {:?}", r.stop_reason, r.warnings));
     if line.starts_with("best of") {
         assert!(line.contains("not begun") && line.contains("without a result of their own"), "{line}");

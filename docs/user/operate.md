@@ -330,10 +330,28 @@ rounds in every run, the dialog says **Routes stable** (also in its window title
 **OK**. It is the same button with the same action: stop and keep the best result so far — exactly the board shown
 under *Best so far*, which then goes to KiCad's DRC and the preview. By default the run does not stop there by itself
 (user 2026-11-16: "don't stop on stable"): it keeps going for marginal gains until OK, Cancel, the safety cap
-`[optimize] rounds` or the time limit (the TopoR way). `finish_when_stable = true` makes it finish at *Routes stable*
-like a normal finish (each run stops at the round in which it becomes stable; `[optimize] finish_patience` > 0 lets
-it look for small gains that many more rounds first). Pressing OK at *Routes stable* is not a cancel: the summary
-says *Stopped: stable*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
+`[optimize] rounds` or the time limit (the TopoR way; user 2026-11-17: "the button should change from 'Cancel' to
+'Ok' and the optimizer should keep running like it does for TopoR"). Nothing else ends a dialog run at *Routes
+stable*: the old keys `[optimize] finish_when_stable` and `finish_patience` are deprecated and ignored (warning
+`CFG_DEPRECATED_KEY` with their line; the pre-flight dialog offers *Use the current default* to comment the line
+out). *Routes stable* appears the moment every run's TopoR loop
+has recorded it and there is a pick to keep, while the loops still run (user 2026-11-17), so OK there really ends the
+run before the cap; *Routes stable* itself never stops anything, it only turns Cancel into OK. The loops judge their
+variants on the topology and draw only the one picked, so until that drawing *Best so far* shows the loops' predicted
+pick (its connections, vias and length as planned); the drawn board then replaces it. With fewer engine threads
+than runs (a small CPU, or `RAYON_NUM_THREADS` set), a run whose loop is stable gives its thread to a run that has
+not begun yet and goes on when a thread is free again, so *Routes stable* still comes while the loops run (log.txt:
+*TopoR loop: stable after cycle …, it gave its compute slot to a run not yet begun*). Pressing OK
+at *Routes stable* is not a cancel: the summary says *Stopped: stable*, and the rest of the run (drawing the picked
+variant, the pour stitching) runs to its end exactly as when a run ends at stable by itself; only the time limit can
+still cut it. When it does (the hard limit, or the soft one past its overrun cap, cuts the drawing of the stable
+plan), the board is drawn only in part and the summary says *Stopped: timeout_wall* or *Stopped: timeout_cpu* (by
+`[run] timeout_clock`), not *Stopped: stable*; the time budget line then says *OK came at Routes stable, but the time
+limit then cut the drawing of the stable plan*. Cancel (pressed while the button still reads Cancel, e.g. at *Runs* 1 of 5 stable) stays a cancel
+whatever the runs do after it: the summary says *Stopped: cancel* and the pour stitching ends after the pass in
+progress. What the button read at the press decides, and the button is disabled after the first press, so there is
+no second Cancel. An OK that comes only after the engine already ended
+at the cap leaves *Stopped: round cap*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
 rounds). The first round of the first run always uses the plain weights, and every run is reproducible: the same
 board and settings give the same result.
 

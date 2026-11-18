@@ -262,7 +262,11 @@ pub struct LoopReport {
 /// when `stop()` before a cycle (the time limit, Cancel; then the report says so). `inner()` ends
 /// a running cycle early (M2.TL: Cancel only with the soft limit); a cycle it cut short is not
 /// offered (Cancel keeps the best variant archived so far). The caller restores the pick.
-pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64) -> LoopReport {
+/// `on_pick(cycle, pick, stable)` is called after the initial plan (cycle 0) and after every
+/// finished cycle with the archive's pick and whether the loop has recorded stable (user
+/// 2026-11-17 "Report stable live": the dialog shows the pick as Best so far and "Routes stable"
+/// while the loop still runs, so OK ends it there).
+pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64, on_pick: &mut dyn FnMut(usize, &Criteria, bool)) -> LoopReport {
     let obj = p.obj;
     let mut rep = LoopReport { stop: "cycle cap".into(), ..LoopReport::default() };
     let mut rng = ChaCha8Rng::seed_from_u64(mix(p.seed, 0x5EED_7090));
@@ -289,6 +293,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
     };
     offer(sp, arch, "initial plan (gen 0)".into(), 0, 0, &mut rep);
     let Some((s0, v0)) = score(arch) else { return rep };
+    on_pick(0, &arch.items[arch.pick(&obj).expect("scored")].crit, false);
     meter.push(s0);
     rep.pick_values.push(v0);
     let mut gen = 0usize;
@@ -337,6 +342,7 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
         if meter.stable() && rep.stable_at.is_none() {
             rep.stable_at = Some(cycle);
         }
+        on_pick(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, rep.stable_at.is_some());
         rep.lines.push(format!(
             "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, {}{}, best {:.1}{}",
             ctx.amp,
@@ -685,7 +691,7 @@ mod tests {
             t.set(t.get() + 1.0);
             t.get()
         };
-        let rep = optimise(&mut sp, &mut a, &params(seed, restart_after), &mut || false, &mut || false, &clock);
+        let rep = optimise(&mut sp, &mut a, &params(seed, restart_after), &mut || false, &mut || false, &clock, &mut |_, _, _| {});
         (sp, a, rep)
     }
 
@@ -745,7 +751,7 @@ mod tests {
             n += 1;
             n > 3
         };
-        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut stop, &mut || false, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut stop, &mut || false, &|| 0.0, &mut |_, _, _| {});
         assert_eq!(rep.stop, "time limit");
         assert_eq!(rep.cycles, 3);
         assert!(!a.items.is_empty());
@@ -761,7 +767,7 @@ mod tests {
             n += 1;
             n > 2
         };
-        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut || false, &mut inner, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &params(1, 2), &mut || false, &mut inner, &|| 0.0, &mut |_, _, _| {});
         assert_eq!(rep.stop, "time limit");
         assert_eq!(rep.cycles, 3, "the third cycle was cut inside");
         assert_eq!(rep.offered, 3, "the initial plan and the two finished cycles only");
@@ -772,7 +778,7 @@ mod tests {
         let mut sp = toy();
         let mut a = Archive::new(4);
         let p = LoopParams { stable_window: 2, stable_gain_pct: 50.0, ..params(1, 0) };
-        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {});
         assert_eq!(rep.stop, "stable");
         assert_eq!(rep.stable_at, Some(2), "a gain below 50 % over 2 cycles");
         assert_eq!(rep.cycles, 2);
@@ -784,10 +790,42 @@ mod tests {
         let mut sp = toy();
         let mut a = Archive::new(4);
         let p = LoopParams { stable_window: 2, stable_gain_pct: 50.0, stop_at_stable: false, ..params(1, 0) };
-        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0);
+        let mut seen = Vec::new();
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |c, pick, st| seen.push((c, pick.errors, st)));
         assert_eq!(rep.stable_at, Some(2));
         assert_eq!(rep.cycles, 30, "ran to the cap");
         assert_eq!(rep.stop, "cycle cap");
+        // "Report stable live": the hook reports the pick after the initial plan and every cycle, and
+        // stable from the cycle it is recorded on, while the loop goes on.
+        assert_eq!(seen.iter().map(|s| s.0).collect::<Vec<_>>(), (0..=30).collect::<Vec<_>>());
+        assert_eq!(seen.iter().position(|s| s.2), Some(2), "{seen:?}");
+        assert!(seen[2..].iter().all(|s| s.2), "stable never goes back");
+        let pick = &a.items[a.pick(&p.obj).expect("pick")].crit;
+        assert_eq!(seen.last().map(|s| s.1), Some(pick.errors), "the last report is the loop's pick");
+    }
+
+    #[test]
+    fn stable_is_reported_live_before_the_loop_ends() {
+        // The stop test before cycle 3 sees the live report of cycle 2's stable (the dialog's OK = Cancel there).
+        let mut sp = toy();
+        let mut a = Archive::new(4);
+        let p = LoopParams { stable_window: 2, stable_gain_pct: 50.0, stop_at_stable: false, ..params(1, 0) };
+        let live = std::cell::Cell::new(None);
+        let mut stop = || live.get().is_some();
+        let rep = optimise(&mut sp, &mut a, &p, &mut stop, &mut || false, &|| 0.0, &mut |c, _, st| {
+            if st && live.get().is_none() {
+                live.set(Some(c));
+            }
+        });
+        assert_eq!(live.get(), Some(2));
+        assert_eq!((rep.cycles, rep.stop.as_str(), rep.stable_at), (2, "time limit", Some(2)), "OK at the live stable ended it mid-loop");
+        // Without stable there is no report.
+        let mut sp = toy();
+        let mut a = Archive::new(4);
+        let p = LoopParams { stable_window: 2, stable_gain_pct: 0.0, stop_at_stable: false, cycles: 6, ..params(1, 0) };
+        let mut n = 0;
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, st| n += usize::from(st));
+        assert_eq!((rep.stable_at, n), (None, 0), "{:?}", rep.lines);
     }
 
     #[test]
@@ -855,7 +893,7 @@ mod tests {
         let mut inner = move || t2.get() >= limit + grace;
         let t3 = ticks.clone();
         let mut stop = move || t3.get() >= limit; // the limit passed: no new cycle
-        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut stop, &mut inner, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut stop, &mut inner, &|| 0.0, &mut |_, _, _| {});
         assert_eq!(rep.stop, "time limit");
         assert_eq!(ticks.get(), limit + grace, "the wait is bounded by the grace: no check past it");
         assert_eq!(rep.offered, 1, "only the initial plan: the cycle cut short is not offered");
@@ -864,7 +902,7 @@ mod tests {
         let ticks = std::rc::Rc::new(std::cell::Cell::new(0usize));
         let mut sp = Slow { ticks: ticks.clone(), done: 0 };
         let mut a = Archive::new(4);
-        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut || false, &mut || false, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {});
         assert!(ticks.get() >= 1000 && rep.offered > 1);
         assert!(!rep.dropped);
     }
@@ -880,7 +918,7 @@ mod tests {
             calls.set(calls.get() + 1);
             calls.get() == 4 // the 4th check says stop, every other check (also the re-check) passes
         };
-        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut || false, &mut inner, &|| 0.0);
+        let rep = optimise(&mut sp, &mut a, &params(1, 0), &mut || false, &mut inner, &|| 0.0, &mut |_, _, _| {});
         assert!(rep.dropped && rep.stop == "time limit", "{rep:?}");
         assert_eq!(rep.offered, 1, "the cut cycle is not offered");
     }

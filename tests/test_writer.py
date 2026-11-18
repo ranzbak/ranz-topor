@@ -4,7 +4,7 @@ import random
 import pcbnew
 import pytest
 
-from harness.model import load_board
+from harness.model import engine_net_codes, load_board
 from harness.writer import save, write_items
 
 
@@ -26,7 +26,7 @@ def _by_uuid(board, uid):
 
 def test_write_seg_arc_via_roundtrip(fixture_board, engine, tmp_path):
     b = load_board(fixture_board)
-    sig = b.GetNetcodeFromNetname("SIG")
+    sig = engine_net_codes(b)["SIG"]
     ids = write_items(b, _items(sig))
     assert len(ids) == 3
     out = tmp_path / "w.kicad_pcb"
@@ -53,7 +53,7 @@ def test_write_seg_arc_via_roundtrip(fixture_board, engine, tmp_path):
 
 def test_write_group(fixture_board, tmp_path):
     b = load_board(fixture_board)
-    sig = b.GetNetcodeFromNetname("SIG")
+    sig = engine_net_codes(b)["SIG"]
     n_groups = len(list(b.Groups()))
     items = _items(sig)[:2]
     for it in items:
@@ -76,7 +76,7 @@ def test_write_group(fixture_board, tmp_path):
 def test_random_arcs_center_matches_engine(fixture_board, engine, tmp_path):
     rng = random.Random(11)
     b = load_board(fixture_board)
-    sig = b.GetNetcodeFromNetname("SIG")
+    sig = engine_net_codes(b)["SIG"]
     items = []
     while len(items) < 200:
         r = rng.uniform(0.3e6, 20e6)
@@ -128,3 +128,10 @@ def test_skip_unchanged_arc_and_via_passthrough():
     same = {"net": 3, "layer": 2, "width": 200_000, "prim": dict(arc)}
     via = {"kind": "via", "net": 3, "at": [0, 0], "d": 600_000, "drill": 300_000, "layers": [0, 2]}
     assert skip_unchanged(kept, ["R"], [via, same]) == ([], [via], 1)
+
+
+def test_write_items_unknown_engine_code_fails_loudly(fixture_board):
+    b = load_board(fixture_board)
+    seg = {"kind": "seg", "a": [0, 0], "b": [1_000_000, 0]}
+    with pytest.raises(ValueError, match="engine net code 77"):
+        write_items(b, [{"net": 77, "layer": 0, "width": 250_000, "prim": seg}])

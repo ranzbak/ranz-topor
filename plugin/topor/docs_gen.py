@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from .config import _range_text, toml_value
-from .schema import KICAD_ONLY, PAST_DEFAULTS, REMOVED, REMOVED_IN, REMOVED_WHEN, SECTIONS, SETTINGS
+from .schema import DEPRECATED, KICAD_ONLY, PAST_DEFAULTS, REMOVED, REMOVED_IN, REMOVED_WHEN, SECTIONS, SETTINGS
 
 REFERENCE = Path(__file__).resolve().parents[2] / "docs" / "user" / "configuration.md"
 
@@ -33,7 +33,8 @@ def render_reference_md(settings=SETTINGS) -> str:
         "default for you; a line without `# ` is your own value and is never changed by the plugin.",
         "Options added in a later version are not added to an existing file (see the known limitation at the end).",
         "Keys marked *since 0.5.0* are accepted but written commented-out until that engine feature is available.",
-        "Keys that were removed (listed at the end) are ignored with the warning `CFG_REMOVED_KEY`.",
+        "Keys that were removed (listed at the end) are ignored with the warning `CFG_REMOVED_KEY`; deprecated keys",
+        "(section Deprecated keys) are ignored with the warning `CFG_DEPRECATED_KEY`, which names their line.",
         "",
     ]
     for sec, sec_doc in SECTIONS.items():
@@ -61,10 +62,20 @@ def render_reference_md(settings=SETTINGS) -> str:
     out += [f"| {n} | {_cell(p)} |" for n, p in KICAD_ONLY]
     out += ["", "## Pinned defaults", "",
             "When a default changes, a `topor.toml` that has the old default as an active line keeps it (the plugin never",
-            "edits your values) and every run warns `CFG_PINNED_OLD_DEFAULT`, one warning per option. Delete or comment the",
-            "line to follow the defaults. History of changed defaults:", "",
+            "edits your values) and every run warns `CFG_PINNED_OLD_DEFAULT`, one warning per option, naming the line.",
+            "Delete or comment the line to follow the defaults, or let the pre-flight dialog do it (user 2026-11-17): select",
+            "the finding, tick *Use the current default for <key>*, and Route comments the line out (`# ` in front) and runs",
+            "with the current default (the report notes it as `CFG_DEFAULT_RESTORED`). The same checkbox is offered for a",
+            "deprecated key (below). History of changed defaults:", "",
             "| Key | Old default | Changed |", "|---|---|---|"]
     out += [f"| `{s}.{k}` | `{_cell(toml_value(old))}` | {when} |" for (s, k), hist in PAST_DEFAULTS.items() for old, when in hist]
+    if not PAST_DEFAULTS:
+        out.append("| (none at present) | | |")
+    out += ["", "## Deprecated keys", "",
+            "A `topor.toml` that still sets one keeps working: the key is ignored with the warning `CFG_DEPRECATED_KEY`,",
+            "which names its line, and the pre-flight dialog offers *Use the current default* to comment the line out.", "",
+            "| Key | Deprecated | Why |", "|---|---|---|"]
+    out += [f"| `{s}.{k}` | {when} | {_cell(why)} |" for (s, k), (when, why) in DEPRECATED.items()]
     out += ["", "Known limitation: an existing `topor.toml` never gets options that were added in a later version; they use",
             "their default until you add them (copy the commented block from a freshly generated file).",
             "", "## Removed keys", "", f"Removed in {REMOVED_IN} (the topological core never read them) or later, as the "
