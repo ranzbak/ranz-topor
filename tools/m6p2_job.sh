@@ -70,7 +70,20 @@ mutants() {
   sub 'if angle_gain >= 0.0 { "lower" } else { "higher" }' 'if angle_gain >= 0.0 { "higher" } else { "lower" }' | mut m4_fuse_angle_word $C --test topo_m6
   sub 'out.push((gain, along - d, i, pts));' 'out.push((gain, gain, i, pts));' | mut m5_fuse_len_part $D --lib -- topo::draw::tests::fuse
   sub 'let cycles = opts.opt_loop == "cycles";' 'let cycles = false;' | mut m6_cycles_memory_off $C --test topo_mb0
-  sub 'angle_gain += gain - len_gain;' 'angle_gain += gain;' | mut m7_fuse_angle_sum $C --test topo_m6
+  sub 'let angle_gain: f64 = fused.iter().map(|f| f.0 - f.1).sum();' 'let angle_gain: f64 = fused.iter().map(|f| f.0).sum();' | mut m7_fuse_angle_sum $C --test topo_m6
+}
+tests2() {  # round 2: the cycles memory line + fuse_line over the applied fuses; the two earlier survivors again
+  cd $ROOT/engine
+  { cargo test --release --no-fail-fast --test topo_m6 --test topo_m6_reason --test topo_mb0 2>&1; echo "itests2 rc $?"; } > $R/tests2.log
+  grep -E "test result|rc " $R/tests2.log | while read -r l; do note "tests2: $l"; done
+  cd $ROOT; local C=$ROOT/engine/src/topo/core.rs
+  sub 'let cycles = opts.opt_loop == "cycles";' 'let cycles = false;' | mut m6_cycles_memory_off $C --test topo_m6
+  sub 'if cycles {
+        warnings.push(format!(' 'if !cycles {
+        warnings.push(format!(' | mut m6b_cycles_line_gate $C --test topo_m6
+  sub 'let angle_gain: f64 = fused.iter().map(|f| f.0 - f.1).sum();' 'let angle_gain: f64 = fused.iter().map(|f| f.0).sum();' | mut m7_fuse_angle_sum $C --test topo_m6
+  sub 'let len_gain_mm: f64 = fused.iter().map(|f| f.1).sum();' 'let len_gain_mm: f64 = fused.iter().map(|f| f.0).sum();' | mut m8_fuse_len_sum $C --test topo_m6
+  note "tests2 done"
 }
 repro() {  # bornhack EPD_MOSI: KiCad sees U6's footprint clearance 0.127 mm, does the exported model?
   local out=$R/repro; mkdir -p $out
@@ -124,6 +137,7 @@ EOF
 case ${1:-} in
   task) shift; task "$@" ;;
   tests) tests ;;
+  tests2) tests2 ;;
   repro) repro ;;
   unit) shift; T=$1; shift
     { for n in $BOARDS; do for c in "$@"; do echo "$c b $n"; done; done

@@ -11,7 +11,7 @@
 
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::route::route;
-use topor_engine::topo::core::{fuse_line, FEEDBACK_IGNORED};
+use topor_engine::topo::core::{fuse_line, CYCLES_MEMORY, FEEDBACK_IGNORED};
 
 fn gap() -> BoardModel {
     BoardModel::from_json(include_str!("fixtures/fx-narrow-gap.json")).expect("fixture parses")
@@ -50,14 +50,27 @@ fn drawing_feedback_redraws_only_with_the_cycles_loop() {
 
 #[test]
 fn fuse_line_keeps_length_and_angle_price_apart() {
-    let l = fuse_line(3, 4.81, 7.58);
-    assert!(l.starts_with("fuse after drawing: 3 trace ends moved onto their trunk's copper"), "{l}");
+    // Two fuses: (price gain, length gain) = (7.0, 3.0) and (5.39, 1.81): 4.81 mm saved, the
+    // junction-angle price 4.0 + 3.58 = 7.58 lower.
+    let l = fuse_line(&[(7.0, 3.0), (5.39, 1.81)]);
+    assert!(l.starts_with("fuse after drawing: 2 trace ends moved onto their trunk's copper"), "{l}");
     assert!(l.contains(": 4.8 mm saved in length, junction-angle price ([factors] junction_angle) lower by 7.6"), "{l}");
     assert!(!l.contains("mm cheaper"), "{l}");
     // A fuse that trades length for a better angle says "added"; a worse angle "higher".
-    let l = fuse_line(1, -0.25, 1281556.0);
-    assert!(l.contains(": 0.2 mm added in length") || l.contains(": 0.3 mm added in length"), "{l}");
-    assert!(l.contains("lower by 1281556.0"), "{l}");
-    assert!(fuse_line(1, 0.5, -2.0).contains("higher by 2.0"));
-    assert!(fuse_line(0, 0.0, 0.0).contains(": 0.0 mm saved in length, junction-angle price ([factors] junction_angle) lower by 0.0"));
+    let l = fuse_line(&[(1281555.7, -0.3)]);
+    assert!(l.contains(": 0.3 mm added in length, junction-angle price ([factors] junction_angle) lower by 1281556.0"), "{l}");
+    assert!(fuse_line(&[(0.5 - 2.0, 0.5)]).contains("0.5 mm saved in length, junction-angle price ([factors] junction_angle) higher by 2.0"));
+    assert!(fuse_line(&[]).starts_with("fuse after drawing: 0 trace ends moved onto their trunk's copper where the two part: 0.0 mm saved in length, junction-angle price ([factors] junction_angle) lower by 0.0"));
+}
+
+#[test]
+fn the_cycles_memory_is_kept_with_the_cycles_loop_only() {
+    // The narrow gap's connection is drawn with violations (never drop): with whole-route cycles
+    // its violation becomes a room hint and its own history for the next cycle; the TopoR loop
+    // routes once per run and keeps nothing (M6 R2).
+    let mem = |json: &str| -> Option<String> { route(&gap(), &opts(json)).warnings.into_iter().find(|w| w.starts_with(CYCLES_MEMORY)) };
+    let l = mem(r#"{"runs": 1, "wall_clock_s": 60.0, "opt_loop": "cycles", "topo_rounds": 1}"#).expect("cycles memory line");
+    let n = |key: &str| -> usize { l.split(key).next().and_then(|t| t.rsplit(' ').find(|x| !x.is_empty())).and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("{key}: {l}")) };
+    assert!(n(" room hints") >= 1 && n(" connections with their own history") >= 1, "{l}");
+    assert!(mem(r#"{"runs": 1, "wall_clock_s": 60.0, "opt_loop": "topor"}"#).is_none());
 }

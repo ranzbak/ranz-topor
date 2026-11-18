@@ -1438,10 +1438,15 @@ impl RoundOut {
     }
 }
 
-/// The fuse pass's report line (M6 F-3): the length the moved ends saved in mm, and apart from it
-/// the drop of the `junction_angle` price (a price: it grows without bound for a branch that
-/// leaves its trunk tangentially, so it is never added to a length). O(1).
-pub fn fuse_line(n_fused: usize, len_gain_mm: f64, angle_gain: f64) -> String {
+/// The fuse pass's report line (M6 F-3) from the fuses applied, each `(price gain, length gain
+/// mm)` as [`draw::fuse_candidates`] gives them: the length the moved ends saved in mm, and apart
+/// from it the drop of the `junction_angle` price (price gain minus length gain; a price: it grows
+/// without bound for a branch that leaves its trunk tangentially, so it is never added to a
+/// length). O(fuses).
+pub fn fuse_line(fused: &[(f64, f64)]) -> String {
+    let n_fused = fused.len();
+    let len_gain_mm: f64 = fused.iter().map(|f| f.1).sum();
+    let angle_gain: f64 = fused.iter().map(|f| f.0 - f.1).sum();
     format!(
         "fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part: {} mm {} in length, junction-angle price ([factors] junction_angle) {} by {:.1}",
         format!("{:.1}", len_gain_mm.abs()),
@@ -1450,6 +1455,11 @@ pub fn fuse_line(n_fused: usize, len_gain_mm: f64, angle_gain: f64) -> String {
         angle_gain.abs()
     )
 }
+
+/// Start of the line (`[optimize] loop = "cycles"` only) that says what a whole-route cycle hands
+/// the next one: room hints, connections with their own history, edges with history (M6 R2: the
+/// TopoR loop computes none of it).
+pub const CYCLES_MEMORY: &str = "cycles memory for the next cycle:";
 
 /// Warning when `drawing_feedback` is set with the TopoR loop, where it has no effect (M6, 6b).
 pub const FEEDBACK_IGNORED: &str = "[search] drawing_feedback is ignored with [optimize] loop = \"topor\": the picked plan is drawn once, no blocker is ripped and redrawn (only loop = \"cycles\" redraws them; M6, 2026-11-18)";
@@ -5410,7 +5420,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let u = ((p - x[0]).dot(ab) / ab.len2().max(1.0)).clamp(0.0, 1.0);
             (x[0] + ab * u - p).len() < 1_000.0
         });
-        let (mut n_fused, mut len_gain_mm, mut angle_gain) = (0usize, 0.0f64, 0.0f64);
+        // (price gain, length gain mm) of every fuse applied, for the report line.
+        let mut fused: Vec<(f64, f64)> = Vec::new();
         let ids: Vec<WireId> = drawn.keys().copied().collect();
         let pad_nm = opts.junction_pad_mm * MM;
         for &w in &ids {
@@ -5465,9 +5476,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         }
                         drawn.insert(w, wo);
                         if ok {
-                            n_fused += 1;
-                            len_gain_mm += len_gain;
-                            angle_gain += gain - len_gain;
+                            fused.push((gain, len_gain));
                             fused_at.insert((w, end));
                             anchors.entry(u).or_default().push(q);
                             if std::env::var("TOPO_FUSEDBG").is_ok() {
@@ -5483,7 +5492,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
         }
-        warnings.push(fuse_line(n_fused, len_gain_mm, angle_gain));
+        warnings.push(fuse_line(&fused));
     }
     // M-45: what the steps after the drawing left not at 0/45/90 degrees (a fused branch end)
     // becomes an elbow or Z where the checker accepts it.
@@ -5644,6 +5653,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
     }
     let new_hints: Hints = hint_map.into_iter().map(|((e, l), sh)| (e, l, (proj.room[e][l] - sh).max(0.0))).collect();
+    if cycles {
+        warnings.push(format!(
+            "{CYCLES_MEMORY} {} room hints, {} connections with their own history, {} edges with history",
+            new_hints.len(),
+            own_out.len(),
+            hist_out.iter().filter(|&&h| h > 0.0).count()
+        ));
+    }
     {
         let cnt = |c: &str| diag.iter().filter(|d| d.class == c).count();
         warnings.push(format!(
