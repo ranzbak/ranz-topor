@@ -92,6 +92,26 @@ and those cut the pour. The loop's measure does not see pour islands: only the `
 drawing's fuse-pour check / GND island stitching. This is an unseen class of its own ("pour_island"). It is not fixed
 in TW4. Owner: a pour-cut term in the measure (a later stage), or the existing stitching.
 
+## T3 as built (phase 2, option `[search] dangling_lead_choice`, default off)
+- The lead stays one terminal obstacle (the full cut stadium, so other nets keep away from all of it: conservative;
+  freeing the unused part needs a re-triangulation, out of scope). With the option the build adds the lead's points
+  at 0 (the hand end), 1/3 and 2/3 of its length as extra centre vertices of that obstacle (`KeptEndOut::choices`,
+  the lead's end = the main centre last; an inner point nearer than `LEAD_MIN_NM` to either end is left out).
+- route_round puts them into the end's copper group (pre-joined, net-tree ends) and gives each the lead's direction
+  (`cont_dir`), so the existing graded `dangling_turn` (1 - cos a, no cutoff) prices the turn at whichever start
+  the search takes; the dangling-end retain keeps exactly these starts. The lead up to the start is not priced (as
+  the fixed lead: it continues the hand track). Pricing it as length was tried on paper and rejected: by the
+  triangle inequality the hand end then always wins (shorter and a smaller turn), so every off-axis lead would
+  vanish; unpriced, a lead towards the target is kept and one pointing past it is cut where going on costs more
+  than turning (Popov & Popov 2012 pp. 117-122: the wire's length and bends count from its terminal).
+- Drawing: the lead is drawn from the hand end to the chosen start (shared ends: the farthest start of the sharing
+  wires); the r4 via end is used only when it lies on that drawn part, else the via goes on the plan's stretch
+  (the lead's via room stays TW6); octi's `lead_in` holds at every start, so a run never folds back along the hand
+  track. Off: no extra vertices, identical projection (one centre per obstacle, `state::centre_vertices` = the old
+  rule there).
+- With `dangling_turn` at its default 0 the length alone decides (a lead is cut where the target lies behind the
+  lead's end point by projection); the pattern `dangling_lead_away` names weight 4.
+
 ## Meter, invariants, tests
 - Meter (the stage's own): unseen count and share per board at rounds=1 and esp r64/r200, qmtech r16; gain ratio
   pooled r1→r16 seeds 0–4 and s0 r1→r64 / r1→r200 (ratio ≥ 0.5 on all three); CM1 cycle cost on the local judge.
