@@ -1188,7 +1188,9 @@ pub struct Options {
     /// direction; the search prices the length from it and the `dangling_turn` factor of the turn
     /// there (the lead up to it is free, as the fixed lead is), and the drawing draws the lead up
     /// to the chosen point. A lead that points past its target gets shorter. Default off (the
-    /// lead's end only). The unused part of the lead still blocks other nets in the plan.
+    /// lead's end only). With it on, `dangling_turn` defaults to 4 (unless `[factors] weight` sets
+    /// it; `topo::factors::with_lead_choice_turn`). The unused part of the lead still blocks other
+    /// nets in the plan.
     pub dangling_lead_choice: bool,
     /// Topological core (D6b, `topor.toml [search] fuse_branches`): after the drawing, a trace
     /// that leaves a junction or a pad beside another trace of its net leaves that trace's copper

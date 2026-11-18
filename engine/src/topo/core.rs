@@ -190,6 +190,16 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 /// so a wait of the drawing counts to the copper handed back.
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
     let t0 = Instant::now();
+    // tw4 T3 (user 2026-11-18): with `[search] dangling_lead_choice` the `dangling_turn` factor
+    // defaults to `DANGLING_TURN_WITH_CHOICE` (a weight the user sets wins).
+    let with_turn;
+    let opts = match super::factors::with_lead_choice_turn(opts) {
+        Some(o) => {
+            with_turn = o;
+            &with_turn
+        }
+        None => opts,
+    };
     let n = opts.runs.max(1);
     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
     ctl.update("setup", 0, 0, 0, 0, 0.0);

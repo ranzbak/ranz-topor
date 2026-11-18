@@ -588,6 +588,8 @@ def dangling_lead_away() -> Pattern:
                              "hand end (3.513 mm) and the turn there is 93.3 deg; the pattern names weight 4",
             "problem_drc_note": "the hand track is dangling: KiCad's DRC reports a track_dangling warning on the "
                                 "problem board; 1 unconnected (R2.1)",
+            "problem_drc_allowed": ["track_dangling"],
+            "approved": "user 2026-11-18, as drawn (the hand end, no lead, 85.1 deg, straight to R2.1)",
             "detail_box": [6.5, 4.5, 10.5, 10.3]}})
 
 
@@ -827,10 +829,11 @@ def diagonal_cut_norm() -> Pattern:
 
 
 PATTERNS = {f.__name__: f for f in (channel_fit, channel_overfull, neck_fit, neck_too_narrow, model_gap_cut,
-                                     inner_layer_room, diagonal_cut_norm, neck_or_detour, exit_tip_from_plan)}
+                                     inner_layer_room, diagonal_cut_norm, neck_or_detour, exit_tip_from_plan,
+                                     dangling_lead_away)}
 # Proposed for the user's approval (patterns rule): generated with the rest, not in the test suite (tests use PATTERNS)
-# until approved; their expected answers are provisional.
-PROPOSED = {f.__name__: f for f in (dangling_lead_away,)}
+# until approved; their expected answers are provisional. (dangling_lead_away: approved by the user 2026-11-18.)
+PROPOSED: dict = {}
 
 
 # ----------------------------------------------------------------------------------------------- expected values

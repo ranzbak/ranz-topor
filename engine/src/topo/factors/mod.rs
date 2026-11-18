@@ -40,7 +40,7 @@ mod via;
 mod via_squeeze;
 mod violation;
 
-pub use branch::{dangling_turn_shape, junction_psi};
+pub use branch::{dangling_turn_shape, junction_psi, with_lead_choice_turn, DANGLING_TURN_WITH_CHOICE};
 pub use necking::necking_amount;
 pub use squeeze::squeeze_amount;
 pub use violation::violation_amount;

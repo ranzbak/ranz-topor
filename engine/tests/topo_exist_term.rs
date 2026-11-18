@@ -632,8 +632,8 @@ fn two_wires_from_one_dangling_end_share_one_lead() {
     assert!(bad.is_empty(), "{bad:#?}");
 }
 
-/// tw4 T3 (`[search] dangling_lead_choice`; synthetic pattern `dangling_lead_away`, its expected
-/// answer PROVISIONAL until the user approves the pattern): a hand-started F.Cu track from R1
+/// tw4 T3 (`[search] dangling_lead_choice`; synthetic pattern `dangling_lead_away`, approved by the
+/// user 2026-11-18: the hand end, no lead, 85.1 deg, straight to R2): a hand-started F.Cu track from R1
 /// (3, 6) ends at (8, 6) heading +x; R2 (8.3, 9.5) lies below the end, behind the end of a
 /// 1.5 mm lead (`dangling_lead_mm`). From the lead's end (9.5, 6) the trace turns 108.9 deg
 /// off +x, from the hand end itself 85.1 deg. With `dangling_turn` 4 (graded, 1 - cos a; cost
@@ -676,7 +676,7 @@ fn a_lead_that_points_away_is_shortened_with_lead_choice() {
     assert!(on.violations.is_empty(), "{}", summary(&on));
     let (l1, a1) = shape(&on);
     eprintln!("T3 on: lead {l1:.3} mm, turn {a1:.1} deg, {:?}", tracks(&on.items));
-    assert!(l1 < 1.5 - 0.1, "the lead is shortened: {l1:.3} mm, {:?}", tracks(&on.items));
+    assert!(l1 < 0.05, "no lead (approved pattern: the hand end): {l1:.3} mm, {:?}", tracks(&on.items));
     assert!(a1 <= 90.0 + 1.0, "the trace leaves at most 90 deg off the hand track: {a1:.1} deg, {:?}", tracks(&on.items));
     assert!(ends_at(&on, 0, (8.3, 9.5)), "it reaches R2: {:?}", tracks(&on.items));
     // R2 ahead, at (11, 9): going on costs less than turning early (costs hand end 4.77, 1/3 4.55,
@@ -725,4 +725,27 @@ fn a_start_short_of_the_lead_end_draws_no_via_past_it_and_no_fold_back() {
     assert_eq!(r.routed, 1, "{}", summary(&r));
     let back = ts.iter().any(|t| t.0 == 0 && (t.1 .1 - 6.0).abs() < 1e-3 && (t.2 .1 - 6.0).abs() < 1e-3 && t.1 .0.min(t.2 .0) < 8.0 - 1e-3 && (d(t.1, (8.0, 6.0)) < 1e-3 || d(t.2, (8.0, 6.0)) < 1e-3));
     assert!(!back, "a new track runs back along the hand track from its end: {ts:?}");
+}
+
+/// tw4 T3 (user 2026-11-18): with `dangling_lead_choice` on and no `dangling_turn` weight set, the
+/// factor defaults to 4: the pattern `dangling_lead_away` gives the same answer as with weight 4
+/// (the hand end, no lead; with the weight at 0 the length alone would take the 1/3 point, 3.506
+/// vs 3.513 mm, and turn 93.3 deg). An explicit weight wins. Mutant: no default.
+#[test]
+fn lead_choice_defaults_the_dangling_turn_weight_to_4() {
+    use topor_engine::topo::factors::{with_lead_choice_turn, FactorConfig};
+    let pads = [("R1", 1, 3.0, 6.0, 1.0, 0), ("R2", 1, 8.3, 9.5, 0.8, 0)];
+    let kept = [("t1", 1, 0, 3.0, 6.0, 8.0, 6.0, 0.25)];
+    let dang = [("t1", 1, 0, 0.25, 8.0, 6.0, 1.0, 0.0)];
+    let m = board(14.0, 12.0, &pads, &kept, &[], &dang);
+    let r = route_with(&m, &Options { dangling_lead_mm: 1.5, dangling_lead_choice: true, ..Options::default() }, &RunControl::new());
+    assert_eq!(r.routed, 1, "{}", summary(&r));
+    let ts = tracks(&r.items);
+    let (q0, q1, _) = leaving(&r, 0, (3.0, 6.0), (8.0, 6.0), "t1").unwrap_or_else(|| panic!("no new track at the dangling end: {ts:?}"));
+    assert!(((q1.1 - q0.1).atan2(q1.0 - q0.0).to_degrees().abs() - 0.0).abs() > 1.0, "no lead along +x: {ts:?}");
+    let o = with_lead_choice_turn(&Options { dangling_lead_choice: true, ..Options::default() }).expect("a default");
+    assert_eq!(o.factors.weight.get("dangling_turn"), Some(&4.0));
+    let set = Options { dangling_lead_choice: true, factors: FactorConfig { weight: [("dangling_turn".to_string(), 0.0)].into_iter().collect(), ..FactorConfig::default() }, ..Options::default() };
+    assert!(with_lead_choice_turn(&set).is_none(), "a weight the user sets wins");
+    assert!(with_lead_choice_turn(&Options::default()).is_none(), "off: no change");
 }
