@@ -2294,9 +2294,7 @@ impl<'a> Drawer<'a> {
                     }
                 }
             }
-            if ndbb() == 0 || self.opts.via_reach_price || std::env::var_os("TOPO_VIADBG").is_some() {
-                price += self.viols_of(&items, &rep).iter().map(Viol::amount).sum::<f64>();
-            }
+            price += self.viols_of(&items, &rep).iter().map(Viol::amount).sum::<f64>();
         }
         (ok, price)
     }
@@ -2489,14 +2487,6 @@ impl<'a> Drawer<'a> {
 /// [`Drawer::viols_of`] for any checker and index of accepted copper (D7: the realised diff-pair
 /// tracks are checked against the real model, not the drawing's alias model).
 pub fn viols_with(model: &BoardModel, opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport) -> Vec<Viol> {
-    viols_with_opt(model, opts, checker, idx, items, rep, true)
-}
-
-/// nd-perf prototype: `probe = false` = the lower bound (every track violation's length at its floor `tw`).
-#[allow(clippy::too_many_arguments)]
-pub fn viols_with_opt(model: &BoardModel, opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport, probe: bool) -> Vec<Viol> {
-    let _nd = super::ndprof::t(if probe { super::ndprof::VIOLS } else { super::ndprof::VIOLS_LB });
-    super::ndprof::add(super::ndprof::RAW_VIOLS, if probe { rep.violations.len() as u64 } else { 0 });
     {
         let r = &model.rules;
         // Routed copper (`item:N`) is named by its net: "track of SIG (item:12)".
@@ -2546,7 +2536,6 @@ pub fn viols_with_opt(model: &BoardModel, opts: &Options, checker: &Checker, idx
                     // 50 um around the coarse hits (or along the whole segment when none hit:
                     // a violation shorter than the coarse step).
                     let below = |ts: &[f64]| -> Vec<bool> {
-                        super::ndprof::add(super::ndprof::PROBES, ts.len() as u64);
                         let probes: Vec<Item> = ts.iter().map(|&u| track_item(t.net, t.layer, t.width as f64, a + (b - a) * u, a + (b - a) * u, None)).collect();
                         let pr = checker.check_against(idx, &probes, &[]);
                         (0..ts.len()).map(|i| pr.violations.iter().any(|x| x.item == i && x.against == v.against && x.layer == v.layer)).collect()
@@ -2555,11 +2544,6 @@ pub fn viols_with_opt(model: &BoardModel, opts: &Options, checker: &Checker, idx
                         let n = (((hi - lo) * len / step).ceil() as usize + 1).clamp(2, cap);
                         (0..n).map(|i| lo + (hi - lo) * i as f64 / (n - 1) as f64).collect()
                     };
-                    if !probe {
-                        let tw = t.width as f64;
-                        out.push(Viol { kind: kind(false), at: (a + b) * 0.5, layer: v.layer, depth_nm: depth, len_nm: tw.min(len.max(tw)), against: name(&v.against), via: false });
-                        continue;
-                    }
                     let coarse = grid(0.0, 1.0, 500_000.0, 48);
                     let hc = below(&coarse);
                     let dt = 1.0 / (coarse.len() - 1) as f64;
@@ -2609,93 +2593,7 @@ pub fn viols_with_opt(model: &BoardModel, opts: &Options, checker: &Checker, idx
     }
 }
 
-/// nd-perf prototype switch `TOPO_NDBB`: 0 off (eager pricing), 1 lazy + bound, 2 lazy + bound checked against eager.
-pub fn ndbb() -> u8 {
-    static M: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *M.get_or_init(|| std::env::var("TOPO_NDBB").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
-}
-
-type ForcedCand = (f64, Vec<Vec2>, Vec<Item>, Vec<Viol>, Option<(f64, [f64; 2])>, &'static str, Option<CheckReport>);
-
 impl<'a> Drawer<'a> {
-    /// nd-perf prototype: a forced candidate's price and violations, or (bound mode) its graze
-    /// violations and its report, priced only when the selection needs it.
-    fn cand_viols(&self, w: WireId, items: &[Item], rep: &CheckReport) -> (f64, Vec<Viol>, Option<CheckReport>) {
-        if ndbb() == 0 {
-            let mut vs = self.viols_of(items, rep);
-            vs.extend(self.graze_viols(w, items));
-            return (vs.iter().map(Viol::amount).sum(), vs, None);
-        }
-        (f64::NAN, self.graze_viols(w, items), Some(rep.clone()))
-    }
-
-    fn resolve_cand(&self, c: &mut ForcedCand) {
-        if let Some(rep) = c.6.take() {
-            let mut vs = self.viols_of(&c.2, &rep);
-            vs.append(&mut c.3);
-            c.0 = vs.iter().map(Viol::amount).sum();
-            c.3 = vs;
-        }
-    }
-
-    /// The forced candidate of least `(short, total, price)`, the first on ties (= `min_by`).
-    fn pick_forced(&self, w: WireId, cands: &mut [ForcedCand]) -> Option<usize> {
-        let cmp3 = |a: &(f64, f64, f64), b: &(f64, f64, f64)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2));
-        let key3 = |vs: &[Viol], price: f64| {
-            let k = viol_key(vs);
-            (k.0, k.1, price)
-        };
-        let eager = |cs: &[ForcedCand]| -> Option<usize> {
-            (0..cs.len()).min_by(|&a, &b| cmp3(&key3(&cs[a].3, cs[a].0), &key3(&cs[b].3, cs[b].0)))
-        };
-        if ndbb() == 0 {
-            return eager(cands);
-        }
-        let lbs: Vec<(f64, f64, f64)> = cands
-            .iter()
-            .map(|c| match &c.6 {
-                None => key3(&c.3, c.0),
-                Some(rep) => {
-                    let mut v = viols_with_opt(self.model, self.opts, self.checker, &self.idx, &c.2, rep, false);
-                    v.extend(c.3.iter().cloned());
-                    let p = v.iter().map(Viol::amount).sum();
-                    key3(&v, p)
-                }
-            })
-            .collect();
-        let mut order: Vec<usize> = (0..cands.len()).collect();
-        order.sort_by(|&a, &b| cmp3(&lbs[a], &lbs[b]).then(a.cmp(&b)));
-        let mut best: Option<((f64, f64, f64), usize)> = None;
-        for &j in &order {
-            if let Some((bk, bi)) = best {
-                match cmp3(&lbs[j], &bk) {
-                    std::cmp::Ordering::Greater => break,
-                    std::cmp::Ordering::Equal if j > bi => continue,
-                    _ => {}
-                }
-            }
-            self.resolve_cand(&mut cands[j]);
-            super::ndprof::add(super::ndprof::BB_EVAL, 1);
-            let k = key3(&cands[j].3, cands[j].0);
-            if best.is_none_or(|(bk, bi)| cmp3(&k, &bk) == std::cmp::Ordering::Less || (cmp3(&k, &bk) == std::cmp::Ordering::Equal && j < bi)) {
-                best = Some((k, j));
-            }
-        }
-        super::ndprof::add(super::ndprof::BB_SKIP, cands.iter().filter(|c| c.6.is_some()).count() as u64);
-        let pick = best.map(|b| b.1);
-        if ndbb() == 2 {
-            let mut all: Vec<ForcedCand> = cands.to_vec();
-            for c in all.iter_mut() {
-                self.resolve_cand(c);
-            }
-            let old = eager(&all);
-            let same = old == pick && pick.is_none_or(|j| all[j].3 == cands[j].3 && all[j].0.to_bits() == cands[j].0.to_bits());
-            let lb_ok = (0..all.len()).all(|j| cmp3(&lbs[j], &key3(&all[j].3, all[j].0)) != std::cmp::Ordering::Greater);
-            eprintln!("NDBB CHECK wire {w}: {} cands, pick {pick:?} old {old:?} {} lb {}", all.len(), if same { "same" } else { "MISMATCH" }, if lb_ok { "ok" } else { "BROKEN" });
-        }
-        pick
-    }
-
     /// The sliver connections of a run's `items` against pads and vias of its own net (what
     /// [`Drawer::track_own_pad_ok`] refuses), as `connection_width` [`Viol`]s: one per track that
     /// grazes, depth = KiCad's minimum connection width.
@@ -3102,7 +3000,7 @@ impl<'a> Drawer<'a> {
             let mut tried: Vec<Vec<Vec2>> = Vec::new();
             // Force mode (M-B1): every attempt's copper with its violations, the cheapest wins.
             #[allow(clippy::type_complexity)]
-            let mut cands: Vec<(f64, Vec<Vec2>, Vec<Item>, Vec<Viol>, Option<(f64, [f64; 2])>, &'static str, Option<CheckReport>)> = Vec::new();
+            let mut cands: Vec<(f64, Vec<Vec2>, Vec<Item>, Vec<Viol>, Option<(f64, [f64; 2])>, &'static str)> = Vec::new();
             // M-C: the plan's necked stretches (width in P2); the drawing realises them.
             let pneck = self.plan_neck(w);
             // M3 `[drawing] realise = "erbs"`: the run's ERBS first (attempt -1), checked like any
@@ -3270,7 +3168,7 @@ impl<'a> Drawer<'a> {
                     last_reason = "drawing: a track grazes a pad or via of its own net (KiCad minimum connection width)".to_string();
                     if self.force {
                         let vs = self.graze_viols(w, &items);
-                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }, None));
+                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }));
                     }
                     continue;
                 }
@@ -3334,7 +3232,7 @@ impl<'a> Drawer<'a> {
                         if self.octi.any_forbidden && !super::octi::breaks(&pts).0.is_empty() {
                             last_reason = "drawing: no octilinear geometry for this run ([drawing] any_angle = \"forbidden\")".to_string();
                             if self.force {
-                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, if attempt < 0 { "erbs" } else { "attempt" }, None));
+                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, if attempt < 0 { "erbs" } else { "attempt" }));
                             }
                             continue;
                         }
@@ -3475,8 +3373,9 @@ impl<'a> Drawer<'a> {
                     break;
                 }
                 if self.force {
-                    let (price, vs, lazy) = self.cand_viols(w, &items, &rep);
-                    cands.push((price, pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }, lazy));
+                    let mut vs = self.viols_of(&items, &rep);
+                    vs.extend(self.graze_viols(w, &items));
+                    cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }));
                 }
                 let v = &rep.violations[0];
                 last_viol = Some(v.clone());
@@ -3511,8 +3410,9 @@ impl<'a> Drawer<'a> {
                         None => self.run_items(w, layer, &pts),
                     };
                     let rep = self.checker.check_against(&self.idx, &items, &[]);
-                    let (price, vs, lazy) = self.cand_viols(w, &items, &rep);
-                    cands.push((price, pts, items, vs, None, "relaxed", lazy));
+                    let mut vs = self.viols_of(&items, &rep);
+                    vs.extend(self.graze_viols(w, &items));
+                    cands.push((vs.iter().map(Viol::amount).sum::<f64>(), pts, items, vs, None, "relaxed"));
                     true
                 };
                 let (mut lo, mut hi) = (0.0, f64::NAN);
@@ -3543,10 +3443,10 @@ impl<'a> Drawer<'a> {
                         None => self.run_items(w, layer, &pts),
                     };
                     let rep = self.checker.check_against(&self.idx, &items, &[]);
-                    let (price, vs, lazy) = self.cand_viols(w, &items, &rep);
-                    cands.push((price, pts, items, vs, None, "funnel", lazy));
+                    let mut vs = self.viols_of(&items, &rep);
+                    vs.extend(self.graze_viols(w, &items));
+                    cands.push((vs.iter().map(Viol::amount).sum(), pts, items, vs, None, "funnel"));
                 }
-                let pick = self.pick_forced(w, &mut cands);
                 if std::env::var("TOPO_FORCEDBG").is_ok() {
                     for c in &cands {
                         eprintln!("FORCED wire {w} layer {layer} k {k0}..{k1}: {} price {:.1}, {} pts, viols {:?}", c.5, c.0, c.1.len(), c.3.iter().map(|v| (v.kind, v.against.clone(), (v.depth_nm / 1e3).round(), (v.len_nm / 1e3).round())).collect::<Vec<_>>());
@@ -3554,7 +3454,10 @@ impl<'a> Drawer<'a> {
                 }
                 // Shorts first, then the total violation price (a funnel run through a via must
                 // not beat a relaxed run that only grazes clearances).
-                if let Some((price, pts, items, vs, neck, src, _)) = pick.and_then(|j| cands.into_iter().nth(j)) {
+                if let Some((price, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| {
+                    let (ka, kb) = (viol_key(&a.3), viol_key(&b.3));
+                    ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1)).then(a.0.total_cmp(&b.0))
+                }) {
                     // M-45: the forced run octilinear too, where that breaks no rule deeper than
                     // the run itself and costs no more violation price.
                     let (mut pts, mut items, mut vs) = (pts, items, vs);
