@@ -6178,7 +6178,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             fused_at.insert((w, end));
                             anchors.entry(u).or_default().push(q);
                             if std::env::var("TOPO_FUSEDBG").is_ok() {
-                                eprintln!("FUSED round {round} wire {w} net {} end {end} onto {u} at ({:.3}, {:.3}) gain {gain:.2} mm", wi.net, q.x / MM, -q.y / MM);
+                                let pl = |p: &[Vec2]| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM;
+                                eprintln!("FUSED round {round} wire {w} net {} end {end} onto {u} at ({:.3}, {:.3}) gain {gain:.2} mm, length gain {len_gain:.3} mm, i {i} of {} vertices, run {:.3} -> {:.3} mm, wire now {:.3} mm", wi.net, q.x / MM, -q.y / MM, run.len(), pl(&run), drawn[&w].runs[r].1.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM, drawn[&w].length_nm / MM);
                             }
                             done = true;
                             break;
