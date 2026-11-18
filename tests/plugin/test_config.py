@@ -294,6 +294,13 @@ def test_m6_removed_keys_name_m6_and_leave_the_engine_alone(tmp_path):
         rem = {f.items[0]: f.message for f in findings if f.code == "CFG_REMOVED_KEY"}
         assert sorted(rem) == ["drawing.lane_walls", "search.neck_in_drawing"], findings
         assert all("ignored: removed in M6 of 2026-11-18 (" in m for m in rem.values()), rem
+        # the line is named, as for CFG_DEPRECATED_KEY (V-5)
+        assert "'search.neck_in_drawing' in topor.toml (line 3) is ignored" in rem["search.neck_in_drawing"], rem
+        assert "'drawing.lane_walls' in topor.toml (line 5) is ignored" in rem["drawing.lane_walls"], rem
+    # a whole removed section ([ripup], CL cleanup) names its line too
+    (tmp_path / "topor.toml").write_text("version = 1\n[ripup]\n# old\ngrowth = 2\n")
+    _, findings = load_config(tmp_path)
+    assert [f.message for f in findings if f.code == "CFG_REMOVED_KEY"][0].startswith("'ripup.growth' in topor.toml (line 4) is ignored"), findings
         assert [f.code for f in findings if f.code != "CFG_REMOVED_KEY"] == []
         eo = cfg.engine_options()
         assert "neck_in_drawing" not in eo and "lane_walls" not in eo

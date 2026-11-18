@@ -74,3 +74,29 @@ fn the_cycles_memory_is_kept_with_the_cycles_loop_only() {
     assert!(n(" room hints") == 0 && n(" connections with their own history") >= 1, "{l}");
     assert!(mem(r#"{"runs": 1, "wall_clock_s": 60.0, "opt_loop": "topor"}"#).is_none());
 }
+
+#[test]
+fn the_fuse_line_of_a_routed_board_reports_the_length_the_fuse_saved() {
+    // V-2 (verify 2026-11-18): the fuse line as the route writes it, not only `fuse_line` alone.
+    // The esp USB crop fuses 15 trace ends: the mm the line reports saved are the copper the fuse
+    // took away, so they match the routed length with `fuse_branches` off minus on (the steps
+    // after the fuse move a little copper too: 7.7 mm reported, 6.6 mm measured, 2026-11-18), and
+    // the junction-angle price part is the rest of the price gain, not 0.
+    let m = BoardModel::from_json(include_str!("fixtures/esp-rust-board-usb-crop.json")).expect("fixture parses");
+    let wall = if cfg!(debug_assertions) { 900.0 } else { 120.0 };
+    let on = route(&m, &opts(&format!(r#"{{"runs": 1, "wall_clock_s": {wall}}}"#)));
+    let off = route(&m, &opts(&format!(r#"{{"runs": 1, "wall_clock_s": {wall}, "fuse_branches": false}}"#)));
+    let l = on.warnings.iter().find(|w| w.starts_with("fuse after drawing: ")).expect("fuse line").clone();
+    let num = |after: &str| -> f64 {
+        let t = l.split(after).nth(1).unwrap_or_else(|| panic!("{after}: {l}"));
+        t.trim_start().split(|c: char| c != '.' && !c.is_ascii_digit()).next().and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("{after}: {l}"))
+    };
+    let n = num("fuse after drawing: ");
+    let saved = num("where the two part: ");
+    let angle = num(") lower by ");
+    assert!(n >= 1.0 && l.contains(" mm saved in length"), "{l}");
+    let measured = (off.total_length_nm - on.total_length_nm) as f64 / 1e6;
+    assert!(measured > 0.0, "fuse on {} nm, off {} nm", on.total_length_nm, off.total_length_nm);
+    assert!((saved - measured).abs() <= 0.25 * measured + 0.5, "reported {saved} mm saved, measured {measured:.2} mm: {l}");
+    assert!(angle > 0.0, "{l}");
+}

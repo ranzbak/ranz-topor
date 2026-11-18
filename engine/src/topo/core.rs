@@ -4943,7 +4943,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 for id in ids {
                     dr.uncommit(id);
                 }
-                if opts.allow_violations && !super::m6_off("force_via") {
+                if opts.allow_violations {
                     via_forced.push((w, r));
                 } else {
                     fail(&mut out, conn_of[wire_conn[w]], r);
@@ -5331,7 +5331,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // geometry, the feedback did not rescue it) is drawn on its best geometry against all copper
     // drawn so far; the rules it breaks are recorded with it and priced by the `violation` factor.
     let mut n_forced = 0usize;
-    if opts.allow_violations && !super::m6_off("force_wire") {
+    if opts.allow_violations {
         dr.force = true;
         ctl.test_point("never drop");
         for &w in &live {
@@ -5432,7 +5432,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     // Never drop (M-B1): the branch is joined to its trunk where they part, by a
                     // via at the branch end (the trunk passes there on another layer) or a track to
                     // the trunk's nearest copper (and a via there when that is on another layer).
-                    if opts.allow_violations && !super::m6_off("force_join") {
+                    if opts.allow_violations {
                         if let Some(bl) = bl {
                             let net = st.wires[bw].net;
                             let sz = via_sizes(&model.rules, net, opts)[0];

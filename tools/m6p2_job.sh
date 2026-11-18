@@ -40,7 +40,7 @@ task() {
 tests() {
   cd $ROOT/engine
   local T="cargo test --release --no-fail-fast"
-  { $T --test topo_m6 --test topo_m6_reason --test topo_mb1 --test topo_mc --test topo_vias54 --test topo_d6b --test topo_mb0 2>&1; echo "itests rc $?"
+  { $T --test topo_m6 --test topo_mb1 --test topo_mc --test topo_vias54 --test topo_d6b --test topo_mb0 2>&1; echo "itests rc $?"
     $T --test topo_m2_draw_once regression_guard 2>&1; echo "m2 guard rc $?"
     $T --lib -- topo::draw topo::octi topo::core 2>&1; echo "lib rc $?"
     cargo clippy --release --all-targets -- -D warnings 2>&1 | tail -30; echo "clippy rc ${PIPESTATUS[0]}"
@@ -66,7 +66,9 @@ mutants() {
   local C=$ROOT/engine/src/topo/core.rs D=$ROOT/engine/src/topo/draw.rs
   sub 'let feedback = opts.drawing_feedback && opts.opt_loop == "cycles";' 'let feedback = opts.drawing_feedback;' | mut m1_feedback_gate $C --test topo_m6
   sub 'warnings.push(FEEDBACK_IGNORED.to_string());' '' | mut m2_feedback_warning $C --test topo_m6
-  sub 'if last_reason.is_empty() {' 'if false {' | mut m3_blank_reason $D --test topo_m6_reason
+  sub '    if last.is_empty() {
+        no_run_reason' '    if false {
+        no_run_reason' | mut m3_blank_reason $D --lib -- topo::draw::tests::a_run_that_drew_nothing
   sub 'if angle_gain >= 0.0 { "lower" } else { "higher" }' 'if angle_gain >= 0.0 { "higher" } else { "lower" }' | mut m4_fuse_angle_word $C --test topo_m6
   sub 'out.push((gain, along - d, i, pts));' 'out.push((gain, gain, i, pts));' | mut m5_fuse_len_part $D --lib -- topo::draw::tests::fuse
   sub 'let cycles = opts.opt_loop == "cycles";' 'let cycles = false;' | mut m6_cycles_memory_off $C --test topo_mb0
@@ -74,7 +76,7 @@ mutants() {
 }
 tests2() {  # round 2: the cycles memory line + fuse_line over the applied fuses; the two earlier survivors again
   cd $ROOT/engine
-  { cargo test --release --no-fail-fast --test topo_m6 --test topo_m6_reason --test topo_mb0 2>&1; echo "itests2 rc $?"; } > $R/tests2.log
+  { cargo test --release --no-fail-fast --test topo_m6 --test topo_mb0 2>&1; echo "itests2 rc $?"; } > $R/tests2.log
   grep -E "test result|rc " $R/tests2.log | while read -r l; do note "tests2: $l"; done
   cd $ROOT; local C=$ROOT/engine/src/topo/core.rs
   sub 'let cycles = opts.opt_loop == "cycles";' 'let cycles = false;' | mut m6_cycles_memory_off $C --test topo_m6
@@ -84,6 +86,35 @@ tests2() {  # round 2: the cycles memory line + fuse_line over the applied fuses
   sub 'let angle_gain: f64 = fused.iter().map(|f| f.0 - f.1).sum();' 'let angle_gain: f64 = fused.iter().map(|f| f.0).sum();' | mut m7_fuse_angle_sum $C --test topo_m6
   sub 'let len_gain_mm: f64 = fused.iter().map(|f| f.1).sum();' 'let len_gain_mm: f64 = fused.iter().map(|f| f.0).sum();' | mut m8_fuse_len_sum $C --test topo_m6
   note "tests2 done"
+}
+tests3() {  # fix round 3 (verify 2026-11-18): V-2 fuse line on a routed board, F-1 as a unit test, V-5 line
+  cd $ROOT/engine
+  { cargo test --release --no-fail-fast --test topo_m6 --test topo_mb0 --test topo_mb1 --test topo_mc --test topo_d6b --test topo_vias54 9>&- 2>&1; echo "itests3 rc $?"
+    cargo test --release --test topo_m2_draw_once regression_guard 9>&- 2>&1; echo "m2 guard rc $?"
+    cargo test --release --lib -- topo::draw topo::octi topo::core 9>&- 2>&1; echo "lib rc $?"; } > $R/tests3.log
+  grep -E "test result|rc " $R/tests3.log | while read -r l; do note "tests3: $l"; done
+  cd $ROOT; CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_messages.py > $R/pytest3.log 2>&1
+  note "pytest3 rc $?"
+  local C=$ROOT/engine/src/topo/core.rs D=$ROOT/engine/src/topo/draw.rs P=$ROOT/plugin/topor/config.py
+  sub 'fused.push((gain, len_gain));' 'fused.push((gain, gain));' | mut v9_fuse_wiring $C --test topo_m6 the_fuse_line_of_a_routed_board
+  sub '    if last.is_empty() {
+        no_run_reason' '    if false {
+        no_run_reason' | mut f1_failed_run_reason $D --lib -- topo::draw::tests::a_run_that_drew_nothing
+  sub '{CONFIG_NAME}{_line_text(line)} is ignored:' '{CONFIG_NAME} is ignored:' | pymut v5_removed_line $P tests/plugin/test_config.py -k m6_removed
+  sub 'findings.append(_removed(sec, key, key_line(text, sec, key)))
+            continue
+        if sec not in SECTIONS' 'findings.append(_removed(sec, key))
+            continue
+        if sec not in SECTIONS' | pymut v5b_removed_section_line $P tests/plugin/test_config.py -k m6_removed
+  note "tests3 done"
+}
+pymut() {  # name file pytest-args... ; like mut, for the plugin
+  local n=$1 f=$2; shift 2
+  cp $f $f.orig; python3 - $f; local pr=$?
+  if [ $pr -ne 0 ] || cmp -s $f $f.orig; then note "mutant $n: patch did not apply"; mv $f.orig $f; return; fi
+  ( cd $ROOT && CI=1 python -m pytest -q "$@" > $R/mut-$n.log 2>&1 ); local rc=$?
+  mv $f.orig $f
+  if [ $rc -ne 0 ]; then note "mutant $n: killed"; else note "mutant $n: SURVIVED"; fi
 }
 repro() {  # bornhack EPD_MOSI: KiCad sees U6's footprint clearance 0.127 mm, does the exported model?
   local out=$R/repro; mkdir -p $out
@@ -138,6 +169,7 @@ case ${1:-} in
   task) shift; task "$@" ;;
   tests) tests ;;
   tests2) tests2 ;;
+  tests3) tests3 ;;
   repro) repro ;;
   unit) shift; T=$1; shift
     { for n in $BOARDS; do for c in "$@"; do echo "$c b $n"; done; done

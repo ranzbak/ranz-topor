@@ -331,7 +331,7 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
     for sec, table in data.items():
         if sec not in SECTIONS and isinstance(table, dict) and table and all((sec, k) in REMOVED for k in table):
             for key in table:
-                findings.append(_removed(sec, key))
+                findings.append(_removed(sec, key, key_line(text, sec, key)))
             continue
         if sec not in SECTIONS or not isinstance(table, dict):
             findings.append(Finding("CFG_UNKNOWN_KEY", "warning", f"Unknown section or key '{sec}' in {CONFIG_NAME} is ignored.",
@@ -358,7 +358,7 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
             s = SETTINGS_BY_KEY.get((sec, key))
             full = f"{sec}.{key}"
             if s is None and (sec, key) in REMOVED:
-                findings.append(_removed(sec, key))
+                findings.append(_removed(sec, key, key_line(text, sec, key)))
                 continue
             if s is None and (sec, key) in DEPRECATED:
                 findings.append(_deprecated(sec, key, raw, key_line(text, sec, key)))
@@ -459,11 +459,12 @@ def comment_out_key(path: Path, full: str) -> int | None:
     return line
 
 
-def _removed(sec: str, key: str) -> Finding:
-    """CFG_REMOVED_KEY for a key of ``schema.REMOVED``: ignored, with why, never an error. O(1)."""
+def _removed(sec: str, key: str, line: int | None = None) -> Finding:
+    """CFG_REMOVED_KEY for a key of ``schema.REMOVED``: ignored, with why and its line (like CFG_DEPRECATED_KEY),
+    never an error. O(1)."""
     full = f"{sec}.{key}"
     return Finding("CFG_REMOVED_KEY", "warning",
-                   f"'{full}' in {CONFIG_NAME} is ignored: removed in {REMOVED_WHEN.get((sec, key), REMOVED_IN)} ({REMOVED[(sec, key)]}).",
+                   f"'{full}' in {CONFIG_NAME}{_line_text(line)} is ignored: removed in {REMOVED_WHEN.get((sec, key), REMOVED_IN)} ({REMOVED[(sec, key)]}).",
                    f"Delete the line from {CONFIG_NAME}; {DOCS_HINT}.", (full,))
 
 

@@ -367,6 +367,17 @@ fn trunk_foot(trunk: &[&[Vec2]], p: Vec2) -> Option<(Vec2, Vec<Vec2>)> {
 /// The failure reason of a run for which no attempt of the drawing ladder produced copper to
 /// check (the exact path found none and no later attempt ran): a drawing failure, so the
 /// never-drop pass draws it ([`Options::allow_violations`](crate::model::Options)). O(layers).
+/// The reason a run that drew nothing fails with: the last attempt's own reason, or, when no
+/// attempt produced copper to check (an empty reason), [`no_run_reason`] (M6 F-1: never blank, so
+/// the never-drop pass, keyed on "drawing:", draws the wire and the report says why). O(layers).
+pub fn failed_run_reason(last: String, model: &BoardModel, lid: u32) -> String {
+    if last.is_empty() {
+        no_run_reason(model, lid)
+    } else {
+        last
+    }
+}
+
 pub fn no_run_reason(model: &BoardModel, lid: u32) -> String {
     format!(
         "drawing: no run found on layer {} (the exact taut path had no legal result and no other attempt gave one)",
@@ -1775,7 +1786,13 @@ impl<'a> Drawer<'a> {
                     let item = via_item(net, p, sz, Some(w));
                     // The side test on the drawing's nominal chords, or on the plan's taut
                     // geometry the relocation balanced the via on (the drawing's checker then
-                    // judges the partners; M6 removed P6 a's partner move, measured without effect).
+                    // judges the partners). M6 (user 2026-11-18) removed P6 a's partner move
+                    // (`follow_vias`), which led a wire crossing a via wire's part back to the side
+                    // the plan gave it (Polubasov 2001, printed p. 4). Its effect depends on the
+                    // plan: on esp-rust-board (seed 0, new net numbering) the forced USB_D- then runs
+                    // across IO21_TX on B.Cu next to its own via: 14 shorts, +43 DRC. In other plans
+                    // it is -12 or 0. The real fix is ERBS sheets with the placed vias, or the plan
+                    // itself (TopoR-way plan), not a drawing stand-in.
                     let (la, lb) = (plan.layers[i], plan.layers[i + 1]);
                     let taut_ok = || !self.via_site_tight.contains(&(w, i)) && self.via_side_ok_taut(w, k, p, la, lb);
                     // P6 (d): with the previous via as drawn (the plan's site of that one may not
@@ -2894,8 +2911,6 @@ impl<'a> Drawer<'a> {
             } else {
                 (0..6).collect()
             };
-            // 6b/M6 measurement (`TOPO_M6_OFF=ladder`, debug only): without the funnel + repair attempts.
-            let ladder: Vec<isize> = if super::m6_off("ladder") { ladder.into_iter().filter(|a| !(3..ERBS_KEPT).contains(a)).collect() } else { ladder };
             for attempt in ladder {
                 // -1 (`realise = "erbs"`): the run's ERBS;
                 // 0: the exact taut path at the nominal width; 1: the same with the plan's necked
@@ -3363,9 +3378,7 @@ impl<'a> Drawer<'a> {
                 // exact path had no result and no later attempt ran), the wire still fails as a
                 // drawing failure, so the never-drop pass draws it (its key is "drawing:") and the
                 // report names why.
-                if last_reason.is_empty() {
-                    last_reason = no_run_reason(self.model, lid);
-                }
+                last_reason = failed_run_reason(std::mem::take(&mut last_reason), self.model, lid);
                 if self.quiet {
                     for id in committed {
                         self.uncommit(id);
@@ -4438,6 +4451,21 @@ mod tests {
         assert!((*gain - 12.39).abs() < 0.02, "{gain}");
         // A branch that leaves straight away has nothing to gain.
         assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0).is_empty());
+    }
+
+    #[test]
+    fn a_run_that_drew_nothing_never_fails_blank() {
+        // M6 F-1: no attempt produced copper (empty reason): the wire fails as a drawing failure
+        // naming its layer, so the never-drop pass (key "drawing:") draws it; an attempt's own
+        // reason stays as it was.
+        let m = BoardModel::from_json(include_str!("../../tests/fixtures/fx-narrow-gap.json")).expect("fixture parses");
+        let l = &m.layers[0];
+        let r = failed_run_reason(String::new(), &m, l.id);
+        assert!(r.starts_with("drawing: no run found on layer "), "{r}");
+        assert!(r.contains(&l.name), "{r}");
+        assert_eq!(failed_run_reason("drawing: blocked by GND".into(), &m, l.id), "drawing: blocked by GND");
+        // A layer id the model does not have is named by its number.
+        assert!(failed_run_reason(String::new(), &m, 9999).starts_with("drawing: no run found on layer 9999 "));
     }
 
     #[test]
