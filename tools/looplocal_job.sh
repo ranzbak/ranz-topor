@@ -106,8 +106,9 @@ case ${1:-} in
   shadow)  # SH again on eprom esp qmtech (shadow compares changes after - before)
     for n in eprom esp qmtech; do ( hzq run --threads 1 --name "SH-$n" -- bash $ROOT/tools/looplocal_job.sh task SH b $n; ) & sleep 1; done
     wait; note "all done" ;;
-  check)  # LC (local + TOPO_LOCALCHECK) rounds=1 on bornhack, qmtech, esp
+  check)  # LC (local + TOPO_LOCALCHECK) rounds=1 on bornhack, qmtech, esp; the L ladder again (fixed rev)
     for n in bornhack qmtech esp; do ( hzq run --threads 1 --name "LC-$n" -- bash $ROOT/tools/looplocal_job.sh task LC b $n; ) & sleep 1; done
+    for n in bornhack qmtech esp wiccon eprom; do ( hzq run --threads 1 --name "L-f-$n" -- bash $ROOT/tools/looplocal_job.sh task L f $n; ) & sleep 1; done
     wait; note "all done" ;;
   both)  # SH = L's copper (the shadow only observes), so L needs no own rounds=1 units
     gen
