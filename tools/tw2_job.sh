@@ -113,6 +113,13 @@ fpcheck() {  # the fuse pour check (TW2, qmtech 43 vs 44 forensics)
   sub 'let pour_check = opts.fuse_pour_check &&' 'let pour_check = false && opts.fuse_pour_check &&' | mut fp5_off $C --test tw2_fuse_pour
   note "fpcheck done"
 }
+flake() {  # the fuse pour tests repeated: alone (1 and default test threads) and next to the lib tests
+  cd $ROOT/engine; cargo test --release --no-run > $R/flake-build.log 2>&1 9>&-
+  for i in 1 2 3 4 5 6; do cargo test --release --test tw2_fuse_pour > $R/flake-a$i.log 2>&1 9>&-; note "flake alone $i rc $?"; done
+  for i in 1 2 3; do cargo test --release --test tw2_fuse_pour -- --test-threads 1 > $R/flake-s$i.log 2>&1 9>&-; note "flake serial $i rc $?"; done
+  for i in 1 2 3; do { cargo test --release --test tw2_metric > /dev/null 2>&1 & cargo test --release --test tw2_fuse_pour > $R/flake-l$i.log 2>&1; r=$?; wait; } 9>&-; note "flake loaded $i rc $r"; done
+  note "flake done"
+}
 case ${1:-} in
   task) shift; task "$@" ;;
   small) for n in esp eprom wiccon; do task $2 $n; done ;;
@@ -124,6 +131,8 @@ case ${1:-} in
   retest-in) retest ;;
   fpcheck) hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in; note "all done" ;;
   fpcheck-in) fpcheck ;;
+  flake) hzq run --threads 4 --name tw2-flake -- bash $ROOT/tools/tw2_job.sh flake-in; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ); note "all done" ;;
+  flake-in) flake ;;
   final) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1
     ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;
   ladder-fp) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-fpcheck -- bash $ROOT/tools/tw2_job.sh fpcheck-in ) & sleep 1; wait; note "all done" ;;

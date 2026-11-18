@@ -3668,6 +3668,12 @@ impl<'a> Drawer<'a> {
         ok
     }
 
+    /// Whether every handle of `wo` names a live item of the drawing's index, one per track
+    /// (the self-check after the fuse pour check's undo). O(handles).
+    pub fn handles_hold(&self, wo: &WireOut) -> bool {
+        wo.handles.iter().all(|&h| self.handles.get(h).is_some_and(|&(_, e)| self.ents.get(e).is_some_and(|en| en.live)))
+    }
+
     /// Undo of [`Drawer::refit_run`]s (the fuse pour check, [`super::fusepour`]): the tracks of
     /// `cur` leave the drawn copper and those of `saved` (the same wire before the refits) come
     /// back; returns `saved` with its new handles. Both have plain tracks behind their handles,

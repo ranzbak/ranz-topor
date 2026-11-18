@@ -103,7 +103,9 @@ fn undoing_every_fuse_move_gives_the_copper_without_the_fuse() {
     assert!(k >= 1 && n == k, "{l}");
     let f = line(&all, "fuse after drawing: ").expect("fuse line");
     assert!(f.starts_with("fuse after drawing: 0 trace ends moved"), "the fuse line counts the moves kept: {f}");
+    assert!(!all.warnings.iter().any(|w| w.contains("not in the drawing's index")), "{:?}", all.warnings.iter().filter(|w| w.starts_with("fuse")).collect::<Vec<_>>());
     let off = route(&m, &[("fuse_branches", serde_json::json!(false))], &[]);
-    assert_eq!(all.total_length_nm, off.total_length_nm);
+    let diag = |r: &RouteResult| -> Vec<String> { r.warnings.iter().filter(|w| w.starts_with("fuse") || w.starts_with("via reduction") || w.starts_with("octilinear polish") || w.starts_with("TopoR loop (") || w.starts_with("pour stitching")).map(|w| w.chars().take(300).collect()).collect() };
+    assert_eq!(all.total_length_nm, off.total_length_nm, "undo all:\n{:#?}\nfuse off:\n{:#?}", diag(&all), diag(&off));
     assert_eq!(copper(&all), copper(&off));
 }

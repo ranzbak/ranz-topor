@@ -6535,6 +6535,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 cur = left_of(&out);
             }
             let n_undone = live.iter().filter(|l| !**l).count();
+            // Self-check: the undone wires' tracks are back in the drawing's index.
+            let stale = moves.iter().enumerate().filter(|(i, (m, _))| !live[*i] && drawn.get(&m.w).is_some_and(|wo| !dr.handles_hold(wo))).count();
+            if stale > 0 {
+                warnings.push(format!("fuse pour check: {stale} undone fuse moves left wires whose tracks are not in the drawing's index (engine bug)"));
+            }
             if n_undone > 0 {
                 // The fuse line counts the moves kept (`fused` and `moves`: one entry per applied
                 // move, in the same order).
