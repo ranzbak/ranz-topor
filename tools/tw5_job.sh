@@ -5,6 +5,7 @@
 #   tw5_job.sh one <run>       one run; <run> = <cfg>:<board>[:<threads>]
 #   tw5_job.sh tests           targeted release tests (lib escape/layers, loop integration binaries)
 # Every board run: tools/route_board.sh (as the main baseline nd2b2-dcf4c0e), cpu clock 2400 s, optimize.runs=1, --no-png.
+# <board> = eprom|wiccon|esp|qmtech|bornhack, p-<pattern> (generated into $HZ_RUN_DIR/pat), q-<pattern> = p- with --declared-layers (In1.Cu routed).
 # cfg = <opts><rounds>[s<seed>]:
 #   opts  O = every TW5 option at its old value (must give main's copper), N = the TW5 defaults,
 #         Na/Nb/Nc/Nd/Ne = O with only that part on (a oscillation, b escape+take, c loop history, d float_wire, e no pre-loop P4)
@@ -18,7 +19,7 @@ W=scratch/boards/wiccon-2023/2d3063e70ed5/2023.kicad_pcb
 E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
 B=scratch/boards/bornhack2026/21c5f478f1af/bornhack2026-hardware.kicad_pcb
-board_path() { case $1 in eprom) echo $P;; wiccon) echo $W;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; p-*) echo $R/pat/${1#p-}/problem/${1#p-}.kicad_pcb;; esac; }
+board_path() { case $1 in eprom) echo $P;; wiccon) echo $W;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; p-*|q-*) echo $R/pat/${1#?-}/problem/${1#?-}.kicad_pcb;; esac; }
 VIA="via_pair_redundant via_pair_slide via_force_relocate branch_point_relocate branch_point_into_pad via_size_rule"
 gen() {  # the synthetic patterns (fit all, via approved 6, radii all) into $R/pat, as looplocal_job.sh
   [ -d $R/pat ] && return
@@ -62,6 +63,7 @@ one() {
     *) note "unknown cfg $c"; return ;;
   esac
   SETS+=(--set optimize.rounds=$n --set optimize.stable_patience=$n)
+  case $b in q-*) SETS+=(--declared-layers) ;; esac  # q-<pattern>: every declared signal layer routed (4-layer default: In1 gnd)
   [ "$seed" != 0 ] && SETS+=(--set optimize.seed=$seed)
   local out=$R/$c/$b; mkdir -p $out
   local t0=$(date +%s)
@@ -79,10 +81,46 @@ u() {  # name threads "lane1 runs" "lane2 runs" ...
   printf '%s\n' "$cmd" > $R/unit-$n.sh
   ( hzq run --threads $t --name $n -- bash $R/unit-$n.sh > $R/unit-$n.log 2>&1; note "unit $n rc $?" ) & sleep 1
 }
+mut() {  # name file test-args... ; the python snippet on stdin edits the file (as looplocal_job.sh)
+  local n=$1 f=$2; shift 2
+  cp $f $f.orig; python3 - $f; local pr=$?
+  if [ $pr -ne 0 ] || cmp -s $f $f.orig; then note "mutant $n: patch did not apply"; mv $f.orig $f; return; fi
+  ( cd $ROOT/engine && cargo test --release "$@" 9>&- > $R/mut-$n.log 2>&1 ); local rc=$?
+  mv $f.orig $f
+  if [ $rc -ne 0 ]; then note "mutant $n: killed"; else note "mutant $n: SURVIVED"; fi
+}
+sub() { cat <<EOF2
+import sys; p = sys.argv[1]; s = open(p).read(); a = '''$1'''; b = '''$2'''
+assert s.count(a) == 1, a; open(p, 'w').write(s.replace(a, b))
+EOF2
+}
+mutants() {  # the TW5 changed lines; each mutant against the tests that guard it
+  local E=$ROOT/engine/src/topo/escape.rs L=$ROOT/engine/src/topo/layers.rs C=$ROOT/engine/src/topo/core.rs
+  local UE=(--lib -- escape::) UL=(--lib -- layers::tests) IL=(--test loop_local) IT=(--test tw5_escape)
+  sub 't.need = t.cost(alive) * (1.0 / share - 1.0);' 't.need = 0.0;' | mut e1_first_wait $E "${UE[@]}"
+  sub 'self.need = w * (1.0 / self.share - 1.0);' 'self.need = w * (0.5 / self.share - 1.0);' | mut e2_share $E "${UE[@]}"
+  sub '*h *= self.fade;' '*h *= 1.0;' | mut e3_fade $E "${UE[@]}"
+  sub 'self.h[e] += (1.0 + d) / (2.0 + d);' 'self.h[e] += 0.5;' | mut e4_depth $E "${UE[@]}"
+  sub 'lo + (hi - lo) * b / (1.0 + b)' 'lo + (hi - lo) * b' | mut e5_amp $E "${UE[@]}"
+  sub 'd += usize::from(x[k] != y[k]);' 'd += 1;' | mut e6_diff $E "${UE[@]}"
+  sub 'if delta <= EPS {' 'if delta <= 1e9 {' | mut l1_walk_up $L "${UL[@]}"
+  sub 'let p4 = if cost(o, x, u, w, false) == 0.0 { 2 } else { 1 };' 'let p4 = if cost(o, x, u, w, false) == 0.0 { 2 } else { 0 };' | mut l2_via_edges $L "${UL[@]}"
+  sub 'if !reaches0 && rng.gen_range(0..2u8) == 1 {' 'if false {' | mut l3_parts $L "${UL[@]}"
+  sub 'rep.walked = g0.plateau_walk(&mut o, p.walk.saturating_mul(rep.domains.max(1)), p.ties);' 'let _ = g0;' | mut l4_two_walk $L "${IL[@]}" the_layering_walk
+  sub '        if c <= best + EPS {
+            rep.walked' '        if false {
+            rep.walked' | mut l5_n_pair $L "${IL[@]}" the_layering_walk
+  sub 'cs.layer_kept += usize::from(self.take_layers(lr, seed));' 'let _ = lr;' | mut c1_take $C "${IL[@]}" layering_escapes
+  sub 'if self.tw5.escape && self.tw5.throttle.due() && !stop() {' 'if self.tw5.escape && !stop() {' | mut c2_throttle $C "${IL[@]}" escapes
+  sub 'let p4_rounds_max = if opts.opt_loop == "topor" && !opts.preloop_p4 { 0 } else { opts.reroute_rounds };' 'let p4_rounds_max = opts.reroute_rounds;' | mut c3_preloop $C "${IT[@]}"
+  sub '                self.history_step(cs);
+                cs.layer_s += tl.elapsed().as_secs_f64();' '                cs.layer_s += tl.elapsed().as_secs_f64();' | mut c4_history $C "${IL[@]}" layering_escapes
+  note "mutants done"
+}
 tests() {
   cd $ROOT/engine
   cargo test --release --lib -- escape:: layers::tests 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $? $(grep 'test result' $R/cargo-lib.log | tail -1)"
-  cargo test --release --test topo_p5_loop --test loop_local --test topo_g0 9>&- > $R/cargo-int.log 2>&1; note "cargo int rc $? $(grep -c 'test result: ok' $R/cargo-int.log) ok binaries"
+  cargo test --release --test topo_p5_loop --test loop_local --test topo_g0 --test tw5_escape -- --nocapture 9>&- > $R/cargo-int.log 2>&1; note "cargo int rc $? $(grep -c 'test result: ok' $R/cargo-int.log) ok binaries"
   cd $ROOT
 }
 case ${1:-} in
@@ -94,6 +132,18 @@ case ${1:-} in
     u q 4 "Or1:qmtech" "Nr1:qmtech" "Nr16:qmtech:2"
     u e 4 "Or1:esp Or1:wiccon Or1:eprom" "Nr1:esp Nr1:wiccon Nr1:eprom" "Nr16:esp" "Nr16:wiccon Nr16:eprom"
     ( hzq run --threads 2 --name tw5-tests -- bash $ROOT/tools/tw5_job.sh tests > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
+    wait; note "all done" ;;
+  mutants) mutants ;;
+  r3)
+    # Round 3: tests (new tw5_escape + loop_local tests), mutants, inner_layer_room with its declared layers routed
+    # (the pattern's KiCad types are all "signal", so topor's 4-layer default makes In1 gnd), O vs N, seeds 0-9.
+    gen
+    ( hzq run --threads 4 --name tw5-tests -- bash -c "bash $ROOT/tools/tw5_job.sh tests; bash $ROOT/tools/tw5_job.sh mutants" > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
+    lo=""; ln=""
+    for s_ in 0 1 2 3 4 5 6 7 8 9; do lo+="Or16s$s_:q-inner_layer_room "; ln+="Nr16s$s_:q-inner_layer_room "; done
+    u i 2 "$lo" "$ln"
+    u q 4 "Nr16:qmtech:2" "Nr16s1:esp Nr16s2:esp" "Nr16s3:esp Nr16s4:esp"
+    u e 2 "Nr16:esp Nr16:wiccon Nr16:eprom" "Nr1:esp Nr1:wiccon Nr1:eprom"
     wait; note "all done" ;;
   r2)
     # Round 2: O vs N at 16 cycles on the ladder (esp 5 seeds), the patterns O vs N at 16 cycles, targeted tests.

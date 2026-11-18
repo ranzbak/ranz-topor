@@ -188,6 +188,8 @@ pub struct CycleStats {
     pub esc_vias_before: usize,
     pub esc_vias_after: usize,
     pub esc_viol_up: usize,
+    /// TW5 (b): domains the plateau walks flipped (a domain may count more than once).
+    pub esc_walked: usize,
     /// TW5 (d) floating up per wire: tried / kept.
     pub float_w_tried: usize,
     pub float_w_kept: usize,
@@ -232,6 +234,7 @@ impl CycleStats {
         self.esc_vias_before += o.esc_vias_before;
         self.esc_vias_after += o.esc_vias_after;
         self.esc_viol_up += o.esc_viol_up;
+        self.esc_walked += o.esc_walked;
         self.float_w_tried += o.float_w_tried;
         self.float_w_kept += o.float_w_kept;
         self.hist_updates += o.hist_updates;

@@ -652,8 +652,35 @@ fn layering_escapes_change_free_positions_deterministically() {
         assert!(n("escapes") > 0.0 && n("free_positions") > 0.0, "{n_layers} layers: {e}");
         assert!(n("changed_positions") > 0.0, "{n_layers} layers, the escapes moved no free position: {e}");
         assert!(n("work_share") <= 0.35 + 1e-9, "{n_layers} layers: {e}");
+        // TW5 (c): the loop history is updated after every escape's whole-board measure.
+        assert_eq!(n("history_updates"), n("escapes"), "{n_layers} layers: {e}");
         assert_eq!(e, escape_json(&m, &loop_opts(r#""loop_judge": "local""#)), "{n_layers} layers: deterministic per seed");
         let t = escape_json(&m, &loop_opts(r#""loop_judge": "local", "escape": "ties""#));
         assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, escape = ties: {t}");
+    }
+}
+
+/// TW5 (b) at the layering itself: `LayerParams.walk` > 0 with random ties moves the whole-board
+/// layering to another one (2 layers: the plateau walk on the domain graph; 4 layers: one random
+/// layer pair re-solved with the walk) for some seeds, the same per seed. (The walk keeps the
+/// domain graph's via optimum: escape::/layers:: unit tests; here the capacity refinement follows.)
+#[test]
+fn the_layering_walk_moves_to_other_layerings_per_seed() {
+    for n_layers in [2, 4] {
+        let (_m, b, st) = laid(n_layers);
+        let smd = |o: usize| b.smd_layer(o);
+        let base = LayerParams { via_between: true, via_site_r: 0.5e6, ..LayerParams::default() };
+        let (mut moved, mut walked) = (0, 0);
+        for seed in 1..=24u64 {
+            let plain = layers::assign(&st, &smd, &LayerParams { ties: seed, ..base });
+            let p = LayerParams { ties: seed, walk: 4, ..base };
+            let w = layers::assign(&st, &smd, &p);
+            assert_eq!(w.events, layers::assign(&st, &smd, &p).events, "{n_layers} layers seed {seed}: deterministic");
+            walked += usize::from(w.walked > 0);
+            moved += usize::from(w.events != plain.events);
+            eprintln!("{n_layers} layers seed {seed}: walked {}, vias {} (plain {})", w.walked, w.vias, plain.vias);
+        }
+        eprintln!("{n_layers} layers: walked {walked} of 24, other layering {moved} of 24");
+        assert!(walked > 0 && moved > 0, "{n_layers} layers: walked {walked}, moved {moved} of 24");
     }
 }

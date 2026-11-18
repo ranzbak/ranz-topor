@@ -406,7 +406,7 @@ impl DomainGraph {
     /// the graph that does not reach node 0 (no SMD pad, no one-layer triangle fixes it) is
     /// flipped as a whole with probability 1/2: every stretch of its wires on the other layer, the
     /// vias the same (Polubasov 2001 p. 4: only the parity along a wire counts). Then `tries`
-    /// cluster moves: a random domain, grown across the edges that carry no via under `o` with
+    /// cluster moves: a random domain, grown to a random size m (probability 2^-m) across the edges that carry no via under `o` with
     /// probability 1/2 each and across the via edges with 1/4 (node 0 never; any other optimum
     /// differs from `o` by connected parts with change 0 each, so every optimum stays reachable),
     /// is flipped when that adds no via (the cut value
@@ -459,10 +459,17 @@ impl DomainGraph {
         let mut in_s = vec![false; n];
         for _ in 0..tries {
             let v = free_nodes[rng.gen_range(0..free_nodes.len())];
+            // The cluster's size: m with probability 2^-m (1 half the time, any size possible). A fixed
+            // growth probability per edge is supercritical on a board's graph (degree about 4): the
+            // clusters swell to whole parts, whose flip almost always adds vias.
+            let mut m = 1usize;
+            while m < n && rng.gen_range(0..2u8) == 1 {
+                m += 1;
+            }
             let mut s = vec![v];
             in_s[v] = true;
             let mut i = 0;
-            while i < s.len() {
+            while i < s.len() && s.len() < m {
                 let x = s[i];
                 i += 1;
                 for (&u, &w) in &self.adj[x] {
@@ -471,7 +478,7 @@ impl DomainGraph {
                     // whose difference holds a via inside are out of reach (any optimum differs from `o` by
                     // connected parts with change 0 each).
                     let p4 = if cost(o, x, u, w, false) == 0.0 { 2 } else { 1 };
-                    if u != 0 && !in_s[u] && rng.gen_range(0..4u8) < p4 {
+                    if s.len() < m && u != 0 && !in_s[u] && rng.gen_range(0..4u8) < p4 {
                         in_s[u] = true;
                         s.push(u);
                     }

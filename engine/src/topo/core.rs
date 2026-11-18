@@ -4408,7 +4408,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// via-optimal layering of the whole board (the plateau walk,
             /// [`layers::DomainGraph::plateau_walk`]), taken as it comes (`escape_take`); the wires
             /// whose via count rose go to `front`, laid again first; then the history update.
-            fn escape(&mut self, c: &CycleCtx, cs: &mut CycleStats, front: &mut std::collections::VecDeque<WireId>) {
+            fn escape(&mut self, c: &CycleCtx, cs: &mut CycleStats, front: &mut std::collections::VecDeque<WireId>, fronted: &mut Vec<bool>) {
                 self.resync();
                 self.tw5.n_esc += 1;
                 let seed = super::optimise::mix_seed(c.seed, 0xE5C0_0000 + self.tw5.n_esc) | 1;
@@ -4416,6 +4416,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let (now0, v0, p0) = (self.st.layers_now.clone(), self.lr.vias, self.pred.count);
                 let tl = Instant::now();
                 let lr = (self.tw5.assign_e)(self.st, seed);
+                cs.esc_walked += lr.walked;
                 cs.layer_kept += usize::from(self.take_layers(lr, seed));
                 cs.layer_runs += 1;
                 cs.escapes += 1;
@@ -4437,7 +4438,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let vias1 = self.via_counts();
                 for w in 0..self.st.wires.len() {
                     if let Some(&ci) = self.wire_conn.get(w).filter(|&&ci| ci != usize::MAX && self.st.wires[w].alive) {
-                        if vias1.get(&ci).copied().unwrap_or(0) > vias0.get(&ci).copied().unwrap_or(0) && !front.contains(&w) {
+                        // Once per cycle per wire (the re-lay counter's role, Polubasov 2010 fig. 11):
+                        // the front cannot refill forever, the sweep ends within 2 x alive re-lays.
+                        if fronted.len() <= w {
+                            fronted.resize(w + 1, false);
+                        }
+                        if vias1.get(&ci).copied().unwrap_or(0) > vias0.get(&ci).copied().unwrap_or(0) && !fronted[w] {
+                            fronted[w] = true;
                             front.push_back(w);
                         }
                     }
@@ -4727,6 +4734,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
                 let mut front: std::collections::VecDeque<WireId> = std::collections::VecDeque::new();
+                let mut fronted: Vec<bool> = vec![false; self.st.wires.len()];
                 let mut j = 0usize;
                 loop {
                     let (w, rose) = match front.pop_front() {
@@ -4763,7 +4771,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let units = self.work_since(k0);
                     self.tw5.throttle.add(units);
                     if self.tw5.escape && self.tw5.throttle.due() && !stop() {
-                        self.escape(c, &mut cs, &mut front);
+                        self.escape(c, &mut cs, &mut front, &mut fronted);
                     }
                 }
                 if self.dbg {
@@ -5313,6 +5321,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "vias_before": rep.stats.esc_vias_before,
                 "vias_after": rep.stats.esc_vias_after,
                 "viol_up": rep.stats.esc_viol_up,
+                "walked": rep.stats.esc_walked,
+                "relaid": [rep.stats.relaid_kept, rep.stats.relaid],
                 "work_share": (esc_share * 1e4).round() / 1e4,
                 "work_units": [(esc_work.0 * 10.0).round() / 10.0, (esc_work.1 * 10.0).round() / 10.0],
                 "layer_s": (rep.stats.layer_s * 1e3).round() / 1e3,
