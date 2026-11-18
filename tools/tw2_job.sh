@@ -4,6 +4,7 @@
 #                              wiccon (1 thread; <= 4 waiting units per job: 2 CFGs per job), then wait
 #   tw2_job.sh tests           one hzq unit (4 threads): cargo test --release, clippy, targeted pytest, TW2 mutants
 #   tw2_job.sh both CFG...     ladder CFG... and tests in one job
+#   tw2_job.sh retest          one hzq unit (4 threads): clippy (log kept), the TW2 tests, mutants j3 and d1
 #   tw2_job.sh task CFG BOARD  one run (inside a unit)
 # CFG: D (the tree's defaults; main = sequential, tw2-metric = erbs joint), J (realise erbs), S (realise sequential),
 #      JF / SF (J / S with optimize.allow_violations = false: no never-drop forcing).
@@ -61,7 +62,7 @@ EOF
 tests() {
   cd $ROOT/engine
   { timeout 5400 cargo test --release --no-fail-fast 2>&1 9>&-; echo "cargo test rc $?"
-    cargo clippy --release --all-targets 2>&1 9>&- | grep -E "^ +--> " | sort | uniq; echo "clippy rc ${PIPESTATUS[0]}"
+    cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; echo "clippy rc $?"; grep -E "^ +--> |^error" $R/clippy.log | sort | uniq
   } > $R/tests.log
   grep -E "test result|rc |FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
   cd $ROOT; CI=1 python -m pytest -q tests/plugin/test_postrun.py tests/plugin/test_config.py tests/plugin/test_config_docs.py \
@@ -78,12 +79,24 @@ tests() {
   sub 'realise: "erbs".into(),' 'realise: "sequential".into(),' | mut m1_default $M --test tw2_metric
   note "tests done"
 }
+retest() {  # targeted: the tests and mutants a fix round touched, clippy with its log
+  cd $ROOT/engine
+  cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; note "clippy rc $?: $(grep -cE '^(warning|error)' $R/clippy.log) warning/error lines"
+  cargo test --release --lib topo::joint --test tw2_metric --test topo_m3_patterns --test topo_m3_class_keep > $R/retest.log 2>&1 9>&-
+  note "retest rc $?"; grep -E "test result|FAILED|panicked" $R/retest.log | while read -r l; do note "retest: $l"; done
+  local J=$ROOT/engine/src/topo/joint.rs D=$ROOT/engine/src/topo/draw.rs
+  sub 'if !stat[bi] && !b.octi {' 'if false {' | mut j3_octi_rescue $J --test tw2_metric
+  sub '            self.release_bands(w);' '' | mut d1_release $D --test tw2_metric
+  note "retest done"
+}
 case ${1:-} in
   task) shift; task "$@" ;;
   small) for n in esp eprom wiccon; do task $2 $n; done ;;
   ladder) shift; ladder "$@"; wait; note "all done" ;;
   tests) hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in; note "all done" ;;
   tests-in) tests ;;
+  retest) hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in; note "all done" ;;
+  retest-in) retest ;;
   both) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1; wait; note "all done" ;;
   *) sed -n 2,12p "$0"; exit 2 ;;
 esac
