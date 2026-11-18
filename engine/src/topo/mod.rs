@@ -47,6 +47,7 @@ pub mod pack;
 pub mod padend;
 pub mod state;
 pub mod stitch;
+pub mod table;
 pub mod tidy;
 pub mod stats;
 pub mod tree;

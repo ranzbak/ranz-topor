@@ -191,7 +191,7 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
     let t0 = Instant::now();
     let n = opts.runs.max(1);
-    let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
+    let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick).with_best_penalty(opts.best_penalty);
     ctl.update("setup", 0, 0, 0, 0, 0.0);
     ctl.with_progress(|p| {
         p.runs = n as u32;
@@ -226,7 +226,10 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         r.converged = false;
         return r;
     }
-    let coord = Coord::new(ctl, n, obj, opts.draw_candidates);
+    let mut coord = Coord::new(ctl, n, obj, opts.draw_candidates);
+    if opts.opt_loop == "topor" {
+        coord = coord.with_table(super::table::SharedTable::new(n, opts.variants, obj, opts.loop_stable_window.max(1)));
+    }
     let (mut outs, skipped) = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
     if outs.is_empty() {
         // M2.TL (fail fast): Cancel / OK before any run kept a plan: nothing to draw, said loudly
@@ -246,6 +249,13 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
             pick = k;
         }
     }
+    // TW3: the four bests of the one variant table, drawn: compared at 100 % drawn by the same
+    // roles ([`super::archive::bests`] on the drawn criteria); `[optimize] pick` names the one that
+    // goes to KiCad ("best" = the overall best, the pick above).
+    let (bests_json, bests_line, role_result) = four_bests(&outs, &obj, &opts.pick);
+    if let Some((k, _)) = role_result.as_ref() {
+        pick = *k;
+    }
     let lines: Vec<String> = outs.iter().map(|o| o.line.clone()).collect();
     let cycle_lines: Vec<String> = outs.iter().map(|o| o.cycles_line.clone()).collect();
     // OK vs Cancel = what the first stop request was, at the press ([`RunControl::request_stop`]):
@@ -264,8 +274,19 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     // Every cycle's variants were stitched before they were judged (pour pieces still cut off
     // count as errors), so the picked board is the one the progress showed.
     let pick_k = outs[pick].k;
-    let mut best = outs.swap_remove(pick).result;
+    let mut best = match role_result {
+        Some((_, r)) => r,
+        None => outs.swap_remove(pick).result,
+    };
     best.warnings.extend(cycle_lines);
+    if let Some(l) = bests_line {
+        best.warnings.push(l);
+    }
+    if let Some(t) = coord.gate.table.as_ref() {
+        let (rows, offers, _) = t.summary();
+        best.warnings.push(format!("TopoR variant table (one for all {n} runs, TW3; committed in cycle order): {offers} offers; {}", table_text(&rows, &obj)));
+    }
+    best.bests = bests_json;
     if n > 1 {
         let skipped_txt = if skipped.is_empty() {
             String::new()
@@ -320,6 +341,59 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     }
     best.limit = limit_report(ctl, opts, &mut best);
     best
+}
+
+/// TW3: the drawn rows of the four bests over all runs ([`RunOut::rows_drawn`]): their JSON for
+/// `result.json` (`bests`), the report line, and when `pick` names a role other than the overall
+/// best, the run index (into `outs`) and the result of the drawn row holding that role among the
+/// drawn rows. The overall best is the objective's pick of the drawn variants (TopoR 6.3 manual pp.
+/// 72-73: violations first, then length at `mm_per_via`). O(rows).
+fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::Value>, Option<String>, Option<(usize, RouteResult)>) {
+    use super::archive::{bests, Role};
+    let rows: Vec<(usize, &Assigned, &Criteria, &RouteResult)> = outs.iter().enumerate().flat_map(|(i, o)| o.rows_drawn.iter().map(move |(a, c, r)| (i, a, c, r))).collect();
+    if rows.is_empty() {
+        return (Vec::new(), None, None);
+    }
+    let cs: Vec<&Criteria> = rows.iter().map(|r| r.2).collect();
+    let db = bests(&cs, obj);
+    let role = Role::of_pick(pick);
+    let ri = Role::ALL.iter().position(|&r| r == role).expect("role");
+    let applied = db[ri];
+    let drawn_roles = |j: usize| -> Vec<&'static str> { Role::ALL.iter().zip(db).filter(|(_, b)| *b == Some(j)).map(|(r, _)| r.name()).collect() };
+    let crit_json = |c: &Criteria| serde_json::json!({"errors": c.errors, "shorts": c.shorts, "open": c.open, "violations": c.violations, "vias": c.vias, "length_mm": (c.length_mm * 1e3).round() / 1e3, "shrinkages": c.shrinkages, "penalty": (c.penalty * 1e3).round() / 1e3});
+    let json: Vec<serde_json::Value> = rows
+        .iter()
+        .enumerate()
+        .map(|(j, (i, a, c, _))| {
+            serde_json::json!({"roles": a.roles.iter().map(|r| r.name()).collect::<Vec<_>>(), "drawn_roles": drawn_roles(j), "row": a.label, "run": outs[*i].k + 1, "origin_run": a.row.run + 1, "predicted": crit_json(&a.crit), "drawn": crit_json(c), "applied": applied == Some(j)})
+        })
+        .collect();
+    let line = format!(
+        "four bests of the variant table drawn ([drawing] candidates; [optimize] pick = \"{}\" applied): {}",
+        role.name(),
+        rows.iter()
+            .enumerate()
+            .map(|(j, (i, a, c, _))| format!(
+                "[{}{}] {} (run {}): predicted {} errors / {} vias / {:.1} mm, drawn {} errors ({} shorts, {} open) / {} vias / {:.1} mm{}",
+                if applied == Some(j) { "APPLIED " } else { "" },
+                a.roles.iter().map(|r| r.name()).collect::<Vec<_>>().join(", "),
+                a.label,
+                outs[*i].k + 1,
+                a.crit.errors,
+                a.crit.vias,
+                a.crit.length_mm,
+                c.errors,
+                c.shorts,
+                c.open,
+                c.vias,
+                c.length_mm,
+                { let d = drawn_roles(j); if d.is_empty() { String::new() } else { format!(", drawn best: {}", d.join(", ")) } }
+            ))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let role_result = (role != Role::Overall).then_some(applied).flatten().map(|j| (rows[j].0, rows[j].3.clone()));
+    (json, Some(line), role_result)
 }
 
 /// M2.TL: the start of the loud error when Cancel / OK came before any plan was kept.
@@ -564,6 +638,9 @@ pub const DRAWING_CUT_LINE: &str = "WARNING: the drawing was cut by the hard tim
 struct RunOut {
     /// The run (0-based).
     k: usize,
+    /// TW3: the rows of the four bests this run drew, each with the better of its drawn variants
+    /// (pour-stitched, judged by the objective) and that variant's result.
+    rows_drawn: Vec<(Assigned, Criteria, RouteResult)>,
     result: RouteResult,
     crit: Criteria,
     /// Cancel or the time budget ended it before its routes were stable.
@@ -614,6 +691,34 @@ struct DrawGate {
     cv: std::sync::Condvar,
     /// The runs that compute at once (and the refinements' spare lanes).
     slots: std::sync::Arc<Slots>,
+    /// TW3: the call's one variant table (`[optimize] loop = "topor"`); its four bests are drawn
+    /// ([`DrawGate::assign`]). `None`: the gate picks runs by their own picks (before TW3).
+    table: Option<std::sync::Arc<super::table::SharedTable<LoopVar>>>,
+}
+
+/// TW3: a run's door to the shared table ([`Shared`](super::optimise::Shared)): its index, its
+/// pre-loop key, and the compute slot it gives back while it waits at a sync point.
+struct Port<'g> {
+    table: &'g super::table::SharedTable<LoopVar>,
+    k: usize,
+    compat: u64,
+    slots: &'g Slots,
+}
+
+impl super::optimise::Shared<LoopVar> for Port<'_> {
+    fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: LoopVar, fp: u64, restarted: bool) {
+        let row = super::table::Row { var: std::sync::Arc::new(var), run: self.k, cycle, gen, fp, compat: self.compat };
+        self.table.offer(self.k, cycle, label, crit, row, restarted);
+    }
+    fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::table::View<LoopVar>> {
+        self.table.sync(self.k, cycle, stop, &|| self.slots.release(), &|| self.slots.acquire())
+    }
+    fn end(&self) {
+        self.table.end(self.k);
+    }
+    fn me(&self) -> (usize, u64) {
+        (self.k, self.compat)
+    }
 }
 
 /// A counting semaphore: at most `n` runs compute at once (the others' threads wait idle, so the
@@ -763,14 +868,78 @@ struct GateState {
     offered: BTreeMap<usize, Criteria>,
     /// The runs that draw, once decided.
     decided: Option<Vec<usize>>,
+    /// TW3: the offering runs' pre-loop keys, the rows each run draws (once decided) and the rows
+    /// of the four bests no run could draw (no run with the row's pre-loop key; said in the report).
+    compat: BTreeMap<usize, u64>,
+    rows: Option<BTreeMap<usize, Vec<Assigned>>>,
+    undrawable: usize,
 }
 
 impl DrawGate {
     fn new(n: usize, quota: usize, slots: usize) -> DrawGate {
         DrawGate {
-            st: std::sync::Mutex::new(GateState { quota: quota.max(1), open: (0..n).collect(), offered: BTreeMap::new(), decided: None }),
+            st: std::sync::Mutex::new(GateState { quota: quota.max(1), open: (0..n).collect(), offered: BTreeMap::new(), decided: None, compat: BTreeMap::new(), rows: None, undrawable: 0 }),
             cv: std::sync::Condvar::new(),
             slots: std::sync::Arc::new(Slots::new(slots)),
+            table: None,
+        }
+    }
+
+    /// TW3: run `k` (pre-loop key `compat`, its own pick `crit`) ended its loop; waits until no
+    /// run can offer any more, then the distinct rows of the table's four bests (TopoR 6.3 manual
+    /// pp. 72-73: the user picks among the table's variants; here they are drawn and compared at
+    /// 100 % drawn) are given out, `[drawing] candidates` of them (after Cancel / OK the overall
+    /// best only): each row to its own run when that run offered, else to the offering run with
+    /// the same pre-loop key that has the fewest rows (ties: the lower run). Returns the rows run
+    /// `k` draws, in role order (empty: none). O(runs x rows) + the wait.
+    fn assign(&self, k: usize, compat: u64, crit: Criteria, obj: &Objective, cancel: bool) -> Vec<Assigned> {
+        self.slots.release();
+        struct Retake<'s>(&'s Slots);
+        impl Drop for Retake<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() { self.0.take_now() } else { self.0.acquire() }
+            }
+        }
+        let _retake = Retake(&self.slots);
+        const POISONED: &str = "TW3 draw gate: its lock is poisoned (a run panicked while the four bests were given out)";
+        let mut g = self.st.lock().expect(POISONED);
+        g.open.remove(&k);
+        g.offered.insert(k, crit);
+        g.compat.insert(k, compat);
+        self.cv.notify_all();
+        while g.rows.is_none() && !g.open.is_empty() {
+            g = self.cv.wait_timeout(g, std::time::Duration::from_millis(200)).expect(POISONED).0;
+        }
+        if g.rows.is_none() {
+            let table = self.table.as_ref().expect("assign needs the table");
+            let mut bests = table.final_bests();
+            bests.truncate(if cancel { 1 } else { g.quota });
+            let mut out: BTreeMap<usize, Vec<Assigned>> = BTreeMap::new();
+            let mut undrawable = 0;
+            for (roles, label, c, row) in bests {
+                let cands: Vec<usize> = g.compat.iter().filter(|(_, &key)| key == row.compat).map(|(&r, _)| r).collect();
+                let who = if cands.contains(&row.run) { Some(row.run) } else { cands.iter().copied().min_by_key(|r| (out.get(r).map_or(0, Vec::len), *r)) };
+                match who {
+                    Some(r) => out.entry(r).or_default().push(Assigned { roles, label, crit: c, row }),
+                    None => undrawable += 1,
+                }
+            }
+            // a run with its own row draws it first; the rows of one run keep the role order
+            g.rows = Some(out);
+            g.undrawable = undrawable;
+            let _ = obj;
+        }
+        g.rows.as_ref().and_then(|m| m.get(&k).cloned()).unwrap_or_default()
+    }
+
+    /// TW3: why a run draws nothing ([`DrawGate::assign`] gave it no row). O(runs).
+    fn why_not(&self, cancel: bool) -> String {
+        let g = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runs: Vec<String> = g.rows.as_ref().map(|m| m.keys().map(|r| (r + 1).to_string()).collect()).unwrap_or_default();
+        if cancel {
+            format!("after Cancel / OK only the overall best of the variant table is drawn, by run {}", runs.join(", "))
+        } else {
+            format!("[drawing] candidates = {}: the rows of the variant table's four bests are drawn by run(s) {}", g.quota, runs.join(", "))
         }
     }
 
@@ -782,6 +951,10 @@ impl DrawGate {
         let mut g = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         g.open.remove(&k);
         drop(g);
+        // TW3: a run that withdraws holds no cycle of the table back
+        if let Some(t) = &self.table {
+            t.end(k);
+        }
         self.cv.notify_all();
     }
 
@@ -909,6 +1082,12 @@ enum RoundEnd<'s> {
 impl<'a> Coord<'a> {
     fn new(ctl: &'a RunControl, n: usize, obj: Objective, candidates: usize) -> Coord<'a> {
         Coord { ctl, obj, st: std::sync::Mutex::new(vec![RunState::default(); n]), snap: std::sync::Mutex::new(None), gate: DrawGate::new(n, candidates, rayon::current_num_threads()), judge: std::sync::Mutex::new(None) }
+    }
+
+    /// TW3: the call's one variant table (`[optimize] loop = "topor"`). O(1).
+    fn with_table(mut self, table: super::table::SharedTable<LoopVar>) -> Coord<'a> {
+        self.gate.table = Some(std::sync::Arc::new(table));
+        self
     }
 
     /// cancel-fix: note a run's pick with criteria `crit` (`complete`: of a cycle not cut short)
@@ -1149,6 +1328,9 @@ struct Run {
     /// Router time of its cycles (s).
     busy_s: f64,
     done: bool,
+    /// TW3: rows of the four bests this run still draws (draw-only rounds) and the ones it drew.
+    queue: Vec<Assigned>,
+    rows_drawn: Vec<(Assigned, Criteria, RouteResult)>,
 }
 
 impl Run {
@@ -1171,6 +1353,8 @@ impl Run {
             picked_at: 0,
             busy_s: 0.0,
             done: false,
+            queue: Vec::new(),
+            rows_drawn: Vec::new(),
         }
     }
 
@@ -1189,7 +1373,16 @@ impl Run {
         let _gate = topor.then(|| GateGuard(&coord.gate, self.k));
         // C0: `[run] stop_after = "plan"` plans one cycle (the next would need the drawing's feedback).
         let plan_only = cycle > 1 && opts.stop_after == "plan";
-        if plan_only || cycle > opts.topo_rounds.max(1) || (cycle > 1 && (ctl.is_cancelled() || cancelled() || over_budget)) {
+        // TW3: a row of the four bests still to draw (draw-only round); Cancel / OK or the limit
+        // end the run instead (the rows drawn so far stay).
+        let draw_row = if topor && cycle > 1 && !self.queue.is_empty() && !(ctl.is_cancelled() || cancelled() || over_budget) { Some(self.queue.remove(0)) } else { None };
+        if topor && cycle > 1 && draw_row.is_none() {
+            // TW3: the rows not drawn (Cancel / OK, the limit) stay undrawn; the run's flags stay.
+            self.queue.clear();
+            self.done = true;
+            return;
+        }
+        if draw_row.is_none() && (plan_only || cycle > opts.topo_rounds.max(1) || (cycle > 1 && (ctl.is_cancelled() || cancelled() || over_budget))) {
             self.time_hit = !plan_only && cycle <= opts.topo_rounds.max(1) && self.stable_at.is_none();
             self.done = true;
             return;
@@ -1232,7 +1425,10 @@ impl Run {
                 r.stable |= l.stable;
             })
         };
-        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj, &live));
+        let fresh = Memory::default();
+        let (mut ro, h2, mem2) = route_round(model, &o2, ctl, &hv, if draw_row.is_some() { &fresh } else { &self.mem }, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj, &live), draw_row.as_ref());
+        let drew = ro.drew.take();
+        self.queue.extend(std::mem::take(&mut ro.extra));
         self.cycles = cycle;
         self.mem = mem2;
         for (e, l, r) in h2 {
@@ -1363,18 +1559,32 @@ impl Run {
             // variants and KiCad found the GND pieces open).
             let empty = self.arch.items.is_empty();
             let RoundOut { result, crit, pre, .. } = ro;
+            // TW3: the row's drawn value = the better of its drawn variants (each pour-stitched),
+            // by the objective; TW2's further drawn variants are more sources of the same row.
+            let mut row_best: Option<(Criteria, RouteResult)> = None;
+            let mut note_row = |c: Criteria, r: &RouteResult| {
+                if drew.is_some() && row_best.as_ref().is_none_or(|(b, _)| obj.better(&c, b)) {
+                    row_best = Some((c, r.clone()));
+                }
+            };
+            let tag = drew.as_ref().map(|d| format!(" (table row {}: {})", d.label, d.roles.iter().map(|r| r.name()).collect::<Vec<_>>().join(", "))).unwrap_or_default();
             if let Some((c, r)) = pre.filter(|_| !cancel_cut) {
                 let (r, c) = stitched(r, c);
                 if !past() || empty {
                     note_judged(c, r.routed, true);
-                    self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
+                    note_row(c, &r);
+                    self.arch.offer(Variant { label: format!("round {cycle} as drawn{tag}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
                 }
             }
             let (r, c) = stitched(result, crit);
             (cyc_err, cyc_viol) = (c.errors, c.violations);
             if !past() || self.arch.items.is_empty() {
                 note_judged(c, r.routed, false);
-                self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
+                note_row(c, &r);
+                self.arch.offer(Variant { label: format!("round {cycle}{tag}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
+            }
+            if let (Some(d), Some((c, r))) = (drew.clone(), row_best) {
+                self.rows_drawn.push((d, c, r));
             }
             cycle_stitch_cut = stitch_cut.get();
         }
@@ -1428,6 +1638,13 @@ impl Run {
         if std::env::var_os("TOPO_TIMES").is_some() {
             eprintln!("[topo run {} cycle {cycle}] cycle: {:.3} s", self.k + 1, t.elapsed().as_secs_f64());
         }
+        if topor && cycle > 1 {
+            // TW3 draw-only round: the loop's flags are those of the first round.
+            self.draw_cut |= interrupted || cycle_stitch_cut;
+            self.time_hit |= interrupted;
+            self.done = self.queue.is_empty();
+            return;
+        }
         if topor {
             // The loop's own end says whether the run was stable or the time limit cut it.
             if let Some(e) = loop_end {
@@ -1442,7 +1659,7 @@ impl Run {
             // The loop's one drawing (draw once): the limit cut its traces / via reduction
             // (`interrupted`; a Cancel cuts nothing of it, `draw_through`) or its pour stitching.
             self.draw_cut = interrupted || cycle_stitch_cut;
-            self.done = true;
+            self.done = self.queue.is_empty();
             coord.report(self.k, |r| r.stable = loop_end.is_some_and(|e| e.stable));
             return;
         }
@@ -1468,7 +1685,7 @@ impl Run {
 
     /// The run's result: its archive's pick, with the variant table and its cycle line; for a run
     /// that Cancel / the time limit ended before it had a result (cancel-fix), why.
-    fn finish(self, opts: &Options, coord: &Coord) -> Result<RunOut, (usize, String)> {
+    fn finish(mut self, opts: &Options, coord: &Coord) -> Result<RunOut, (usize, String)> {
         let obj = coord.obj;
         let Some(pick) = self.arch.pick(&obj) else {
             coord.report(self.k, |r| r.done = true);
@@ -1510,7 +1727,7 @@ impl Run {
             self.picked_at,
             self.busy_s
         );
-        Ok(RunOut { k: self.k, result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, draw_cut: self.draw_cut, stable: self.stable_at.is_some(), line, cycles_line })
+        Ok(RunOut { k: self.k, rows_drawn: std::mem::take(&mut self.rows_drawn), result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, draw_cut: self.draw_cut, stable: self.stable_at.is_some(), line, cycles_line })
     }
 }
 
@@ -1646,6 +1863,70 @@ struct RoundOut {
     /// cut a planning step, and the drawing of the kept plan is not cut, its pour stitching
     /// neither (verify-m2c 5: the stitching carries the drawing's decision, not its own).
     draw_exempt: bool,
+    /// TW3: the row of the shared table this round drew, and the rows of the four bests this run
+    /// draws next in draw-only rounds.
+    drew: Option<Assigned>,
+    extra: Vec<Assigned>,
+}
+
+/// One topological variant of the TopoR loop: the routed state, the wire -> connection map, the
+/// layering, the connections placed without a legal path, the reroute counters and the predicted
+/// violations of the layering; TW3: what its run decided before the loop ([`PreLoop`]).
+#[derive(Clone)]
+struct LoopVar {
+    topo: super::state::Topology,
+    wire_conn: Vec<usize>,
+    lr: layers::LayerReport,
+    forced: BTreeSet<usize>,
+    reroutes: Vec<u32>,
+    pred: super::optimise::Predicted,
+    /// loop-local: `pred` is a sum of local changes (`Sp::resync`).
+    pred_local: bool,
+    pre: std::sync::Arc<PreLoop>,
+}
+
+/// TW3: what a run decided before its TopoR loop that the drawing of its variants reads: the
+/// connections failed before the loop (index into the outcomes, reason), the terminals the P4
+/// moves moved (`term_over`) and every connection's straight pad-to-pad distance. A row of the
+/// shared table is restored or drawn only by a run with the same key ([`PreLoop::key`]); a
+/// draw-only round ([`route_round`] with a row) takes them from the row.
+#[derive(Clone, Debug, Default)]
+struct PreLoop {
+    failed: Vec<(usize, String)>,
+    term_over: BTreeMap<usize, (TermRef, TermRef)>,
+    ghost: Vec<f64>,
+}
+
+impl PreLoop {
+    /// A hash of everything in it (equal pre-loop decisions, equal keys). O(size).
+    fn key(&self) -> u64 {
+        let mut h: u64 = 0xC0FF_EE00_1234_5678;
+        let mut add = |x: u64| {
+            h ^= x.wrapping_add(0x9E37_79B9_7F4A_7C15).wrapping_add(h << 6).wrapping_add(h >> 2);
+        };
+        for (i, r) in &self.failed {
+            add(*i as u64);
+            r.bytes().for_each(|b| add(u64::from(b)));
+        }
+        for (i, (f, t)) in &self.term_over {
+            add(*i as u64);
+            format!("{f:?}{t:?}").bytes().for_each(|b| add(u64::from(b)));
+        }
+        for g in &self.ghost {
+            add(g.to_bits());
+        }
+        h
+    }
+}
+
+/// TW3: a row of the shared table one run draws: the roles it holds (its four bests), its label
+/// and predicted criteria, and the row.
+#[derive(Clone)]
+struct Assigned {
+    roles: Vec<super::archive::Role>,
+    label: String,
+    crit: Criteria,
+    row: super::table::Row<LoopVar>,
 }
 
 /// How the TopoR loop of a round ended (`[optimize] loop = "topor"`).
@@ -1659,7 +1940,7 @@ struct LoopEnd {
 
 impl RoundOut {
     fn unrouted(r: RouteResult) -> RoundOut {
-        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None, skipped: None, nothing: None, draw_exempt: false }
+        RoundOut { crit: Criteria { errors: r.failed, open: r.failed, ..Criteria::default() }, result: r, pre: None, lp: None, skipped: None, nothing: None, draw_exempt: false, drew: None, extra: Vec::new() }
     }
 
     /// A round that draws nothing: `skipped` (another run's pick is drawn) or `nothing` (no plan
@@ -2493,7 +2774,12 @@ fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
 /// one TopoR loop pick of the call is drawn), and the run's live report ([`LiveLoop`]: the TopoR
 /// loop calls it after its initial plan and every cycle, so its pick is Best so far and its stable
 /// shows the moment it is recorded, user 2026-11-17 "Report stable live").
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective, &dyn Fn(&LiveLoop))) -> (RoundOut, Hints, Memory) {
+///
+/// TW3 `draw_row`: a draw-only round: no initial routing, no rip-up rounds, no loop; the row's
+/// state and its run's pre-loop decisions ([`PreLoop`]) are restored and drawn (a run draws the
+/// rows of the call's four bests that no other run draws, [`DrawGate::assign`]).
+#[allow(clippy::too_many_arguments)]
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective, &dyn Fn(&LiveLoop)), draw_row: Option<&Assigned>) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -3022,7 +3308,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 p2_failed.push(ci);
             }
         }
-    } else {
+    } else if draw_row.is_none() {
         for &ci in &order {
             if cut_here() {
                 timed_out = true;
@@ -3145,7 +3431,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // the pick before M0: the fewest over-full edge-layers first, then the objective (S3,
     // 3814139, measured then: one sum routed fewer connections on bornhack2026; that was a
     // monotone gate, no-monotone-gates).
-    let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
+    let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick).with_best_penalty(opts.best_penalty);
     let overflow_mm = reg.price(&Event::Overflow { wire: 0, edge: 0 }, &WireCtx::default()).max(1e-6);
     let via_area_mm = {
         let r = crate::vias::plan_via_need(&model.rules, opts);
@@ -3170,7 +3456,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             area_mm += l * (st.wires[w].w + st.wires[w].s) / ws0;
         }
         let own = match obj {
-            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } => len_mm + mm_per_via * lr.vias as f64,
+            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } | Objective::Best { mm_per_via, .. } => len_mm + mm_per_via * lr.vias as f64,
             Objective::Area => area_mm + via_area_mm * lr.vias as f64,
         };
         // Predicted violations: over-full edge-layers, vias without a site, (M-B2) crossings
@@ -3306,7 +3592,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let first_score = score(&st, &lr);
     let mut best_p4 = (st.clone(), wire_conn.clone(), lr.clone(), first_score);
     let (mut p4_rounds, mut p4_stall, mut p4_ripped) = (0usize, 0usize, 0usize);
-    for _round in 0..opts.reroute_rounds {
+    for _round in 0..if draw_row.is_some() { 0 } else { opts.reroute_rounds } {
         if expired() {
             timed_out = true;
             break;
@@ -3472,7 +3758,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if opts.moves && has_junctions {
         warnings.push("P4 moves skipped: the net trees have branch points on traces, which the moves do not handle yet ([search] net_tree = \"fixed\" to use them)".into());
     }
-    if opts.moves && opts.max_moves > 0 && !expired() && !has_junctions {
+    if opts.moves && opts.max_moves > 0 && !expired() && !has_junctions && draw_row.is_none() {
         let t_mv = Instant::now();
         let s0 = score(&st, &lr);
         let mut topo = Topo {
@@ -3605,6 +3891,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // the one drawing below. No drawing inside the loop, nothing fed back from a drawing.
     let mut loop_end: Option<LoopEnd> = None;
     let mut loop_json: Option<serde_json::Value> = None;
+    let (mut drew_row, mut extra_rows): (Option<Assigned>, Vec<Assigned>) = (None, Vec::new());
     // M2.TL: the initial routing (P2-P4) has ended; its plan is the run's first variant (the TopoR
     // loop's generation 0, or this whole-route cycle's plan). Cancel / OK during it (P2 before
     // every connection had its place, or the layer assignment and rip-up rounds of P3/P4, which
@@ -3617,7 +3904,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let topor = opts.opt_loop == "topor";
     if topor {
-        use super::optimise::{criteria_of, evaluation, foreign_copper, foreign_copper_only, k_osc, layers_now, layers_now_only, optimise, reroute_set, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
+        use super::optimise::{criteria_of, evaluation, foreign_copper, foreign_copper_only, k_osc, layers_now, layers_now_only, optimise_shared, reroute_set, LoopReport, Shared, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
         let t_loop = Instant::now();
         // The loop's own emergency stop: a share of the time left (the rest is the drawing's).
         let loop_deadline = ctl.deadline().map(|d| {
@@ -3832,20 +4119,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             (lr, p)
         };
-        /// One topological variant: the routed state, the wire -> connection map, the layering,
-        /// the connections placed without a legal path, the reroute counters and the predicted
-        /// violations of the layering.
-        #[derive(Clone)]
-        struct LoopVar {
-            topo: super::state::Topology,
-            wire_conn: Vec<usize>,
-            lr: layers::LayerReport,
-            forced: BTreeSet<usize>,
-            reroutes: Vec<u32>,
-            pred: Predicted,
-            /// loop-local: `pred` is a sum of local changes ([`Sp::resync`]).
-            pred_local: bool,
-        }
         type PlaceFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, usize, usize, &mut Vec<usize>, &Registry) -> bool;
         type CrossFn<'f, 'p> = &'f dyn Fn(&mut State<'p>, &mut Vec<usize>, &mut Vec<u32>, &mut layers::LayerReport, &mut usize, usize);
         type MeasureFn<'f, 'p> = &'f dyn Fn(&State<'p>, &layers::LayerReport) -> Predicted;
@@ -4045,6 +4318,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// Debug (`TOPO_LOOPDBG`): one line per reroute and per cycle stage.
             dbg: bool,
             dbg_tag: u64,
+            /// TW3: this run's pre-loop decisions (every snapshot carries them).
+            pre: std::sync::Arc<PreLoop>,
             /// The run's control: the test hook's markers between the cycle's stages.
             ctl: &'a RunControl,
         }
@@ -4463,7 +4738,30 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr + self.pred.shrink_n, area)
             }
             fn snapshot(&mut self) -> LoopVar {
-                LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone(), reroutes: self.reroutes.clone(), pred: self.pred, pred_local: self.pred_local }
+                LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone(), reroutes: self.reroutes.clone(), pred: self.pred, pred_local: self.pred_local, pre: self.pre.clone() }
+            }
+            fn fingerprint(&mut self) -> u64 {
+                // TW3: the wires' paths (triangles, turns, the pass points: their order on the
+                // edges) and the layering events; equal states give equal values. O(state).
+                let mut h: u64 = 0x5EED_F1A9_0000_0001;
+                let mut add = |x: u64| {
+                    h = (h ^ x).wrapping_mul(0x0100_0000_01B3).rotate_left(29);
+                };
+                for (w, wi) in self.st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
+                    add(w as u64);
+                    add(wi.net as u64);
+                    wi.tris.iter().for_each(|&t| add(t as u64));
+                    wi.turns.iter().for_each(|&(k, v)| add(((k as u64) << 32) ^ v as u64));
+                    for &p in &wi.passes {
+                        let q = self.st.pass_point(p);
+                        add(q.x.to_bits());
+                        add(q.y.to_bits());
+                    }
+                    if let Some(ev) = self.lr.events.get(w) {
+                        ev.iter().for_each(|&(k, f, l)| add((k as u64) ^ f.to_bits().rotate_left(7) ^ ((l as u64) << 48)));
+                    }
+                }
+                h
             }
             fn restore(&mut self, v: &LoopVar) {
                 self.st.restore(v.topo.clone());
@@ -4778,6 +5076,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let cross_vias0 = st.cross_vias;
         st.cross_vias = true;
         st.layers_now = layers_now(&st, &lr.events, bottom);
+        // TW3: the pre-loop decisions of this run (a draw-only round takes its row's).
+        let pre_loop: std::sync::Arc<PreLoop> = match draw_row {
+            Some(d) => {
+                let p = d.row.var.pre.clone();
+                for (i, r) in &p.failed {
+                    if out[*i].reason.is_empty() {
+                        fail(&mut out, *i, r.clone());
+                    }
+                }
+                term_over.clone_from(&p.term_over);
+                for (o, &g) in out.iter_mut().zip(&p.ghost) {
+                    o.ghost_nm = g;
+                }
+                p
+            }
+            None => std::sync::Arc::new(PreLoop { failed: out.iter().enumerate().filter(|(_, o)| !o.reason.is_empty()).map(|(i, o)| (i, o.reason.clone())).collect(), term_over: term_over.clone(), ghost: out.iter().map(|o| o.ghost_nm).collect() }),
+        };
         let pred0 = measure(&st, &lr);
         // The connections in the plan: every one not failed so far is drawn (M-B1 never drop), so
         // the live Best so far counts them as routed (predicted).
@@ -4831,9 +5146,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             shadow: (0, 0, 0.0, 0, 0, 0.0),
             dbg: std::env::var_os("TOPO_LOOPDBG").is_some(),
             dbg_tag: opts.seed,
+            pre: pre_loop.clone(),
         };
+        // TW3 (D6): the dialog run has no cycle cap (OK, Cancel or the time limit end it); headless
+        // `rounds` is the work cap of the comparisons.
+        let dialog = !(opts.stop_when_stable || opts.finish_when_stable);
         let params = LoopParams {
-            cycles: opts.topo_rounds.max(1),
+            cycles: if dialog && opts.restart != "stall" && opts.restart != "off" { usize::MAX - 1 } else { opts.topo_rounds.max(1) },
             restart_after: opts.loop_restart,
             seed: seed_of(opts.seed, round, 5000),
             fluctuation: fluct0,
@@ -4847,8 +5166,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             stop_at_stable: opts.stop_when_stable || opts.finish_when_stable,
             emphasis: Emphasis { via_start: opts.loop_via_start, via_end: opts.loop_via_end },
             obj,
+            restart: super::optimise::Restart::parse(&opts.restart),
+            restart_relays: opts.restart_relays,
+            restart_min_cycles: opts.restart_min_cycles,
+            run: gate.0,
+            runs: opts.runs.max(1),
         };
         let mut arch: Archive<Gen<LoopVar>> = Archive::new(opts.variants);
+        if let Some(d) = draw_row {
+            // TW3 draw-only round: the row is the one variant; no cycle runs.
+            arch.offer(Variant { label: d.label.clone(), crit: d.crit, payload: Gen { var: (*d.row.var).clone(), gen: d.row.gen, cycle: d.row.cycle, at_s: 0.0 } }, &obj);
+        }
         // M2.TL: between cycles the loop ends at Cancel / OK, the time limit or its share of it
         // (no new step begins); inside a cycle only Cancel / OK stops it with the soft limit (the
         // cycle finishes and is offered), with `hard` the limits too. A cycle Cancel cut short is
@@ -4891,7 +5219,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             stable_seen.set(stable);
             live(&LiveLoop { pick: *pick, planned, total, stable });
         };
-        let mut rep = crate::control::in_loop_scope(|| optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock, &mut on_pick));
+        let compat = sp.pre.key();
+        let port = gate.1.table.as_ref().filter(|_| draw_row.is_none()).map(|t| Port { table: t, k: gate.0, compat, slots: &gate.1.slots });
+        let mut rep = if draw_row.is_some() {
+            LoopReport { stop: "draw-only".into(), ..LoopReport::default() }
+        } else {
+            crate::control::in_loop_scope(|| optimise_shared(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock, &mut on_pick, port.as_ref().map(|p| p as &dyn Shared<LoopVar>)))
+        };
         if yields.get() > 0 {
             warnings.push(format!(
                 "TopoR loop: stable after cycle {}, it gave its compute slot to a run not yet begun {} time(s) (fewer engine threads than runs) and waited {:.1} s for one again",
@@ -4914,8 +5248,29 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // M2 (6.1 draw once): the runs' picks are judged by their predicted criteria; only the
         // `[drawing] candidates` best are drawn (after Cancel / OK the best one).
         ctl.idle(); // waiting at the gate computes nothing: the soft limit names the runs still computing (F6)
-        let skip_draw = gate.1.offer(gate.0, arch.items[pick].crit, gate.2, stop_now());
-        sp.restore(&arch.items[pick].payload.var);
+        // TW3: the rows of the call's four bests are drawn ([`DrawGate::assign`]); a draw-only
+        // round draws its own row.
+        let skip_draw = if let Some(d) = draw_row {
+            sp.restore(&d.row.var);
+            drew_row = Some(d.clone());
+            None
+        } else if gate.1.table.is_some() {
+            let mut rows = gate.1.assign(gate.0, compat, arch.items[pick].crit, gate.2, stop_now());
+            if rows.is_empty() {
+                sp.restore(&arch.items[pick].payload.var);
+                Some(gate.1.why_not(stop_now()))
+            } else {
+                let first = rows.remove(0);
+                sp.restore(&first.row.var);
+                drew_row = Some(first);
+                extra_rows = rows;
+                None
+            }
+        } else {
+            let why = gate.1.offer(gate.0, arch.items[pick].crit, gate.2, stop_now());
+            sp.restore(&arch.items[pick].payload.var);
+            why
+        };
         drop(sp);
         if std::env::var_os("TOPO_LOOPDBG").is_some() {
             let dirs = dirs_of(&st);
@@ -4961,6 +5316,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit });
         let pc = arch.items[pick].crit;
         let table = table_text(&arch.table(Some(pick)), &obj);
+        // TW3: the restarts whose descent then gave the shared table a new row (before the next
+        // restart of this run, or its end).
+        let restarts_new_row = gate.1.table.as_ref().filter(|_| draw_row.is_none()).map_or(0, |t| {
+            let cs: Vec<usize> = rep.restart_from.iter().map(|r| r.0).collect();
+            (0..cs.len()).filter(|&i| t.accepted_in(gate.0, cs[i], cs.get(i + 1).copied().unwrap_or(usize::MAX)) > 0).count()
+        });
+        if rep.checks > 0 {
+            warnings.push(format!(
+                "TopoR loop restarts ([optimize] restart = \"{}\", every {} re-lays and at least {} cycles; TW3, Polubasov 2010 «Многовариантная оптимизация»): {} period checks, {} restarts ({} from another run's row, {} led to a new table row), {} times the descent still gained and went on, {} times no other row to go to",
+                opts.restart,
+                opts.restart_relays,
+                opts.restart_min_cycles,
+                rep.checks,
+                rep.restarts.len(),
+                rep.restart_from.iter().filter(|r| r.1 != gate.0).count(),
+                restarts_new_row,
+                rep.kept_gaining,
+                rep.no_row
+            ));
+        }
         warnings.push(format!(
             "TopoR loop ([optimize] loop = \"topor\"; Polubasov 2010): {} cycles in {loop_s:.1} s, ended by {}{}; {} restarts from the archive{}; {} variants offered, {} archived, first loop variant after {}; picked {} (gen {}): predicted {} violations, {} vias, {:.1} mm, {} shrinkages; reroutes kept {}/{}, via-rose laid again {}/{}, floating-up moves {}, crossing passes kept {}, whole-board moves undone {}, layer re-optimisation {} runs, {} taken ({:.0} % of the loop's time); every move priced with the archive's predicted violations at the violation weight ({:.0} mm each), crossings layer-aware ({:.2} of the crossing factor kept); per cycle: {}",
             rep.cycles,
@@ -5022,6 +5397,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "stop": rep.stop,
             "stable_at": rep.stable_at,
             "restarts": rep.restarts.len(),
+            "restart": {"mode": opts.restart, "relays": opts.restart_relays, "min_cycles": opts.restart_min_cycles, "checks": rep.checks, "kept_gaining": rep.kept_gaining, "no_row": rep.no_row, "new_row": restarts_new_row, "from_other_run": rep.restart_from.iter().filter(|r| r.1 != gate.0).count()},
             "offered": rep.offered,
             "archived": rep.archived,
             "variants": arch.items.len(),
@@ -7070,6 +7446,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         violations: viol_list,
         diff_pairs: dp_list,
         limit: None,
+        bests: Vec::new(),
         compass: compass_plan.map(|mut c| {
             c.drawn_shrinkages = crit_main.shrinkages;
             c
@@ -7077,7 +7454,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().filter(|_| cycles).map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
-    (RoundOut { result, crit: crit_main, pre, lp: loop_end, skipped: None, nothing: None, draw_exempt: draw_exempt.get() }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
+    (RoundOut { result, crit: crit_main, pre, lp: loop_end, skipped: None, nothing: None, draw_exempt: draw_exempt.get(), drew: drew_row, extra: extra_rows }, new_hints, Memory { edge: hist_out, own: own_out, vias: vias_out, plan: plan_carry })
 }
 
 /// D7: realise every coupled pair connection of `out`: the lead's drawn centre line becomes the P
