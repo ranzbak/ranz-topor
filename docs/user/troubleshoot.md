@@ -186,6 +186,22 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Edit topor.toml in the project folder to change settings; the key reference is docs/user/configuration.md (e.g. run.timeout_s).
 
+### CFG_DEFAULT_RESTORED
+
+*Severity: info.*
+
+**Cause.** The pre-flight dialog's Use the current default commented a pinned line out of topor.toml; this run and the next ones use the current default.
+
+**Fix.** Nothing to do; to pin a value again, set the line in topor.toml (docs/user/configuration.md, e.g. run.timeout_s).
+
+### CFG_DEPRECATED_KEY
+
+*Severity: warning.*
+
+**Cause.** topor.toml sets a key that is deprecated (e.g. optimize.finish_when_stable since 2026-11-17: with the progress dialog nothing ends the run at Routes stable any more, only OK does); the key is ignored.
+
+**Fix.** In the pre-flight dialog select the finding and tick Use the current default: Route then comments the line out. Or delete the line the finding names by hand; runs without the dialog keep their stop at stable (optimize.stable_patience). docs/user/configuration.md, section Deprecated keys, says why.
+
 ### CFG_PARSE
 
 *Severity: warning.*
@@ -200,7 +216,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** topor.toml has an option as an active line with a value that was the default in an older version; the value is kept (never changed silently) but the default has changed since.
 
-**Fix.** Delete or comment the line (put '# ' in front) to follow the current default, or set it explicitly to the value you want (e.g. optimize.finish_when_stable); docs/user/configuration.md, section Pinned defaults, lists what changed.
+**Fix.** In the pre-flight dialog select the finding and tick Use the current default: Route then comments the line out (puts '# ' in front) and the run uses the current default. Or edit topor.toml by hand at the line the finding names (e.g. run.timeout_s); docs/user/configuration.md, section Pinned defaults, lists what changed.
 
 ### CFG_REMOVED_KEY
 

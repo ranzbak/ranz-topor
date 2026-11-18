@@ -135,7 +135,11 @@ any finding the list and the Cause pane are hidden. Default `Route`.
   `Accept` checkbox sits under the pane, shown only while the selected row's code is acceptable
   and relabelled per code (`PAD_OUTSIDE_BOARD` → `accept_pads`, `DRILL_OUTSIDE_FILTER` →
   `accept_drills`); its checked state is kept per code, and the checked codes form
-  `Decision.accepted_codes`. Row 1 is selected on open. Message column = `Finding.message`; items
+  `Decision.accepted_codes`. A second checkbox, `use_default` (user 2026-11-17, "Show it in the
+  dialog"), is shown only while the selected row is a pinned topor.toml line (`CFG_PINNED_OLD_DEFAULT`,
+  `CFG_DEPRECATED_KEY`) and names its key; its state is kept per key, and the ticked keys form
+  `Decision.use_defaults`: Route comments those lines out and runs with the current default
+  (`CFG_DEFAULT_RESTORED` in the report). Row 1 is selected on open. Message column = `Finding.message`; items
   (`Finding.items`) appear in the Cause text, up to 10, then "… and {n} more (all in the report)".
 - **Error present → `Route` disabled** and the status text left of the buttons (error icon + text)
   reads `Cannot route: {n} error(s) — see Fix above.` (so the disabled button has a visible
@@ -500,6 +504,7 @@ title/label/button/checkbox/choice/heading/text).
 | preflight | items_more | text | … and {n} more (all in the report) |
 | preflight | accept_pads | checkbox | Accept: skip these pads (saved to topor.toml ignore_pads) |
 | preflight | accept_drills | checkbox | Accept: add these drills to topor.toml allowed_drills_mm |
+| preflight | use_default | checkbox | Use the current default for {key}: Route comments its line out in topor.toml |
 | preflight | options_heading | heading | Options |
 | preflight | scope_label | label | Scope |
 | preflight | scope_whole | choice | Whole board |

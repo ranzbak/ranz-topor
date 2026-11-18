@@ -221,9 +221,19 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     }
     let lines: Vec<String> = outs.iter().map(|o| o.line.clone()).collect();
     let cycle_lines: Vec<String> = outs.iter().map(|o| o.cycles_line.clone()).collect();
-    let stable_all = outs.iter().all(|o| o.stable_at.is_some());
+    // OK vs Cancel = what the first stop request was, at the press ([`RunControl::request_stop`]):
+    // not whether the runs in `outs` (since draw once: the drawn run only) are stable at the end.
+    let ok_stop = ctl.ok_at_stable();
+    // "stable" as a stop reason = every run ENDED because its routes were stable; a dialog run that
+    // went on past stable to the cycle cap ends at the cap (stop_reason "round cap").
+    let stable_stop_all = outs.iter().all(|o| o.stable_stop);
     let cancel = ctl.is_cancelled();
     let time_hit = outs.iter().any(|o| o.time_hit);
+    // verify-sl3 F1: the limit (acting as hard) cut the drawing of the picked run's plan: its board
+    // is drawn only in part, so the call is never "stable" then, even after an OK at Routes stable
+    // (the user took the stable plan; the limit, not the OK, ended what is drawn of it).
+    let (draw_cut, drawn_stable) = (outs[pick].draw_cut, outs[pick].stable);
+    let ok_kept = ok_stop && !draw_cut;
     // Every cycle's variants were stitched before they were judged (pour pieces still cut off
     // count as errors), so the picked board is the one the progress showed.
     let pick_k = outs[pick].k;
@@ -238,10 +248,16 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         best.warnings.push(format!("best of {n} seeded runs ([optimize] runs): run {} picked; {}{skipped_txt}", pick_k + 1, lines.join("; ")));
     }
     best.stop_reason = if cancel {
-        if stable_all { "stable" } else { "cancel" }
-    } else if time_hit {
+        if ok_kept {
+            "stable"
+        } else if ok_stop {
+            "timeout"
+        } else {
+            "cancel"
+        }
+    } else if time_hit || draw_cut {
         "timeout"
-    } else if stable_all {
+    } else if stable_stop_all {
         "stable"
     } else {
         "round cap"
@@ -250,7 +266,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     if opts.stop_after == "plan" {
         best.stop_reason = "stop_after plan".into();
     }
-    best.timed_out = time_hit && !(cancel && stable_all);
+    best.timed_out = (time_hit || draw_cut) && !(cancel && ok_kept);
     best.converged = !best.timed_out;
     post(&mut best);
     best.runtime_s = t0.elapsed().as_secs_f64();
@@ -259,7 +275,12 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         // Name the limit and its clock. The engine's own limit is the wall clock; a caller that counts
         // another clock (the plugin's [run] timeout_clock = cpu) reaches the limit itself and gives the engine
         // none (`wall_clock_s` 0), so the seconds `limit` are then wall seconds at the reach, not its limit.
-        let why = if cancel {
+        let why = if draw_cut && (ok_stop || drawn_stable && !cancel) {
+            format!(
+                "{}, but the time limit then cut the drawing of the stable plan: the board is drawn only in part (see the time limit line)",
+                if ok_stop { "OK came at Routes stable" } else { "the routes were stable" }
+            )
+        } else if cancel {
             "Cancel stopped the run before its routes were stable".to_string()
         } else if ctl.limit.changed() {
             format!("the time limit of {limit:.0} s wall clock (changed during the run; [run] timeout_s = {:.0} s at this engine job's start) stopped the run before its routes were stable", opts.wall_clock_s)
@@ -514,10 +535,17 @@ struct RunOut {
     k: usize,
     result: RouteResult,
     crit: Criteria,
-    /// The cycle after which its routes were first stable.
-    stable_at: Option<usize>,
     /// Cancel or the time budget ended it before its routes were stable.
     time_hit: bool,
+    /// The run ended BECAUSE its routes were stable (the loop's or the run's stop at stable), not
+    /// because it reached the cycle cap with stable recorded (a dialog run goes on past stable).
+    stable_stop: bool,
+    /// The time limit, acting as hard, cut the one drawing of its TopoR loop pick (the traces, the
+    /// via reduction or the pour stitching): its board is drawn only in part, whatever ended the
+    /// loop (verify-sl3 F1: an OK at Routes stable then a hard limit in the drawing).
+    draw_cut: bool,
+    /// Its routes were stable (at some cycle), however the run ended.
+    stable: bool,
     /// Its summary for the report, and its cycle by cycle line.
     line: String,
     cycles_line: String,
@@ -558,44 +586,86 @@ struct DrawGate {
 }
 
 /// A counting semaphore: at most `n` runs compute at once (the others' threads wait idle, so the
-/// busy threads stay at the engine's share, `min(runs, rayon threads)`). O(1) per call.
+/// busy threads stay at the engine's share, `min(runs, rayon threads)`). A run that waits for its
+/// FIRST slot (not begun yet) goes before one that waits to go on: with fewer slots than runs a
+/// TopoR loop that is stable and only waits for OK gives its slot to a run not yet begun
+/// ([`Slots::yield_to_first`], user 2026-11-17 "free the slot"), so "Routes stable" (every run
+/// stable) can come while the loops run. O(1) per call.
 struct Slots {
-    /// Free slots; below 0 only for a moment after [`Slots::take_now`] (a slot owed).
-    free: std::sync::Mutex<isize>,
+    st: std::sync::Mutex<SlotState>,
     cv: std::sync::Condvar,
+}
+
+#[derive(Debug)]
+struct SlotState {
+    /// Free slots; below 0 only for a moment after [`Slots::take_now`] (a slot owed).
+    free: isize,
+    /// Runs waiting for their first slot ([`Slots::acquire_first`]).
+    first: usize,
 }
 
 impl Slots {
     fn new(n: usize) -> Slots {
-        Slots { free: std::sync::Mutex::new(n.max(1) as isize), cv: std::sync::Condvar::new() }
+        Slots { st: std::sync::Mutex::new(SlotState { free: n.max(1) as isize, first: 0 }), cv: std::sync::Condvar::new() }
     }
 
-    /// Waits for a free slot and takes it. O(1) + the wait.
+    /// Waits until a slot is free that no run waiting for its first one needs, and takes it.
+    /// O(1) + the wait.
     fn acquire(&self) {
-        let Ok(mut f) = self.free.lock() else { return };
-        while *f <= 0 {
-            f = match self.cv.wait(f) {
-                Ok(f) => f,
+        let Ok(mut g) = self.st.lock() else { return };
+        while g.free <= g.first as isize {
+            g = match self.cv.wait(g) {
+                Ok(g) => g,
                 Err(_) => return,
             };
         }
-        *f -= 1;
+        g.free -= 1;
+    }
+
+    /// A run's first slot: waits for a free one (before the runs that wait to go on). O(1) + the wait.
+    fn acquire_first(&self) {
+        let Ok(mut g) = self.st.lock() else { return };
+        g.first += 1;
+        while g.free <= 0 {
+            g = match self.cv.wait(g) {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+        }
+        g.free -= 1;
+        g.first -= 1;
+    }
+
+    /// The caller holds a slot: when a run waits for its first slot, gives it to that run and
+    /// waits to go on ([`Slots::acquire`]); returns whether it did. O(1) + the wait.
+    fn yield_to_first(&self) -> bool {
+        {
+            let Ok(mut g) = self.st.lock() else { return false };
+            if g.first == 0 {
+                return false;
+            }
+            g.free += 1;
+        }
+        self.cv.notify_all();
+        self.acquire();
+        true
     }
 
     /// Takes a slot without waiting (a slot owed while none is free): a panic unwinding through
     /// [`DrawGate::offer`], whose [`SlotGuard`] gives the slot back once more. O(1).
     fn take_now(&self) {
-        if let Ok(mut f) = self.free.lock() {
-            *f -= 1;
+        if let Ok(mut g) = self.st.lock() {
+            g.free -= 1;
         }
     }
 
     /// Gives a slot back. O(1).
     fn release(&self) {
-        if let Ok(mut f) = self.free.lock() {
-            *f += 1;
+        if let Ok(mut g) = self.st.lock() {
+            g.free += 1;
         }
-        self.cv.notify_one();
+        // two kinds of waiters (first slot / go on): wake all, each tests its own condition
+        self.cv.notify_all();
     }
 }
 
@@ -603,8 +673,10 @@ impl Slots {
 struct SlotGuard<'s>(&'s Slots);
 
 impl<'s> SlotGuard<'s> {
+    /// A run's first slot ([`Slots::acquire_first`]): with the TopoR loop a run takes one slot,
+    /// for its one cycle. O(1) + the wait.
     fn take(s: &'s Slots) -> SlotGuard<'s> {
-        s.acquire();
+        s.acquire_first();
         SlotGuard(s)
     }
 }
@@ -723,6 +795,21 @@ struct RunState {
     gain: Option<f64>,
     /// Best so far: criteria, routed, total and the round (cycle) it came from.
     best: Option<RunBest>,
+    /// The TopoR loop's pick so far, predicted (the plan's measure, nothing drawn; reported live
+    /// per loop cycle, [`LiveLoop`]): *Best so far* while no run has drawn its pick (draw once:
+    /// the drawing waits for every loop), so "Routes stable" has a pick to keep.
+    predicted: Option<RunBest>,
+}
+
+/// The TopoR loop's live report to the progress after its initial plan and every cycle
+/// ([`route_round`] -> [`Coord::report`]): its pick's predicted criteria, the connections in the
+/// plan (every one is drawn, M-B1 never drop) of all, and whether it recorded stable.
+#[derive(Clone, Copy, Debug)]
+struct LiveLoop {
+    pick: Criteria,
+    planned: usize,
+    total: usize,
+    stable: bool,
 }
 
 /// The pick of a run's variant table so far ([`RunState::best`]).
@@ -811,15 +898,33 @@ impl<'a> Coord<'a> {
     /// The run whose pick is the call's best now: the best by the objective over the runs' picks,
     /// ties to the lower run (what [`route_topo`] picks at the end). O(runs).
     fn best_of(&self, s: &[RunState]) -> Option<usize> {
-        let mut bi: Option<usize> = None;
+        self.best_by(s, |r| r.best.as_ref())
+    }
+
+    /// [`Coord::best_of`] over the picks `pick` gives (the drawn ones, or the predicted ones). O(runs).
+    fn best_by(&self, s: &[RunState], pick: impl Fn(&RunState) -> Option<&RunBest>) -> Option<usize> {
+        let mut bi: Option<(usize, &RunBest)> = None;
         for (i, r) in s.iter().enumerate() {
-            if let Some(b) = &r.best {
-                if bi.is_none_or(|j| self.obj.better(&b.crit, &s[j].best.as_ref().expect("best").crit)) {
-                    bi = Some(i);
+            if let Some(b) = pick(r) {
+                if bi.is_none_or(|(_, c)| self.obj.better(&b.crit, &c.crit)) {
+                    bi = Some((i, b));
                 }
             }
         }
-        bi
+        bi.map(|(i, _)| i)
+    }
+
+    /// *Best so far* as the progress shows it: the best drawn pick, else (draw once: no run has
+    /// drawn yet) the best of the TopoR loops' predicted picks. O(runs).
+    fn shown_best(&self, s: &[RunState]) -> Option<(usize, RunBest)> {
+        self.best_of(s).map(|i| (i, s[i].best.expect("best"))).or_else(|| self.best_by(s, |r| r.predicted.as_ref()).map(|i| (i, s[i].predicted.expect("predicted"))))
+    }
+
+    /// "Routes stable" ([`Progress::stable`], the dialog's Cancel turns into OK): every run stable
+    /// or done, one of them stable, and a pick to keep (*Best so far* not empty, user 2026-11-17).
+    /// Monotone: none of its terms goes back. O(runs).
+    fn shows_stable(&self, s: &[RunState]) -> bool {
+        s.iter().any(|r| r.stable) && s.iter().all(|r| r.stable || r.done) && self.shown_best(s).is_some()
     }
 
     /// Run `k` ended a cycle (or the run, `done`); publish the M-B0 progress over all runs.
@@ -834,10 +939,16 @@ impl<'a> Coord<'a> {
     fn ended(&self, k: usize, upd: impl FnOnce(&mut RunState), round: Option<(usize, RoundEnd)>) {
         let Ok(mut s) = self.st.lock() else { return };
         let before = self.best_of(&s).map(|i| (i, s[i].best.expect("best")));
+        let was_stable = s[k].stable;
         upd(&mut s[k]);
+        // A run's stable never goes back (the dialog's contract, ui_wx set_stable): the TopoR loop
+        // reports it live, and the round's end after the drawing must not clear it before the
+        // run's own end report, or an OK in between would not be "OK at Routes stable".
+        s[k].stable |= was_stable;
         let n = s.len();
         let stable_n = s.iter().filter(|r| r.stable).count();
-        let settled = s.iter().all(|r| r.stable || r.done);
+        let shows_stable = self.shows_stable(&s);
+        let shown = self.shown_best(&s);
         let gain = s.iter().filter(|r| !r.done).map(|r| r.gain).try_fold(None::<f64>, |acc, g| g.map(|g| Some(acc.map_or(g, |a: f64| a.max(g)))));
         let bi = self.best_of(&s).map(|i| (i, s[i].best.expect("best")));
         let at = |i: usize, cycle: usize| format!("run {}, round {cycle}", i + 1);
@@ -895,9 +1006,9 @@ impl<'a> Coord<'a> {
             p.runs = n as u32;
             p.runs_stable = stable_n as u32;
             p.runs_done = s.iter().filter(|r| r.done).count() as u32;
-            p.stable = settled && stable_n > 0;
+            p.stable = shows_stable;
             p.gain_pct = gain.flatten();
-            if let Some((i, b)) = bi {
+            if let Some((i, b)) = shown {
                 p.best_routed = b.routed;
                 p.best_total = b.total;
                 p.best_length_mm = b.crit.length_mm;
@@ -961,6 +1072,8 @@ struct Run {
     mem: Memory,
     notes: Vec<String>,
     time_hit: bool,
+    stable_stop: bool,
+    draw_cut: bool,
     stable_at: Option<usize>,
     first: Option<usize>,
     cycles: usize,
@@ -982,6 +1095,8 @@ impl Run {
             mem: Memory::default(),
             notes: Vec::new(),
             time_hit: false,
+            stable_stop: false,
+            draw_cut: false,
             stable_at: None,
             first: None,
             cycles: 0,
@@ -1040,7 +1155,16 @@ impl Run {
             o2.initial = "once".into();
         }
         let hv: Hints = if o2.drawing_feedback && !topor { self.all.iter().map(|(&(e, l), &r)| (e, l, r)).collect() } else { Vec::new() };
-        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj));
+        let k = self.k;
+        // The TopoR loop's live report: its predicted pick is Best so far until a pick is drawn,
+        // and its stable shows at once ("Report stable live", user 2026-11-17).
+        let live = |l: &LiveLoop| {
+            coord.report(k, |r| {
+                r.predicted = Some(RunBest { crit: l.pick, routed: l.planned, total: l.total, cycle });
+                r.stable |= l.stable;
+            })
+        };
+        let (ro, h2, mem2) = route_round(model, &o2, ctl, &hv, &self.mem, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj, &live));
         self.cycles = cycle;
         self.mem = mem2;
         for (e, l, r) in h2 {
@@ -1115,6 +1239,8 @@ impl Run {
                 judged = Some(Judged { crit, routed, total, as_drawn });
             }
         };
+        // The limit cut this cycle's pour stitching (set below; verify-sl3 F1).
+        let mut cycle_stitch_cut = false;
         if !interrupted || self.arch.items.is_empty() {
             // Pour stitching (D4) on each variant before it is judged: a pour piece the copper cut
             // off that no stitch joins back is an open connection in KiCad's DRC, so it counts as an
@@ -1127,14 +1253,39 @@ impl Run {
             // the drawing's (verify-m2c 5): after a drawing the limit cut, the stitching is cut too
             // (before, it re-decided at its own start and so ran in full).
             let exempt = ro.draw_exempt;
-            let cut = || !exempt && ctl.limit.cuts_in(CutStep::Stitching);
+            // Whether the limit cut a stitching of this cycle (verify-sl3 F1: the result is then
+            // drawn only in part, never "stable", and the stitching did not run to its end).
+            let stitch_cut = std::cell::Cell::new(false);
+            let cut = || {
+                let c = !exempt && ctl.limit.cuts_in(CutStep::Stitching);
+                if c {
+                    stitch_cut.set(true);
+                }
+                c
+            };
             // The same test without noting a cut (the stitching may have ended before it): whether
             // a variant counts as cut short below; only the stitching's own stop test reports one.
             let past = || !exempt && ctl.limit.is_hard() && ctl.limit.passed();
+            // OK at Routes stable (user 2026-11-17): a stop request while the progress showed
+            // "Routes stable" is the user taking the stable result, so the stitching of the TopoR
+            // loop's one drawing runs to its end as at a natural stable end (the time limit still
+            // cuts it); a Cancel before stable still ends it after the pass in progress. What the
+            // request was is latched at the request ([`RunControl::request_stop`]), never judged
+            // here (verify-sl2 V1: after a Cancel the other runs end, and "every run stable or
+            // done" turned true while this one stitched). The dialog disables its button after
+            // the first press, so there is no second request to honour.
+            let ok_at_stable = || topor && ctl.ok_at_stable();
             let stitched = |mut r: RouteResult, mut c: Criteria| -> (RouteResult, Criteria) {
                 if opts.stitch_islands {
                     ctl.stage(cycle as u32, opts.topo_rounds.max(1) as u32, "pour stitching");
-                    c.errors += stitch_pours(model, opts, &mut r, None, &|| ctl.is_cancelled() || cut());
+                    let cut_before = stitch_cut.replace(false);
+                    c.errors += stitch_pours(model, opts, &mut r, None, &|| (ctl.is_cancelled() && !ok_at_stable()) || cut());
+                    let this_cut = stitch_cut.get();
+                    stitch_cut.set(cut_before || this_cut);
+                    // Only a stitching the limit did not cut ran to its end (verify-sl3 F1).
+                    if ok_at_stable() && !this_cut {
+                        r.warnings.push("OK at Routes stable: the pour stitching ran to its end, as at a natural stable end (a Cancel before Routes stable ends it after the pass in progress)".into());
+                    }
                 }
                 (r, c)
             };
@@ -1157,6 +1308,7 @@ impl Run {
                 note_judged(c, r.routed, false);
                 self.arch.offer(Variant { label: format!("round {cycle}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
             }
+            cycle_stitch_cut = stitch_cut.get();
         }
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
@@ -1214,10 +1366,14 @@ impl Run {
                 if e.stable {
                     self.stable_at.get_or_insert(cycle);
                 }
+                self.stable_stop = e.stopped_stable && !interrupted;
                 self.time_hit = e.time_hit || interrupted;
             } else {
                 self.time_hit = interrupted;
             }
+            // The loop's one drawing (draw once): the limit cut its traces / via reduction
+            // (`interrupted`; a Cancel cuts nothing of it, `draw_through`) or its pour stitching.
+            self.draw_cut = interrupted || cycle_stitch_cut;
             self.done = true;
             coord.report(self.k, |r| r.stable = loop_end.is_some_and(|e| e.stable));
             return;
@@ -1237,6 +1393,7 @@ impl Run {
                 || !opts.stop_when_stable && opts.finish_when_stable && cycle >= s.max(self.picked_at) + opts.finish_patience
             {
                 self.done = true;
+                self.stable_stop = true;
             }
         }
     }
@@ -1285,7 +1442,7 @@ impl Run {
             self.picked_at,
             self.busy_s
         );
-        Ok(RunOut { k: self.k, result: best, crit, stable_at: self.stable_at, time_hit: self.time_hit, line, cycles_line })
+        Ok(RunOut { k: self.k, result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, draw_cut: self.draw_cut, stable: self.stable_at.is_some(), line, cycles_line })
     }
 }
 
@@ -1324,7 +1481,8 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
     // M2: with the TopoR loop every run has a thread of its own: a run waits after its loop until
     // every run offered its pick ([`DrawGate`]), so the decision sees all of them and never waits
     // for a run that has no thread. Only `min(runs, rayon threads)` of them compute at once (the
-    // gate's slots; a run waiting at the gate gives its slot back): the busy threads stay as before.
+    // gate's slots; a run waiting at the gate gives its slot back, and so does a stable loop to a run
+    // not yet begun, [`Slots::yield_to_first`]): the busy threads stay as before.
     let workers = if topor { n } else { n.min(rayon::current_num_threads()).max(1) };
     if workers == 1 {
         worker();
@@ -1422,6 +1580,8 @@ struct RoundOut {
 #[derive(Clone, Copy, Debug, Default)]
 struct LoopEnd {
     stable: bool,
+    /// The loop stopped at stable (not at the cycle cap with stable recorded).
+    stopped_stable: bool,
     time_hit: bool,
 }
 
@@ -2075,8 +2235,10 @@ fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
 /// `opts.fluctuation` is this cycle's width).
 #[allow(clippy::too_many_arguments)]
 /// `gate`: the run (0-based), the call's [`DrawGate`] and objective (cancel-fix: after Cancel only
-/// one TopoR loop pick of the call is drawn).
-fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective)) -> (RoundOut, Hints, Memory) {
+/// one TopoR loop pick of the call is drawn), and the run's live report ([`LiveLoop`]: the TopoR
+/// loop calls it after its initial plan and every cycle, so its pick is Best so far and its stable
+/// shows the moment it is recorded, user 2026-11-17 "Report stable live").
+fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective, &dyn Fn(&LiveLoop))) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -3910,6 +4072,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.cross_vias = true;
         st.layers_now = layers_now(&st, &lr.events, bottom);
         let pred0 = measure(&st, &lr);
+        // The connections in the plan: every one not failed so far is drawn (M-B1 never drop), so
+        // the live Best so far counts them as routed (predicted).
+        let planned = out.iter().filter(|o| o.reason.is_empty()).count();
         let mut sp = Sp {
             ctl,
             st: &mut st,
@@ -3975,7 +4140,27 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // cycle finishes and is offered), with `hard` the limits too. A cycle Cancel cut short is
         // not offered (Cancel = the best variant kept so far).
         let loop_over = || loop_deadline.is_some_and(|d| Instant::now() >= d);
-        let mut stop = || stop_now() || ctl.limit_reached() || loop_over();
+        // Free the slot (user 2026-11-17): once this loop is stable it only waits for OK (a dialog
+        // run never ends by itself at stable), so before each further cycle it gives its compute
+        // slot to a run not yet begun, if one waits, and goes on when a slot is free again; with
+        // fewer engine threads than runs every run can so become stable while the loops run. Its
+        // own result does not change (the cycles depend only on the run's state). Never past the
+        // time limit (limit-wait: bounded waits): the loop stops at this check then, and a yield
+        // would wait for a slot, unbounded by `[run] limit_grace_s`.
+        let stable_seen = std::cell::Cell::new(false);
+        let (yields, yield_s) = (std::cell::Cell::new(0usize), std::cell::Cell::new(0.0f64));
+        let mut stop = || {
+            if stable_seen.get() && !stop_now() {
+                ctl.test_point("stable yield check");
+                let t_y = Instant::now();
+                if !ctl.over_limit() && gate.1.slots.yield_to_first() {
+                    ctl.test_point("stable slot given");
+                    yields.set(yields.get() + 1);
+                    yield_s.set(yield_s.get() + t_y.elapsed().as_secs_f64());
+                }
+            }
+            stop_now() || ctl.limit_reached() || loop_over()
+        };
         // `[run] limit_grace_s`: past the limit and its grace the step stops at its next check (the
         // cycle it cut is not offered; the archive's best variant is kept). Read only after the limit
         // passed, so a run without a limit takes the same moves in the same order.
@@ -3983,7 +4168,24 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let clock = || t_loop.elapsed().as_secs_f64();
         // M0: the progress dialog names the loop (tests/cancel_latency.rs waits for it).
         ctl.stage(rnd, rnds, "TopoR loop on the topology");
-        let mut rep = crate::control::in_loop_scope(|| optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock));
+        // "Report stable live" (user 2026-11-17): the progress says "Routes stable" while the loop
+        // still runs, so the dialog's OK (= Cancel) ends the loop there ("Cancel / OK", labelled
+        // "stable" by route_topo); a dialog run never ends BY ITSELF at stable (finish_when_stable off).
+        let live = gate.3;
+        let total = nconn;
+        let mut on_pick = |_: usize, pick: &Criteria, stable: bool| {
+            stable_seen.set(stable);
+            live(&LiveLoop { pick: *pick, planned, total, stable });
+        };
+        let mut rep = crate::control::in_loop_scope(|| optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock, &mut on_pick));
+        if yields.get() > 0 {
+            warnings.push(format!(
+                "TopoR loop: stable after cycle {}, it gave its compute slot to a run not yet begun {} time(s) (fewer engine threads than runs) and waited {:.1} s for one again",
+                rep.stable_at.unwrap_or(0),
+                yields.get(),
+                yield_s.get()
+            ));
+        }
         // The TopoR loop step ends here (its wait, when the limit fell in it); the pick and the cut
         // necks belong to the drawing of the picked variant.
         ctl.stage(rnd, rnds, "picking the variant to draw");
@@ -4042,7 +4244,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.layers_now.clear();
         let loop_s = t_loop.elapsed().as_secs_f64();
         let time_hit = rep.stop == "time limit" || rep.stop == "loop_time_share";
-        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), time_hit });
+        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit });
         let pc = arch.items[pick].crit;
         let table = table_text(&arch.table(Some(pick)), &obj);
         warnings.push(format!(
@@ -6617,6 +6819,156 @@ mod tests {
     }
 
     use super::*;
+
+    fn coord_obj() -> Objective {
+        let o = Options::default();
+        Objective::from_options(&o.objective, o.mm_per_via, &o.pick)
+    }
+
+    fn predicted(errors: usize) -> RunBest {
+        RunBest { crit: Criteria { errors, ..Criteria::default() }, routed: 3, total: 3, cycle: 1 }
+    }
+
+    #[test]
+    fn a_runs_stable_never_goes_back_in_the_progress() {
+        // "Report stable live": the loop's live report, then the round's end (which knows only its
+        // own meter) and the run's end; "Routes stable" stays on throughout (ui_wx: never goes back).
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 1, coord_obj(), 1);
+        assert!(!ctl.snapshot().stable);
+        coord.report(0, |r| {
+            r.stable = true;
+            r.predicted = Some(predicted(0));
+        });
+        assert!(ctl.snapshot().stable);
+        coord.ended(0, |r| r.stable = false, None);
+        assert!(ctl.snapshot().stable, "the round's end cleared the live stable");
+        coord.report(0, |r| r.done = true);
+        assert!(ctl.snapshot().stable);
+        // two runs: stable only when every run is stable or done
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 2, coord_obj(), 1);
+        coord.report(0, |r| {
+            r.stable = true;
+            r.predicted = Some(predicted(0));
+        });
+        assert!(!ctl.snapshot().stable);
+        coord.report(1, |r| r.done = true);
+        assert!(ctl.snapshot().stable);
+    }
+
+    /// User 2026-11-17: "Routes stable" (the button turns into OK) only once there is a pick to
+    /// keep: a live stable without any pick (drawn or predicted) is not shown; the loop's predicted
+    /// pick is Best so far until a pick is drawn, and the drawn one replaces it.
+    #[test]
+    fn routes_stable_waits_for_the_first_pick() {
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 1, coord_obj(), 1);
+        coord.report(0, |r| r.stable = true);
+        let p = ctl.snapshot();
+        assert!(!p.stable && p.best_total == 0 && p.runs_stable == 1, "stable, but Best so far empty: not shown");
+        coord.report(0, |r| r.predicted = Some(RunBest { routed: 2, ..predicted(1) }));
+        let p = ctl.snapshot();
+        assert!(p.stable && p.best_total == 3 && p.best_routed == 2 && p.best_errors == 1 && p.best_round == 1, "{p:?}");
+        // the drawn pick replaces the predicted one in Best so far
+        let drawn = RunBest { crit: Criteria { errors: 2, ..Criteria::default() }, routed: 3, total: 3, cycle: 1 };
+        coord.ended(0, |r| r.best = Some(drawn), None);
+        let p = ctl.snapshot();
+        assert!(p.stable && p.best_errors == 2 && p.best_routed == 3, "{p:?}");
+        // a drawn pick alone (the cycles loop) is enough too
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 1, coord_obj(), 1);
+        coord.report(0, |r| r.stable = true);
+        assert!(!ctl.snapshot().stable);
+        coord.ended(0, |r| r.best = Some(drawn), None);
+        assert!(ctl.snapshot().stable);
+        // two runs: the better predicted pick is Best so far
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 2, coord_obj(), 1);
+        coord.report(0, |r| r.predicted = Some(predicted(3)));
+        coord.report(1, |r| r.predicted = Some(predicted(1)));
+        let p = ctl.snapshot();
+        assert!(!p.stable && p.best_run == 2 && p.best_errors == 1, "{p:?}");
+    }
+
+    /// verify-sl2 V1: OK vs Cancel is what the progress showed at the first stop request, latched
+    /// there: a run that turns stable (or "every run stable or done") after a Cancel does not make
+    /// it an OK, and a second request does not change it.
+    #[test]
+    fn the_stop_request_is_latched_at_the_press() {
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 2, coord_obj(), 1);
+        coord.report(0, |r| {
+            r.stable = true;
+            r.predicted = Some(predicted(0));
+        });
+        assert!(!ctl.snapshot().stable && !ctl.ok_at_stable());
+        ctl.request_cancel(); // 1 of 2 runs stable: Cancel
+        coord.report(1, |r| r.done = true); // the other run ends after the Cancel
+        assert!(ctl.snapshot().stable, "premise: the progress turns stable after the press");
+        assert!(ctl.is_cancelled() && !ctl.ok_at_stable(), "a Cancel stays a Cancel");
+        ctl.request_stop(Some(true));
+        assert!(!ctl.ok_at_stable(), "only the first request counts");
+        // OK: the progress shows Routes stable at the press
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 1, coord_obj(), 1);
+        coord.report(0, |r| {
+            r.stable = true;
+            r.predicted = Some(predicted(0));
+        });
+        assert!(!ctl.ok_at_stable(), "no stop request yet");
+        ctl.request_cancel();
+        assert!(ctl.ok_at_stable());
+        // the caller's own view wins (the plugin passes what its button read)
+        let ctl = RunControl::new();
+        ctl.request_stop(Some(true));
+        assert!(ctl.ok_at_stable());
+        let ctl = RunControl::new();
+        let coord = Coord::new(&ctl, 1, coord_obj(), 1);
+        coord.report(0, |r| {
+            r.stable = true;
+            r.predicted = Some(predicted(0));
+        });
+        ctl.request_stop(Some(false));
+        assert!(ctl.is_cancelled() && !ctl.ok_at_stable());
+        // a direct store of the flag is a Cancel
+        let ctl = RunControl::new();
+        ctl.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!ctl.ok_at_stable());
+    }
+
+    /// User 2026-11-17 "free the slot": a run waiting for its first slot goes before one that
+    /// waits to go on, and a stable run gives its slot to it ([`Slots::yield_to_first`]).
+    #[test]
+    fn a_stable_run_gives_its_slot_to_a_run_not_yet_begun() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let slots = Slots::new(1);
+        assert!(!slots.yield_to_first(), "nobody waits: no yield");
+        let begun = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            slots.acquire_first(); // run 1 computes
+            let h = s.spawn(|| {
+                slots.acquire_first(); // run 2 waits for its first slot
+                begun.store(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                begun.store(2, Ordering::SeqCst);
+                slots.release();
+            });
+            while slots.st.lock().expect("slots").first == 0 {
+                std::thread::yield_now();
+            }
+            let gave = slots.yield_to_first();
+            let at = begun.load(Ordering::SeqCst);
+            // run 1 holds one slot either way: release it before asserting, so a failed check ends
+            // the test instead of leaving run 2 waiting for ever
+            slots.release();
+            h.join().expect("run 2");
+            assert!(gave, "run 2 waits: run 1 gives its slot");
+            assert_eq!(at, 2, "run 1 went on only after run 2 gave the slot back");
+        });
+        let g = slots.st.lock().expect("slots");
+        assert_eq!((g.free, g.first), (1, 0));
+    }
 
     fn eprom() -> BoardModel {
         BoardModel::from_json(include_str!("../../tests/fixtures/eprom-to-kernal-ripped.json")).expect("fixture parses")
