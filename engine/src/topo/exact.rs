@@ -1362,6 +1362,11 @@ mod tests {
             let mut st = State::new(&b.proj);
             let c = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
             st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+            // Further wires, not drawn: lane neighbours of wire 0 (the planned-room zones and
+            // the lane-slot gates that `room` prices).
+            for c in conns.iter().filter(|c| c.w > 0.0 && c.net != 1) {
+                let _ = st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0);
+            }
             let opts = Options::default();
             let checker = Checker::new(&m, &opts);
             let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
@@ -1383,7 +1388,7 @@ mod tests {
     /// runs of the routed wire with and without pad exits.
     #[test]
     fn octilinear_shape_cache_matches_the_reference_loop() {
-        use super::super::octi::OCTI_REF;
+        use super::super::octi::{OCTI_HITS, OCTI_REF};
         let (mut some, mut runs) = (0, 0);
         with_octi_fields(&mut |dr, g| {
             let wi = &dr.st.wires[0];
@@ -1411,6 +1416,7 @@ mod tests {
                 assert_eq!(bits(&got), bits(&want));
             }
         });
-        assert!(some > 10, "{some} of {runs}");
+        let hits = OCTI_HITS.with(|h| h.get());
+        assert!(some > 10 && hits[0] > 20 && hits[1] > 20, "{some} of {runs}, hits {hits:?}");
     }
 }

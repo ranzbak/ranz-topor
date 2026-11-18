@@ -34,8 +34,8 @@ case ${1:-} in
     for b in eprom-to-kernal wiccon-2023 $E; do one $(basename $b .kicad_pcb) $b 1 & sleep 1; done
     ( hzq run --threads 4 --name f67-tests -- bash $ROOT/tools/tw3f67_job.sh tests-in > $R/hzq-tests.log 2>&1; note "hzq tests rc $?" ) & sleep 1
     MS=($(python3 tools/tw3f67_mutants.py list))
-    for u in A B C; do
-      case $u in A) o=0;; B) o=6;; C) o=12;; esac
+    for u in A B C D; do
+      case $u in A) o=0;; B) o=6;; C) o=12;; D) o=18;; esac
       ( hzq run --threads 4 --name f67-mut$u -- bash $ROOT/tools/tw3f67_job.sh mut-in $u "${MS[@]:$o:6}" > $R/hzq-mut$u.log 2>&1; note "hzq mut$u rc $?" ) & sleep 1
     done
     wait; note "all done" ;;

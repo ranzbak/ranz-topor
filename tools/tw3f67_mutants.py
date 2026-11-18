@@ -28,6 +28,12 @@ M = {
     "o1_pre_across_nodes": (O, "            for i in 0..n {\n                let mut js: Option<Vec<usize>> = None;\n                let mut pre: Vec<Option<Vec<Shape>>> = Vec::new();", "            let mut pre: Vec<Option<Vec<Shape>>> = Vec::new();\n            for i in 0..n {\n                let mut js: Option<Vec<usize>> = None;"),
     "o2_legal_assumed": (O, "Shape { s, legs, legal: None }", "Shape { s, legs, legal: Some(true) }"),
     "o3_follow_from_start": (O, "=> follow(from, e, kk),", "=> follow(p, e, kk),"),
+    # F6 octilinear follow window, room precompute
+    "f1_window_no_need": (O, "let (sa, r) = (u.cross(a), nmax + tol + 1.0);", "let (sa, r) = (u.cross(a), tol + 1.0);"),
+    "f2_bucket_dir": (O, ".filter(|(_, x)| x.2 == k % 4)", ".filter(|(_, x)| x.2 == (k + 1) % 4)"),
+    "f3_window_low": (O, "by.partition_point(|x| x.0 < sa - r)", "by.partition_point(|x| x.0 < sa)"),
+    "g1_gate_far_end": (O, "(gp, gp + gu * glen, glen, glo, ghi)", "(gp, gp + gu * (0.5 * glen), glen, glo, ghi)"),
+    "z1_zone_unit": (O, "(za, sign, zl, (zb - za) * (1.0 / zl))", "(za, sign, zl, (zb - za) * (0.5 / zl))"),
     # F6 cached boxes, memo keys
     "b1_box_shrink": (D, "self.ent_box.push(core_box);", "self.ent_box.push(core_box.grow(-0.05e6));"),
     "k1_repair_key_a_only": (D, "let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];\n                if let Some(&worst) = memo.get(&key) {", "let key = [a.x.to_bits(), a.y.to_bits(), a.x.to_bits(), a.y.to_bits()];\n                if let Some(&worst) = memo.get(&key) {"),

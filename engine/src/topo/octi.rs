@@ -184,6 +184,8 @@ type Leg = (Vec2, Option<usize>);
 thread_local! {
     /// Test switch: run the DP loop without the shape cache (the reference).
     pub(super) static OCTI_REF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test coverage: legs with a bundle length > 0, legs with a room price > 0 (cached loop).
+    pub(super) static OCTI_HITS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
 }
 
 /// Where the run ends at a pad: the pad's long axis (unit, pointing out of the pad towards the
@@ -446,8 +448,9 @@ impl Drawer<'_> {
         let tol = 0.05 * pitch + 1_000.0;
         let mut follow_cache: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
         // Length of the leg `a-b` (direction `k`) that runs beside a drawn neighbour at its
-        // clearance (the overlap of their projections).
-        let mut follow = |a: Vec2, b: Vec2, k: usize| -> f64 {
+        // clearance (the overlap of their projections). The scan of every neighbour: the
+        // reference of `follow` below (tests, `OCTI_REF`).
+        let mut follow_ref = |a: Vec2, b: Vec2, k: usize| -> f64 {
             let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
             if let Some(&v) = follow_cache.get(&key) {
                 return v;
@@ -474,7 +477,7 @@ impl Drawer<'_> {
         // lane neighbour (`zones`), each piece weighted by `x + x^2`, `x` = depth over the pitch
         // (midpoint rule, pieces of at most a quarter pitch or 1/24 of the leg).
         let mut room_cache: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
-        let mut room = |a: Vec2, b: Vec2| -> f64 {
+        let mut room_ref = |a: Vec2, b: Vec2| -> f64 {
             if (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0 {
                 return 0.0;
             }
@@ -529,6 +532,115 @@ impl Drawer<'_> {
             }
             let v = cfg.room * tot;
             room_cache.insert(key, v);
+            v
+        };
+        // The same two prices with the per-leg work cut, exactly: the zones' unit directions and
+        // lengths and the gates' far ends computed once (the same expressions), the sample
+        // count once per leg; the bundle neighbours per direction sorted by their offset across
+        // it, so only those whose offset can lie within `tol` of their clearance are looked at
+        // (window: the widest clearance + tol + 1 nm against rounding; `max` is order-free).
+        let zpre: Vec<(Vec2, f64, f64, Vec2)> = zones
+            .iter()
+            .map(|&(za, zb, sign)| {
+                let zl = (zb - za).len();
+                (za, sign, zl, (zb - za) * (1.0 / zl))
+            })
+            .collect();
+        let gpre: Vec<(Vec2, Vec2, f64, f64, f64)> = gates.iter().map(|&(gp, gu, glen, glo, ghi)| (gp, gp + gu * glen, glen, glo, ghi)).collect();
+        let side_by: Vec<(Vec<(f64, usize)>, f64)> = (0..8)
+            .map(|k| {
+                let u = dir(k);
+                let mut v: Vec<(f64, usize)> = side.iter().enumerate().filter(|(_, x)| x.2 == k % 4).map(|(i, x)| (u.cross(x.0), i)).collect();
+                v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                let nmax = v.iter().map(|&(_, i)| side[i].3).fold(0.0, f64::max);
+                (v, nmax)
+            })
+            .collect();
+        let mut follow_cache2: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
+        let mut follow = |a: Vec2, b: Vec2, k: usize| -> f64 {
+            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
+            if let Some(&v) = follow_cache2.get(&key) {
+                return v;
+            }
+            let u = dir(k);
+            let (t0, t1) = (0.0f64, (b - a).dot(u));
+            let mut best = 0.0f64;
+            let (by, nmax) = &side_by[k % 8];
+            let (sa, r) = (u.cross(a), nmax + tol + 1.0);
+            let from = by.partition_point(|x| x.0 < sa - r);
+            for &(sc, i) in &by[from..] {
+                if sc > sa + r {
+                    break;
+                }
+                let (c, e, _, need) = side[i];
+                let off = u.cross(c - a).abs();
+                if (off - need).abs() > tol {
+                    continue;
+                }
+                let (s0, s1) = ((c - a).dot(u), (e - a).dot(u));
+                let ov = (t1.min(s0.max(s1)) - t0.max(s0.min(s1))).max(0.0);
+                best = best.max(ov);
+            }
+            #[cfg(test)]
+            OCTI_HITS.with(|h| h.set([h.get()[0] + usize::from(best > 0.0), h.get()[1]]));
+            follow_cache2.insert(key, best);
+            best
+        };
+        let mut room_cache2: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
+        let mut room = |a: Vec2, b: Vec2| -> f64 {
+            if (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0 {
+                return 0.0;
+            }
+            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
+            if let Some(&v) = room_cache2.get(&key) {
+                return v;
+            }
+            let l = (b - a).len();
+            let mut tot = 0.0;
+            if l >= 1.0 {
+                let n = ((l / (0.25 * pitch)).ceil() as usize).clamp(2, 24);
+                let ds = l / n as f64;
+                for &(za, sign, zl, zu) in &zpre {
+                    let d0 = sign * zu.cross(a - za);
+                    let d1 = sign * zu.cross(b - za);
+                    if d0 <= 0.0 && d1 <= 0.0 {
+                        continue;
+                    }
+                    let (t0, t1) = ((a - za).dot(zu), (b - za).dot(zu));
+                    if (t0 < 0.0 && t1 < 0.0) || (t0 > zl && t1 > zl) {
+                        continue;
+                    }
+                    for i in 0..n {
+                        let f = (i as f64 + 0.5) / n as f64;
+                        let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
+                        if d > 0.0 && (0.0..=zl).contains(&t) {
+                            let x = d / pitch;
+                            tot += ds * (x + x * x);
+                        }
+                    }
+                }
+            }
+            // The lane slots beyond the span (P6 b): the depth of the crossing past it.
+            for &(gp, gq, glen, glo, ghi) in &gpre {
+                if !super::draw::seg_proper(a, b, gp, gq) {
+                    continue;
+                }
+                let (d1, d2) = (b - a, gq - gp);
+                let den = d1.cross(d2);
+                if den.abs() < 1e-9 {
+                    continue;
+                }
+                let t = (gp - a).cross(d1) / den * glen;
+                let depth = (glo - t).max(t - ghi).max(0.0);
+                if depth > 0.0 {
+                    let x = depth / pitch;
+                    tot += pitch * (x + x * x);
+                }
+            }
+            let v = cfg.room * tot;
+            #[cfg(test)]
+            OCTI_HITS.with(|h| h.set([h.get()[0], h.get()[1] + usize::from(v > 0.0)]));
+            room_cache2.insert(key, v);
             v
         };
         let mut legal_cache: FxHashMap<[u64; 4], bool> = crate::fxhash::map();
@@ -679,9 +791,9 @@ impl Drawer<'_> {
                                     ok = false;
                                     break;
                                 }
-                                c += len + b + room(from, e);
+                                c += len + b + room_ref(from, e);
                                 if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
-                                    c -= cfg.pull * follow(from, e, kk);
+                                    c -= cfg.pull * follow_ref(from, e, kk);
                                 }
                                 if dk.is_none() {
                                     c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
