@@ -30,7 +30,7 @@ boards() { # boards THREADS...
   done; }
 case ${1:-all} in
   all)
-    ( hzq run --threads 4 --name pd-tests -- bash -c "cd $ROOT/engine && RAYON_NUM_THREADS=4 cargo test --release --lib -- par:: octi exact:: 9>&- > $R/tests.log 2>&1; echo \"lib rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/tests.log 2>&1; echo \"par_draw rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_refine --test par_refine_dense --test topo_drawing_grace --test topo_m3_class_keep 9>&- >> $R/tests.log 2>&1; echo \"near rc \$?\" >> $R/tests.log; cargo clippy --release --all-targets 9>&- >> $R/tests.log 2>&1; echo \"clippy rc \$?\" >> $R/tests.log; cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py tests/test_docs_links.py >> $R/tests.log 2>&1; echo \"pytest rc \$?\" >> $R/tests.log" ) & sleep 1
+    ( hzq run --threads 4 --name pd-tests -- bash -c "cd $ROOT/engine && RAYON_NUM_THREADS=4 cargo test --release --lib -- par:: octi exact:: 9>&- > $R/tests.log 2>&1; echo \"lib rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/tests.log 2>&1; echo \"par_draw rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_refine --test par_refine_dense --test topo_drawing_grace --test topo_m3_class_keep --test topo_erbs_margin --test topo_pad_end 9>&- >> $R/tests.log 2>&1; echo \"near rc \$?\" >> $R/tests.log; cargo clippy --release --all-targets 9>&- >> $R/tests.log 2>&1; echo \"clippy rc \$?\" >> $R/tests.log; cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py tests/test_docs_links.py >> $R/tests.log 2>&1; echo \"pytest rc \$?\" >> $R/tests.log" ) & sleep 1
     if [ -z "${NOBOARDS:-}" ]; then  # NOBOARDS=1: tests and mutants only
     # slim (lead 2026-11-18, smart compute): esp/qmtech at RAYON 2 and 4 (1 and 8 come from the
     # exclusive timing run), eprom/wiccon at RAYON 1; no default-runs configs
@@ -57,6 +57,18 @@ case ${1:-all} in
       hzq run --threads 4 --name pd-mut$M -- bash -c "RAYON_NUM_THREADS=4 cargo test --release --lib -- octilinear_shape_cache par:: 9>&- > $R/mut$M.log 2>&1; echo \"lib rc \$?\" >> $R/mut$M.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/mut$M.log 2>&1; echo \"par_draw rc \$?\" >> $R/mut$M.log"
       grep -E "rc [0-9]|^test result" $R/mut$M.log | while read -r l; do note "mutant $M: $l"; done
     done
+    cp $R/par.rs.orig src/topo/par.rs; cp $R/octi.rs.orig src/topo/octi.rs
+    note "all done" ;;
+  rb)  # the rebase onto a new main (par-draw-tw2's joint bands included): tests, near tests, clippy, config pytest;
+       # 4 boards x sequential/erbs x RAYON 1 and 8; mutant M1 (completion order: par::map incl. the joint bands, the crew)
+    ( hzq run --threads 4 --name pd-tests -- bash -c "cd $ROOT/engine && RAYON_NUM_THREADS=4 cargo test --release --lib -- par:: octi exact:: joint 9>&- > $R/tests.log 2>&1; echo \"lib rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/tests.log 2>&1; echo \"par_draw rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_refine --test par_refine_dense --test topo_drawing_grace --test topo_m3_class_keep --test topo_erbs_margin --test topo_pad_end 9>&- >> $R/tests.log 2>&1; echo \"near rc \$?\" >> $R/tests.log; cargo clippy --release --all-targets 9>&- >> $R/tests.log 2>&1; echo \"clippy rc \$?\" >> $R/tests.log; cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py tests/test_docs_links.py >> $R/tests.log 2>&1; echo \"pytest rc \$?\" >> $R/tests.log" ) & sleep 1
+    boards 1 8
+    wait
+    grep -E "rc [0-9]|^test result|FAILED|panicked|^(warning|error)(\[|:)" $R/tests.log | while read -r l; do note "tests: $l"; done
+    cd $ROOT/engine; cp src/topo/par.rs $R/par.rs.orig; cp src/topo/octi.rs $R/octi.rs.orig
+    python3 $ROOT/tools/parocti_mut.py M1; note "mutant M1 applied rc $?"
+    hzq run --threads 4 --name pd-mutM1 -- bash -c "RAYON_NUM_THREADS=4 cargo test --release --lib -- octilinear_shape_cache par:: 9>&- > $R/mutM1.log 2>&1; echo \"lib rc \$?\" >> $R/mutM1.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/mutM1.log 2>&1; echo \"par_draw rc \$?\" >> $R/mutM1.log"
+    grep -E "rc [0-9]|^test result" $R/mutM1.log | while read -r l; do note "mutant M1: $l"; done
     cp $R/par.rs.orig src/topo/par.rs; cp $R/octi.rs.orig src/topo/octi.rs
     note "all done" ;;
   ref)
