@@ -62,6 +62,7 @@ EOF
 tests() {
   cd $ROOT/engine
   { timeout 5400 cargo test --release --no-fail-fast 2>&1 9>&-; echo "cargo test rc $?"
+    rustup component add clippy > $R/clippy-install.log 2>&1 9>&-
     cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; echo "clippy rc $?"; grep -E "^ +--> |^error" $R/clippy.log | sort | uniq
   } > $R/tests.log
   grep -E "test result|rc |FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
@@ -81,8 +82,9 @@ tests() {
 }
 retest() {  # targeted: the tests and mutants a fix round touched, clippy with its log
   cd $ROOT/engine
+  rustup component add clippy > $R/clippy-install.log 2>&1 9>&-  # the VM image has no clippy (tw2l-retest 2026-11-18)
   cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; note "clippy rc $?: $(grep -cE '^(warning|error)' $R/clippy.log) warning/error lines"
-  cargo test --release --lib topo::joint --test tw2_metric --test topo_m3_patterns --test topo_m3_class_keep > $R/retest.log 2>&1 9>&-
+  { cargo test --release --lib topo::joint 9>&-; cargo test --release --test tw2_metric --test topo_m3_patterns --test topo_m3_class_keep 9>&-; } > $R/retest.log 2>&1
   note "retest rc $?"; grep -E "test result|FAILED|panicked" $R/retest.log | while read -r l; do note "retest: $l"; done
   local J=$ROOT/engine/src/topo/joint.rs D=$ROOT/engine/src/topo/draw.rs
   sub 'if !stat[bi] && !b.octi {' 'if false {' | mut j3_octi_rescue $J --test tw2_metric
@@ -98,5 +100,6 @@ case ${1:-} in
   retest) hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in; note "all done" ;;
   retest-in) retest ;;
   both) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-tests -- bash $ROOT/tools/tw2_job.sh tests-in ) & sleep 1; wait; note "all done" ;;
+  ladder-retest) shift; ladder "$@"; ( hzq run --threads 4 --name tw2-retest -- bash $ROOT/tools/tw2_job.sh retest-in ) & sleep 1; wait; note "all done" ;;
   *) sed -n 2,12p "$0"; exit 2 ;;
 esac
