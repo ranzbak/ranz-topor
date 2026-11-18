@@ -1516,6 +1516,7 @@ impl<'a> Drawer<'a> {
     /// traversal `at` (P3/P4) goes first, then the triangles no other wire traverses, wide
     /// enough, widest first.
     fn via_candidates(&self, w: WireId, ka: usize, kb: usize, need_r: f64, at: Option<usize>) -> Vec<(usize, Vec2)> {
+        let _nd = super::ndprof::t(super::ndprof::VIA_CANDS);
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let mut c: Vec<(bool, usize, bool, f64, usize, Vec2)> = Vec::new();
@@ -1540,6 +1541,7 @@ impl<'a> Drawer<'a> {
     /// its two ends first: where the packing gave the via its room (the disc items of
     /// [`layer_items`]). Empty when the passes have no packed position yet. O(turns).
     fn chord_sites(&self, w: WireId, k: usize) -> Vec<(usize, Vec2)> {
+        let _nd = super::ndprof::t(super::ndprof::CHORD_SITES);
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let n = wi.passes.len();
@@ -2152,6 +2154,7 @@ impl<'a> Drawer<'a> {
     /// plan's class ([`Drawer::via_reach`]), their reach violations added to the price with
     /// `[vias] reach_price`; `None` = every site.
     pub fn force_via(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, sizes: &[ViaSize], class: Option<&ClassCrossings>) -> Option<(usize, Vec2, ViaSize, Vec<Viol>)> {
+        let _nd = super::ndprof::t(super::ndprof::FORCE_VIA);
         let net = self.st.wires[w].net;
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
@@ -2256,6 +2259,7 @@ impl<'a> Drawer<'a> {
     /// Price: the violation amounts of both reach segments ([`Viol::amount`], graded; 0 for a free
     /// reach). O(chord + objects nearby).
     pub fn via_reach(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> (bool, f64) {
+        let _nd = super::ndprof::t(super::ndprof::VIA_REACH);
         let net = self.st.wires[w].net;
         let chord = self.taut_chord(w, k);
         let q = match chord.len() {
@@ -2975,6 +2979,7 @@ impl<'a> Drawer<'a> {
         let mut out = WireOut { wire: w, ..Default::default() };
         let mut committed: Vec<usize> = Vec::new();
         for r in 0..plan.layers.len() {
+            super::ndprof::add(super::ndprof::RUNS, 1);
             let k0 = if r == 0 { 0 } else { vias[r - 1].0 };
             let k1 = if r == plan.layers.len() - 1 { n } else { vias[r].0 };
             // A branch ends on its trunk's drawn copper (D5 net trees, `end_at`), else at its vertex.
@@ -3761,6 +3766,7 @@ impl<'a> Drawer<'a> {
     /// `None` when no vertex goes. O(passes x vertices x checker query).
     #[allow(clippy::type_complexity)]
     pub(super) fn pull_taut(&self, w: WireId, k0: usize, k1: usize, layer: usize, lid: u32, pts: &[Vec2], pneck: &Option<super::exact::Neck>) -> Option<(Vec<Vec2>, Vec<Item>, Option<(f64, [f64; super::exact::NECK_ZONES])>)> {
+        let _nd = super::ndprof::t(super::ndprof::PULL_TAUT);
         let cur = self.pull_pts(w, k0, k1, layer, pts, None)?;
         self.realise(w, layer, lid, &cur, pneck).map(|(its, pn)| (cur, its, pn))
     }
@@ -3769,6 +3775,7 @@ impl<'a> Drawer<'a> {
     /// force, never drop) a leg is taken when the whole run's violation price stays at most
     /// `price` (then lowered to the new one) instead of when the leg is legal.
     fn pull_pts(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], mut forced: Option<(f64, f64)>) -> Option<Vec<Vec2>> {
+        let _nd = super::ndprof::t(super::ndprof::PULL_PTS);
         if pts.len() < 3 {
             return None;
         }
@@ -3889,6 +3896,7 @@ impl<'a> Drawer<'a> {
     /// that passes; and no own-net pad grazed. `(items, plan neck width and lengths)`.
     #[allow(clippy::type_complexity)]
     pub(super) fn realise(&self, w: WireId, layer: usize, lid: u32, pts: &[Vec2], pneck: &Option<super::exact::Neck>) -> Option<(Vec<Item>, Option<(f64, [f64; super::exact::NECK_ZONES])>)> {
+        let _nd = super::ndprof::t(super::ndprof::REALISE);
         let items = self.run_items(w, layer, pts);
         let (items, pn) = if self.checker.check_against(&self.idx, &items, &[]).violations.is_empty() {
             (items, None)
@@ -4218,6 +4226,7 @@ impl<'a> Drawer<'a> {
     /// without the repair and with it, and classifies. Only on failure. O(attempts x segments).
     #[allow(clippy::too_many_arguments)]
     fn diagnose(&mut self, w: WireId, layer: usize, k0: usize, k1: usize, s: Vec2, e: Vec2, last: &Violation, last_pts: &[Vec2]) {
+        let _nd = super::ndprof::t(super::ndprof::DIAGNOSE);
         let wi = &self.st.wires[w];
         let mut pre_bad = [false; 3];
         let mut pre0: Vec<Vec2> = Vec::new();
@@ -4334,6 +4343,7 @@ impl<'a> Drawer<'a> {
     /// (the push grows by 12 % per repeat at one object) until clean or the cap is reached; the
     /// result is judged by the [`Checker`] anyway. O(rounds x segments x neighbours).
     pub(super) fn repair(&self, net: i32, w: f64, s: f64, layer: usize, mut pts: Vec<Vec2>) -> Vec<Vec2> {
+        let _nd = super::ndprof::t(super::ndprof::REPAIR);
         let mut bumps: BTreeMap<usize, u32> = BTreeMap::new();
         // F6: the worst violation of a segment is a pure function of its two ends here (the objects
         // do not change during the repair), and a sweep changes only the segments it bumps: the

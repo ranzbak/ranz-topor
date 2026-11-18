@@ -294,6 +294,7 @@ impl Drawer<'_> {
     /// Walls are the sides left over: strip sides with nothing free behind them, and the other
     /// two sides of a pocket. A side shared by two strip triangles is open.
     pub(super) fn strip(&self, w: WireId, k0: usize, k1: usize) -> Strip {
+        let _nd = super::ndprof::t(super::ndprof::STRIP);
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let portal: Vec<usize> = (k0..k1).map(|k| st.passes[wi.passes[k]].edge).collect();
@@ -571,6 +572,7 @@ impl Drawer<'_> {
     /// The shortest path from `a` to `b` in the sleeve that clears `ents`, searched over nodes in
     /// the window `bb`; `None` when there is none or the node cap is hit.
     fn local_path(&self, strip: &Strip, wp: &Wp, a: Vec2, b: Vec2, bb: Aabb) -> Option<Vec<Vec2>> {
+        let _nd = super::ndprof::t(super::ndprof::LOCAL_PATH);
         let reach = self.qgrow;
         let ents = self.local_ents(wp, bb.grow(reach));
         let nr = self.near(ents.clone(), wp);
@@ -594,6 +596,7 @@ impl Drawer<'_> {
             }
         }
         let n = nodes.len();
+        super::ndprof::add(super::ndprof::LP_NODES, n as u64);
         let mut g = vec![f64::INFINITY; n];
         let mut from = vec![usize::MAX; n];
         let mut done = vec![false; n];
@@ -617,6 +620,7 @@ impl Drawer<'_> {
                     continue;
                 }
                 let (p, q) = (nodes[u], nodes[v]);
+                super::ndprof::add(super::ndprof::LP_EDGES, 1);
                 let mid = (p + q) * 0.5;
                 if strip.crosses_wall(p, q) || !strip.contains(mid) || !self.seg_clear_near(&nr, p, q) {
                     continue;
@@ -627,6 +631,7 @@ impl Drawer<'_> {
             }
         }
         if !done[1] {
+            super::ndprof::add(super::ndprof::LP_FAIL, 1);
             if std::env::var("TOPO_DEBUG").is_ok() {
                 let reached: Vec<String> = (0..n).filter(|&i| done[i]).map(|i| format!("({:.3},{:.3})", nodes[i].x / 1e6, -nodes[i].y / 1e6)).collect();
                 eprintln!(
@@ -700,6 +705,7 @@ impl Drawer<'_> {
     /// (never drop, M-B1: the least violating geometry where no legal one exists).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn exact_fix_relaxed(&self, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, neck: Option<Neck>, relax: f64) -> Option<Vec<Vec2>> {
+        let _nd = super::ndprof::t(if relax > 0.0 { super::ndprof::EXACT_RELAX } else { super::ndprof::EXACT0 });
         let wi = &self.st.wires[w];
         let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax };
         let mut strip = self.strip(w, k0, k1);
@@ -713,6 +719,7 @@ impl Drawer<'_> {
         // segments before and after it are not tested again. Keyed by the ends' bits.
         let mut seg_ok: crate::fxhash::FxHashMap<[u64; 4], bool> = crate::fxhash::map();
         for _ in 0..24 {
+            super::ndprof::add(super::ndprof::EXACT_ITERS, 1);
             let mut bad = None;
             for i in 0..pts.len() - 1 {
                 let (a, b) = (pts[i], pts[i + 1]);

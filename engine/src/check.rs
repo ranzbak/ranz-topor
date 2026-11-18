@@ -668,6 +668,7 @@ impl Checker {
     /// pool (one report per item, concatenated in item order, so the result is independent of
     /// the thread count). O(|items| * q), independent of the index size; wall time / threads.
     pub fn check_against(&self, idx: &ItemIndex, items: &[Item], skip: &[usize]) -> CheckReport {
+        let _nd = crate::topo::ndprof::t(crate::topo::ndprof::CHECK);
         use rayon::prelude::*;
         let all_layers = self.all_layers();
         let one = |(i, item): (usize, &Item)| {

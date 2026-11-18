@@ -240,6 +240,7 @@ impl Drawer<'_> {
     /// `relax` (nm, 0 = the rule): the clearance to foreign objects is kept only up to this much
     /// less (a run drawn by force, never drop: no deeper than its own violations).
     pub(super) fn octilinear(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], relax: f64) -> Option<OctiOut> {
+        let _nd = super::ndprof::t(if relax > 0.0 { super::ndprof::OCTI_RELAX } else { super::ndprof::OCTI0 });
         let cfg = self.octi;
         let mut taut: Vec<Vec2> = pts.to_vec();
         taut.dedup_by(|a, b| (*a - *b).len2() < 1.0);
