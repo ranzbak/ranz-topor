@@ -16,16 +16,19 @@ R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
 E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
-board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023;; esp) echo $E;; qmtech) echo $Q;; esac; }
+B=scratch/boards/bornhack2026/21c5f478f1af/bornhack2026-hardware.kicad_pcb
+board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; esac; }
 one() {
   local c=${1%%:*} rest=${1#*:}; local b=${rest%%:*} th=1
   [ "$rest" != "$b" ] && th=${rest#*:}
   local SETS=(--set 'drawing.realise="erbs"' --set optimize.runs=1) ENVS=() only=0 cc=$c CLK=()
   # suffix v: [capacity] via_cuts = true (tw4 T2), with TOPO_VIACHECK (stored vs fresh via prices)
+  # suffix w: [capacity] via_cuts = true without the check (product conditions: equal-time runs)
   # suffix n: [factors] neck_depth = 1000 (tw4 T1, the violation weight); suffixes combine (vn)
   # suffix c: [search] dangling_lead_choice = true (tw4 T3); suffix d: [factors] dangling_turn = 4 (not with n)
   while :; do
     if [ "${c%v}" != "$c" ]; then SETS+=(--set capacity.via_cuts=true); ENVS+=(TOPO_VIACHECK=1); c=${c%v}
+    elif [ "${c%w}" != "$c" ]; then SETS+=(--set capacity.via_cuts=true); c=${c%w}
     elif [ "${c%n}" != "$c" ]; then SETS+=(--set 'factors.weight={"neck_depth": 1000}'); c=${c%n}
     elif [ "${c%c}" != "$c" ]; then SETS+=(--set search.dangling_lead_choice=true); c=${c%c}
     elif [ "${c%d}" != "$c" ]; then SETS+=(--set 'factors.weight={"dangling_turn": 4}'); c=${c%d}
@@ -96,6 +99,21 @@ case ${1:-} in
     u eq-1 16 "e0:esp:4" "e0v:esp:4" "e1:esp:4" "e1v:esp:4"
     u eq-2 16 "e2:esp:4" "e2v:esp:4" "e3:esp:4" "e3v:esp:4"
     u eq-3 16 "e4:esp:4" "e4v:esp:4" "e0:qmtech:4" "e0v:qmtech:4"
+    wait; note "all done" ;;
+  eqn)
+    # TW4 merge round (lead 2026-11-19): neck_depth 1000 A/B at equal time on top of via_cuts (the new default),
+    # wall 300 s, 4 threads, esp s0-s4 + qmtech s0; paired runs share each unit (16 threads on a ccx43, --exclusive)
+    u eqn-1 16 "e0w:esp:4" "e0wn:esp:4" "e1w:esp:4" "e1wn:esp:4"
+    u eqn-2 16 "e2w:esp:4" "e2wn:esp:4" "e3w:esp:4" "e3wn:esp:4"
+    u eqn-3 16 "e4w:esp:4" "e4wn:esp:4" "e0w:qmtech:4" "e0wn:qmtech:4"
+    wait; note "all done" ;;
+  bh)
+    # TW4 merge round: the long board with via_cuts off / on (rounds=1, 4 threads, cpu 2400): cycle cost and DRC per
+    # type; KiCad caps its counts there, so each routed board also gets the tiled DRC (net pairs, U6 courtyard apart)
+    for c in r1s0 r1s0w; do
+      printf '%s\n' "bash $ROOT/tools/tw4_job.sh one $c:bornhack:4; python tools/drc_tiles.py run \$(ls $R/$c/bornhack/*/s0/*-topor/*.kicad_pcb) $R/$c/tiles --depth 4 --jobs 4 --area U6 > $R/$c-tiles.log 2>&1 9>&-; echo tiles rc \$?" > $R/unit-bh-$c.sh
+      ( RAYON_NUM_THREADS=4 hzq run --threads 4 --name bh-$c -- bash $R/unit-bh-$c.sh > $R/unit-bh-$c.log 2>&1; note "unit bh-$c rc $?" ) & sleep 1
+    done
     wait; note "all done" ;;
   t1)
     # TW4 T1 part 1 ([factors] neck_depth): targeted tests; off = main copper (JK 4 boards, r16s0 esp vs tw4t2b);
