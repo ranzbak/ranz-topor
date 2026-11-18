@@ -6,14 +6,15 @@
 # exactly its rev. Both: build a wheel (sccache), then the 1-thread units run in parallel, at most PROF_PAR (default 8 = half of a
 # ccx43's 16 vCPUs), each board's base and tip adjacent in the queue so both see the same load:
 #   tools/prof_run.sh <board> <out>/<tag>/<board> (seed 0, optimize.rounds=1 runs=1 unless --args overrides, --timeout 600 wall)
-# --args "--set optimize.rounds=1000 --set optimize.stable_patience=1000": the long run (no cycle cap, ends at the 600 s limit).
+# --set-csv optimize.rounds=1000,optimize.stable_patience=1000: the long run (no cycle cap, ends at the 600 s limit). (hz.sh flattens
+# quoting: no spaces inside one option value; --args "..." works only when run directly.)
 # Overhead: eprom and esp also run once with TOPO_PROF off (tip) -> overhead.md. Finally tools/prof_compare.py -> compare.{md,json}.
 # Output dir: $HZ_RUN_DIR (hz.sh) else scratch/prof-job. Progress lines in $OUT/rc.txt, "all done" at the end.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${HZ_RUN_DIR:-$ROOT/scratch/prof-job}; mkdir -p "$OUT"
 BOARDS="eprom-to-kernal,wiccon-2023,esp-rust-board,qmtech,bornhack2026"; FLAME=""; XARGS=""; LABELS="base,tip"
-while [ $# -gt 0 ]; do case $1 in --boards) BOARDS=$2; shift 2;; --flame) FLAME=--flame; shift;; --args) XARGS=$2; shift 2;; --labels) LABELS=$2; shift 2;; *) shift;; esac; done
+while [ $# -gt 0 ]; do case $1 in --boards) BOARDS=$2; shift 2;; --flame) FLAME=--flame; shift;; --args) XARGS=$2; shift 2;; --set-csv) XARGS=$(echo "$2" | tr , "\n" | sed "s/^/--set /" | tr "\n" " "); shift 2;; --labels) LABELS=$2; shift 2;; *) shift;; esac; done
 note() { echo "$*" >> "$OUT/rc.txt"; }
 export RAYON_NUM_THREADS=${TOPO_PROF_THREADS:-1}
 PATH=/root/.cargo/bin:$PATH
