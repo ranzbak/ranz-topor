@@ -22,7 +22,12 @@ one() {
   [ "$rest" != "$b" ] && th=${rest#*:}
   local SETS=(--set 'drawing.realise="erbs"' --set optimize.runs=1) ENVS=() only=0 cc=$c
   # suffix v: [capacity] via_cuts = true (tw4 T2), with TOPO_VIACHECK (stored vs fresh via prices)
-  if [ "${c%v}" != "$c" ]; then SETS+=(--set capacity.via_cuts=true); ENVS+=(TOPO_VIACHECK=1); c=${c%v}; fi
+  # suffix n: [factors] neck_depth = 1000 (tw4 T1, the violation weight); suffixes combine (vn)
+  while :; do
+    if [ "${c%v}" != "$c" ]; then SETS+=(--set capacity.via_cuts=true); ENVS+=(TOPO_VIACHECK=1); c=${c%v}
+    elif [ "${c%n}" != "$c" ]; then SETS+=(--set 'factors.weight={"neck_depth": 1000}'); c=${c%n}
+    else break; fi
+  done
   case $c in
     JK) SETS+=(--set optimize.rounds=1); ENVS+=(TOPO_ERBS_DEBUG=1) ;;
     JF) SETS+=(--set optimize.rounds=1 --set optimize.allow_violations=false) ;;
@@ -81,6 +86,16 @@ case ${1:-} in
     else note "mutant not applied"; fi
     cp $R/refine.rs.orig engine/src/topo/refine.rs
     note "all done" ;;
+  t1)
+    # TW4 T1 part 1 ([factors] neck_depth): targeted tests; off = main copper (JK 4 boards, r16s0 esp vs tw4t2b);
+    # A/B neck_depth 1000 per connection: JK 4 boards, r16 esp s0-s2, r16 qmtech, r16 wiccon
+    ( cd engine && cargo test --release --lib factors 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $?" )
+    ( cd engine && cargo test --release --test topo_compass --test loop_local --test topo_cm1_room 9>&- > $R/cargo.log 2>&1; note "cargo rc $?" )
+    u t1-q 4 "JK:qmtech:2" "JKn:qmtech:2"
+    u t1-qr 4 "r16s0:qmtech:2" "r16s0n:qmtech:2"
+    u t1-s 4 "JK:esp JK:wiccon JK:eprom" "JKn:esp JKn:wiccon JKn:eprom" "r16s0:wiccon r16s0n:wiccon" "r16s1n:esp"
+    u t1-e 4 "r16s0:esp r16s2n:esp" "r16s0n:esp"
+    wait; note "all done" ;;
   hooks)
     # TW4 unit 1 (meter hooks): targeted tests, then rounds=1 copper (must equal the tw4b base) + the new compass items
     ( cd engine && cargo test --release --test topo_compass --test topo_exits 9>&- > $R/cargo.log 2>&1; note "cargo rc $?" )
