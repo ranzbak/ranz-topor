@@ -1354,11 +1354,17 @@ impl Run {
             let empty = self.arch.items.is_empty();
             let RoundOut { result, crit, pre, .. } = ro;
             if let Some((c, r)) = pre.filter(|_| !cancel_cut) {
+                if std::env::var_os("TOPO_FUSEDBG").is_some() {
+                    eprintln!("STITCH variant: round {cycle} as drawn");
+                }
                 let (r, c) = stitched(r, c);
                 if !past() || empty {
                     note_judged(c, r.routed, true);
                     self.arch.offer(Variant { label: format!("round {cycle} as drawn"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
                 }
+            }
+            if std::env::var_os("TOPO_FUSEDBG").is_some() {
+                eprintln!("STITCH variant: round {cycle} (reduced + fused)");
             }
             let (r, c) = stitched(result, crit);
             (cyc_err, cyc_viol) = (c.errors, c.violations);

@@ -191,6 +191,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
     let (mut fine_on, mut fine_passes) = (false, 0usize);
     let mut fine_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut kept: Option<PourReach> = None;
+    let mut left: Vec<String> = Vec::new();
     for pass in 0..PASSES + FINE_PASSES {
         unplaced.clear();
         let again = kept.is_some();
@@ -208,6 +209,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
             }
         }
         out.after = reach.cuts.len();
+        left = reach.cuts.iter().map(|c| cut_text(model, c)).collect();
         if reach.cuts.is_empty() || expired() {
             break;
         }
@@ -384,6 +386,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                     reach.dump(&format!("{path}.p{}", pass + 1));
                 }
                 out.after = reach.cuts.len();
+                left = reach.cuts.iter().map(|c| cut_text(model, c)).collect();
             }
             break;
         }
@@ -399,6 +402,12 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
         ));
     }
     out.notes.extend(unplaced.into_iter().map(|s| format!("no stitch site for {s}")));
+    if std::env::var_os("TOPO_FUSEDBG").is_some() {
+        // Debug: the pieces left cut off, to compare the variants' stitchings.
+        for l in &left {
+            eprintln!("STITCH left ({} before, {} after): {l}", out.before, out.after);
+        }
+    }
     out
 }
 
