@@ -1678,6 +1678,18 @@ pub fn fuse_line(fused: &[(f64, f64)]) -> String {
     )
 }
 
+/// The octilinear polish's report line: `n` segments redrawn as an elbow or Z, which changed the
+/// copper's length by `added_mm` (an elbow is never shorter than the straight segment it
+/// replaces: after many fuses the polish gives back part of the length the fuse line reports
+/// saved, e.g. 3.0 of 8.5 mm on the esp USB crop with 48 fuses, hotfix-main 2026-11-18). O(1).
+pub fn polish_line(n: usize, added_mm: f64) -> String {
+    format!(
+        "octilinear polish after drawing: {n} segments not at 0/45/90 degrees (fused branch ends) redrawn as an elbow or Z: {:.1} mm {} in length",
+        added_mm.abs(),
+        if added_mm >= 0.0 { "added" } else { "saved" }
+    )
+}
+
 /// Start of the line (`[optimize] loop = "cycles"` only) that says what a whole-route cycle hands
 /// the next one: room hints, connections with their own history, edges with history (M6 R2: the
 /// TopoR loop computes none of it).
@@ -6143,19 +6155,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // becomes an elbow or Z where the checker accepts it.
     if octi_on {
         let ids: Vec<WireId> = drawn.keys().copied().collect();
-        let mut n_pol = 0usize;
+        let (mut n_pol, mut pol_nm) = (0usize, 0.0);
         for w in ids {
             let mut wo = drawn.remove(&w).expect("drawn wire");
+            let len0 = wo.length_nm;
             let k = dr.octi_polish(&mut wo);
             if k > 0 {
                 n_pol += k;
+                pol_nm += wo.length_nm - len0;
                 let ci = conn_of[wire_conn[w]];
                 necking.retain(|(c, _)| *c != ci);
                 settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
             }
             drawn.insert(w, wo);
         }
-        warnings.push(format!("octilinear polish after drawing: {n_pol} segments not at 0/45/90 degrees (fused branch ends) redrawn as an elbow or Z"));
+        warnings.push(polish_line(n_pol, pol_nm / MM));
         // Bundles (M-45 item 4): bends a wire takes together with a parallel neighbour, and the
         // skew each such bend gives the outer wire (2 d tan(a/2): 0.83 x pitch per 45 degrees).
         let wires = &st.wires;
@@ -7480,7 +7494,7 @@ mod tests {
             assert_eq!(lent, 0, "free slots while a run waits (first {first}, waiting {waiting}): no lane borrows");
         }
         assert_eq!(slots.try_take(8), 2, "nobody waits: the lanes borrow both free slots");
-        let (begun, done) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let (begun, done, tried) = (AtomicUsize::new(0), AtomicBool::new(false), AtomicBool::new(false));
         std::thread::scope(|s| {
             let run = || {
                 slots.acquire_first(); // a run waits for its first slot
@@ -7508,6 +7522,12 @@ mod tests {
             let run1 = s.spawn(|| {
                 // run 1 is stable: it gives its slot to run 3 and waits to go on
                 let gave = slots.yield_to_first();
+                // run 1 goes on: it keeps its slot until the lane below has tried (CI 2026-11-18:
+                // a run 1 that went on and ended at once gave the slot back, and the lane rightly
+                // borrowed that free slot)
+                while !tried.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
                 slots.release();
                 gave
             });
@@ -7516,6 +7536,7 @@ mod tests {
             }
             slots.give(1); // the other lane ends: its slot is for run 1
             let lent1 = slots.try_take(8);
+            tried.store(true, Ordering::SeqCst);
             slots.give(lent1);
             let gave = run1.join().expect("run 1");
             done.store(true, Ordering::SeqCst);
