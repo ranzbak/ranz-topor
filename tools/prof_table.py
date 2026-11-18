@@ -57,6 +57,12 @@ def load(path: Path):
     rd = d.get("report_dir")
     if not rd and p.name == "result.json":
         rd = str(p.parent)
+    try:  # a run fetched from a VM: report_dir names the VM's path; find the log next to the metrics file
+        if rd and not (Path(rd) / "log.txt").is_file():
+            logs = sorted(p.parent.glob("reports/**/log.txt"))
+            rd = str(logs[-1].parent) if logs else None
+    except OSError:
+        rd = None
     return prof, d, rd
 
 
