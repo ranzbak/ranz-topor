@@ -27,7 +27,7 @@ from pathlib import Path
 
 import wx
 
-from .config import Config
+from .config import PINNED_LINE_CODES, Config
 from .findings import Finding
 from .ports import Decision, Progress, RunSummary
 
@@ -69,6 +69,8 @@ WORDING: dict[str, dict[str, str]] = {
         "items_more": "… and {n} more (all in the report)",
         "accept_pads": "Accept: skip these pads (saved to topor.toml ignore_pads)",
         "accept_drills": "Accept: add these drills to topor.toml allowed_drills_mm",
+        # user 2026-11-17 ("Show it in the dialog"): a pinned old default / deprecated key, commented out on Route
+        "use_default": "Use the current default for {key}: Route comments its line out in topor.toml",
         "options_heading": "Options",
         "scope_label": "Scope",
         "scope_whole": "Whole board",
@@ -790,6 +792,8 @@ class _FindingsMixin:
         items = [str(i) for i in f.items]
         txt = f.message
         if items:
+            if txt.endswith(".") and not txt.endswith(".."):  # the sentence goes on with its items (never ".:")
+                txt = txt[:-1]
             txt += ": " + ", ".join(items[:_ITEMS_PREFLIGHT])
             if len(items) > _ITEMS_PREFLIGHT:
                 txt += ", " + W["items_more"].format(n=len(items) - _ITEMS_PREFLIGHT)
@@ -827,7 +831,7 @@ class _FindingsMixin:
 class PreflightDialog(_FindingsMixin, _Base):
     _wk = "preflight"
     #: tab order from the note §2 (one Accept checkbox, relabelled per selected code)
-    TAB_ORDER = ("findings", "cause", "accept", "scope_whole", "scope_between",
+    TAB_ORDER = ("findings", "cause", "accept", "use_default", "scope_whole", "scope_between",
                  "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
                  "save_toml", "help", "cancel", "route")
 
@@ -855,6 +859,15 @@ class PreflightDialog(_FindingsMixin, _Base):
         self.accept_cb.Bind(wx.EVT_CHECKBOX, self._on_accept)
         self.accept_code = None
         self.root.Add(self.accept_cb, 0, wx.BOTTOM, self.row)
+        # user 2026-11-17 ("Show it in the dialog"): ONE "Use the current default" checkbox, shown while the selected
+        # row is a pinned topor.toml line (CFG_PINNED_OLD_DEFAULT, CFG_DEPRECATED_KEY) and relabelled with its key;
+        # its state is kept per key, the ticked keys form Decision.use_defaults (Route comments those lines out)
+        self.use_default_state = {f.items[0]: False for f in self.findings if f.code in PINNED_LINE_CODES and f.items}
+        self.use_default_cb = wx.CheckBox(self, label=_mn(W["use_default"].format(key="…"), "u"), name="use_default")
+        self.use_default_cb.Hide()
+        self.use_default_cb.Bind(wx.EVT_CHECKBOX, self._on_use_default)
+        self.use_default_key = None
+        self.root.Add(self.use_default_cb, 0, wx.BOTTOM, self.row)
 
         self.root.Add(self.text(self, "preflight", "options_heading", bold=True), 0, wx.TOP | wx.BOTTOM, self.row)
         self._build_options(summary, cfg)
@@ -982,11 +995,21 @@ class PreflightDialog(_FindingsMixin, _Base):
             self.accept_cb.SetLabel(_mn(WORDING["preflight"][ACCEPT_CODES[code]], "a"))
             self.accept_cb.SetValue(self.accepted_state[code])
         self.accept_cb.Show(self.accept_code is not None)
+        key = f.items[0] if f is not None and f.code in PINNED_LINE_CODES and f.items else None
+        self.use_default_key = key if key in self.use_default_state else None
+        if self.use_default_key:
+            self.use_default_cb.SetLabel(_mn(WORDING["preflight"]["use_default"].format(key=key), "u"))
+            self.use_default_cb.SetValue(self.use_default_state[key])
+        self.use_default_cb.Show(self.use_default_key is not None)
         self.Layout()
 
     def _on_accept(self, _evt) -> None:
         if self.accept_code:
             self.accepted_state[self.accept_code] = self.accept_cb.GetValue()
+
+    def _on_use_default(self, _evt) -> None:
+        if self.use_default_key:
+            self.use_default_state[self.use_default_key] = self.use_default_cb.GetValue()
 
     def _summary_text(self, connections: int) -> str:
         s = self.summary
@@ -1035,7 +1058,8 @@ class PreflightDialog(_FindingsMixin, _Base):
             ov["drawing_style"] = style
         put("timeout_s", float(self.timeout.GetValue()))
         put("timeout_clock", self._clock_keys[self.timeout_clock.GetSelection()])
-        return Decision(True, accepted, ov, self.save_toml.GetValue())
+        use = tuple(k for k, on in self.use_default_state.items() if on)
+        return Decision(True, accepted, ov, self.save_toml.GetValue(), use)
 
 
 # --------------------------------------------------------------------------------------------- (3) progress
@@ -1099,6 +1123,9 @@ class ProgressDialog(_Base):
         # the score of the last round and of the best so far (what OK / Cancel keeps), over all runs
         self._build_score_rows()
         self.stable = False
+        #: What the button read when it was pressed (True = OK at "Routes stable", False = Cancel; None = not pressed),
+        #: latched in ``cancel`` (verify-sl3 F2: the label after the next poll may read OK already).
+        self.ok_at_press: bool | None = None
         self.stable_window = stable_window
         self._build_limit_row()
         hint = self.text(self, "progress", "cancel_hint")  # one short line; the full text is its tooltip
@@ -1305,11 +1332,13 @@ class ProgressDialog(_Base):
     def _set_stopping_label(self, stage: str = "") -> None:
         W = WORDING["progress"]
         s = int(time.monotonic() - (self.cancelled_at or time.monotonic()))
-        self._phase_label(W["phase_finishing" if self.stable else "phase_cancelling"].format(stage=f" ({stage})" if stage else "", s=s))
+        ok = self.stable if self.ok_at_press is None else self.ok_at_press  # the label at the press (F2)
+        self._phase_label(W["phase_finishing" if ok else "phase_cancelling"].format(stage=f" ({stage})" if stage else "", s=s))
 
     def cancel(self) -> None:
         if self.cancelled:
             return
+        self.ok_at_press = self.stable  # what the button read at the press (OK once stable, else Cancel)
         self.cancelled = True
         self.cancelled_at = time.monotonic()
         self._set_stopping_label()
@@ -1899,12 +1928,21 @@ class WxUi:
             d = dlg.decision(rc == wx.ID_OK)
         finally:
             dlg.Destroy()
+        defaults, use = Config.defaults(), set(getattr(d, "use_defaults", ()))
+
+        def eff(sec: str, key: str):
+            """The value the run uses (run.py: the dialog's own field, else the current default for a pinned line the
+            user chose "Use the current default" for, else topor.toml; verify-sl3 F3). O(1)."""
+            if sec == "run" and key in d.overrides:
+                return d.overrides[key]
+            return defaults.get(sec, key) if f"{sec}.{key}" in use else cfg.get(sec, key)
+
         if d.proceed:  # progress needs the effective limit / cap
-            self._timeout_s = float(d.overrides.get("timeout_s", cfg.get("run", "timeout_s")))
-            self._timeout_clock = str(d.overrides.get("timeout_clock", cfg.get("run", "timeout_clock")))
+            self._timeout_s = float(eff("run", "timeout_s"))
+            self._timeout_clock = str(eff("run", "timeout_clock"))
             self._limit_editable = True
-        self._iter_cap = int(cfg.get("optimize", "rounds"))  # the topological core's whole-route rounds
-        self._stable_window = int(cfg.get("optimize", "stable_window"))
+        self._iter_cap = int(eff("optimize", "rounds"))  # the topological core's whole-route rounds
+        self._stable_window = int(eff("optimize", "stable_window"))
         return d
 
     def progress(self, p: Progress) -> bool:
@@ -1915,11 +1953,20 @@ class WxUi:
                                            self._timeout_clock, limit_editable=self._limit_editable)
             self._present(self._progress)
         dlg = self._progress
+        # verify-sl3 F2: a press queued while the button still read Cancel is handled against that label first;
+        # only then may this progress turn the button into OK (and the second pump paints it)
+        self._pump()
         dlg.update(p)
         self._pump()
         if dlg.cancelled:
             self._cancelled = True
         return not self._cancelled
+
+    def ok_at_press(self) -> bool | None:
+        """What the stop button read when it was pressed: True = OK ("Routes stable"), False = Cancel, None = not
+        pressed (or no progress dialog). The run flow sends it to the engine, which latches it. O(1)."""
+        dlg = self._progress
+        return dlg.ok_at_press if dlg is not None and dlg.cancelled else None
 
     def time_limit_request(self) -> float | None:
         """The time limit the user set in the progress dialog since the last call (seconds on the run's clock,

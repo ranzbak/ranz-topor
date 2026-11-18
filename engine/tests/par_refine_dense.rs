@@ -147,6 +147,34 @@ fn every_refinement_of_a_dense_board_equals_the_serial_one() {
     *test_cancel::FLAG.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     assert!(ctl.cancel.load(Relaxed), "the hook did not fire: fewer than {AT} candidates");
     assert_eq!(test_cancel::SEEN.load(Relaxed), AT, "candidates evaluated after the Cancel (routed {})", r.routed);
+
+    // The shadow's own negative test: a change of any compared item in the reference's result
+    // (`shadow::FAULT`) makes the comparison panic naming that item. A panic hook keeps the
+    // messages (a panic in a lane thread reaches the caller with another payload).
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keep = seen.clone();
+    let old_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info.payload().downcast_ref::<String>().cloned().or_else(|| info.payload().downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+        keep.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(msg);
+    }));
+    let m = dense(10, 0.8);
+    let mut missed = Vec::new();
+    shadow::ON.store(true, Relaxed);
+    for (k, field) in shadow::FIELDS.iter().enumerate().take(11) {
+        seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        shadow::FAULT.store(k + 1, Relaxed);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&m, &opts(w1))));
+        let msgs = seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let want = format!("the lanes differ from the serial refinement in {field} (");
+        if r.is_ok() || !msgs.iter().any(|s| s.contains(&want)) {
+            missed.push(format!("{field}: {}", if r.is_ok() { "no panic".to_string() } else { format!("{msgs:?}") }));
+        }
+    }
+    shadow::FAULT.store(0, Relaxed);
+    shadow::ON.store(false, Relaxed);
+    std::panic::set_hook(old_hook);
+    assert!(missed.is_empty(), "the shadow missed a changed item: {missed:?}");
 }
 
 

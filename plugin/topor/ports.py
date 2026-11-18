@@ -93,11 +93,14 @@ class RunSummary:
 @dataclass
 class Decision:
     """Pre-flight answer. ``overrides`` holds any of ``scope_mode, existing_copper, respect_locked,
-    timeout_s, timeout_clock`` ([run] key -> value) and ``drawing_style`` ([drawing] style); ``save_to_toml`` persists them."""
+    timeout_s, timeout_clock`` ([run] key -> value) and ``drawing_style`` ([drawing] style); ``save_to_toml`` persists them.
+    ``use_defaults``: the ``section.key`` of the pinned topor.toml lines (CFG_PINNED_OLD_DEFAULT, CFG_DEPRECATED_KEY)
+    to comment out, so the run uses the current default (user 2026-11-17, "Use the current default")."""
     proceed: bool
     accepted_codes: tuple = ()
     overrides: dict = field(default_factory=dict)
     save_to_toml: bool = False
+    use_defaults: tuple = ()
 
 
 @dataclass
@@ -237,6 +240,12 @@ class UiPort(Protocol):
     #   def splash(self, status: str, version: str | None = None) -> None:
     #       """The start-up splash (logo, name, version, status line): opened by the first call, later calls
     #       change the status line."""
+
+    # Optional (the interactive progress dialog only; UIs without it are judged by the progress they returned False on):
+    #   def ok_at_press(self) -> bool | None:
+    #       """What the stop button read when it was pressed (True = OK at "Routes stable", False = Cancel), or None
+    #       when it was not pressed. A press is handled at the next ``progress`` call, whose progress may already
+    #       say stable: this is what the user saw, and what the run flow sends to the engine."""
 
     # Optional (the interactive progress dialog only; headless UIs leave it out, so their limit stays fixed):
     #   def time_limit_request(self) -> float | None:

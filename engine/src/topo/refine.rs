@@ -82,11 +82,57 @@ pub(crate) fn keep_rule(new_wc: f64, old_wc: f64, d_oc: f64, add_vias: bool) -> 
 /// moves are equal bit for bit (a refinement a stop cut is not compared). Process-wide; a test
 /// binary sets it for itself. Off = one relaxed load per refinement.
 pub mod shadow {
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
     pub static ON: AtomicBool = AtomicBool::new(false);
     /// Refinements compared, and those of them that kept at least one move.
     pub static CHECKED: AtomicU64 = AtomicU64::new(0);
     pub static CHECKED_MOVED: AtomicU64 = AtomicU64::new(0);
+    /// The shadow's own negative test: `k` > 0 changes item `k` of [`FIELDS`] in the reference's
+    /// result before the comparison, which must then panic naming that item. 0 = off.
+    pub static FAULT: AtomicUsize = AtomicUsize::new(0);
+    /// What the comparison checks, in its order (`over-full after` follows from the prices, so a
+    /// changed price is reported as `prices`; it has no fault of its own).
+    pub const FIELDS: [&str; 12] = [
+        "labels",
+        "evaluations",
+        "stream",
+        "kept moves",
+        "pass layers",
+        "pass discs",
+        "via intervals",
+        "via traversals",
+        "vias without a site",
+        "prices",
+        "end-site memo",
+        "over-full after",
+    ];
+}
+
+/// [`shadow::FAULT`]: changes item `k` (1-based, of [`shadow::FIELDS`]) of a result. O(1).
+fn shadow_fault(k: usize, cm: &mut Arrays, evl: &mut [Vec<LEv>], st: &mut RefineStats) {
+    match k {
+        1 => match evl.iter_mut().find(|e| !e.is_empty()) {
+            Some(e) => e[0].2 += 1,
+            None => {
+                if let Some(e) = evl.first_mut() {
+                    e.push((0, 0.0, 0));
+                }
+            }
+        },
+        2 => st.evals += 1,
+        3 => st.stream ^= 1,
+        4 => st.moves += 1,
+        5 => cm.pass_layer.push(-1),
+        6 => cm.pass_disc.push([0.0, 0.0]),
+        7 => cm.via_iv.push(Vec::new()),
+        8 => cm.via_k.push(Vec::new()),
+        9 => cm.nosite.push(0),
+        10 => cm.cost.push(1.0),
+        11 => {
+            cm.end_sites.insert((usize::MAX, 0, 0, 0, 0), None);
+        }
+        _ => {}
+    }
 }
 
 /// [`shadow`]: the first difference between the lanes' result and the reference's, if any.
@@ -96,21 +142,22 @@ fn shadow_diff(a: (&CapModel, &[Vec<LEv>], &RefineStats), b: (&CapModel, &[Vec<L
     let labels = |e: &[Vec<LEv>]| e.iter().map(|w| w.iter().map(|&(k, s, l)| (k, s.to_bits(), l)).collect::<Vec<_>>()).collect::<Vec<_>>();
     let (ca, ea, sa) = a;
     let (cb, eb, sb) = b;
-    let checks: [(&str, bool); 12] = [
-        ("labels", labels(ea) == labels(eb)),
-        ("evaluations", sa.evals == sb.evals),
-        ("stream", sa.stream == sb.stream),
-        ("kept moves", sa.moves == sb.moves),
-        ("pass layers", ca.pass_layer == cb.pass_layer),
-        ("pass discs", disc(&ca.pass_disc) == disc(&cb.pass_disc)),
-        ("via intervals", ca.via_iv == cb.via_iv),
-        ("via traversals", ca.via_k == cb.via_k),
-        ("vias without a site", ca.nosite == cb.nosite),
-        ("prices", bits(&ca.cost) == bits(&cb.cost) && bits(&ca.sq) == bits(&cb.sq)),
-        ("end-site memo", memo_hash(&ca.end_sites) == memo_hash(&cb.end_sites) && ca.end_sites.len() == cb.end_sites.len()),
-        ("over-full after", ca.overfull() == cb.overfull()),
+    let checks: [bool; 12] = [
+        labels(ea) == labels(eb),
+        sa.evals == sb.evals,
+        sa.stream == sb.stream,
+        sa.moves == sb.moves,
+        ca.pass_layer == cb.pass_layer,
+        disc(&ca.pass_disc) == disc(&cb.pass_disc),
+        ca.via_iv == cb.via_iv,
+        ca.via_k == cb.via_k,
+        ca.nosite == cb.nosite,
+        bits(&ca.cost) == bits(&cb.cost) && bits(&ca.sq) == bits(&cb.sq),
+        memo_hash(&ca.end_sites) == memo_hash(&cb.end_sites) && ca.end_sites.len() == cb.end_sites.len(),
+        ca.overfull() == cb.overfull(),
     ];
-    checks.iter().find(|c| !c.1).map(|c| format!("{} (lanes: {} evaluations, {} kept; reference: {} evaluations, {} kept)", c.0, sa.evals, sa.moves, sb.evals, sb.moves))
+    let first = checks.iter().position(|ok| !ok)?;
+    Some(format!("{} (lanes: {} evaluations, {} kept; reference: {} evaluations, {} kept)", shadow::FIELDS[first], sa.evals, sa.moves, sb.evals, sb.moves))
 }
 
 /// [`RefineStats::memo`]: an order-free hash of the end-site memo. O(entries).
@@ -1485,6 +1532,7 @@ pub fn refine(
         let mut st_ref = RefineStats { before: cm_ref.overfull(), ..RefineStats::default() };
         refine_reference(&ctx, &mut cm_ref, &mut evl_ref, &mut st_ref);
         super::refine_par::run(&ctx, &mut cm, evl, &mut stats);
+        shadow_fault(shadow::FAULT.load(std::sync::atomic::Ordering::Relaxed), &mut cm_ref.a, &mut evl_ref, &mut st_ref);
         if !crate::control::stop_requested() {
             if let Some(d) = shadow_diff((&cm, evl, &stats), (&cm_ref, &evl_ref, &st_ref)) {
                 panic!("par-refine shadow: the lanes differ from the serial refinement in {d}");
@@ -1795,6 +1843,10 @@ mod tests {
         assert!(!keep_rule(3.0, 1.0, -5.0, false));
         assert!(keep_rule(3.0, 1.0, -5.0, true));
         assert!(keep_rule(1.0 + EPS / 2.0, 1.0, -1.0, false));
+        // ... and the growth it allows is EPS, pinned from both sides (`<=`, not `<`; not more)
+        assert!(keep_rule(EPS, 0.0, -1.0, false));
+        assert!(!keep_rule(1.001 * EPS, 0.0, -1.0, false));
+        assert!(!keep_rule(1.0 + 2.0 * EPS, 1.0, -1.0, false));
     }
 
     #[test]

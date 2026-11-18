@@ -22,7 +22,7 @@ from harness.paths import board_pcb  # noqa: E402
 from topor import preview, run as run_mod  # noqa: E402
 from topor.config import Config  # noqa: E402
 from topor.fake import FakeBoard, ScriptedUi  # noqa: E402
-from topor.ports import Report  # noqa: E402
+from topor.ports import Decision, Report  # noqa: E402
 from toporlib import pcbfile  # noqa: E402
 from toporlib.drc import classify, run_drc  # noqa: E402
 
@@ -114,6 +114,7 @@ class ProxyJob:
     def __init__(self, real, hold=1, patch=None):
         self.real, self.hold, self.polls, self.cancelled, self.patch = real, hold, 0, False, patch
         self.reached = False
+        self.ok = None  # cancel(ok=...): what the button read
         self.hardened = False
         self.limits = []  # set_time_limit calls (the progress dialog's live limit, wall clock)
 
@@ -126,8 +127,9 @@ class ProxyJob:
     def done(self):
         return self.polls >= self.hold and self.real.done()
 
-    def cancel(self):
+    def cancel(self, ok=None):
         self.cancelled = True  # recorded only: the real job has to finish for a deterministic result
+        self.ok = ok  # what the plugin said the button read (user 2026-11-17: the engine latches it)
 
     def reach_limit(self):
         self.reached = True  # M2.TL soft limit (CPU clock): recorded only, as cancel
@@ -415,8 +417,8 @@ class SlowStopJob(ProxyJob):
         super().__init__(real, hold=2)
         self.clock, self.after_s, self.cancelled_at = clock, after_s, None
 
-    def cancel(self):
-        super().cancel()
+    def cancel(self, ok=None):
+        super().cancel(ok)
         self.cancelled_at = self.clock.monotonic()
 
     def done(self):
@@ -1061,14 +1063,56 @@ def test_run_ok_at_routes_stable_is_not_a_cancel(app, eprom, tmp_path, reports):
     once the progress says stable ends it: the result is "stable", not cancelled, and is previewed and accepted
     like a finished run."""
     ui = ScriptedUi(accept=True, ok_at_stable=True)
-    cfg = CFG  # default finish_when_stable = False: the run waits for the OK poll
+    # default finish_when_stable = False: the run waits for the OK poll; a cap far away (eprom's loop runs ~20 cycles
+    # a second), so no run's loop can reach the cap before every run is stable and the OK comes
+    cfg = CFG.with_values({("optimize", "rounds"): 1000})
     board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=_RealCancelEngine(), cfg=cfg)
     assert out.status == "accepted" and out.routed == 27
     assert out.stop_reason == "stable" and out.cancelled is False
     stable = [c[1][0] for c in ui.calls if c[0] == "progress" and c[1][0].stable]
-    assert stable and stable[0].best_total == 27 and stable[0].runs == 5
+    # every run stable (5 of 5, whatever the engine's thread count: a stable run frees its slot for a run not yet
+    # begun) and a pick to keep: "Routes stable" waits for the first pick (user 2026-11-17), the loops' predicted one
+    assert stable and stable[0].runs == 5 and stable[0].runs_stable == 5, stable[:1]
+    assert stable[0].best_total == 27 and stable[0].best_routed == 27 and stable[0].best_round >= 1, stable[0]
     log = (out.report_dir / "log.txt").read_text()
-    assert "OK at Routes stable: best so far 27/27 routed" in log
+    assert f"OK at Routes stable: best so far {stable[0].best_routed}/27 routed" in log
+    assert "no pick drawn yet" not in log
+    # "Report stable live" (user 2026-11-17): the OK reached the running engine, so the drawn run's TopoR loop (the
+    # result carries its loop line only) ended by the OK, before the cycle cap, and the engine itself says "stable"
+    rr = json.loads((out.report_dir / "result.json").read_text())
+    assert rr["stop_reason"] == "stable"
+    loops = [w for w in _engine_warnings(out) if w.startswith("TopoR loop (")]
+    assert len(loops) == 1 and "ended by Cancel / OK" in loops[0], loops
+    # ... the drawn run was stable, and the other 4 runs (every one stable when the OK came, runs_stable above) each
+    # had a pick of their own, not drawn because only one pick is drawn after Cancel / OK
+    best_of = next(w for w in _engine_warnings(out) if w.startswith("best of 5 seeded runs"))
+    assert "stable after cycle" in best_of and "not stable" not in best_of, best_of
+    assert best_of.count("its TopoR loop pick not drawn") == 4, best_of
+
+
+def _engine_warnings(out):
+    """The engine's own report lines of the run (result.json "route")."""
+    return list(json.loads((out.report_dir / "result.json").read_text())["route"].get("warnings") or [])
+
+
+def test_ok_after_the_engine_ended_at_the_cap_stays_round_cap(app, eprom, tmp_path, reports):
+    """An OK that arrives after the engine had already ended at its cycle cap did not end the run: stop_reason stays
+    "round cap" (verify-slfx F1: the plugin no longer relabels it "stable"), and it is not a cancel either. The proxy
+    job records the OK and lets the real job run to its cap."""
+    class OkOnceDrawn(ScriptedUi):  # OK at "Routes stable" (a pick to keep: the log names the best so far)
+        def progress(self, p):
+            super().progress(p)
+            return not (p.stable and p.best_total)
+
+    cfg = CFG.with_values({("optimize", "rounds"): 20})
+    ui = OkOnceDrawn(accept=True, ok_at_stable=True)
+    eng = ProxyEngine(hold=1)
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=cfg)
+    assert eng.jobs[0].cancelled, "the OK was sent"
+    assert out.stop_reason == "round cap" and out.cancelled is False, out.stop_reason
+    assert out.status == "accepted" and out.routed == 27
+    log = (out.report_dir / "log.txt").read_text()
+    assert re.search(r"OK at Routes stable: best so far \d+/27 routed, [\d.]+ m, \d+ vias \(run \d of 5\)", log), log
 
 
 class _RealCancelEngine:
@@ -1204,3 +1248,184 @@ def test_edge_non_zero_board_value_wins_in_the_run(app, eprom, tmp_path, reports
     assert eng.models[0]["rules"]["edge_clearance"] == eprom.model["rules"]["edge_clearance"] == 250_000
     assert not any(f.code == "EDGE_CLEARANCE_ZERO" for f in out.findings)
     assert "Copper to edge clearance 0 on the board" not in (out.report_dir / "report.md").read_text()
+
+
+class _NeverOkDialog(ScriptedUi):
+    """Progress dialog the user never answers: counts the polls before and after "Routes stable" and never ends the run."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.waits_for_ok = True
+        self.polls_after_stable = 0
+
+    def progress(self, p):
+        if getattr(p, "stable", False):
+            self.polls_after_stable += 1
+        return super().progress(p)
+
+
+def test_dialog_run_ends_at_the_cycle_cap_not_at_stable(app, eprom, tmp_path, reports):
+    """Stop-on-stable fix: with the dialog and the defaults the run goes on after "Routes stable" until the cycle
+    cap, and says so: stop_reason "round cap", never "stable" (patience gap M5/M6 of verify-stable-toml)."""
+    cfg = CFG.with_values({("optimize", "rounds"): 20})
+    ui = _NeverOkDialog(accept=True)
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=_RealCancelEngine(), cfg=cfg)
+    assert ui.polls_after_stable > 1, "the dialog saw Routes stable and the run went on"
+    assert out.stop_reason == "round cap", out.stop_reason
+    assert out.status == "accepted" and out.routed == 27 and out.cancelled is False
+
+
+def _project_with_toml(eprom, tmp_path, toml_text):
+    """A project folder of its own (the module's eprom copy stays untouched) whose topor.toml is `toml_text`; the
+    run loads it (cfg None). Returns the board port."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "topor.toml").write_text(toml_text)
+    text = eprom.text.rstrip()
+    live = text[:-1].rstrip("\n") + "\n" + LIVE_EDIT + ")\n"
+    return FakeBoard(eprom.pcb, eprom.model, live_text=live, project_dir=proj)
+
+
+_PINNED_FINISH = ("version = 1\n[run]\nexisting_copper = \"rip\"\ntimeout_s = 60.0\n[optimize]\nrounds = 1000\n"
+                  "finish_when_stable = true\n")
+
+
+class _OkAfterStable(ScriptedUi):
+    """The progress dialog whose user presses OK only `after` polls past the first "Routes stable"."""
+
+    def __init__(self, after, **kw):
+        super().__init__(**kw)
+        self.waits_for_ok = True
+        self.after, self.polls_after_stable = after, 0
+
+    def progress(self, p):
+        super().progress(p)
+        if getattr(p, "stable", False):
+            self.polls_after_stable += 1
+        return self.polls_after_stable <= self.after
+
+
+def test_a_pinned_finish_when_stable_no_longer_ends_a_dialog_run(app, eprom, tmp_path, reports):
+    """User 2026-11-17 (a real run in the plugin stopped at "Routes stable" after 119 s of 600 because topor.toml
+    pinned finish_when_stable = true from 15 Nov): with the progress dialog nothing ends the run at stable. The key is
+    deprecated: the pre-flight lists CFG_DEPRECATED_KEY with its line, the engine gets finish_when_stable false, and
+    the run keeps iterating after "Routes stable" until the OK (the TopoR loop ended by the OK, not at stable)."""
+    board = _project_with_toml(eprom, tmp_path, _PINNED_FINISH)
+    eng = _RealCancelEngine()
+    ui = _OkAfterStable(8, accept=True)
+    out = run_mod.run(board, ui, None, eng, tmp_root=tmp_path / "work")
+    _ok(out)
+    pre = next(c[1][0] for c in ui.calls if c[0] == "preflight")
+    dep = [f for f in pre if f.code == "CFG_DEPRECATED_KEY"]
+    assert len(dep) == 1 and "topor.toml (line 7) sets optimize.finish_when_stable = true" in dep[0].message, pre
+    assert eng.options[0]["finish_when_stable"] is False and eng.options[0]["finish_patience"] == 0
+    assert ui.polls_after_stable > 8, "the run went on after Routes stable until the OK"
+    assert out.stop_reason == "stable" and out.cancelled is False and out.routed == 27
+    loops = [w for w in _engine_warnings(out) if w.startswith("TopoR loop (")]
+    assert len(loops) == 1 and "ended by Cancel / OK" in loops[0], loops
+    assert "finish_when_stable = true" in (board.project_dir() / "topor.toml").read_text()  # untouched without the tick
+
+
+def test_use_the_current_default_comments_the_pinned_line_out(app, eprom, tmp_path, reports, monkeypatch):
+    """User 2026-11-17 ("Show it in the dialog"): ticking Use the current default for a pinned line (a deprecated key,
+    a pinned old default) comments the line out in topor.toml when Route is pressed, the run uses the current default
+    and the report notes CFG_DEFAULT_RESTORED; an unticked pinned line stays as it is."""
+    from topor import schema
+    monkeypatch.setattr(schema, "PAST_DEFAULTS", {("run", "timeout_clock"): (("cpu", "2026-01-01"),),
+                                                  ("run", "respect_locked"): ((not schema.SETTINGS_BY_KEY[("run", "respect_locked")].default, "2026-01-02"),)})
+    old_locked = str(not schema.SETTINGS_BY_KEY[("run", "respect_locked")].default).lower()
+    toml = _PINNED_FINISH.replace("timeout_s = 60.0\n", f"timeout_s = 60.0\ntimeout_clock = \"cpu\"\nrespect_locked = {old_locked}\n")
+    board = _project_with_toml(eprom, tmp_path, toml)
+    chosen = ("optimize.finish_when_stable", "run.timeout_clock")
+    ui = ScriptedUi(decisions=Decision(True, use_defaults=chosen), accept=False)
+    out = run_mod.run(board, ui, None, topor_engine, tmp_root=tmp_path / "work")
+    _ok(out)
+    pre = next(c[1][0] for c in ui.calls if c[0] == "preflight")
+    assert {f.code for f in pre} >= {"CFG_DEPRECATED_KEY", "CFG_PINNED_OLD_DEFAULT"}
+    got = (board.project_dir() / "topor.toml").read_text()
+    assert "\n# finish_when_stable = true\n" in got and '\n# timeout_clock = "cpu"\n' in got
+    assert f"\nrespect_locked = {old_locked}\n" in got, "an unticked pinned line is kept"
+    assert out.time_limit["clock"] == "wall", "the run used the current default of run.timeout_clock"
+    notes = [f for f in out.findings if f.code == "CFG_DEFAULT_RESTORED"]
+    assert sorted(f.items[0] for f in notes) == sorted(chosen), notes
+    assert any("line 9 of topor.toml commented out" in f.message for f in notes), notes
+    log = (out.report_dir / "log.txt").read_text()
+    assert "pre-flight: run.timeout_clock: line 5 of topor.toml commented out" in log
+    # the next load: no warning for the lines commented out, the unticked one still warns
+    from topor.config import load_config
+    codes = [f.code for f in load_config(board.project_dir())[1]]
+    assert codes == ["CFG_PINNED_OLD_DEFAULT"], codes
+
+
+
+# ------------------------------------------------------------------ OK vs Cancel at the press (user 2026-11-17)
+class _CancelWhen(ScriptedUi):
+    """Presses the button once, the first time `when(p)` holds for the progress the dialog shows."""
+
+    def __init__(self, when, **kw):
+        super().__init__(**kw)
+        self.waits_for_ok = True
+        self.when, self.pressed = when, None
+
+    def progress(self, p):
+        super().progress(p)
+        if self.pressed is None and self.when(p):
+            self.pressed = p
+        return self.pressed is None
+
+
+@pytest.mark.parametrize("press", ["cancel_before_stable", "ok_at_stable"])
+def test_the_button_read_at_the_press_reaches_the_engine(app, eprom, tmp_path, reports, press):
+    """User 2026-11-17: the engine latches what the button read at the first press: ``job.cancel(ok=...)`` gets
+    False for a Cancel (the progress not "Routes stable", e.g. at 0 of 5 stable) and True for OK at "Routes stable";
+    the run's `cancelled` follows the same value (the proxy records it, the real job runs on)."""
+    # a progress of the running engine job (its coordinator set `runs`), before / at "Routes stable"
+    when = ((lambda p: getattr(p, "runs", 0) > 0 and not p.stable) if press == "cancel_before_stable"
+            else (lambda p: p.stable))
+    ui = _CancelWhen(when, accept=True)
+    eng = ProxyEngine(hold=1)
+    _, _, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=CFG.with_values({("optimize", "rounds"): 20}))
+    assert ui.pressed is not None and eng.jobs[0].cancelled
+    assert ui.pressed.stable is (press == "ok_at_stable"), ui.pressed
+    assert eng.jobs[0].ok is (press == "ok_at_stable")
+    if press == "ok_at_stable":
+        assert out.cancelled is False
+    else:
+        assert out.cancelled is True
+
+
+def test_a_cancel_pressed_just_before_routes_stable_stays_a_cancel(app, eprom, tmp_path, reports):
+    """verify-sl3 F2: the dialog handles a click at its next poll, whose progress may be the first "Routes stable"
+    (the button turns into OK on it). What the button read at the press (the UI's ``ok_at_press``: Cancel) is what
+    reaches the engine, not the stable progress of that poll: ``job.cancel(ok=False)``, the run is a cancel."""
+    class CancelQueued(_CancelWhen):
+        def ok_at_press(self):
+            return None if self.pressed is None else False  # the click came while the button read Cancel
+
+    ui = CancelQueued(lambda p: p.stable, accept=True)
+    eng = ProxyEngine(hold=1)
+    _, _, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=CFG.with_values({("optimize", "rounds"): 20}))
+    assert ui.pressed is not None and ui.pressed.stable, "premise: the poll that handles the press is stable"
+    assert eng.jobs[0].cancelled and eng.jobs[0].ok is False
+    assert out.cancelled is True
+    log = (out.report_dir / "log.txt").read_text()
+    assert "OK at Routes stable" not in log
+
+
+def test_an_engine_without_ok_still_gets_the_cancel(app, eprom, tmp_path, reports):
+    """An engine older than the plugin (``RouteJob.cancel()`` without ``ok``): the plugin falls back to the plain
+    cancel, which judges by the engine's own progress (fail-safe: never an error)."""
+    class OldJob(ProxyJob):
+        def cancel(self):
+            super().cancel()
+
+    class OldEngine(ProxyEngine):
+        def route_async(self, m, o):
+            j = OldJob(topor_engine.route_async(m, o), self.hold, self.patch)
+            self.jobs.append(j)
+            return j
+
+    eng = OldEngine(hold=1)
+    ui = _CancelWhen(lambda p: p.stable, accept=True)
+    _, _, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=CFG.with_values({("optimize", "rounds"): 20}))
+    assert eng.jobs[0].cancelled and eng.jobs[0].ok is None and out.cancelled is False

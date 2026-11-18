@@ -19,7 +19,7 @@ from pathlib import Path
 from .findings import Finding
 from .layers import ROLES
 from . import schema as _schema
-from .schema import (BACKLOG_VALUES, CONFIG_VERSION, CURRENT_VERSION, KICAD_ONLY, REMOVED, REMOVED_IN, SECTIONS,
+from .schema import (BACKLOG_VALUES, CONFIG_VERSION, CURRENT_VERSION, DEPRECATED, KICAD_ONLY, REMOVED, REMOVED_IN, SECTIONS,
                      SETTINGS, SETTINGS_BY_KEY, Setting, available)
 
 CONFIG_NAME = "topor.toml"
@@ -298,8 +298,10 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
     """Load ``<project_dir>/topor.toml``; create it with all defaults when missing (CFG_CREATED).
 
     Findings: CFG_CREATED (info), CFG_PARSE, CFG_VERSION, CFG_UNKNOWN_KEY, CFG_REMOVED_KEY (a key removed in
-    the CL cleanup: ignored), CFG_VALUE, CFG_VALUE_BACKLOG (warnings; the default is used for the offending value)
-    and CFG_WRITE (could not create the file).
+    the CL cleanup: ignored), CFG_DEPRECATED_KEY (a deprecated key: ignored, its line named), CFG_PINNED_OLD_DEFAULT,
+    CFG_VALUE, CFG_VALUE_BACKLOG (warnings; the default is used for the offending value) and CFG_WRITE (could not
+    create the file). The two pinned-line codes name the line and carry ``(section.key,)`` as items: the pre-flight dialog's
+    "use the current default" comments that line out (:func:`comment_out_key`).
     """
     path = Path(project_dir) / CONFIG_NAME
     findings: list[Finding] = []
@@ -313,7 +315,8 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
                                     "Make the project directory writable or run with the built-in defaults.", (str(path),)))
         return Config.defaults(), findings
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         findings.append(Finding("CFG_PARSE", "warning", f"{path} is not valid TOML ({e}); built-in defaults are used.",
                                 f"Fix the syntax in {CONFIG_NAME} or delete the file to get a fresh commented one.", (str(path),)))
@@ -357,6 +360,9 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
             if s is None and (sec, key) in REMOVED:
                 findings.append(_removed(sec, key))
                 continue
+            if s is None and (sec, key) in DEPRECATED:
+                findings.append(_deprecated(sec, key, raw, key_line(text, sec, key)))
+                continue
             if s is None:
                 findings.append(Finding("CFG_UNKNOWN_KEY", "warning", f"Unknown key '{full}' in {CONFIG_NAME} is ignored.",
                                         f"Check the spelling against {DOCS_HINT}.", (full,)))
@@ -371,14 +377,23 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
                                         f"Correct {full} in {CONFIG_NAME} (allowed: {_range_text(s)}).", (full,)))
             values[(sec, key)] = v
             if not err:
-                pin = _pinned_old_default(s, v)
+                pin = _pinned_old_default(s, v, key_line(text, sec, key))
                 if pin:
                     findings.append(pin)
     return Config(values, layer_roles), findings
 
 
-def _pinned_old_default(s: Setting, v) -> Finding | None:
-    """CFG_PINNED_OLD_DEFAULT when active value ``v`` equals a past default of ``s`` but not the current one. O(history)."""
+#: The findings whose pinned line the pre-flight dialog offers to comment out ("use the current default").
+PINNED_LINE_CODES = ("CFG_PINNED_OLD_DEFAULT", "CFG_DEPRECATED_KEY")
+
+
+def _line_text(line: int | None) -> str:
+    return f" (line {line})" if line else ""
+
+
+def _pinned_old_default(s: Setting, v, line: int | None = None) -> Finding | None:
+    """CFG_PINNED_OLD_DEFAULT when active value ``v`` equals a past default of ``s`` but not the current one;
+    ``line``: its line in topor.toml (1-based). O(history)."""
     if v == s.default:
         return None
     for old, when in _schema.PAST_DEFAULTS.get((s.section, s.key), ()):
@@ -387,10 +402,61 @@ def _pinned_old_default(s: Setting, v) -> Finding | None:
             how = ("set it explicitly to the value you want" if s.type != "bool"
                    else "the warning stays while the value is pinned")
             return Finding("CFG_PINNED_OLD_DEFAULT", "warning",
-                           f"{CONFIG_NAME} pins {full} = {toml_value(v)}, the old default; the current default is {toml_value(s.default)} "
-                           f"(changed {when}). Delete or comment the line to follow defaults; to keep it on purpose {how}.",
+                           f"{CONFIG_NAME}{_line_text(line)} pins {full} = {toml_value(v)}, the old default; the current default is {toml_value(s.default)} "
+                           f"(changed {when}). Delete or comment the line to follow defaults (the pre-flight dialog does it for you: "
+                           f"Use the current default); to keep it on purpose {how}.",
                            f"{DOCS_HINT}#pinned-defaults.", (full,))
     return None
+
+
+def _deprecated(sec: str, key: str, raw, line: int | None) -> Finding:
+    """CFG_DEPRECATED_KEY for a key of ``schema.DEPRECATED``: ignored, its line and why named. O(1)."""
+    full = f"{sec}.{key}"
+    when, why = DEPRECATED[(sec, key)]
+    val = toml_value(raw) if isinstance(raw, (bool, int, float, str)) else repr(raw)
+    return Finding("CFG_DEPRECATED_KEY", "warning",
+                   f"{CONFIG_NAME}{_line_text(line)} sets {full} = {val}, which is deprecated since {when} and ignored: {why}.",
+                   f"Delete or comment the line (the pre-flight dialog does it for you: Use the current default); "
+                   f"{DOCS_HINT}#deprecated-keys.", (full,))
+
+
+def key_line(text: str, sec: str, key: str) -> int | None:
+    """The 1-based line of the active ``key = ...`` line in section ``[sec]`` of a topor.toml text, or None.
+    O(lines)."""
+    lines = text.split("\n")
+    hdr = next((i for i, ln in enumerate(lines) if (m := _HEADER.match(ln)) and m.group(1).strip() == sec), None)
+    if hdr is None:
+        return None
+    active = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    for i in range(hdr + 1, len(lines)):
+        if _HEADER.match(lines[i]):
+            return None
+        if active.match(lines[i]):
+            return i + 1
+    return None
+
+
+def comment_out_key(path: Path, full: str) -> int | None:
+    """Comment out the active line of ``section.key`` in topor.toml (``# `` in front of each of its lines, a
+    multi-line value included), keeping everything else; the option then follows the current default (the
+    pre-flight dialog's "Use the current default", user 2026-11-17). Returns the line (1-based), None when there was
+    no active line (nothing written). O(lines)."""
+    path = Path(path)
+    sec, _, key = full.partition(".")
+    text = path.read_text(encoding="utf-8")
+    line = key_line(text, sec, key)
+    if line is None:
+        return None
+    lines = text.split("\n")
+    i = last = line - 1
+    depth = _balance(lines[i].split("=", 1)[1])
+    while depth > 0 and last + 1 < len(lines):
+        last += 1
+        depth += _balance(lines[last])
+    for j in range(i, last + 1):
+        lines[j] = "# " + lines[j]
+    _atomic_write(path, "\n".join(lines))
+    return line
 
 
 def _removed(sec: str, key: str) -> Finding:
