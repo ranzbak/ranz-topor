@@ -120,15 +120,22 @@ case ${1:-} in
     ( hzq run --threads 1 --name t3-pat -- bash tools/tw4_job.sh pattern > $R/pattern.log 2>&1; note "pattern rc $?" ) & sleep 1
     wait; note "all done" ;;
   badge)
-    # one private-badge run (copper kept, rounds=1): off | c (dangling_lead_choice) | cd (c + dangling_turn 4)
+    # one private-badge run (copper kept, rounds=1, TOPO_T3DBG): off | c (dangling_lead_choice) | cd (c + dangling_turn 4) | d (dangling_turn 4)
     BADGE=$(ls scratch/boards/xt-badge/*.kicad_pcb | head -1)
     A=(--keep-copper --no-png --set optimize.rounds=1)
     case $2 in
       off) ;;
       c) A+=(--set search.dangling_lead_choice=true) ;;
       cd) A+=(--set search.dangling_lead_choice=true --set 'factors.weight={"dangling_turn": 4}') ;;
+      d) A+=(--set 'factors.weight={"dangling_turn": 4}') ;;
     esac
-    tools/route_board.sh "$BADGE" $R/badge/$2 "${A[@]}" > $R/badge-$2.txt 2>&1 9>&- ;;
+    TOPO_T3DBG=1 tools/route_board.sh "$BADGE" $R/badge/$2 "${A[@]}" > $R/badge-$2.txt 2>&1 9>&- ;;
+  t3b)
+    # T3 round b: the private badge with the T3DBG starts: d (dangling_turn 4 alone = the base of cd), c, cd
+    for n in d c cd; do
+      ( hzq run --threads 2 --name t3b-badge-$n -- bash tools/tw4_job.sh badge $n > $R/badge-$n.log 2>&1; note "badge $n rc $?" ) & sleep 1
+    done
+    wait; note "all done" ;;
   pattern)
     P=$R/patterns
     python -c "

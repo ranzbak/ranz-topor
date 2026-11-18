@@ -2885,6 +2885,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 let ((path, tris), i, j) = st.search_tree(c, &src, &dst, w, (c.w + c.s) / ws0, None)?;
                 let (sa, sb) = (src[i], dst[j]);
+                if std::env::var_os("TOPO_T3DBG").is_some() {
+                    // Debug (tw4 T3): the start a continued dangling end's search took on its lead.
+                    for (v, e) in [(c.a, sa), (c.b, sb)] {
+                        if let Some(alt) = lead_alt.get(&v) {
+                            let t = alt.iter().find(|x| x.0 == e.v).map_or(-1.0, |x| x.1);
+                            let l = alt.last().map_or(0.0, |x| x.1);
+                            eprintln!("T3DBG net {} end ({:.3}, {:.3}) lead {:.3} mm start t {:.3} mm{}", c.net, proj.pos[v].x / 1e6, -proj.pos[v].y / 1e6, l / 1e6, t / 1e6, if t < l - 1.0 { " SHORTENED" } else { "" });
+                        }
+                    }
+                }
                 for e in [sa, sb] {
                     if let Some((tw, k)) = e.on {
                         st.add_turn(tw, k, e.v);
