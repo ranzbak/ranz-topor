@@ -84,6 +84,14 @@ located shrinkage items (today `neck_loss` can never match: no item has a place)
   and the D5 overall best reported next to the predicted gain.
 - Synthetic pattern first for T1 (PNG + text for approval). Budget for phase 2 ≤ €1.5.
 
+## Unseen class found in phase 2: pour islands
+With `[capacity] via_cuts` on, KiCad's unconnected count on esp rose 6 → 11 (r16 s0) and 5 → 12 (r16 s2) while every
+signal connection stayed routed (127/127). Every added item is a pour piece cut off, mostly TOP_GND on F.Cu, plus one
+VBUS piece on B.Cu (tw4t2b-0414ca6 drc-routed.json, zone-to-zone items). The via-cut plans keep more traces on F.Cu
+and those cut the pour. The loop's measure does not see pour islands: only the `plane_cut` factor in P2 and the
+drawing's fuse-pour check / GND island stitching. This is an unseen class of its own ("pour_island"). It is not fixed
+in TW4. Owner: a pour-cut term in the measure (a later stage), or the existing stitching.
+
 ## Meter, invariants, tests
 - Meter (the stage's own): unseen count and share per board at rounds=1 and esp r64/r200, qmtech r16; gain ratio
   pooled r1→r16 seeds 0–4 and s0 r1→r64 / r1→r200 (ratio ≥ 0.5 on all three); CM1 cycle cost on the local judge.
