@@ -187,6 +187,9 @@ def neck_title(pat):
     neck = pat.extra.get("neck")
     if not neck:
         return ""
+    if "detour_ratio" in neck:
+        return (f"\nfull width {neck['nominal_width']:.2f}, no neck: {neck['reference_length']:.2f} mm = "
+                f"{neck['detour_ratio']:.3f} x straight; N1 would need the {neck['floor']:.2f} floor")
     if "reference" in neck:
         return (f"\nneck {neck['max_neck_width']:.2f} (floor {neck['floor']:.2f}) from U2.1 to "
                 f"{neck['full_width_clear_from_pin_line']:.4f} past the pins: {neck['neck_length_from_pad_centre']:.4f}")

@@ -389,6 +389,140 @@ def neck_too_narrow() -> Pattern:
     return _neck("neck_too_narrow", 0.50)
 
 
+def neck_or_detour() -> Pattern:
+    """tw4 T1. neck_fit's header gap with a clean way round: a second header pin J3.1 1.30 mm east of J1.2 leaves a
+    passage that holds the 0.8 mm wire at full width; the straight way through the pin gap fits only at the floor."""
+    W, H, Yr = 8.44, 15.1, 7.5
+    xc = 2.72
+    w_pow, floor = 0.8, 0.40
+    r_pin = 0.85
+    xp = 1.27
+    j1 = Fp("J1", [Pad("1", None, (xc - xp, Yr), (1.7, 1.7), "circle", drill=1.0),
+                   Pad("2", None, (xc + xp, Yr), (1.7, 1.7), "circle", drill=1.0)], "wall")
+    e_gap = w_pow + 2 * CLEAR + 0.10  # 1.30: the full-width wire plus 0.10 slack
+    x_j3 = xc + xp + r_pin + e_gap + r_pin  # 6.99
+    j3 = Fp("J3", [Pad("1", None, (x_j3, Yr), (1.7, 1.7), "circle", drill=1.0)], "wall")
+    u2 = Fp("U2", [Pad("1", "VBUS", (xc, 1.5), (1.2, 1.2))], "terminal")
+    j2 = Fp("J2", [Pad("1", "VBUS", (xc, 13.5), (2.0, 2.0))], "terminal")
+    xe = xc + xp + r_pin + e_gap / 2  # 5.49: the centre of the passage E1
+    ref = [(xc, 1.5), (xe, Yr - 1.0), (xe, Yr + 1.0), (xc, 13.5)]
+    length = sum(math.dist(a, b) for a, b in zip(ref, ref[1:]))
+    n1 = Cut("N1", "F.Cu", (xc - xp + r_pin, Yr), (xc + xp - r_pin, Yr), ("J1", "1"), ("J1", "2"),
+             "rightmost point of the round pad", "leftmost point of the round pad", [],
+             hand={"len_e": 0.84, "len_o": 0.84, "need": 0.0},
+             role="empty",
+             note="The straight way (12.00 mm), empty in the expected answer: the pin gap of neck_fit, 0.84; the wire "
+                  "would fit only necked to the 0.40 floor (0.80 + 2 x 0.2 ... demand 0.80, slack +0.04), over-full "
+                  "by 0.36 at its 0.8 mm width.")
+    e1 = Cut("E1", "F.Cu", (xc + xp + r_pin, Yr), (x_j3 - r_pin, Yr), ("J1", "2"), ("J3", "1"),
+             "rightmost point of the round pad", "leftmost point of the round pad", ["VBUS"],
+             hand={"len_e": 1.30, "len_o": 1.30, "need": 1.20, "slack": 0.10, "need_floor": 0.80, "slack_floor": 0.50},
+             note="The clean way round J1.2: 1.30 between the pins, the 0.8 mm wire needs 0.8 + 2 x 0.2 = 1.20 (slack "
+                  "+0.10) at full width.")
+    dru = (f'(version 1)\n(rule "POWER neck floor"\n  (condition "A.NetClass == \'POWER\'")\n'
+           f'  (constraint track_width (min {floor:g}mm)))\n')
+    classes = [dict(DEFAULT_CLASS), {"name": "POWER", "clearance": CLEAR, "track_width": w_pow, "via_diameter": 0.8,
+                                     "via_drill": 0.4, "priority": 0}]
+    straight = 13.5 - 1.5
+    neck = {
+        "nominal_width": w_pow, "floor": floor, "floor_source": ".kicad_dru rule 'POWER neck floor' (track_width min)",
+        "max_neck_width_n1": round(0.84 - 2 * CLEAR, 6),
+        "straight_length": straight, "reference_length": round(length, 4),
+        "detour_ratio": round(length / straight, 4),
+        "expected_neck": None,
+        "rule": "TopoR 6.3 manual p. 56: the minimum width is used in bottlenecks 'unless a different path is "
+                "available'; tw4 baseline: every connection drawn necked to the floor had drawn violations (17 of 17).",
+        "graded": "tw4 T1 prices a planned neck by its depth d = (w - w_neck) / (w - floor) (one violation's price "
+                  "times d^2 at the floor); the 12 % longer clean way costs less than a floor neck at the default "
+                  "weights. A clean way much longer than this (or none: neck_fit) keeps the neck.",
+    }
+    return Pattern(
+        name="neck_or_detour", title="Wide wire: a floor neck through the pin gap or 12 % longer at full width",
+        kind="solvable", gap_classes=["fit / neck planned where a full-width way exists (pad exit with its neck, tw4)"],
+        purpose="The same 0.8 mm VBUS wire (POWER class, neck floor 0.40 mm) as neck_fit, from U2.1 to J2.1 12 mm "
+                "below it, past a 2.54 mm header (J1). East of J1.2 a third pin J3.1 leaves a 1.30 mm passage.",
+        answer=(f"VBUS at its full 0.8 mm width through E1 (J1.2 to J3.1, 1.30 mm, slack +0.10), {length:.2f} mm "
+                f"long ({length / straight:.3f} x the 12.00 mm straight way), no neck. Not through N1 (fits only "
+                "necked to the 0.40 floor)."),
+        why=("Solvable by construction: the reference wire was laid first (straight to the passage centre x = 5.49, "
+             "2 mm along it, straight to J2.1) and the passage sized from it: 0.8 + 2 x 0.2 + 0.10. West of J1.1 and "
+             "east of J3.1 the 0.6 mm to the edge holds no wire even at the floor (0.5 + 0.4 + 0.2 = 1.1); B.Cu is "
+             "closed."),
+        size=(W, H), layers=2, nets=["VBUS"], fps=[j1, j3, u2, j2],
+        connections=[("VBUS", "U2.1", "J2.1")], cuts=[e1, n1],
+        keepouts=[Keepout(["B.Cu"], _strip(W, 0.0, H))], classes=classes,
+        net_patterns=[{"netclass": "POWER", "pattern": "VBUS"}], dru=dru,
+        ref_tracks=[Track("VBUS", "F.Cu", w_pow, ref)],
+        witness={"VBUS": ("F.Cu", ref)},
+        closed=[{"way": "past J1.1 or J3.1 to the side edge", "capacity": 0.6,
+                 "demand_one_wire_at_floor": round(EDGE + floor + CLEAR, 3), "formula": "edge + floor + s"},
+                {"way": "through N1 (the pin gap)", "capacity": 0.84, "demand_full": 1.20, "demand_at_floor": 0.80,
+                 "note": "open only necked to the floor"},
+                {"way": "on B.Cu", "capacity": 0.0, "formula": "rule area on B.Cu (tracks, vias) over the board"}],
+        extra={"neck": neck})
+
+
+def exit_tip_from_plan() -> Pattern:
+    """tw4 T1. A QFN pin whose target lies across the chip: the straight line to it leaves the pad through its inner
+    tip, where a stub fits but the ring channel round the exposed pad leads nowhere; the planned path leaves through
+    the outer tip and goes round the chip."""
+    W, H = 8.0, 10.0
+    cx, cy, R, e = 4.0, 5.0, 1.9, 0.8
+    pads = []
+    for i in range(5):  # north 1-5 (west to east), east 6-10 (north to south), south 11-15 (east to west), west 16-20
+        d = (i - 2) * QFN_P
+        pads.append(Pad(str(1 + i), "SIG" if i == 2 else None, (cx + d, cy - R), (QFN_W, QFN_L)))
+    for i in range(5):
+        pads.append(Pad(str(6 + i), None, (cx + R, cy + (i - 2) * QFN_P), (QFN_L, QFN_W)))
+    for i in range(5):
+        pads.append(Pad(str(11 + i), None, (cx - (i - 2) * QFN_P, cy + R), (QFN_W, QFN_L)))
+    for i in range(5):
+        pads.append(Pad(str(16 + i), None, (cx - R, cy - (i - 2) * QFN_P), (QFN_L, QFN_W)))
+    pads.append(Pad("21", None, (cx, cy), (2 * e, 2 * e)))
+    u1 = Fp("U1", pads, "wall")
+    c1 = Fp("C1", [Pad("1", None, (cx - 0.5, cy - 3.6), (0.6, 0.6))], "wall")
+    t1 = Fp("T1", [Pad("1", "SIG", (cx - 1.0, cy + 4.0), (0.8, 0.8))], "terminal")
+    tip_o, tip_i = cy - R - QFN_L / 2, cy - R + QFN_L / 2  # outer 1.70, inner 2.50
+    yw, xw = tip_o - 0.45, cx - R - QFN_L / 2 - 0.45  # 1.25: s + w past the tip; x 1.25 past the west tips
+    ref = [(cx, cy - R), (cx, yw), (xw, yw), (xw, cy + 2.25), (cx - 1.0, cy + 4.0)]
+    p1 = Cut("P1", "F.Cu", (cx - 0.5, cy - 3.3), (cx - 0.5, tip_o), ("C1", "1"), ("U1", "2"),
+             "bottom side of the pad", "outer tip of the pad", ["SIG"],
+             hand={"len_e": 1.0, "len_o": 1.0, "need": 0.65, "slack": 0.35},
+             note="The planned way out: between the decoupling pad C1.1 and the north row, 1.00; one Default wire needs "
+                  "0.25 + 2 x 0.2 = 0.65.")
+    i1 = Cut("I1", "F.Cu", (cx, tip_i), (cx, cy - e), ("U1", "3"), ("U1", "21"),
+             "inner tip of the pad", "top side of the exposed pad", [], hand={"len_e": 0.70, "len_o": 0.70, "need": 0.0},
+             role="empty",
+             note="The straight line to T1.1 leaves U1.3 here (the 5.10 tip facing the target). A stub fits (s + w = "
+                  "0.45 past the tip, 0.25 from the exposed pad), but the 0.70 ring channel round the exposed pad is "
+                  "closed at every corner (0.495 < 0.65) and between the pads (0.20): no way on.")
+    return Pattern(
+        name="exit_tip_from_plan", title="QFN pin with its target across the chip: leave through the outer tip",
+        kind="solvable", gap_classes=["pad exit: the exit side from the plan, not from the straight line (tw4 T1)"],
+        purpose="A 20-pin QFN (0.30 x 0.80 mm pads at 0.5 mm pitch, 1.6 mm exposed pad 0.70 mm inside the rows). "
+                "Pin U1.3 (SIG, north row middle) connects to T1.1, 4 mm below the chip centre. Every other pad has "
+                "no net. B.Cu is a rule area.",
+        answer=("SIG leaves U1.3 through its outer (north) tip, passes P1 (slack +0.35), runs round the chip's "
+                "north-west corner and down its west side to T1.1. The planned pad exit of U1.3 is the outer tip; a stub "
+                "at the inner tip (the 5.10 straight-line choice) is wrong."),
+        why=("Solvable by construction: the reference wire (45 degree corners) keeps 0.325 mm from the row tips and "
+             "0.425 from C1.1. The inner tip leads into the closed ring channel round the exposed pad; between the pads "
+             "0.20 holds no wire."),
+        size=(W, H), layers=2, nets=["SIG"], fps=[u1, c1, t1],
+        connections=[("SIG", "U1.3", "T1.1")], cuts=[p1, i1],
+        keepouts=[Keepout(["B.Cu"], _strip(W, 0.0, H))],
+        ref_tracks=[Track("SIG", "F.Cu", W_SIG, ref)],
+        witness={"SIG": ("F.Cu", ref)},
+        closed=[{"way": "U1.3's inner tip into the ring channel round the exposed pad", "capacity": 0.70,
+                 "note": "the channel is closed at its corners (0.495) and between the pads (0.20); a wire needs 0.65"},
+                {"way": "between two pads of a row", "capacity": 0.20, "formula": "pitch - pad width"},
+                {"way": "on B.Cu", "capacity": 0.0, "formula": "rule area on B.Cu (tracks, vias) over the board"}],
+        extra={"pad_exit": {"pin": "U1.3", "expected_tip": "outer (north)", "straight_line_tip": "inner (south)",
+                            "stub_510_inner": "legal (0.45 past the tip, 0.25 to the exposed pad) and a dead end",
+                            "rule": "tw4 T1: the exit side is read from the plan (the triangle the planned path "
+                                    "leaves the pad through), not from the straight line to the target"}})
+
+
 def model_gap_cut() -> Pattern:
     """4. Maley's non-adjacent cut: every edge of the triangulation has room, the cut across the opening does not."""
     W, H, Yr = 14.3, 16.0, 8.0
@@ -625,7 +759,7 @@ def diagonal_cut_norm() -> Pattern:
 
 
 PATTERNS = {f.__name__: f for f in (channel_fit, channel_overfull, neck_fit, neck_too_narrow, model_gap_cut,
-                                     inner_layer_room, diagonal_cut_norm)}
+                                     inner_layer_room, diagonal_cut_norm, neck_or_detour, exit_tip_from_plan)}
 
 
 # ----------------------------------------------------------------------------------------------- expected values
