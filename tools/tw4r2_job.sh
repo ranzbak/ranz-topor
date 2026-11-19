@@ -82,6 +82,7 @@ case ${1:-} in
     ( hzq run --threads 4 --name t4r2-hpat -- bash -c "for r in Kh:vgap Kbh:vgap Mh:vgap Mbh:vgap; do bash $ROOT/tools/tw4r2_job.sh one \$r & done; wait" > $R/u-hpat.log 2>&1; note "unit hpat rc $?" ) &
     wait; note "all done" ;;
   px)
+    [ -n "${2:-}" ] && XCFG=$2
     ( hzq run --threads 4 --name t4r2-tests -- bash $ROOT/tools/tw4r2_job.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
     for b in esp qmtech; do
       ( hzq run --threads 4 --name t4r2-x$b -- bash -c "for c in ${XCFG:-K Kx Khx}; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-x$b.log 2>&1; note "unit x$b rc $?" ) &
