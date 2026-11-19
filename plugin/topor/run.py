@@ -637,6 +637,29 @@ def _abort_locked(busy, ui, out: "RunOutcome", report, log, ctx, t0) -> "RunOutc
     return out
 
 
+def sketch_poll(job, ui, p: Progress, sk: dict, now: float, interval: float, done: bool) -> None:
+    """last-preview, one progress poll: ask the engine for a new last-round sketch every `interval` s while it runs
+    (it builds one at the next loop cycle's end), and hand the UI the sketch it shows (``ui.preview_wanted()``) when a
+    new one was published (``p.sketch_seq``) or the UI switched kind. `sk` keeps the state between polls. O(1) +
+    the sketch's JSON when one is fetched."""
+    kind = ui.preview_wanted()
+    if kind is None:
+        return
+    if not done and now - sk["asked"] >= interval:
+        job.request_sketch()
+        sk["asked"] = now
+    if p.sketch_seq == sk["seq"] and kind == sk["kind"]:
+        return
+    sk["seq"], sk["kind"] = p.sketch_seq, kind
+    js = job.sketch(kind)
+    if not js:
+        return
+    d = json.loads(js)
+    if sk["sent"] != (kind, d.get("seq")):
+        sk["sent"] = (kind, d.get("seq"))
+        ui.sketch(kind, d)
+
+
 def post_commit_finding(step: str, e: BaseException) -> Finding:
     """POST_COMMIT_STEP_FAILED (ruling C30): the routes were committed, then `step` failed. O(1)."""
     return Finding("POST_COMMIT_STEP_FAILED", "warning",
@@ -968,6 +991,17 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             (d / f"options-{n}.json").write_text(oj)
             log.line(f"engine input written to {d}/model-{n}.json, options-{n}.json (TOPOR_DUMP_ENGINE_INPUT)")
         job = engine.route_async(mj, oj)
+        # last-preview: the progress dialog's board image ([run] progress_preview); a UI without it (headless) or an
+        # engine without sketches never asks, so the engine builds none
+        wanted = getattr(ui, "preview_wanted", None)
+        sketching = (callable(wanted) and wanted() is not None and callable(getattr(job, "enable_sketches", None))
+                     and callable(getattr(ui, "sketch", None)))
+        if sketching:
+            job.enable_sketches()
+            if callable(getattr(ui, "set_board", None)):
+                ui.set_board(m)
+            interval = max(POLL_S, float(getattr(ui, "preview_interval_s", lambda: 2.0)()))
+        sk = {"asked": -1e9, "seq": -1, "kind": None, "sent": None}  # last request, progress seq / kind fetched, sent
         job_t0, router_before = time.monotonic(), state["router_s"]
         cpu_t0, cpu_before = time.process_time(), state["router_cpu_s"]
         # cancelled_at: Cancel / OK was sent (job.cancel(); also the CPU clock's limit for an engine without
@@ -1000,6 +1034,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 p.limit_s = state["limit"]
                 if ui.progress(p) is False:
                     state["cancel"] = True
+                if sketching:
+                    try:
+                        sketch_poll(job, ui, p, sk, now, interval, done)
+                    except Exception as e:  # noqa: BLE001 - the board image never stops a run: off, logged
+                        sketching = False
+                        log.line(f"progress board image switched off after an error: {type(e).__name__}: {e}")
                 if take_limit() and not done and not cpu_clock:
                     setter = getattr(job, "set_time_limit", None)  # the engine reads its limit live
                     if callable(setter):

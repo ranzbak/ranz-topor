@@ -27,7 +27,8 @@ from pathlib import Path
 
 import wx
 
-from .config import PINNED_LINE_CODES, Config
+from .config import PINNED_LINE_CODES, Config, plugin_value, unreleased_allowed
+from .schema import SETTINGS_BY_KEY, available
 from .findings import Finding
 from .ports import Decision, Progress, RunSummary
 
@@ -169,12 +170,40 @@ WORDING: dict[str, dict[str, str]] = {
         "score_head_vias": "Vias",
         "score_head_length": "Length",
         "score_last": "Last round",
+        "score_run": "Last run",
         "score_best": "Best so far",
+        # last-preview (user 2026-11-19): predicted = a TopoR loop cycle's plan (nothing drawn), drawn = copper; a
+        # drawn row's round is the drawing's number ("draw 1"), not a loop round
+        "score_head_source": "Source",
+        "source_predicted": "predicted",
+        "source_drawn": "drawn",
+        "drawn_round": "draw {n}",
+        # the round count never goes back (user 2026-11-19: "the run/round displayed goes back to 1 / 1"): rounds
+        # (TopoR loop cycles) finished over all runs, and where the last one was
+        "round_total_tip": "Rounds finished over all runs (TopoR loop cycles; each run counts its own rounds and "
+                           "may restart from a variant of the shared table): this number never goes back.",
+        "round_context": "Last round finished {time} ({ago} s ago): run {run}{restart}, round {cycle}",
+        "round_context_restart": ", restart {n}",
+        "vs_predicted": "Last round is a plan (predicted, not drawn yet); drawn rounds are compared with the best "
+                        "when the loop draws.",
+        # the board image (user 2026-11-19: "What ever the result is, I would like the last round result to be
+        # displayed"): [run] progress_preview picks the first one shown
+        "preview_show": "Show:",
+        "preview_last": "Last round",
+        "preview_run": "Last run",
+        "preview_best": "Best so far",
+        "preview_caption": "{which}: run {run}, round {round} — {what}",
+        "preview_plan": "predicted plan, not drawn copper",
+        "preview_copper": "drawn copper",
+        "preview_received": "Image of {time}; the board you get with OK / Cancel is the best so far.",
+        "preview_waiting": "Waiting for the first image…",
         "score_length": "{length} m",
         "score_pending": "–",
         "score_hint": "Scores compare in the pick order: fewest errors (open connections and connections with rule "
                       "violations), then fewest connections with a short, then fewest open, fewest vias, the shortest length ([optimize] pick). The best "
-                      "so far is the board OK or Cancel keeps.",
+                      "so far is the board OK or Cancel keeps. Last round = the round that finished last, whatever its "
+                      "score; Last run = the newest best of the run whose own best changed last. Predicted = a "
+                      "plan of the TopoR loop (nothing drawn yet), drawn = copper.",
         "vs_first": "The first result is the best so far.",
         "vs_new_best": "Last round is the new best: {delta}.",
         "vs_worse": "Last round is worse than the best: {delta}.",
@@ -198,7 +227,9 @@ WORDING: dict[str, dict[str, str]] = {
         "zoom_200": "200 %",
         "legend_label": "Legend: F.Cu · B.Cu · new copper (highlighted)",
         "before_heading": "Current board",
-        "after_heading": "Result",
+        # last-preview (lead 2026-11-19): the result shown is the best so far, what Accept writes (the progress
+        # dialog's image may have shown a later, worse round)
+        "after_heading": "Result: the best so far, what Accept writes",
         "summary_heading": "Summary",
         # top line of the summary when KiCad's DRC finds new violations (red, bold)
         "drc_alert": "⚠ DRC new {n} ({types}) — see findings",
@@ -480,20 +511,56 @@ def score_delta(decider: str, delta: float) -> str:
     return W[key].format(d=f"{delta:+.0f}") if key in W else f"{decider} {delta:+g}"
 
 
+def loop_mode(p: Progress) -> bool:
+    """The engine reports TopoR loop rounds (``loop_run`` / ``cycles_total``): its whole-route round is then 1 for
+    every run, and a drawn result's round is the drawing's number. O(1)."""
+    return bool(getattr(p, "loop_run", 0) or getattr(p, "cycles_total", 0))
+
+
+def last_is_predicted(p: Progress) -> bool:
+    """The Last round row shows the TopoR loop round that finished last (predicted) rather than the round judged last
+    (drawn): the loop round is newer (or nothing was drawn yet). O(1)."""
+    if not getattr(p, "loop_run", 0):
+        return False
+    return not getattr(p, "last_round", 0) or getattr(p, "loop_at_s", 0.0) > getattr(p, "last_at_s", 0.0)
+
+
 def score_rows(p: Progress) -> tuple[dict, str]:
-    """Cells of the "Last round" / "Best so far" rows (``None`` = nothing yet: the rows keep "–") and the verdict
-    line: how the last round compares with the best and on which criterion, in the pick order (the engine's
-    ``Progress.last_vs_best`` / ``last_decider`` / ``last_delta``). O(1)."""
+    """Cells of the "Last round" / "Last run" / "Best so far" rows (``None`` = nothing yet: the rows keep "–") and
+    the verdict line: how the last round compares with the best and on which criterion, in the pick order (the
+    engine's ``Progress.last_vs_best`` / ``last_decider`` / ``last_delta``). Last round = the TopoR loop round that
+    finished last (its own state's predicted score) or the round judged last (drawn), whichever is newer; Last run =
+    the newest pick of the run whose own pick changed last; Best so far = the best over the runs (what OK / Cancel
+    keeps). The "source" cell says predicted or drawn; a drawn round in loop mode is "draw N" (the loop's whole-route
+    round is 1 for every run, the user's "goes back to 1 / 1", 2026-11-19). O(1)."""
     W = WORDING["progress"]
+    loop = loop_mode(p)
 
-    def cells(run, rnd, errors, open_, vias, length_mm):
-        return {"run": str(run), "round": str(rnd), "errors": str(errors), "open": str(open_), "vias": str(vias),
-                "length": W["score_length"].format(length=f"{length_mm / 1000:.3f}")}
+    def cells(run, rnd, errors, open_, vias, length_mm, predicted):
+        shown = str(rnd) if predicted or not loop else W["drawn_round"].format(n=rnd)
+        return {"run": str(run), "round": shown, "errors": str(errors), "open": str(open_), "vias": str(vias),
+                "length": W["score_length"].format(length=f"{length_mm / 1000:.3f}"),
+                "source": W["source_predicted" if predicted else "source_drawn"]}
 
-    last = (cells(p.last_run, p.last_round, p.last_errors, p.last_open, p.last_vias, p.last_length_mm)
-            if getattr(p, "last_round", 0) else None)
-    best = (cells(p.best_run, p.best_round, p.best_errors, p.best_open, p.best_vias, p.best_length_mm)
-            if getattr(p, "best_round", 0) else None)
+    if last_is_predicted(p):
+        last = cells(p.loop_run, p.loop_cycle, p.loop_errors, p.loop_open, p.loop_vias, p.loop_length_mm, True)
+    elif getattr(p, "last_round", 0):
+        last = cells(p.last_run, p.last_round, p.last_errors, p.last_open, p.last_vias, p.last_length_mm, False)
+    else:
+        last = None
+    run = None
+    if getattr(p, "runbest_run", 0):
+        pred = getattr(p, "runbest_kind", "") == "plan"
+        run = cells(p.runbest_run, p.runbest_cycle, p.runbest_errors, p.runbest_open, p.runbest_vias,
+                    p.runbest_length_mm, pred)
+    best = None
+    if getattr(p, "best_round", 0):
+        pred = getattr(p, "best_kind", "") == "plan"
+        pc = list(getattr(p, "pick_cycles", []) or [])
+        rnd = pc[p.best_run - 1] if pred and 0 < p.best_run <= len(pc) else p.best_round
+        best = cells(p.best_run, rnd, p.best_errors, p.best_open, p.best_vias, p.best_length_mm, pred)
+    if last_is_predicted(p):
+        return {"last": last, "run": run, "best": best}, W["vs_predicted"]
     vs = getattr(p, "last_vs_best", "")
     delta = score_delta(getattr(p, "last_decider", ""), getattr(p, "last_delta", 0.0))
     if last is None or not vs:
@@ -508,7 +575,33 @@ def score_rows(p: Progress) -> tuple[dict, str]:
         verdict = W["vs_tie"]
     else:
         verdict = W["vs_same"]
-    return {"last": last, "best": best}, verdict
+    return {"last": last, "run": run, "best": best}, verdict
+
+
+def round_context(p: Progress, finished_wall: float | None, now: float | None = None) -> str:
+    """The line under the score table: when the last TopoR loop round finished (wall clock, `finished_wall` =
+    ``time.time()`` when the dialog saw it), where (run, restart of that run's loop, its round): a long round shows
+    as long. "" before the first loop round. O(1)."""
+    if not getattr(p, "loop_run", 0) or finished_wall is None:
+        return ""
+    W = WORDING["progress"]
+    now = time.time() if now is None else now
+    rs = int(getattr(p, "loop_restarts", 0) or 0)
+    return W["round_context"].format(time=time.strftime("%H:%M:%S", time.localtime(finished_wall)),
+                                     ago=max(0, int(now - finished_wall)), run=p.loop_run,
+                                     restart=W["round_context_restart"].format(n=rs) if rs else "", cycle=p.loop_cycle)
+
+
+def sketch_caption(kind: str, sk: dict | None) -> str:
+    """The board image's caption: which result (Last round / Last run / Best so far), its run and round, predicted
+    plan or drawn copper; the waiting text before the first sketch. O(1)."""
+    W = WORDING["progress"]
+    if not sk:
+        return W["preview_waiting"]
+    plan = sk.get("kind") == "plan"
+    rnd = sk.get("cycle", 0) if plan else W["drawn_round"].format(n=sk.get("cycle", 0))
+    return W["preview_caption"].format(which=W[f"preview_{kind}"], run=sk.get("run", 0), round=rnd,
+                                       what=W["preview_plan" if plan else "preview_copper"])
 
 
 def verdict_tone(p: Progress) -> str:
@@ -1073,8 +1166,16 @@ class ProgressDialog(_Base):
     LIMIT_MAX_S = 86400.0  # schema range of run.timeout_s
 
     def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None, stable_window: int = 4,
-                 timeout_clock: str = "wall", limit_editable: bool = True):
+                 timeout_clock: str = "wall", limit_editable: bool = True, preview: str = "off"):
         super().__init__(WORDING["progress"]["title"].format(board=board))
+        # last-preview: the board image ([run] progress_preview: last | run | best first; off = none)
+        self.preview_mode = preview if preview in ("last", "run", "best") else "off"
+        self._total_seen = 0  # the round count shown: never goes back
+        self._loop_key: tuple | None = None  # (run, cycle, cycles_total) of the loop round seen last
+        self._loop_wall: float | None = None  # wall time when it was seen
+        self._sketches: dict = {}  # kind -> the engine's sketch dict
+        self._base = None  # preview.live_base of the model (set_board)
+        self._sketch_wall: dict = {}  # kind -> wall time it arrived
         self.board = board
         self.timeout_s = float(timeout_s or 0)
         self.timeout_clock = timeout_clock
@@ -1122,6 +1223,10 @@ class ProgressDialog(_Base):
         self.root.Add(grid, 0, wx.BOTTOM, self.group)
         # the score of the last round and of the best so far (what OK / Cancel keeps), over all runs
         self._build_score_rows()
+        self.iteration_value.SetToolTip(W["round_total_tip"])
+        if self.preview_mode != "off":
+            self._build_preview()
+            self.TAB_ORDER = ("preview_last", "preview_run", "preview_best") + type(self).TAB_ORDER
         self.stable = False
         #: What the button read when it was pressed (True = OK at "Routes stable", False = Cancel; None = not pressed),
         #: latched in ``cancel`` (verify-sl3 F2: the label after the next poll may read OK already).
@@ -1142,8 +1247,12 @@ class ProgressDialog(_Base):
         self._sync_limit_controls()
         self.cancel_button.SetFocus()
 
-    SCORE_COLS = (("run", 30, "888"), ("round", 40, "8888"), ("errors", 44, "88888"), ("open", 40, "88888"),
-                  ("vias", 40, "888888"), ("length", 70, "888.888 m"))
+    SCORE_COLS = (("run", 30, "888"), ("round", 40, "88888", "draw 88"), ("errors", 44, "88888"),
+                  ("open", 40, "88888"), ("vias", 40, "888888"), ("length", 70, "888.888 m"),
+                  ("source", 60, "predicted", "drawn"))
+    SCORE_ROWS = ("last", "run", "best")
+    #: the board image's size (DIP); the image is scaled to fit it, the dialog never resizes for it
+    PREVIEW_DIP = (430, 240)
     #: width of the phase and verdict lines (DIP); longer text ends in "…" / wraps inside it
     TEXT_WIDTH = 430
 
@@ -1154,16 +1263,16 @@ class ProgressDialog(_Base):
         W = WORDING["progress"]
         grid = wx.FlexGridSizer(1 + len(self.SCORE_COLS), self.row // 2, self.group)
         grid.Add((0, 0))
-        for col, _w, _s in self.SCORE_COLS:
+        for col, *_ in self.SCORE_COLS:
             grid.Add(self.text(self, "progress", f"score_head_{col}", style=wx.ALIGN_RIGHT), 0, wx.ALIGN_RIGHT)
         self.score_cells: dict[str, dict[str, wx.StaticText]] = {}
-        for row in ("last", "best"):
+        for row in self.SCORE_ROWS:
             name = self.text(self, "progress", f"score_{row}")
             name.SetToolTip(W["score_hint"])
             grid.Add(name, 0)
             self.score_cells[row] = {}
-            for col, width, sample in self.SCORE_COLS:
-                cell = self._num(f"{row}_{col}", width, sample)
+            for col, width, *samples in self.SCORE_COLS:
+                cell = self._num(f"{row}_{col}", width, *samples)
                 cell.SetLabel(W["score_pending"])
                 self.score_cells[row][col] = cell
                 grid.Add(cell, 0, wx.ALIGN_RIGHT)
@@ -1180,9 +1289,101 @@ class ProgressDialog(_Base):
         self.score_verdict = wx.StaticText(self, label=" ", name="score_verdict", style=wx.ST_NO_AUTORESIZE)
         self.score_verdict.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH),
                                               2 * self.score_verdict.GetCharHeight() + self.FromDIP(2)))
-        self.root.Add(self.score_verdict, 0, wx.BOTTOM, self.group)
+        self.root.Add(self.score_verdict, 0, wx.BOTTOM, self.row)
         self._verdict = " "
         self._verdict_tone = ""
+        # when and where the last loop round finished (one line, fixed width: a long round shows as long)
+        self.round_context = wx.StaticText(self, label=" ", name="round_context_line",
+                                           style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
+        self.round_context.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH), -1))
+        self.round_context.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+        self.root.Add(self.round_context, 0, wx.BOTTOM, self.group)
+
+    def _build_preview(self) -> None:
+        """last-preview: "Show: (•) Last round ( ) Last run ( ) Best so far", the caption (which result, run, round,
+        predicted plan or drawn copper), the image (fixed size, scaled to fit) and when it arrived."""
+        W = WORDING["progress"]
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(self.text(self, "progress", "preview_show"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
+        self.preview_radio: dict[str, wx.RadioButton] = {}
+        for i, (kind, mn) in enumerate((("last", "r"), ("run", "u"), ("best", "b"))):
+            rb = wx.RadioButton(self, label=_mn(W[f"preview_{kind}"], mn), name=f"preview_{kind}",
+                                style=wx.RB_GROUP if i == 0 else 0)
+            rb.SetValue(kind == self.preview_mode)
+            rb.Bind(wx.EVT_RADIOBUTTON, lambda _e, k=kind: self.show_kind(k))
+            self.preview_radio[kind] = rb
+            row.Add(rb, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
+        self.root.Add(row, 0, wx.BOTTOM, self.row)
+        self.preview_caption = wx.StaticText(self, label=W["preview_waiting"], name="preview_caption",
+                                             style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
+        self.preview_caption.SetFont(self.preview_caption.GetFont().Bold())
+        self.preview_caption.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH), -1))
+        self.root.Add(self.preview_caption, 0, wx.BOTTOM, self.row)
+        self.preview_size = self.FromDIP(wx.Size(*self.PREVIEW_DIP))
+        blank = wx.Bitmap(self.preview_size.width, self.preview_size.height)
+        self.preview_image = wx.StaticBitmap(self, bitmap=blank, name="preview_image", size=self.preview_size)
+        self.preview_image.SetMinSize(self.preview_size)
+        self.root.Add(self.preview_image, 0, wx.BOTTOM, self.row)
+        self.preview_time = wx.StaticText(self, label=" ", name="preview_time",
+                                          style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
+        self.preview_time.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH), -1))
+        self.preview_time.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+        self.root.Add(self.preview_time, 0, wx.BOTTOM, self.group)
+        self.rendered: tuple | None = None  # (kind, seq) of the image shown (tests, the GUI e2e)
+
+    # -- the board image (last-preview)
+    @property
+    def preview_kind(self) -> str | None:
+        """The sketch the image shows now ("last" | "run" | "best"), None without an image."""
+        return None if self.preview_mode == "off" else self.preview_mode
+
+    def show_kind(self, kind: str) -> None:
+        """Switch the image to `kind` (the radio buttons); the run flow fetches its sketch at the next poll."""
+        if self.preview_mode == "off" or kind not in ("last", "run", "best"):
+            return
+        self.preview_mode = kind
+        if self.preview_radio[kind].GetValue() is False:
+            self.preview_radio[kind].SetValue(True)
+        self._render_preview()
+
+    def set_board(self, model: dict) -> None:
+        """The run's engine model: the image's fixed part (``preview.live_base``), built once."""
+        from .preview import live_base  # noqa: PLC0415
+
+        self._base = live_base(model)
+
+    def set_sketch(self, kind: str, sk: dict) -> None:
+        """A new sketch of `kind` from the engine; redrawn when it is the one shown. O(items)."""
+        self._sketches[kind] = sk
+        self._sketch_wall[kind] = time.time()
+        if kind == self.preview_mode:
+            self._render_preview()
+
+    def _render_preview(self) -> None:
+        if self.preview_mode == "off":
+            return
+        W = WORDING["progress"]
+        kind = self.preview_mode
+        sk = self._sketches.get(kind)
+        self.preview_caption.SetLabel(sketch_caption(kind, sk))
+        self.preview_caption.SetToolTip(self.preview_caption.GetLabel())
+        if sk is None or self._base is None:
+            return
+        import wx.svg  # noqa: PLC0415
+
+        from .preview import live_svg  # noqa: PLC0415
+
+        img = wx.svg.SVGimage.CreateFromBytes(live_svg(self._base, sk.get("items") or []).encode())
+        bw, bh = max(1e-6, float(img.width)), max(1e-6, float(img.height))
+        box = self.preview_size
+        scale = min(box.width / bw, box.height / bh)
+        bmp = img.ConvertToBitmap(scale=scale, width=max(1, int(bw * scale)), height=max(1, int(bh * scale)))
+        self.preview_image.SetBitmap(bmp)
+        self.rendered = (kind, sk.get("seq"))
+        wall = self._sketch_wall.get(kind)
+        self.preview_time.SetLabel(W["preview_received"].format(
+            time=time.strftime("%H:%M:%S", time.localtime(wall)) if wall else "–"))
+        self.Layout()
 
     def _show_scores(self, show: bool) -> None:
         self.scores_shown = show
@@ -1194,7 +1395,7 @@ class ProgressDialog(_Base):
         """Fill the score rows from the engine's progress (``score_rows``); the verdict in its tone's colour (green:
         the last round beat the best, amber: worse; ``verdict_tone``)."""
         rows, verdict = score_rows(p)
-        if (rows["last"] is not None or rows["best"] is not None) != self.scores_shown:
+        if any(r is not None for r in rows.values()) != self.scores_shown:
             self._show_scores(not self.scores_shown)
         for row, cells in rows.items():
             if cells is None:
@@ -1374,8 +1575,18 @@ class ProgressDialog(_Base):
             self._round = (p.iteration, self.iteration_cap)  # an engine without rounds: its iteration
         self._round_from_engine = self._round_from_engine or bool(getattr(p, "rounds", 0))
         rnd, cap = self._round
-        if self._round_from_engine:  # M-B0: [optimize] rounds is only a safety cap; the run ends at "stable"
-            self.iteration_value.SetLabel(W["round_value"].format(round=rnd))
+        if loop_mode(p):
+            # last-preview (user 2026-11-19, "goes back to 1 / 1"): the TopoR loop's whole-route round is 1 for
+            # every run; the count shown is the loop rounds over all runs, which never goes back (also not across
+            # a progress that lost it)
+            self._total_seen = max(self._total_seen, int(getattr(p, "cycles_total", 0) or 0))
+            self.iteration_value.SetLabel(W["round_value"].format(round=self._total_seen))
+            key = (p.loop_run, p.loop_cycle, getattr(p, "cycles_total", 0))
+            if key != self._loop_key:
+                self._loop_key, self._loop_wall = key, time.time()
+        elif self._round_from_engine:  # M-B0: [optimize] rounds is only a safety cap; the run ends at "stable"
+            self._total_seen = max(self._total_seen, rnd)
+            self.iteration_value.SetLabel(W["round_value"].format(round=self._total_seen))
         else:
             self.iteration_value.SetLabel(W["iteration_value"].format(iteration=rnd, cap=cap) if cap else str(rnd))
         g = getattr(p, "gain_pct", None)
@@ -1385,6 +1596,10 @@ class ProgressDialog(_Base):
         self.runs_value.SetLabel(W["runs_value"].format(stable=getattr(p, "runs_stable", 0), runs=runs) if runs
                                  else W["gain_pending"])
         self._set_score(p)
+        ctx = round_context(p, self._loop_wall) or " "
+        if ctx != self.round_context.GetLabel():
+            self.round_context.SetLabel(ctx)
+            self.round_context.SetToolTip(ctx)
         if p.iteration == 0 and p.routed == 0:
             self.routed_value.SetLabel(W["routed_pending"].format(total=p.total))
         else:
@@ -1861,6 +2076,10 @@ class WxUi:
         self._last_progress: Progress | None = None
         self._limit_editable = False  # True once the pre-flight was answered with Route (the routing run)
         self._splash: SplashWindow | None = None
+        # last-preview: [run] progress_preview / progress_preview_interval_s (defaults until the pre-flight answers)
+        self._preview_mode = str(plugin_value(Config.defaults(), "run", "progress_preview"))
+        self._preview_interval = float(plugin_value(Config.defaults(), "run", "progress_preview_interval_s"))
+        self._board_model: dict | None = None
 
     #: M-B0: the progress dialog lets the user end the run (OK at "Routes stable"); the run flow then does not
     #: stop the engine at stable by itself.
@@ -1942,6 +2161,10 @@ class WxUi:
             self._timeout_clock = str(eff("run", "timeout_clock"))
             self._limit_editable = True
         self._iter_cap = int(eff("optimize", "rounds"))  # the topological core's whole-route rounds
+        pv = SETTINGS_BY_KEY[("run", "progress_preview")]
+        if available(pv) or unreleased_allowed():  # since-loud: a later release's setting keeps its default here
+            self._preview_mode = str(eff("run", "progress_preview"))
+            self._preview_interval = float(eff("run", "progress_preview_interval_s"))
         self._stable_window = int(eff("optimize", "stable_window"))
         return d
 
@@ -1950,7 +2173,10 @@ class WxUi:
         if self._progress is None:
             self._close_splash()
             self._progress = ProgressDialog(self.ctx.board, self._timeout_s, self._iter_cap, self._stable_window,
-                                           self._timeout_clock, limit_editable=self._limit_editable)
+                                           self._timeout_clock, limit_editable=self._limit_editable,
+                                           preview=self._preview_mode if self._limit_editable else "off")
+            if self._board_model is not None and self._progress.preview_kind is not None:
+                self._progress.set_board(self._board_model)
             self._present(self._progress)
         dlg = self._progress
         # verify-sl3 F2: a press queued while the button still read Cancel is handled against that label first;
@@ -1961,6 +2187,27 @@ class WxUi:
         if dlg.cancelled:
             self._cancelled = True
         return not self._cancelled
+
+    # -- the progress dialog's board image (last-preview; ports.UiPort optional methods)
+    def preview_wanted(self) -> str | None:
+        """The sketch the board image shows ("last" | "run" | "best"); None = no image (off, or not the routing
+        run's dialog). O(1)."""
+        if not self._limit_editable or self._preview_mode == "off":
+            return None
+        dlg = self._progress
+        return dlg.preview_kind if dlg is not None else self._preview_mode
+
+    def preview_interval_s(self) -> float:
+        return self._preview_interval
+
+    def set_board(self, model: dict) -> None:
+        self._board_model = model
+        if self._progress is not None and self._progress.preview_kind is not None:
+            self._progress.set_board(model)
+
+    def sketch(self, kind: str, sketch: dict) -> None:
+        if self._progress is not None and self._progress.preview_kind is not None:
+            self._progress.set_sketch(kind, sketch)
 
     def ok_at_press(self) -> bool | None:
         """What the stop button read when it was pressed: True = OK ("Routes stable"), False = Cancel, None = not

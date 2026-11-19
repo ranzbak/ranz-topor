@@ -330,7 +330,7 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
     x0 = m + (total_w - 2 * m - (2 * pw_px + gap)) // 2
     dc.SetFont(bold)
     dc.DrawText("Current board", x0, y)
-    dc.DrawText("Result", x0 + pw_px + gap, y)
+    dc.DrawText("Result (best so far, what Accept writes)", x0 + pw_px + gap, y)
     y += lh
     for i, bmp in enumerate((bmp_b, bmp_a)):
         px = x0 + i * (pw_px + gap)
@@ -364,3 +364,123 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
     if not canvas.SaveFile(str(out_png), wx.BITMAP_TYPE_PNG):
         raise RuntimeError(f"could not write {out_png}")
     return out_png, notes
+
+
+# ---------------------------------------------------------------- live board image (progress dialog, last-preview)
+#: the live image's board ground and outline (KiCad's default board colours, as the post-run preview's export)
+LIVE_BOARD_RGB = (0, 16, 35)
+LIVE_EDGE_RGB = (208, 210, 205)
+#: existing copper (pads, kept tracks, vias) is drawn at this opacity under the result's copper
+LIVE_BASE_OPACITY = 0.45
+
+
+def _pt(p) -> tuple:
+    if isinstance(p, dict):
+        return (p["x"], p["y"])
+    return (p[0], p[1])
+
+
+def live_base(model: dict) -> dict | None:
+    """The fixed part of the progress dialog's board image (last-preview), from the engine model the plugin built
+    (KiCad frame, nm): ``{"origin": (x, y) nm, "size": (w, h) mm, "svg": <elements>}`` with the board outline, the
+    pads (rotated rect / oval / round-rect / circle / polygon, per their first copper layer's colour) and the existing
+    tracks and vias, dimmed. None without an outline. Built once per run; no kicad-cli. O(pads + kept + vias)."""
+    box = outline_origin([{**p, **{k: list(_pt(p[k])) for k in ("a", "b", "start", "mid", "end") if k in p}}
+                          for p in model.get("outline") or []])
+    if box is None:
+        return None
+    ox, oy = box[0], box[1]
+
+    def mm(v) -> str:
+        return f"{v / MM:.4f}"
+
+    def xy(p) -> tuple:
+        x, y = _pt(p)
+        return (x - ox) / MM, (y - oy) / MM
+
+    def col(layers) -> str:
+        lay = [int(x) for x in layers or []]
+        if 0 in lay:
+            return _hex(_LAYER_RGB[0])
+        if 2 in lay:
+            return _hex(_LAYER_RGB[2])
+        return _hex(_INNER_RGB)
+
+    parts = []
+    for p in model.get("outline") or []:
+        if p.get("kind") == "arc":
+            pts = geom.flatten_arc(tuple(_pt(p["start"])), tuple(_pt(p["mid"])), tuple(_pt(p["end"])), 5000)
+        else:
+            pts = [_pt(p["a"]), _pt(p["b"])]
+        d = " ".join(f"{(q[0] - ox) / MM:.4f},{(q[1] - oy) / MM:.4f}" for q in pts)
+        parts.append(f'<polyline points="{d}" fill="none" stroke="{_hex(LIVE_EDGE_RGB)}" stroke-width="0.15" />')
+    for it in model.get("kept") or []:
+        prim = it.get("prim") or {}
+        if prim.get("kind") == "arc":
+            pts = geom.flatten_arc(tuple(_pt(prim["start"])), tuple(_pt(prim["mid"])), tuple(_pt(prim["end"])), 5000)
+        elif prim.get("kind") == "seg":
+            pts = [_pt(prim["a"]), _pt(prim["b"])]
+        else:
+            continue
+        d = " ".join(f"{(q[0] - ox) / MM:.4f},{(q[1] - oy) / MM:.4f}" for q in pts)
+        parts.append(f'<polyline points="{d}" fill="none" stroke="{col([it.get("layer")])}" '
+                     f'stroke-width="{mm(it.get("width", 0))}" stroke-linecap="round" />')
+    for v in model.get("vias") or []:
+        x, y = xy(v["at"])
+        parts.append(f'<circle cx="{x:.4f}" cy="{y:.4f}" r="{v.get("d", 0) / 2 / MM:.4f}" fill="#C8C8C8" />')
+    for pad in model.get("pads") or []:
+        shapes = pad.get("shapes") or {}
+        if not shapes:
+            continue
+        key = sorted(shapes, key=lambda k: int(k))[0]
+        sh, fill = shapes[key], col(pad.get("layers") or [int(key)])
+        cx, cy = xy(pad["center"])
+        rot = -float(pad.get("rotation_deg") or 0.0)
+        kind = sh.get("kind")
+        if kind == "circle":
+            parts.append(f'<circle cx="{cx:.4f}" cy="{cy:.4f}" r="{sh["d"] / 2 / MM:.4f}" fill="{fill}" />')
+        elif kind in ("rect", "roundrect", "oval"):
+            w, h = sh["w"] / MM, sh["h"] / MM
+            r = min(w, h) / 2 if kind == "oval" else (sh.get("rc", 0) / MM if kind == "roundrect" else 0.0)
+            parts.append(f'<rect x="{-w / 2:.4f}" y="{-h / 2:.4f}" width="{w:.4f}" height="{h:.4f}" rx="{r:.4f}" '
+                         f'fill="{fill}" transform="translate({cx:.4f},{cy:.4f}) rotate({rot:.3f})" />')
+        elif kind == "poly" and sh.get("pts"):
+            d = " ".join("{:.4f},{:.4f}".format(*xy(q)) for q in sh["pts"])
+            parts.append(f'<polygon points="{d}" fill="{fill}" />')
+        drill = pad.get("drill")
+        if drill:
+            parts.append(f'<circle cx="{cx:.4f}" cy="{cy:.4f}" r="{min(drill["w"], drill["h"]) / 2 / MM:.4f}" '
+                         f'fill="{_hex(LIVE_BOARD_RGB)}" />')
+    size = ((box[2] - box[0]) / MM, (box[3] - box[1]) / MM)
+    return {"origin": (ox, oy), "size": size,
+            "svg": f'<g opacity="{LIVE_BASE_OPACITY}">' + "".join(parts) + "</g>\n"}
+
+
+def live_svg(base: dict, items: list) -> str:
+    """The progress dialog's board image as SVG text (mm units, origin at the outline's minimum corner): the board
+    ground, `base` (:func:`live_base`) and `items` (a sketch's tracks and vias, KiCad frame) in their layers'
+    default colours on top. O(items)."""
+    ox, oy = base["origin"]
+    w, h = base["size"]
+    m = 0.5  # mm of margin around the outline
+    core = []
+    for it in items or []:
+        if it.get("kind") == "via":
+            x, y = (it["at"][0] - ox) / MM, (it["at"][1] - oy) / MM
+            core.append(f'<circle cx="{x:.4f}" cy="{y:.4f}" r="{it["d"] / 2 / MM:.4f}" fill="#E0E0E0" />')
+            continue
+        p = it.get("prim") or {}
+        if p.get("kind") == "arc":
+            pts = geom.flatten_arc(tuple(p["start"]), tuple(p["mid"]), tuple(p["end"]), 2000)
+        elif p.get("kind") == "seg":
+            pts = [p["a"], p["b"]]
+        else:
+            continue
+        d = " ".join(f"{(q[0] - ox) / MM:.4f},{(q[1] - oy) / MM:.4f}" for q in pts)
+        rgb = _LAYER_RGB.get(int(it.get("layer", -1)), _INNER_RGB)
+        core.append(f'<polyline points="{d}" fill="none" stroke="{_hex(rgb)}" stroke-width="{it["width"] / MM:.4f}" '
+                    f'stroke-linecap="round" stroke-linejoin="round" />')
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w + 2 * m:.4f}mm" height="{h + 2 * m:.4f}mm" '
+            f'viewBox="{-m:.4f} {-m:.4f} {w + 2 * m:.4f} {h + 2 * m:.4f}">\n'
+            f'<rect x="{-m:.4f}" y="{-m:.4f}" width="{w + 2 * m:.4f}" height="{h + 2 * m:.4f}" '
+            f'fill="{_hex(LIVE_BOARD_RGB)}" />\n' + base["svg"] + "<g>" + "".join(core) + "</g>\n</svg>\n")
