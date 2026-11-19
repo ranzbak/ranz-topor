@@ -194,6 +194,10 @@ case ${1:-} in
     ( bash $ROOT/tools/tw5_job.sh final > $R/final-mode.log 2>&1 ) & sleep 1
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  ocheck)
+    # O = main copper at 1 cycle on the tip (vs nd2b2-dcf4c0e), after the assign_n refactor and the main merge.
+    u o 4 "Or1:esp" "Or1:eprom Or1:wiccon" "Or1:qmtech"
+    wait; note "all done" ;;
   final)
     # Merge trial on the tip (main merged in): every engine test, clippy, the full pytest (CI=1).
     ( hzq run --threads 6 --name tw5-final -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast > $R/cargo-all.log 2>&1; echo rc \$? >> $R/cargo-all.log; cargo clippy --release --all-targets > $R/clippy.log 2>&1; echo rc \$? >> $R/clippy.log; cd $ROOT && CI=1 python -m pytest -q > $R/pytest.log 2>&1; echo rc \$? >> $R/pytest.log" > $R/final.log 2>&1; note "final unit rc $?" ) & sleep 1
