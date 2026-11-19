@@ -9790,6 +9790,35 @@ mod tests {
         assert_eq!((g.free, g.first, g.waiting, g.queue.len()), (1, 0, 0, 0));
     }
 
+    /// sync-wait (d9402d48): at the moment the lower waiter takes the slot, the run that turns is already
+    /// queued (one lock frees the slot and queues it); with two locks a waiter behind it could take the slot in the gap.
+    /// Observes the invariant at the hand-over, so it catches the two-lock turn (an end-state order test did not).
+    /// ignored line: is queued before the run it gave its slot to can take it.
+    #[test]
+    fn a_turning_run_is_queued_when_the_lower_waiter_takes_its_slot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let missing = AtomicUsize::new(0);
+        for _ in 0..200 {
+            let slots = Slots::new(1);
+            slots.acquire_as(1, 4, 0);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    slots.acquire_as(1, 3, 2);
+                    if !slots.st.lock().unwrap().queue.iter().any(|k| k.2 == 0) {
+                        missing.fetch_add(1, Ordering::SeqCst);
+                    }
+                    slots.release();
+                });
+                while slots.st.lock().unwrap().queue.is_empty() {
+                    std::thread::yield_now();
+                }
+                assert!(slots.turn(5, 0));
+                slots.release();
+            });
+        }
+        assert_eq!(missing.load(Ordering::SeqCst), 0, "the turning run was not queued when its slot was taken");
+    }
+
     /// sync-wait: a loop run gives its slot at a cycle boundary only to a waiter behind it, and the
     /// run that gave it gets it back once it is the lowest (the stable yield is not one-way).
     #[test]

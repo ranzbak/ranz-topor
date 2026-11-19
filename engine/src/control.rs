@@ -1351,6 +1351,7 @@ impl Job {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     /// sync-wait: the cycle lines keep the last CYCLE_LINES, numbered by `cycles_logged`.
     #[test]
@@ -1365,8 +1366,6 @@ mod tests {
         assert_eq!(p.cycle_lines[0], "line 45");
         assert_eq!(p.cycle_lines.last().map(String::as_str), Some(format!("line {}", CYCLE_LINES + 44).as_str()));
     }
-
-    use super::*;
 
     /// last-preview: a request is honoured only while enabled and is cleared by the publish to the
     /// last slot (at most one build per request); a best-only publish keeps it; best slots are per
