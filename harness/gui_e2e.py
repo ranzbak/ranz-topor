@@ -962,7 +962,8 @@ def run(a) -> int:
             e.check("Reject: no 'Topor — Finished' / error window", not stray, str(stray))
             e.shot("after-reject")
             e.check("Reject leaves the copper unchanged", e.counts() == before, f"{before} -> {e.counts()}")
-            return 0 if all(c["ok"] for c in e.checks) else 1
+            ok = all(c["ok"] for c in e.checks)
+            return 0 if ok else 1
         e.key(nxt[1], "Return")  # Enter = Accept
         e.check("Accept closes the preview", e.wait_gone("Topor — Preview", 60))
         time.sleep(4)  # no finished window (user 2026-11-19): nothing "Topor — ..." may appear after the commit
