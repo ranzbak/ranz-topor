@@ -27,7 +27,7 @@ TF=(--test tw5_escape -- loop_p4_rounds_fold)
 TB=(--test tw5_escape -- loop_p4_rounds_run_beside)
 # F2: the rounds share the escapes' throttle again
 sub 'if !self.tw5.p4_throttle.due() {' 'if !self.tw5.throttle.due() {' | mut f2a_shared $C "${TB[@]}"
-sub 'self.tw5.p4_throttle.ran_work(w);' 'self.tw5.throttle.ran_work(w);' | mut f2b_charge $C "${TB[@]}"
+sub 'self.tw5.p4_throttle.ran_work(w);' 'self.tw5.throttle.ran_work(w);' | mut f2b_charge $C --test tw5_escape -- loop_p4
 sub '                    self.tw5.p4_throttle.add(units);
 ' '' | mut f2c_nowork $C --test tw5_escape -- loop_p4
 # F1: a round that is the history alone (no rip), no cap, no history step
@@ -45,5 +45,5 @@ sub '                    if stop() {
                         break;' | mut l1_stop $C --test tw5_escape -- loop_p4
 sub 'if opts.escape == "layering" && opts.loop_p4 { opts.escape_share * 0.5 } else { opts.escape_share }, opts.escape_kappa, st_alive),
                 p4_throttle' 'opts.escape_share, opts.escape_kappa, st_alive),
-                p4_throttle' | mut l2_half_esc $C --test tw5_escape -- loop_p4
+                p4_throttle' | mut l2_half_esc $C "${TB[@]}"
 note "mutants done"

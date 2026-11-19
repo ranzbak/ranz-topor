@@ -156,6 +156,9 @@ fn loop_p4_rounds_run_beside_the_layering_escapes() {
     assert!(ran >= 1, "with the layering escapes on, in-loop rounds run: {t}");
     let escapes: usize = w.split("layering escape \"layering\": ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(0);
     assert!(escapes >= 1, "the escapes run beside the rounds: {w}");
+    // both parts together stay inside the one `escape_share` (0.35 by default): half of it each
+    let share: f64 = w.split("work share of the escapes ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(f64::NAN);
+    assert!(share <= 35.0 + 1.0, "escapes and rounds together stay near escape_share: {share} %: {w}");
 }
 
 /// TW5 (f): a round is kept like the loop's other whole-board moves: `escape_take = "always"`
