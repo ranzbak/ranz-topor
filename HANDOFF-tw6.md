@@ -1,4 +1,15 @@
-# TW6 VIA-SITES handoff (2026-11-19)
+# TW6 VIA-SITES handoff (2026-11-19, updated round 3, tip after ba566bae)
+
+## Round 3 state (read first; older notes below)
+- A/B re-run done (tw6acd2-0967792) and B search + E A/B done (tw6be-094cee3), both on topor-rsc-c0c953ad. Report:
+  scratch/agent-wt/reports/tw6-via-sites-r3-20261119-1040.md (+ .json). No default flips; off = main copper.
+- B search term DONE opt-in: `[factors] via_site_social` (d1fd284d). E DONE opt-in: `[optimize] site_move`,
+  `branch_move` (8ccfb0e0). Tests engine/tests/topo_site_social.rs. Mutants 12/13 killed (M13 survivor: set_lr refresh).
+- tw6_ab.sh: `be <cfgs>` mode (tests + clippy + off + pytest + pats + eq); suffixes b (SITE_W, default 50), m, j.
+- Open for the lead/user: graded detour price in E's keep judge; site_price implies via_disc_height?; pcw is a
+  metric/drawing defect (to branch cross-draw F2/F3); B weight 10-20 retry or park.
+- Nothing in flight. The lib-test fix (ba566bae, factor order) has not run on the VM yet: include `--lib` next job.
+
 
 Branch tw6-via-sites, worktree scratch/agent-wt/wt-tw6. main 12699012 (tw4-r2) is merged in (271153d7).
 Design note: docs/dev/design/tw6-via-sites.md. Lead orders: parts in the order A+C, D, B (search term), E. Every part is
