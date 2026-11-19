@@ -140,3 +140,55 @@ def test_no_kicad_subprocess_bypasses_the_helper():
                 if re.search(r"(^|\s)kicad-cli\s", code) and "KICAD_CONFIG_HOME" not in code:
                     bad.append(f"{f.relative_to(ROOT)}:{n}")
     assert not bad, "KiCad started without harness.kicad_env:\n" + "\n".join(bad)
+
+
+def _clean_env(fake_home: Path, kicad_home: Path) -> dict:
+    import os
+    e = {k: v for k, v in os.environ.items() if not k.startswith(("XDG_", "KICAD_"))}
+    e.update(HOME=str(fake_home), TOPOR_KICAD_HOME=str(kicad_home), PYTHONPATH=f"{ROOT}:{ROOT / 'plugin'}")
+    return e
+
+
+def _files(d: Path) -> list:
+    return sorted(str(p.relative_to(d)) for p in d.rglob("*"))
+
+
+@pytest.mark.skipif(__import__("importlib").util.find_spec("pcbnew") is None, reason="needs KiCad's pcbnew module")
+def test_in_process_pcbnew_through_harness_stays_off_the_user_home(tmp_path):
+    """`import harness` then SWIG pcbnew (LoadBoard, SaveBoard, FootprintLoad) in a process whose HOME stands for
+    the user's: nothing appears under that HOME (without harness pcbnew creates ~/.config/kicad/10.0), the
+    KiCad dirs land in the isolated home; the real ~/.config/kicad is byte- and mtime-identical."""
+    import sys
+    from tests.mcp_server.test_mcp_drc import _tree_state  # noqa: PLC0415
+    user = Path.home() / ".config" / "kicad"
+    before = _tree_state(user)
+    fake, iso = tmp_path / "user-home", tmp_path / "kicad-home"
+    fake.mkdir()
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text('(kicad_pcb (version 20241229) (generator "pcbnew") (generator_version "9.0"))\n')
+    prog = ("import harness, pcbnew\n"
+            f"b = pcbnew.LoadBoard({str(pcb)!r}); pcbnew.SaveBoard({str(tmp_path / 'o.kicad_pcb')!r}, b)\n"
+            "pcbnew.FootprintLoad('/usr/share/kicad/footprints/Resistor_SMD.pretty', 'R_0603_1608Metric')\n")
+    r = subprocess.run([sys.executable, "-c", prog], env=_clean_env(fake, iso), capture_output=True, text=True,
+                       timeout=120, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert _files(fake) == [] and (iso / ".config/kicad/10.0").is_dir()
+    assert "WARNING" not in r.stderr
+    assert _tree_state(user) == before
+
+
+def test_route_board_script_isolates_before_anything_else(tmp_path):
+    """harness/route_board.py runs as a script (tools/route_board.sh): main() isolates first."""
+    import sys
+    fake, iso = tmp_path / "user-home", tmp_path / "kicad-home"
+    fake.mkdir()
+    r = subprocess.run([sys.executable, "-P", str(ROOT / "harness/route_board.py"), "--help"],
+                       env=_clean_env(fake, iso), capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr[-1500:]
+    assert (iso / ".config/kicad/10.0/fp-lib-table").is_file() and _files(fake) == []
+
+
+def test_harness_import_sets_the_kicad_location_variables():
+    import os
+    for k in K.PROCESS_VARS:
+        assert not Path(os.environ[k]).resolve().is_relative_to(Path.home().resolve() / ".config"), k

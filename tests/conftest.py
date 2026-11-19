@@ -2,6 +2,8 @@ import pathlib
 
 import pytest
 
+import harness  # noqa: F401  (the whole session: KiCad in an isolated home, never the user's config)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 

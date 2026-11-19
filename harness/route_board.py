@@ -46,6 +46,16 @@ def _load_strip():
     return mod
 
 
+def _isolate_kicad() -> None:
+    """harness/kicad_env.py by file path (this file runs as a script, also on a classic-reference TOPOR_TREE):
+    KiCad location variables + kicad-cli env isolated before pcbnew is imported."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_topor_kicad_env", Path(__file__).with_name("kicad_env.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.install()
+
+
 def _count_vias(pcb: Path) -> int:
     from toporlib import pcbfile
     return len(pcbfile.find_items(pcb.read_text(), ("via",)))
@@ -362,6 +372,7 @@ def require_display(env=None, platform: str | None = None) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _isolate_kicad()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("board", help="BENCH_BOARDS key or .kicad_pcb path")
     ap.add_argument("out_dir", type=Path)

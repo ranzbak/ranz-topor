@@ -9,6 +9,7 @@ import shutil
 import sys
 from pathlib import Path
 
+import harness  # noqa: F401,E402,I001  (KiCad isolated before pcbnew, also when run as a script)
 import pcbnew
 
 from harness import via_patterns as vp

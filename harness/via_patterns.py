@@ -33,6 +33,7 @@ import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import harness  # noqa: F401,E402,I001  (KiCad isolated before pcbnew, also when run as a script)
 import pcbnew
 from shapely.geometry import LineString, Point, box
 from shapely.ops import unary_union

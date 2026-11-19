@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import harness  # noqa: F401,E402,I001  (KiCad isolated before pcbnew, also when run as a script)
 import pcbnew
 
 from harness.paths import kicad_cli

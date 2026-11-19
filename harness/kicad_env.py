@@ -98,8 +98,31 @@ def run_drc(pcb, out_json, **kw):
     return _run_drc(pcb, out_json, **kw)
 
 
+#: KiCad's own location variables: set in a harness PROCESS they keep in-process SWIG pcbnew off the user's KiCad
+#: dirs (probe 2026-11-19, KiCad 10.0.8: with them LoadBoard / SaveBoard / FootprintLoad create nothing under
+#: $HOME; without, pcbnew creates ~/.config/kicad/10.0). HOME / XDG_* of the process stay as they are: harness/paths
+#: finds the boards under ~/work/kicad/projects, the plugin's report cache follows XDG_CACHE_HOME, git its config.
+PROCESS_VARS = ("KICAD_CONFIG_HOME", "KICAD_CACHE_HOME", "KICAD_DOCUMENTS_HOME")
+
+
+def isolate_process(home: Path | None = None) -> None:
+    """Point this process's KiCad location variables (PROCESS_VARS) into `home` (default :func:`default_home`)
+    BEFORE pcbnew is imported (a script that imported pcbnew first gets a loud stderr warning: its KiCad paths are
+    fixed then). Child processes inherit them."""
+    import sys
+    e = isolated_env(home)  # creates the home + library tables
+    want = {"KICAD_CONFIG_HOME": e["KICAD_CONFIG_HOME"], "KICAD_CACHE_HOME": f"{e['XDG_CACHE_HOME']}/kicad",
+            "KICAD_DOCUMENTS_HOME": f"{e['HOME']}/Documents/KiCad"}
+    if "pcbnew" in sys.modules and any(os.environ.get(k) != v for k, v in want.items()):
+        print("harness.kicad_env: WARNING pcbnew was imported before harness: this process's pcbnew uses the "
+              "user's KiCad config dir; import harness first", file=sys.stderr)
+    os.environ.update(want)
+
+
 def install() -> None:
-    """Make :func:`isolated_env` the default env of toporlib.kicad_cli.run_cli in this process."""
+    """This process: KiCad location variables isolated (:func:`isolate_process`) and :func:`isolated_env` the
+    default env of toporlib.kicad_cli.run_cli. Called by ``import harness``."""
     from toporlib import kicad_cli
+    isolate_process()
     if kicad_cli.DEFAULT_ENV is None:
         kicad_cli.DEFAULT_ENV = isolated_env()
