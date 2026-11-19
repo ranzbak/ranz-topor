@@ -1713,7 +1713,7 @@ impl Default for Options {
             via_best_point: false,
             via_over_ramp_mm: 0.0,
             pour_cuts: false,
-            pour_cut_cells: 1.0e6,
+            pour_cut_cells: 1.0e5,
             stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,

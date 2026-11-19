@@ -14,7 +14,8 @@ R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
 E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
-board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023;; esp) echo $E;; qmtech) echo $Q;; esac; }
+board_path() { case $1 in eprom) echo eprom-to-kernal;; wiccon) echo wiccon-2023;; esp) echo $E;; qmtech) echo $Q;;
+  pring) echo $R/pat/pour_ring/problem/pour_ring.kicad_pcb;; vgap) echo $R/pat/via_gap_best_point/problem/via_gap_best_point.kicad_pcb;; esac; }
 one() {
   local c=${1%%:*} rest=${1#*:}; local b=${rest%%:*} th=1
   [ "$rest" != "$b" ] && th=${rest#*:}
@@ -51,6 +52,10 @@ case ${1:-} in
     for b in esp qmtech; do
       ( hzq run --threads 4 --name t4r2-$b -- bash -c "for c in K Kb Kr KR; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-$b.log 2>&1; note "unit $b rc $?" ) &
     done
+    wait; note "all done" ;;
+  pat)
+    python -m harness.tw4r2_patterns $R/pat > $R/gen.log 2>&1; note "gen rc $?"
+    ( hzq run --threads 4 --name t4r2-pat -- bash -c "for r in K:pring Kp:pring K:vgap Kb:vgap Kr:vgap Kbr:vgap; do bash $ROOT/tools/tw4r2_job.sh one \$r & done; wait" > $R/u-pat.log 2>&1; note "unit pat rc $?" ) &
     wait; note "all done" ;;
   pour)
     for b in esp qmtech; do
