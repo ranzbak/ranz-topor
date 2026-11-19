@@ -270,6 +270,15 @@ pub fn pad_exit_items(v: &PlanView) -> Option<Vec<CompassItem>> {
     v.pad_exits.map(|x| x.to_vec())
 }
 
+/// tw4-r2 (1) (`[capacity] pad_exits`): one `pad_exit` item (predicted) per planned pad exit with
+/// an over-full term (`refine::CapModel::exit_items`): segs = the stub's centre line, layers =
+/// the pad's, conns = the wire's connection, over_nm = the graded price x 1000 (no length). O(exits).
+pub fn plan_exit_items(list: &[(WireId, u8, usize, Vec2, Vec2, f64)], conn: &dyn Fn(WireId) -> Option<usize>, layer: &dyn Fn(usize) -> String) -> Vec<CompassItem> {
+    list.iter()
+        .map(|&(w, _, l, a, b, g)| CompassItem { class: "pad_exit".into(), layers: vec![layer(l)], conns: conn(w).into_iter().collect(), segs: vec![seg(a, b)], over_nm: (g * 1000.0).round() as i64, members: 1 })
+        .collect()
+}
+
 /// The items of [`PlanView::pad_exits`] for a build with `[search] pad_exit_stubs` on (the caller
 /// passes `None` with it off): one `pad_exit_stub` per `Board::exit_stubs` entry (segs = the stub
 /// rectangle's sides) and one `pad_exit` per `Board::exit_blocked` entry (segs = the pad's sides:

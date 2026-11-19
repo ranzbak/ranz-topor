@@ -75,7 +75,8 @@ pub struct ViaGeom {
 /// The over-full amount of a via's gap cuts: per layer the worst `(need - len, pitch)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Over {
-    /// Over-full via-layers (`need > len` on at least one cut of the layer).
+    /// Over-full via-layers (`need > len` on at least one cut of the layer; with a ramp, by at
+    /// least the ramp, [`price`]).
     pub count: usize,
     /// Sum over the over-full layers of `1 + over / pitch` (the per-edge price factor).
     pub graded: f64,
@@ -265,8 +266,10 @@ pub fn via_geom(st: &State, packer: &Packer, t: TriId, net: i32, at: Vec2, norm:
 /// `b`): Maley's cut between two islands, capacity `|pq| - d_a / 2 - d_b / 2` (p. 32), its items
 /// the other nets' chords of the neighbourhood that cross it (neither via's net). `on(w, k)`: the
 /// traversal lies on a layer of the cut (a through via pair: any layer, the caller decides).
-/// `None`: nothing crosses, or it fits; else `1 + over / pitch`. O(chords).
-pub fn pair_over(g: &ViaGeom, a: Item, q: Vec2, b: Item, norm: Norm, on: &dyn Fn(WireId, usize) -> Option<usize>, item: &dyn Fn(WireId, usize) -> Item) -> Option<f64> {
+/// `None`: nothing crosses, or it fits; else the worst layer's [`price`] `(graded, counted)`
+/// (`ramp`: the over-full ramp, nm). O(chords).
+#[allow(clippy::too_many_arguments)]
+pub fn pair_over(g: &ViaGeom, a: Item, q: Vec2, b: Item, norm: Norm, ramp: f64, on: &dyn Fn(WireId, usize) -> Option<usize>, item: &dyn Fn(WireId, usize) -> Item) -> Option<(f64, bool)> {
     let p = g.at;
     let len = norm.len(q - p) - 0.5 * a.w - 0.5 * b.w;
     // Per layer the crossers, ordered along the cut.
@@ -283,25 +286,41 @@ pub fn pair_over(g: &ViaGeom, a: Item, q: Vec2, b: Item, norm: Norm, on: &dyn Fn
             None => by_layer.push((l, vec![(t, it)])),
         }
     }
-    let mut worst: Option<f64> = None;
+    let mut worst: Option<(f64, bool)> = None;
     for (_, mut its) in by_layer {
         its.sort_by(|x, y| x.0.total_cmp(&y.0));
         let items: Vec<Item> = its.iter().map(|x| x.1).collect();
         let ov = need(&items, Bound::Pad { net: Some(a.net), clear: a.s }, Bound::Pad { net: Some(b.net), clear: b.s }) - len;
-        if ov > 1e-6 {
-            let pitch = (items.iter().map(|i| i.w + i.s).sum::<f64>() / items.len() as f64).max(1.0);
-            let f = 1.0 + ov / pitch;
-            worst = Some(worst.map_or(f, |x: f64| x.max(f)));
+        let pitch = (items.iter().map(|i| i.w + i.s).sum::<f64>() / items.len() as f64).max(1.0);
+        if let Some((f, c)) = price(ov, pitch, ramp) {
+            worst = Some(worst.map_or((f, c), |x: (f64, bool)| (x.0.max(f), x.1 || c)));
         }
     }
     worst
 }
 
+/// The price of one via cut over-full by `ov` (nm) with item pitch `pitch`: `None` when it
+/// fits; else `(graded, counted)`. `ramp` 0: `(1 + ov / pitch, true)`, a full violation from the
+/// first nm (the step at zero). `ramp > 0` (tw4-r2 `[capacity] via_over_ramp`): graded
+/// `min(1, ov / ramp) x (1 + ov / pitch)`, rising from 0 at zero overage, counted as a predicted
+/// violation only from `ov >= ramp`. O(1).
+pub fn price(ov: f64, pitch: f64, ramp: f64) -> Option<(f64, bool)> {
+    if ov <= 1e-6 {
+        return None;
+    }
+    let f = 1.0 + ov / pitch;
+    if ramp <= 0.0 {
+        return Some((f, true));
+    }
+    Some(((ov / ramp).min(1.0) * f, ov >= ramp))
+}
+
 /// Price the gap cuts of `g` for the via `via` (net, width `d`, clearance): `on(w, k, l)` = the
 /// traversal `k` of `w` lies on layer `l`, `item(w, k)` its pass item. Per layer the worst cut
-/// counts. O(cuts x crossers log crossers).
-pub fn over(g: &ViaGeom, via: Item, on: &dyn Fn(WireId, usize, usize) -> bool, item: &dyn Fn(WireId, usize) -> Item) -> Over {
-    let mut worst: Vec<(usize, f64)> = Vec::new();
+/// counts ([`price`], `ramp` nm: the over-full ramp; a layer counts when any of its cuts does).
+/// O(cuts x crossers log crossers).
+pub fn over(g: &ViaGeom, via: Item, ramp: f64, on: &dyn Fn(WireId, usize, usize) -> bool, item: &dyn Fn(WireId, usize) -> Item) -> Over {
+    let mut worst: Vec<(usize, f64, bool)> = Vec::new();
     for c in &g.cuts {
         let mut its: Vec<(f64, Item)> = c.cross.iter().filter(|x| on(x.0, x.1, c.layer)).map(|x| (x.2, item(x.0, x.1))).collect();
         if its.is_empty() {
@@ -318,17 +337,17 @@ pub fn over(g: &ViaGeom, via: Item, on: &dyn Fn(WireId, usize, usize) -> bool, i
             _ => b,
         };
         let ov = need(&items, wall(c.ba, its.first()), wall(c.bb, its.last())) - c.len;
-        if ov <= 1e-6 {
-            continue;
-        }
         let pitch = (items.iter().map(|i| i.w + i.s).sum::<f64>() / items.len() as f64).max(1.0);
-        let f = 1.0 + ov / pitch;
+        let Some((f, counted)) = price(ov, pitch, ramp) else { continue };
         match worst.iter_mut().find(|x| x.0 == c.layer) {
-            Some(x) => x.1 = x.1.max(f),
-            None => worst.push((c.layer, f)),
+            Some(x) => {
+                x.1 = x.1.max(f);
+                x.2 |= counted;
+            }
+            None => worst.push((c.layer, f, counted)),
         }
     }
-    Over { count: worst.len(), graded: worst.iter().map(|x| x.1).sum() }
+    Over { count: worst.iter().filter(|x| x.2).count(), graded: worst.iter().map(|x| x.1).sum() }
 }
 
 #[cfg(test)]
@@ -375,20 +394,20 @@ mod tests {
     #[test]
     fn a_via_in_a_pad_gap_over_fills_it_with_the_wire_that_passes() {
         let (g, via) = gui27();
-        let o = over(&g, via, &|_, _, l| l == 0, &rst);
+        let o = over(&g, via, 0.0, &|_, _, l| l == 0, &rst);
         assert_eq!(o.count, 1);
         let pitch = (1.0 + 0.45) / 2.0;
         assert!((o.graded - (1.0 + 0.45 / pitch)).abs() < 1e-9, "{o:?}");
         // The wire on the other layer: nothing on this cut.
-        assert_eq!(over(&g, via, &|_, _, l| l == 1, &rst), Over::default());
+        assert_eq!(over(&g, via, 0.0, &|_, _, l| l == 1, &rst), Over::default());
         // A wider gap (1.5 mm): fits.
         let mut wide = g.clone();
         wide.cuts[0].len = 1.5 * MM;
-        assert_eq!(over(&wide, via, &|_, _, _| true, &rst).count, 0);
+        assert_eq!(over(&wide, via, 0.0, &|_, _, _| true, &rst).count, 0);
         // No crosser: no item, nothing to price (a via alone in a gap is the via site's matter).
         let mut empty = g.clone();
         empty.cuts[0].cross.clear();
-        assert_eq!(over(&empty, via, &|_, _, _| true, &rst).count, 0);
+        assert_eq!(over(&empty, via, 0.0, &|_, _, _| true, &rst).count, 0);
     }
 
     /// A via never dips into its own pad: next to it the via takes its whole diameter. An own-net
@@ -397,11 +416,11 @@ mod tests {
     fn the_via_takes_its_whole_diameter_next_to_its_own_pad() {
         let (mut g, via) = gui27();
         g.cuts[0].len = 1.2 * MM;
-        assert_eq!(over(&g, via, &|_, _, _| true, &rst).count, 1, "1.45 > 1.2");
+        assert_eq!(over(&g, via, 0.0, &|_, _, _| true, &rst).count, 1, "1.45 > 1.2");
         // RST between the via and the own pad: the pad's clearance counts, the via is at the far end.
         g.cuts[0].cross = vec![(7, 3, 0.1)];
         g.cuts[0].len = 1.44 * MM;
-        assert_eq!(over(&g, via, &|_, _, _| true, &rst).count, 1, "0.2 + 0.25 + 0.2 + 0.8 + 0.2 (RXD pad) = 1.65 > 1.44");
+        assert_eq!(over(&g, via, 0.0, &|_, _, _| true, &rst).count, 1, "0.2 + 0.25 + 0.2 + 0.8 + 0.2 (RXD pad) = 1.65 > 1.44");
     }
 
     /// Per layer the worst cut counts once; two layers count twice.
@@ -411,10 +430,10 @@ mod tests {
         let mut c2 = g.cuts[0].clone();
         c2.len = 1.1 * MM;
         g.cuts.push(c2.clone());
-        assert_eq!(over(&g, via, &|_, _, _| true, &rst).count, 1);
+        assert_eq!(over(&g, via, 0.0, &|_, _, _| true, &rst).count, 1);
         c2.layer = 1;
         g.cuts.push(c2);
-        assert_eq!(over(&g, via, &|_, _, _| true, &rst).count, 2);
+        assert_eq!(over(&g, via, 0.0, &|_, _, _| true, &rst).count, 2);
     }
 
     /// topo_reroute52's shape: two VCC vias (0.8) with SDA (0.25, clearance 0.2) between them on
@@ -426,14 +445,64 @@ mod tests {
         let sda = |_: WireId, _: usize| Item { net: 1, w: 0.25 * MM, s: 0.2 * MM };
         let g = ViaGeom { at: v(0.0, 0.0), cuts: Vec::new(), chords: vec![(5, 2, v(0.68 * MM, -MM), v(0.68 * MM, 1.0 * MM))], reach: 5.0 * MM, tris: Vec::new(), wires: vec![5] };
         let on = |_: WireId, _: usize| Some(0usize);
-        let f = pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, &on, &sda).expect("over-full");
-        assert!((f - (1.0 + 0.09 / 0.45)).abs() < 1e-9, "{f}");
-        assert!(pair_over(&g, via, v(1.67 * MM, 0.0), via, Norm::Euclid, &on, &sda).is_none());
+        let (f, counted) = pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, 0.0, &on, &sda).expect("over-full");
+        assert!(counted && (f - (1.0 + 0.09 / 0.45)).abs() < 1e-9, "{f}");
+        assert!(pair_over(&g, via, v(1.67 * MM, 0.0), via, Norm::Euclid, 0.0, &on, &sda).is_none());
         // The chord misses the segment between them (the wire goes round): nothing.
         let g2 = ViaGeom { chords: vec![(5, 2, v(0.68 * MM, 0.2 * MM), v(0.68 * MM, 1.0 * MM))], ..g.clone() };
-        assert!(pair_over(&g2, via, v(1.36 * MM, 0.0), via, Norm::Euclid, &on, &sda).is_none());
+        assert!(pair_over(&g2, via, v(1.36 * MM, 0.0), via, Norm::Euclid, 0.0, &on, &sda).is_none());
         // A VCC wire between them: own net, no item.
-        assert!(pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, &on, &|_, _| Item { net: 2, w: 0.25 * MM, s: 0.2 * MM }).is_none());
+        assert!(pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, 0.0, &on, &|_, _| Item { net: 2, w: 0.25 * MM, s: 0.2 * MM }).is_none());
+    }
+
+    /// tw4-r2 (2): ramp 0 is the step at zero (a full violation from the first nm over); a ramp
+    /// grades the price from 0 (continuous at zero and at the ramp) and counts only from the ramp.
+    #[test]
+    fn the_over_full_price_ramps_from_zero() {
+        let pitch = 0.45 * MM;
+        assert_eq!(price(0.0, pitch, 0.0), None);
+        assert_eq!(price(0.0, pitch, 0.05 * MM), None);
+        let (f, c) = price(0.001 * MM, pitch, 0.0).expect("over");
+        assert!(c && f > 1.0, "the step: {f}");
+        let (f, c) = price(0.001 * MM, pitch, 0.05 * MM).expect("over");
+        assert!(!c && f < 0.03, "1 um over is a small cost: {f}");
+        let below = price(0.05 * MM - 1.0, pitch, 0.05 * MM).expect("over");
+        let at = price(0.05 * MM, pitch, 0.05 * MM).expect("over");
+        assert!(!below.1 && at.1 && (at.0 - below.0).abs() < 1e-4, "continuous at the ramp (1 nm apart): {below:?} {at:?}");
+        assert_eq!(price(0.2 * MM, pitch, 0.05 * MM), price(0.2 * MM, pitch, 0.0), "past the ramp: the full price");
+        // Graded: more over never costs less.
+        let mut last = 0.0;
+        for i in 1..200 {
+            let f = price(i as f64 * 0.001 * MM, pitch, 0.05 * MM).expect("over").0;
+            assert!(f >= last, "{i}: {f} < {last}");
+            last = f;
+        }
+    }
+
+    /// `over` with a ramp: the gui27 gap (0.45 mm over) past a 0.05 ramp is priced and counted as
+    /// before; a ramp past its overage grades it below 1 and does not count it.
+    #[test]
+    fn over_with_a_ramp() {
+        let (g, via) = gui27();
+        let full = over(&g, via, 0.0, &|_, _, l| l == 0, &rst);
+        assert_eq!(over(&g, via, 0.05 * MM, &|_, _, l| l == 0, &rst), full);
+        let soft = over(&g, via, 0.9 * MM, &|_, _, l| l == 0, &rst);
+        assert_eq!(soft.count, 0);
+        assert!((soft.graded - full.graded * 0.5).abs() < 1e-9, "{soft:?} vs {full:?}");
+    }
+
+    /// tw4-r2 (2): the via-to-via cut takes the ramp too: topo_reroute52's pair 0.09 mm over is the
+    /// full step at ramp 0, graded 0.09 / 0.5 of it under a 0.5 mm ramp and not counted.
+    #[test]
+    fn pair_over_with_a_ramp() {
+        let via = Item { net: 2, w: 0.8 * MM, s: 0.2 * MM };
+        let sda = |_: WireId, _: usize| Item { net: 1, w: 0.25 * MM, s: 0.2 * MM };
+        let g = ViaGeom { at: v(0.0, 0.0), cuts: Vec::new(), chords: vec![(5, 2, v(0.68 * MM, -MM), v(0.68 * MM, 1.0 * MM))], reach: 5.0 * MM, tris: Vec::new(), wires: vec![5] };
+        let on = |_: WireId, _: usize| Some(0usize);
+        let full = pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, 0.0, &on, &sda).expect("over-full");
+        let soft = pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, 0.5 * MM, &on, &sda).expect("over-full, priced");
+        assert!(full.1 && !soft.1, "{full:?} {soft:?}");
+        assert!((soft.0 - full.0 * 0.09 / 0.5).abs() < 1e-9, "{soft:?} vs {full:?}");
     }
 
     #[test]

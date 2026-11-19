@@ -242,6 +242,7 @@ fn build_raster(
     allowance: u64,
     stop: &dyn Fn() -> bool,
     erode: f64,
+    cells: f64,
 ) -> (Raster, u64, bool) {
     let mut bb: Option<Aabb> = None;
     for ring in rings {
@@ -255,7 +256,7 @@ fn build_raster(
         max: Vec2 { x: 0.0, y: 0.0 },
     });
     let (w, h) = (bb.max.x - bb.min.x, bb.max.y - bb.min.y);
-    let res = (w * h / CELL_BUDGET).sqrt().max(MIN_CELL_NM);
+    let res = (w * h / cells).sqrt().max(MIN_CELL_NM);
     let nx = ((w / res).ceil() as usize + 3).max(1);
     let ny = ((h / res).ceil() as usize + 3).max(1);
     let x0 = bb.min.x - 1.5 * res;
@@ -696,6 +697,19 @@ pub fn check_pour_reach_until(
     routed_pads: &[usize],
     deadline: Option<std::time::Instant>,
 ) -> PourReach {
+    check_pour_reach_cells(model, items, routed_pads, deadline, CELL_BUDGET)
+}
+
+/// [`check_pour_reach_until`] at a raster of at most `cells` cells per (pour, layer) (the cell
+/// is never below [`MIN_CELL_NM`]): tw4-r2's plan check (`topo::pourplan`) runs at a coarser
+/// raster than the check of the drawn copper. O(nets * pours * (cells + stamped cells)).
+pub fn check_pour_reach_cells(
+    model: &BoardModel,
+    items: &[Item],
+    routed_pads: &[usize],
+    deadline: Option<std::time::Instant>,
+    cells: f64,
+) -> PourReach {
     let stop = move || deadline.map_or_else(crate::control::cancelled, crate::control::expired);
     let mut budget_left = STAMP_CELL_BUDGET;
     let mut out = PourReach::default();
@@ -777,7 +791,7 @@ pub fn check_pour_reach_until(
                     .collect();
                 let rings: Vec<&[Vec2]> = rings_owned.iter().map(|r| r.as_slice()).collect();
                 // Cell size as `build_raster` derives it, for the conservative half-diagonal.
-                let probe = build_cell(&rings);
+                let probe = build_cell(&rings, cells);
                 let half_min = 0.5 * z.min_thickness as f64;
                 // The knockout by the clearance (a quarter cell conservative); the min-width
                 // opening is the erosion in `build_raster`.
@@ -802,7 +816,7 @@ pub fn check_pour_reach_until(
                     .map(|k| k.poly.iter().map(|p| p.to_vec2()).collect())
                     .collect();
                 let outs: Vec<&[Vec2]> = outs_owned.iter().map(|r| r.as_slice()).collect();
-                let (raster, stamped, cut) = build_raster(&rings, &outs, &stamps, allowance, &stop, half_min);
+                let (raster, stamped, cut) = build_raster(&rings, &outs, &stamps, allowance, &stop, half_min, cells);
                 ((zi, layer), raster, stamped, cut)
             })
             .collect();
@@ -1179,7 +1193,7 @@ pub fn check_pour_reach_until(
 }
 
 /// Cell size `build_raster` picks for these rings.
-fn build_cell(rings: &[&[Vec2]]) -> f64 {
+fn build_cell(rings: &[&[Vec2]], cells: f64) -> f64 {
     let mut bb: Option<Aabb> = None;
     for ring in rings {
         for p in ring.iter() {
@@ -1188,7 +1202,7 @@ fn build_cell(rings: &[&[Vec2]]) -> f64 {
         }
     }
     bb.map_or(MIN_CELL_NM, |b| {
-        ((b.max.x - b.min.x) * (b.max.y - b.min.y) / CELL_BUDGET)
+        ((b.max.x - b.min.x) * (b.max.y - b.min.y) / cells)
             .sqrt()
             .max(MIN_CELL_NM)
     })
@@ -1412,7 +1426,7 @@ mod tests {
             .map(|p| p.to_vec2())
             .collect()];
         let refs: Vec<&[Vec2]> = rings.iter().map(|v| v.as_slice()).collect();
-        let res = build_cell(&refs);
+        let res = build_cell(&refs, CELL_BUDGET);
         let l = 29.4e6f64 * std::f64::consts::SQRT_2;
         let w = 2.0 * (125_000.0 + 200_000.0 + 127_000.0 + 0.71 * res);
         let bound = 4.0 * (l / res) * (w / res) + 64.0;

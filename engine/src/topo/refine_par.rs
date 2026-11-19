@@ -234,7 +234,7 @@ impl Overlay {
         if self.pstamp.len() < np {
             self.pstamp.resize(np, 0);
             self.play.resize(np, 0);
-            self.pdisc.resize(np, [0.0; 2]);
+            self.pdisc.resize(np, [0.0; 3]);
         }
         if self.wstamp.len() < nw {
             self.wstamp.resize(nw, 0);

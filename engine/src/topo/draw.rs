@@ -1025,7 +1025,7 @@ impl<'a> Drawer<'a> {
             dirs,
             iv: Intervals::default(),
             pass_layer: vec![-1; st.passes.len()],
-            pass_disc: vec![[0.0; 2]; st.passes.len()],
+            pass_disc: vec![[0.0; 3]; st.passes.len()],
             over: vec![false; st.proj.edges.len() * st.proj.n_layers],
             spare: vec![f64::INFINITY; st.proj.edges.len() * st.proj.n_layers],
             diag: Vec::new(),
@@ -1313,7 +1313,7 @@ impl<'a> Drawer<'a> {
                 let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
                 // The plan's width of the pass (M-C: necked where P2 necked it).
                 let pw = self.widths.as_ref().map_or(self.st.pass_w.get(pid).copied().unwrap_or(wi.w), |x| x.pass_w[pid]);
-                PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(&self.b.proj, e, self.dirs[w][k]), disc: [0.0; 2] }
+                PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(&self.b.proj, e, self.dirs[w][k]), disc: [0.0; 3], lean: 0.0 }
             },
         );
         if ids.is_empty() {

@@ -391,7 +391,7 @@ fn bare_hole(pad: &crate::model::Pad) -> bool {
 }
 
 /// Distance between segment `a`-`b` and the polygon `poly` (0 when an end lies inside). O(|poly|).
-fn seg_poly_dist(a: Vec2, b: Vec2, poly: &[Vec2]) -> f64 {
+pub(crate) fn seg_poly_dist(a: Vec2, b: Vec2, poly: &[Vec2]) -> f64 {
     if point_in_poly(a, poly) || point_in_poly(b, poly) {
         return 0.0;
     }
@@ -400,7 +400,7 @@ fn seg_poly_dist(a: Vec2, b: Vec2, poly: &[Vec2]) -> f64 {
 }
 
 /// Distance between two polygons (0 when a vertex of one lies inside the other). O(|p| |q|).
-fn poly_poly_dist(p: &[Vec2], q: &[Vec2]) -> f64 {
+pub(crate) fn poly_poly_dist(p: &[Vec2], q: &[Vec2]) -> f64 {
     if p.iter().any(|&x| point_in_poly(x, q)) || q.iter().any(|&x| point_in_poly(x, p)) {
         return 0.0;
     }

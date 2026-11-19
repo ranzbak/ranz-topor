@@ -1,0 +1,422 @@
+{
+ "name": "neck_or_detour",
+ "kind": "solvable",
+ "model": {
+  "units": "nm",
+  "board": "neck_or_detour",
+  "layers": [
+   {
+    "id": 0,
+    "name": "F.Cu",
+    "kind": "signal",
+    "routable": true
+   },
+   {
+    "id": 2,
+    "name": "B.Cu",
+    "kind": "signal",
+    "routable": true
+   }
+  ],
+  "nets": [
+   {
+    "code": 1,
+    "name": "VBUS"
+   }
+  ],
+  "pads": [
+   {
+    "uuid": "195ff992-c70f-4b9d-b300-90255c85dff4",
+    "ref": "U2",
+    "number": "1",
+    "net": 1,
+    "attr": "smd",
+    "center": [
+     2720000,
+     1500000
+    ],
+    "rotation_deg": 0.0,
+    "layers": [
+     0
+    ],
+    "shapes": {
+     "0": {
+      "kind": "rect",
+      "w": 1200000,
+      "h": 1200000
+     }
+    },
+    "drill": null,
+    "local_clearance": null,
+    "net_tie_group": null,
+    "spoke_angle_deg": 45.0
+   },
+   {
+    "uuid": "4cf6d0f1-db0f-4107-9578-2896cb8214e2",
+    "ref": "J2",
+    "number": "1",
+    "net": 1,
+    "attr": "smd",
+    "center": [
+     2720000,
+     13500000
+    ],
+    "rotation_deg": 0.0,
+    "layers": [
+     0
+    ],
+    "shapes": {
+     "0": {
+      "kind": "rect",
+      "w": 2000000,
+      "h": 2000000
+     }
+    },
+    "drill": null,
+    "local_clearance": null,
+    "net_tie_group": null,
+    "spoke_angle_deg": 45.0
+   },
+   {
+    "uuid": "1e422d19-4724-4397-83b5-cd6bc685f1ab",
+    "ref": "J1",
+    "number": "1",
+    "net": 0,
+    "attr": "pth",
+    "center": [
+     1450000,
+     7500000
+    ],
+    "rotation_deg": 0.0,
+    "layers": [
+     0,
+     2
+    ],
+    "shapes": {
+     "0": {
+      "kind": "circle",
+      "d": 1700000
+     },
+     "2": {
+      "kind": "circle",
+      "d": 1700000
+     }
+    },
+    "drill": {
+     "w": 1000000,
+     "h": 1000000
+    },
+    "local_clearance": null,
+    "net_tie_group": null,
+    "spoke_angle_deg": 45.0
+   },
+   {
+    "uuid": "953f38f5-31ee-4a69-b985-7d8803b29232",
+    "ref": "J1",
+    "number": "2",
+    "net": 0,
+    "attr": "pth",
+    "center": [
+     3990000,
+     7500000
+    ],
+    "rotation_deg": 0.0,
+    "layers": [
+     0,
+     2
+    ],
+    "shapes": {
+     "0": {
+      "kind": "circle",
+      "d": 1700000
+     },
+     "2": {
+      "kind": "circle",
+      "d": 1700000
+     }
+    },
+    "drill": {
+     "w": 1000000,
+     "h": 1000000
+    },
+    "local_clearance": null,
+    "net_tie_group": null,
+    "spoke_angle_deg": 45.0
+   },
+   {
+    "uuid": "1a056d1a-99fe-4712-a826-a97216042078",
+    "ref": "J3",
+    "number": "1",
+    "net": 0,
+    "attr": "pth",
+    "center": [
+     6990000,
+     7500000
+    ],
+    "rotation_deg": 0.0,
+    "layers": [
+     0,
+     2
+    ],
+    "shapes": {
+     "0": {
+      "kind": "circle",
+      "d": 1700000
+     },
+     "2": {
+      "kind": "circle",
+      "d": 1700000
+     }
+    },
+    "drill": {
+     "w": 1000000,
+     "h": 1000000
+    },
+    "local_clearance": null,
+    "net_tie_group": null,
+    "spoke_angle_deg": 45.0
+   }
+  ],
+  "vias": [],
+  "kept": [],
+  "copper_shapes": [],
+  "holes": [
+   {
+    "at": [
+     1450000,
+     7500000
+    ],
+    "d": 1000000,
+    "kind": "pth"
+   },
+   {
+    "at": [
+     3990000,
+     7500000
+    ],
+    "d": 1000000,
+    "kind": "pth"
+   },
+   {
+    "at": [
+     6990000,
+     7500000
+    ],
+    "d": 1000000,
+    "kind": "pth"
+   }
+  ],
+  "outline": [
+   {
+    "kind": "seg",
+    "a": [
+     0,
+     0
+    ],
+    "b": [
+     8440000,
+     0
+    ]
+   },
+   {
+    "kind": "seg",
+    "a": [
+     0,
+     15100000
+    ],
+    "b": [
+     0,
+     0
+    ]
+   },
+   {
+    "kind": "seg",
+    "a": [
+     8440000,
+     0
+    ],
+    "b": [
+     8440000,
+     15100000
+    ]
+   },
+   {
+    "kind": "seg",
+    "a": [
+     8440000,
+     15100000
+    ],
+    "b": [
+     0,
+     15100000
+    ]
+   }
+  ],
+  "keepouts": [
+   {
+    "name": "",
+    "layers": [
+     2
+    ],
+    "poly": [
+     [
+      0,
+      0
+     ],
+     [
+      8440000,
+      0
+     ],
+     [
+      8440000,
+      15100000
+     ],
+     [
+      0,
+      15100000
+     ]
+    ],
+    "no_tracks": true,
+    "no_vias": true,
+    "no_pour": false,
+    "no_pads": false,
+    "no_footprints": false
+   }
+  ],
+  "net_ties": [],
+  "pours": [],
+  "teardrops": [],
+  "dangling_ends": [],
+  "rules": {
+   "min_clearance": 200000,
+   "min_track_width": 250000,
+   "min_via_diameter": 400000,
+   "min_via_drill": 300000,
+   "min_annular": 50000,
+   "hole_clearance": 250000,
+   "via_hole_clearance": 250000,
+   "hole_to_hole": 250000,
+   "edge_clearance": 500000,
+   "max_error": 5000,
+   "min_connection": 0,
+   "profile": "board",
+   "predefined_vias": [],
+   "default": {
+    "clearance": 200000,
+    "width": 250000,
+    "via_d": 600000,
+    "via_drill": 300000,
+    "netclass": "Default",
+    "width_source": "default",
+    "min_width": 0
+   },
+   "per_net": {
+    "1": {
+     "clearance": 200000,
+     "width": 800000,
+     "via_d": 800000,
+     "via_drill": 400000,
+     "netclass": "POWER,Default",
+     "width_source": "netclass",
+     "min_width": 400000
+    }
+   },
+   "floors_applied": [],
+   "fallbacks": [],
+   "warnings": [],
+   "ignored_checks": [],
+   "custom_rules": [
+    {
+     "rule": "POWER neck floor",
+     "constraint": "track_width",
+     "values": {
+      "min": 400000
+     },
+     "condition": "A.NetClass == 'POWER'",
+     "layer": null,
+     "severity": null,
+     "use": "net"
+    }
+   ],
+   "custom_regions": [],
+   "custom_notes": [],
+   "clearance_regions": [],
+   "outline_half_stroke": 25000
+  }
+ },
+ "cuts": [
+  {
+   "id": "E1",
+   "role": "binding",
+   "layer": "F.Cu",
+   "p": [
+    4.84,
+    7.5
+   ],
+   "q": [
+    6.14,
+    7.5
+   ],
+   "length_euclid": 1.3,
+   "length_octagonal": 1.3,
+   "demand": 1.2,
+   "slack_euclid": 0.1,
+   "slack_octagonal": 0.1,
+   "crossing": [
+    {
+     "net": "VBUS",
+     "width": 0.8,
+     "clearance": 0.2
+    }
+   ]
+  },
+  {
+   "id": "N1",
+   "role": "empty",
+   "layer": "F.Cu",
+   "p": [
+    2.3,
+    7.5
+   ],
+   "q": [
+    3.14,
+    7.5
+   ],
+   "length_euclid": 0.84,
+   "length_octagonal": 0.84,
+   "demand": 0.0,
+   "slack_euclid": null,
+   "slack_octagonal": null,
+   "crossing": []
+  }
+ ],
+ "wires": [
+  {
+   "net": "VBUS",
+   "width": 0.8,
+   "clearance": 0.2,
+   "crosses": [
+    "E1"
+   ],
+   "witness_layer": "F.Cu",
+   "witness": [
+    [
+     2.72,
+     1.5
+    ],
+    [
+     5.49,
+     6.5
+    ],
+    [
+     5.49,
+     8.5
+    ],
+    [
+     2.72,
+     13.5
+    ]
+   ]
+  }
+ ]
+}
