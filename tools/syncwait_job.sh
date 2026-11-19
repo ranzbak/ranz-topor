@@ -63,6 +63,9 @@ tests() {  # targeted release tests (rule 14c) + clippy + the plugin's own pytes
 case ${1:-} in
   one) one "$2" ;;
   tests) tests ;;
+  pyfull)  # the full pytest (rule 7: Python touched), CI=1, as one 4-thread hzq unit
+    ( hzq run --pin --threads 4 --name pytest -- bash -c "cd $ROOT && CI=1 python -m pytest -q -rs > $R/pytest-full.log 2>&1"; note "unit pytest rc $?" )
+    note "all done" ;;
   tunit)  # the tests as one 4-thread hzq unit (the bulk VM's queue)
     ( hzq run --pin --threads 4 --name tests -- bash $ROOT/tools/syncwait_job.sh tests > $R/unit-tests.log 2>&1; note "unit tests rc $?" )
     note "all done" ;;
