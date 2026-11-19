@@ -131,6 +131,10 @@ fn the_exit_terms_measure_the_row() {
     let tip = packer.exit_static(u13, Side::TipPlus, wi.net, wi.w, wi.s, floor).expect("fine pitch");
     assert!((tip.w_e - wi.w).abs() < 1.0 && tip.over <= 0.0, "{tip:?}");
     assert!(tip.neigh.len() >= 2, "both row neighbours");
+    // A 0.29 mm wire (floor 0.25): the tip stub still keeps 0.2 mm at full width (0.35 - 0.145 =
+    // 0.205 mm), so the widest fitting width is the wire's own, not the floor.
+    let wide = packer.exit_static(u13, Side::TipPlus, wi.net, 0.29e6, wi.s, floor).expect("fine pitch");
+    assert!((wide.w_e - 0.29e6).abs() < 1.0 && floor < 0.29e6 - 1e3, "the widest width that fits: {wide:?} (floor {floor})");
     let side = packer.exit_static(u13, Side::LongPlus, wi.net, wi.w, wi.s, floor).expect("fine pitch");
     assert!(side.over > 0.1e6, "the side stub stands on U1.4: {side:?}");
     assert!((side.w_e - floor).abs() < 1.0, "at worst the floor: {side:?}");
@@ -144,6 +148,13 @@ fn the_exit_terms_measure_the_row() {
     assert!(o.count == 1 && o.graded > 1.0, "{o:?}");
     let o = topor_engine::topo::padexit::exit_via_room(&st, e, &[clear], r, wi.s, 0.0);
     assert_eq!(o.count, 0, "{o:?}");
+    // The deficit is the clearance the via disc lacks: 1 mm north of U1.3's tip a 0.3 mm via is
+    // clear of U1.2 and U1.4 by more than its 0.2 mm (negative deficit); beside U1.4 it lacks
+    // r + s - distance.
+    let far = topor_engine::geom::Vec2 { x: 4.0e6, y: e.a.y + e.dir.y * 1.0e6 };
+    assert!(topor_engine::topo::padexit::via_deficit(&st, &e.neigh, far, r, wi.s) < -0.3e6);
+    let d = topor_engine::topo::padexit::via_deficit(&st, &e.neigh, beside, r, wi.s);
+    assert!(d > 0.0 && d <= r + wi.s + 1.0, "{d}");
     // Stored = fresh with the option on (exit entries included).
     let dirs = packer.taut_dirs(&st);
     let evl = vec![vec![(0, 0.5, 0)]];

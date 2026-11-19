@@ -13,6 +13,16 @@ use topor_engine::route::route_with;
 
 const MM: f64 = 1e6;
 
+/// The gap board's pads `(ref, net, x, y, w, h, layer)` (KiCad frame, mm): net 1 TXD, 2 RST,
+/// 3 RXD (U21, one pad: no connection).
+const GAP_PADS: [(&str, i32, f64, f64, f64, f64, i32); 5] = [
+    ("U22", 1, 6.0, 4.0, 2.5, 1.0, 0),
+    ("T1", 1, 6.0, 5.0, 0.3, 0.3, 2),
+    ("U21", 3, 6.0, 6.0, 2.5, 1.0, 0),
+    ("R1", 2, 1.0, 5.0, 1.0, 1.0, 0),
+    ("R2", 2, 11.0, 5.0, 1.0, 1.0, 0),
+];
+
 fn gap() -> BoardModel {
     let p = |v: f64| (v * MM).round() as i64;
     let c = [(0.0, 0.0), (12.0, 0.0), (12.0, 10.0), (0.0, 10.0)];
@@ -22,15 +32,7 @@ fn gap() -> BoardModel {
             format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(a.0), p(a.1), p(b.0), p(b.1))
         })
         .collect();
-    // (ref, net, x, y, w, h, layer): net 1 TXD, 2 RST, 3 RXD (U21, one pad: no connection).
-    let pads = [
-        ("U22", 1, 6.0, 4.0, 2.5, 1.0, 0),
-        ("T1", 1, 6.0, 5.0, 0.3, 0.3, 2),
-        ("U21", 3, 6.0, 6.0, 2.5, 1.0, 0),
-        ("R1", 2, 1.0, 5.0, 1.0, 1.0, 0),
-        ("R2", 2, 11.0, 5.0, 1.0, 1.0, 0),
-    ];
-    let pj: Vec<String> = pads
+    let pj: Vec<String> = GAP_PADS
         .iter()
         .enumerate()
         .map(|(i, &(r, net, x, y, w, h, l))| {
@@ -202,4 +204,103 @@ fn disc_heights_stay_fresh_and_focus_exact() {
     assert!(n > 0 && fn_ > 0, "the case does not show: {n} entries, {fn_} judgements checked");
     assert_eq!(bad, 0, "{bad} stale discs, leans or prices of {n}");
     assert_eq!(fbad, 0, "{fbad} of {fn_} local judgements differ from the judge with every wire in focus");
+}
+
+/// The gap board planned by hand (each connection its shortest path, the layer assignment as the
+/// loop's), measured by the capacity model under `o`: `(violations count, graded, via_cut_count,
+/// located via cut points, via cut list length)`.
+fn gap_measure(o: &Options) -> (usize, f64, usize, usize, usize) {
+    use topor_engine::topo::board::{self as tb, BuildOpts};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::layers::{self, LayerParams};
+    use topor_engine::topo::pack::Packer;
+    use topor_engine::topo::refine::CapModel;
+    use topor_engine::topo::state::State;
+    let m = gap();
+    let b = tb::build(&m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    for c in &conns {
+        st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+    }
+    let packer = Packer::for_model(&m, o, &b.proj);
+    let smd = |ob: usize| b.smd_layer(ob);
+    let lr = layers::assign_with(&st, &smd, &LayerParams::default(), Some(&packer));
+    let dirs = packer.taut_dirs(&st);
+    let cm = CapModel::new(&st, &packer, &dirs, &lr.events, 1, 1.0);
+    let (n, g) = cm.violations();
+    (n, g, cm.via_cut_count(), cm.via_cut_points().len(), cm.via_cut_list().len())
+}
+
+fn gap_opts(json: &str) -> Options {
+    Options::from_json(json).expect("options parse")
+}
+
+/// tw4-r2 (2) behaviour: TXD's via in the gap with RST through it is over-full at its planned
+/// point. Measured at the least-over site point of its triangle (`via_best_point`) the via is
+/// never priced higher than at the planned point (the planned point is one of the candidates), and
+/// on this board strictly lower (a site point nearer an end of the gap leaves RST more of the cut).
+#[test]
+fn best_point_prices_the_gap_via_no_worse_and_here_lower() {
+    let off = gap_measure(&gap_opts(r#"{"via_cuts": true}"#));
+    let on = gap_measure(&gap_opts(r#"{"via_cuts": true, "via_best_point": true}"#));
+    let none = gap_measure(&gap_opts(r#"{"via_cuts": false}"#));
+    eprintln!("gap off {off:?} best {on:?} no-cuts {none:?}");
+    assert!(off.2 >= 1 && off.1 > none.1, "the case shows: an over-full via cut at the planned point {off:?} vs {none:?}");
+    assert!(on.1 <= off.1 + 1e-9, "the best point is never priced above the planned one: {on:?} vs {off:?}");
+    assert!(on.1 < off.1 - 1e-6, "a better site point exists in the via's triangle: {on:?} vs {off:?}");
+}
+
+/// tw4-r2 (2) behaviour: with a ramp far past the gap's overage (`via_over_ramp_mm` 100) the via
+/// entry stays priced (graded above the board without via cuts, below the step) but is no
+/// predicted violation: the compass locates no via cut and the P4 list holds none.
+#[test]
+fn the_ramp_keeps_a_small_overage_priced_but_out_of_the_compass() {
+    let full = gap_measure(&gap_opts(r#"{"via_cuts": true}"#));
+    let soft = gap_measure(&gap_opts(r#"{"via_cuts": true, "via_over_ramp_mm": 100.0}"#));
+    let none = gap_measure(&gap_opts(r#"{"via_cuts": false}"#));
+    eprintln!("gap full {full:?} ramp {soft:?} no-cuts {none:?}");
+    assert!(full.3 >= 1 && full.4 >= 1, "the step: located and listed {full:?}");
+    assert_eq!((soft.2, soft.3, soft.4), (0, 0, 0), "under the ramp: not counted, not located, not listed {soft:?}");
+    assert!(soft.1 > none.1 + 1e-9 && soft.1 < full.1 - 1e-6, "graded between: {none:?} < {soft:?} < {full:?}");
+}
+
+/// tw4-r2 (2) behaviour: the best point's candidates are site points of the triangle where a via
+/// keeps its clearance to every other net's pad (static room); on the gap board some triangles
+/// lose some of their 9 site points that way.
+#[test]
+fn best_point_candidates_keep_the_via_clear_of_other_pads() {
+    use topor_engine::topo::board::{self as tb, BuildOpts};
+    use topor_engine::topo::pack::{tri_site_points, Packer};
+    let m = gap();
+    let b = tb::build(&m, &BuildOpts::default()).unwrap();
+    let packer = Packer::for_model(&m, &gap_opts(r#"{"via_cuts": true, "via_best_point": true}"#), &b.proj);
+    let (r, s) = (0.3 * MM, 0.2 * MM);
+    // Distance from a point (math frame, y up) to a pad rectangle of another net.
+    let clear = |q: topor_engine::geom::Vec2| {
+        GAP_PADS
+            .iter()
+            .filter(|p| p.1 != 1)
+            .map(|&(_, _, x, y, w, h, _)| {
+                let dx = ((q.x - x * MM).abs() - 0.5 * w * MM).max(0.0);
+                let dy = ((q.y + y * MM).abs() - 0.5 * h * MM).max(0.0);
+                (dx * dx + dy * dy).sqrt()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut fewer = 0;
+    for t in 0..b.proj.tris.len() {
+        let [a, bb, c] = b.proj.tris[t].map(|v| b.proj.pos[v]);
+        let all = tri_site_points(a, bb, c);
+        let cands = packer.via_cands(t, 1, 2.0 * r, s);
+        for q in cands.iter() {
+            assert!(all.contains(q), "triangle {t}: a candidate is a site point");
+            assert!(clear(*q) >= r + s - 1e3, "triangle {t}: candidate {q:?} only {:.3} mm from another net's pad", clear(*q) / MM);
+        }
+        if all.iter().any(|&q| clear(q) < r + s - 1e3) {
+            assert!(cands.len() < 9, "triangle {t}: a site point too near another pad is no candidate");
+            fewer += 1;
+        }
+    }
+    assert!(fewer > 0, "the case shows: some site points lack room");
 }

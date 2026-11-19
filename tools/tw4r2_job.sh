@@ -73,6 +73,9 @@ case ${1:-} in
     ( hzq run --threads 4 --name t4r2-suite -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast" > $R/suite.log 2>&1 9>&-; note "unit suite rc $?" ) &
     ( hzq run --threads 4 --name t4r2-pytest -- bash -c "cd $ROOT && CI=1 python -m pytest -q -p no:cacheprovider" > $R/pytest.log 2>&1 9>&-; note "unit pytest rc $?" ) &
     wait; note "all done" ;;
+  gaps)
+    ( hzq run --threads 4 --name t4r2-gaps -- bash -c "mkdir -p $R/mt && tar -C $ROOT --exclude=./engine/target --exclude=./target --exclude=./scratch -cf - . | tar -C $R/mt -xf - && cd $R/mt/engine && CARGO_TARGET_DIR=$R/mt/target-mut cargo test --release --test topo_cm1_room --test topo_pad_exit --lib -- best_point the_ramp_keeps pair_over_with the_exit_terms --nocapture > $R/gaps-tests.log 2>&1; echo tests rc \$? >> $R/gaps-tests.log; cd $R/mt && TW4R2_MUT_ONLY=best_off,best_takes_worse,cands_no_room_filter,pair_ramp_off,ramp_in_compass_off,px_we_narrowest,px_via_def_sign CARGO_TARGET_DIR=$R/mt/target-mut python3 tools/tw4r2_mutate.py run $R/mut" > $R/u-gaps.log 2>&1 9>&-; note "unit gaps rc $?" ) &
+    wait; note "all done" ;;
   merge)
     ( hzq run --threads 4 --name t4r2-off -- bash -c "for b in eprom wiccon esp qmtech; do bash $ROOT/tools/tw4r2_job.sh one K:\$b & done; wait" > $R/u-off.log 2>&1; note "unit off rc $?" ) &
     ( hzq run --threads 4 --name t4r2-suite -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast" > $R/suite.log 2>&1 9>&-; note "unit suite rc $?" ) &

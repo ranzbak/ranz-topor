@@ -52,7 +52,7 @@ M = {
     "px_zone_none": (X, "        if super::draw::seg_dist(p, g.a, g.b) > zone {", "        if true {"),
     "px_long_filter": (X, "            if long && (x.center - c).dot(dir) <= 0.5 * lv {", "            if long {"),
 }
-TESTS = ["--lib", "--test", "topo_cm1_room", "--test", "topo_disc_height", "--test", "topo_pad_exit", "--", "padexit", "the_exit", "exit_tip", "neck_or_detour", "viacut", "pourplan", "optimise::tests::the_pour_part", "best_point",
+TESTS = ["--lib", "--test", "topo_cm1_room", "--test", "topo_disc_height", "--test", "topo_pad_exit", "--", "padexit", "the_exit", "exit_tip", "neck_or_detour", "viacut", "pourplan", "optimise::tests::the_pour_part", "best_point", "the_ramp_keeps", "pair_over_with",
          "via_prices_stay_fresh", "height", "a_disc_against", "a_track_lean", "a_track_with_its_own", "the_end_margin_is"]
 
 

@@ -491,6 +491,20 @@ mod tests {
         assert!((soft.graded - full.graded * 0.5).abs() < 1e-9, "{soft:?} vs {full:?}");
     }
 
+    /// tw4-r2 (2): the via-to-via cut takes the ramp too: topo_reroute52's pair 0.09 mm over is the
+    /// full step at ramp 0, graded 0.09 / 0.5 of it under a 0.5 mm ramp and not counted.
+    #[test]
+    fn pair_over_with_a_ramp() {
+        let via = Item { net: 2, w: 0.8 * MM, s: 0.2 * MM };
+        let sda = |_: WireId, _: usize| Item { net: 1, w: 0.25 * MM, s: 0.2 * MM };
+        let g = ViaGeom { at: v(0.0, 0.0), cuts: Vec::new(), chords: vec![(5, 2, v(0.68 * MM, -MM), v(0.68 * MM, 1.0 * MM))], reach: 5.0 * MM, tris: Vec::new(), wires: vec![5] };
+        let on = |_: WireId, _: usize| Some(0usize);
+        let full = pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, 0.0, &on, &sda).expect("over-full");
+        let soft = pair_over(&g, via, v(1.36 * MM, 0.0), via, Norm::Euclid, 0.5 * MM, &on, &sda).expect("over-full, priced");
+        assert!(full.1 && !soft.1, "{full:?} {soft:?}");
+        assert!((soft.0 - full.0 * 0.09 / 0.5).abs() < 1e-9, "{soft:?} vs {full:?}");
+    }
+
     #[test]
     fn closest_point_of_a_square() {
         let sq = [v(0.0, 0.0), v(2.0, 0.0), v(2.0, 1.0), v(0.0, 1.0)];
