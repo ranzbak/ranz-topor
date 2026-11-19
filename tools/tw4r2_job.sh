@@ -8,7 +8,7 @@
 # Every run: harness.score_runs (cpu clock 2400 s unless equal time), optimize.runs=1, --no-png, realise erbs.
 # cfg: K = rounds=1; e<k> = equal time (wall 300 s) seed k; suffixes (any order, at the end):
 #   b = [capacity] via_best_point = true; r = [capacity] via_over_ramp = 0.05; R = via_over_ramp = 0.1;
-#   p = [capacity] pour_cuts = true.
+#   p = [capacity] pour_cuts = true; q / Q = pour_cut_cells 250000 / 100000 (pour mode: PCFG = the cfgs).
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
@@ -25,6 +25,8 @@ one() {
     elif [ "${c%r}" != "$c" ]; then SETS+=(--set capacity.via_over_ramp=0.05); c=${c%r}
     elif [ "${c%R}" != "$c" ]; then SETS+=(--set capacity.via_over_ramp=0.1); c=${c%R}
     elif [ "${c%p}" != "$c" ]; then SETS+=(--set capacity.pour_cuts=true); c=${c%p}
+    elif [ "${c%q}" != "$c" ]; then SETS+=(--set capacity.pour_cut_cells=250000); c=${c%q}
+    elif [ "${c%Q}" != "$c" ]; then SETS+=(--set capacity.pour_cut_cells=100000); c=${c%Q}
     else break; fi
   done
   case $c in
@@ -52,7 +54,7 @@ case ${1:-} in
     wait; note "all done" ;;
   pour)
     for b in esp qmtech; do
-      ( hzq run --threads 1 --name t4r2-p$b -- bash $ROOT/tools/tw4r2_job.sh one Kp:$b > $R/u-p$b.log 2>&1; note "unit p$b rc $?" ) &
+      ( hzq run --threads 3 --name t4r2-p$b -- bash -c "for c in ${PCFG:-Kpq KpQ}; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-p$b.log 2>&1; note "unit p$b rc $?" ) &
     done
     wait; note "all done" ;;
   eq)
