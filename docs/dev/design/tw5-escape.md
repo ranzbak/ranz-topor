@@ -124,7 +124,7 @@ D8 patterns (Polubasov figs. 6, 8-9, 10, 11) proposed as PNG + text to the lead,
   suite. Fig. 8 at the paper's scale has a shorter 0-via answer than the paper's end state 9c (W2 on F.Cu between U2
   and W4 instead of the left loop): the expected end state needs a decision.
 
-## (f) P4 rip-up inside the loop (round 3, 2026-11-19; waits for the lead's reply)
+## (f) P4 rip-up inside the loop (round 3, 2026-11-19; lead OK 2026-11-19)
 **What.** `[optimize] loop_p4 = false` (opt-in until the A/B). Once per cycle, after the sweep (and its
 escapes) and before stage 2 (uncross, layer re-opt, via-rose relay, floating up, crossing rules): when the
 present layering has over-full cuts (cut model; per-edge model: over-full edge-layers), vias without a site
@@ -157,3 +157,16 @@ integration (loop_local, smallest fixture): a cut that stays full under single-w
 in-loop round, and a mutant (round skipped / victims empty) fails it. Board A/B on the VM, 16 cycles:
 O+f and Ne+f (pre-loop off, loop_p4 on) vs O on qmtech s0-2 and esp s1-3, inner_layer_room 10 seeds (KiCad
 types, In1 routed), per connection; a default flips only where it wins at equal time with no new detour.
+
+**Lead conditions (2026-11-19) and as built.** Deterministic (cycle seed, `mix_seed`), thread-independent; prof key
+`loop_p4`; throttled by and charged to the escapes' work budget (`Throttle::ran_work`: its counted layering and
+measuring plus each placing at the mean re-lay's work), so a stuck board cannot spend the loop on it; the cap is a
+safety bound only, the victims ordered by their graded weight (`p4_keep_heaviest`); a round whose placing fails is
+restored (test hook `loop_p4_test_fail`; `State::any_path` ignores room and the rips only free room, so a real failure
+is not expected). Changed against the note: a round is kept like the loop's other whole-board moves, by
+`escape_take` (default "not_worse": undone when the evaluation rises; "always": as it comes). With "always" every
+round was taken and inner_layer_room got worse (2 vias every seed, engine route, 16 cycles): the round's rough
+placings destroy better states faster than the archive's restarts recover them. Engine route on inner_layer_room
+(16 cycles, seeds 0-9, layering with the answer's 6 vias): O 4/10, O + loop_history 8/10, O + loop_p4 8/10 (every
+round undone: the gain is its history), pre-loop off 0/10, pre-loop off + loop_history 0/10, pre-loop off +
+loop_p4 5/10.
