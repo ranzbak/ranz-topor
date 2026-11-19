@@ -21,9 +21,9 @@ M = {
     "d_no_refresh": (C, "self.tw7.detour_amt = self.detour_amounts();", "self.tw7.detour_amt = Vec::new();"),
     "d_linear": (C, "if d > 0.0 && l > 0.0 { (l / d - 1.0).max(0.0).powi(2) } else { 0.0 }", "if d > 0.0 && l > 0.0 { (l / d - 1.0).max(0.0) } else { 0.0 }"),
     "b_stage_off": (C, "                if !self.tw7.kinds.is_empty() {", "                if false {"),
-    "b_judge_always": (C, "                    if e1 < e0 - 1e-6 {\n                        for &ci in &cis {\n                            self.reroutes[ci] += 1;\n                        }\n                        kept = true;\n                    }\n                }\n                if !kept {\n                    self.restore(&before);\n                }\n                let mut own_u",
-                       "                    if true {\n                        for &ci in &cis {\n                            self.reroutes[ci] += 1;\n                        }\n                        kept = true;\n                    }\n                }\n                if !kept {\n                    self.restore(&before);\n                }\n                let mut own_u"),
-    "b_reverse_order": (C, "                let mut cis = own.clone();", "                let mut cis: Vec<usize> = own.iter().rev().copied().collect();"),
+    # round 4: b_judge_always / b_reverse_order ported to the held_relay fold (their r3 text is gone)
+    "b_judge_always": (C, "                    let (keep, refused) = site_keep(e0, e1, det_old, det_new);", "                    let (keep, refused) = (true, site_keep(e0, e1, det_old, det_new).1);"),
+    "b_reverse_order": (C, "                let mut cis = own;\n                cis.dedup();", "                let mut cis: Vec<usize> = own.into_iter().rev().collect();\n                cis.dedup();"),
     "b_evasion_once": (C, "if !kept && p.kind == super::xrules::Kind::MutualEvasion", "if false && !kept && p.kind == super::xrules::Kind::MutualEvasion"),
     "b_no_plain_filter": (C, "if p.first == p.second || !plain(p.first) || !plain(p.second) || !seen.insert", "if p.first == p.second || !seen.insert"),
     "a_parity": (X, "if n % 2 == 1 && ", "if n >= 1 && "),
