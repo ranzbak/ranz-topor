@@ -15,7 +15,6 @@ Verified with kicad-cli 10.0.8 (2026-11-01): all cases as expected.
 """
 import json
 import re
-import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -118,8 +117,10 @@ def main(out: Path) -> int:
     out.mkdir(parents=True, exist_ok=True)
     pcb, rep = out / "net_tie_probe.kicad_pcb", out / "net_tie_probe-drc.json"
     pcb.write_text(board())
-    subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all",
-                    "--output", str(rep), str(pcb)], check=True, capture_output=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from harness.kicad_env import run as kicad_run  # isolated KiCad home: never the user's config
+    kicad_run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all",
+               "--output", str(rep), str(pcb)], check=True, capture_output=True, timeout=600)
     flagged: dict[int, list[str]] = {}
     for v in json.loads(rep.read_text())["violations"]:
         if v["type"] not in ROUTING:

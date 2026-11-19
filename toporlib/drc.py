@@ -53,10 +53,11 @@ class DrcReport:
 
 
 def run_drc(pcb: Path, out_json: Path, *, save_board: bool = False, timeout_s: float | None = None,
-            on_poll=None) -> DrcReport:
+            on_poll=None, env: dict | None = None) -> DrcReport:
     """Run the fixed kicad-cli DRC command; exit 0 and 5 both count as successful runs. `save_board` adds
     ``--save-board``: the refilled board is written back over `pcb`. `timeout_s` / `on_poll` as in
-    :func:`toporlib.kicad_cli.run_cli` (kill + KicadCliTimeout / KicadCliCancelled); both None = blocking wait."""
+    :func:`toporlib.kicad_cli.run_cli` (kill + KicadCliTimeout / KicadCliCancelled); both None = blocking wait.
+    `env` None = run_cli's default (harness/kicad_env.py: an isolated KiCad home)."""
     pcb = Path(pcb)
     out_json = Path(out_json)
     if not pcb.is_file():
@@ -68,7 +69,7 @@ def run_drc(pcb: Path, out_json: Path, *, save_board: bool = False, timeout_s: f
         "-o", str(out_json), str(pcb),
     ]
     t0 = time.monotonic()
-    proc = run_cli(cmd, timeout_s=timeout_s, on_poll=on_poll)
+    proc = run_cli(cmd, timeout_s=timeout_s, on_poll=on_poll, env=env)
     seconds = time.monotonic() - t0
     if proc.returncode not in (0, 5):
         raise RuntimeError(

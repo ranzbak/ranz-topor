@@ -350,7 +350,7 @@ def crop(src: Path, window_mm: Rect, out_dir: Path, name: str, *, split_nets: bo
                 shutil.copyfile(f, d.with_suffix(ext))
     # zone fills by KiCad itself (pcbnew's ZONE_FILLER crashes on the edited board): the split sees the pours through
     # them, and the model export reads them
-    from toporlib.drc import run_drc
+    from harness.kicad_env import run_drc
     fill = lambda d: run_drc(d, d.with_name(f"{d.stem}--drc.json"), save_board=True)  # noqa: E731
     fill(ref_pcb)
     splits = _split_nets(pcbnew, ref_pcb, leaving) if split_nets else []
@@ -444,7 +444,7 @@ def _drc_key(v) -> tuple:
 def hand_drc(src: Path, cache: Path) -> Path:
     """KiCad's DRC of the source board copy (with refill), cached per source content under `cache`."""
     import hashlib
-    from toporlib.drc import run_drc
+    from harness.kicad_env import run_drc
     h = hashlib.sha256(Path(src).read_bytes()).hexdigest()[:12]
     out = Path(cache) / f"{Path(src).stem}-{h}--drc.json"
     if not out.is_file():
@@ -464,7 +464,7 @@ def reference_drc(meta: dict, out: Path | None = None, hand: Path | None = None)
     board has itself (same type at the same item positions in `hand`, its DRC JSON), the new ones, and the
     unconnected items: the hand board's own, pour pieces (every item on a pour net: pieces of the clipped pour, or
     copper on two of its islands, that the hand layout joins outside the window), and the new ones."""
-    from toporlib.drc import run_drc
+    from harness.kicad_env import run_drc
     from harness.cutclass import ROUTING_DRC
     ref = Path(meta["reference_pcb"])
     out = out or ref.with_name(f"{ref.stem}--drc.json")

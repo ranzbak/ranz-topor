@@ -27,6 +27,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from harness.kicad_env import isolated_env
 from topor.postrun import drc_without_project
 from topor.run import PROJECT_EXTS, _variant, project_missing, project_snapshot  # drc-project-fix (one copy)
 from toporlib import pcbfile
@@ -57,27 +58,12 @@ def sha256(b: bytes) -> str:
 
 #: bump when the DRC command or its environment changes (part of the cache key)
 CACHE_VERSION = "2"
-TEMPLATE = Path("/usr/share/kicad/template")
 
 
 def _cli_env(home: Path, keep_display: bool = False) -> dict:
-    """kicad-cli / pcbnew with their own HOME/XDG dirs (the user's KiCad config is never read or written: even
-    `kicad-cli version` rewrites kicad_common.json) and KiCad's default global library tables (as
-    harness.gui_e2e.E2E.make_home: else every footprint is a lib_footprint_issues). EVERY KiCad process the MCP
-    tools start gets this env (tests/mcp_server/test_mcp_drc.py asserts it)."""
-    home = Path(home)
-    cfg = home / ".config" / "kicad" / "10.0"
-    cfg.mkdir(parents=True, exist_ok=True)
-    for n in ("fp-lib-table", "sym-lib-table"):
-        if not (cfg / n).exists() and (TEMPLATE / n).is_file():
-            shutil.copy(TEMPLATE / n, cfg / n)
-    h = str(home)
-    e = {k: v for k, v in os.environ.items() if not k.startswith(("KICAD_API", "XDG_"))}
-    e.update(HOME=h, XDG_CONFIG_HOME=f"{h}/.config", XDG_DATA_HOME=f"{h}/.local/share", XDG_CACHE_HOME=f"{h}/.cache",
-             XDG_STATE_HOME=f"{h}/.local/state", KICAD_CONFIG_HOME=f"{h}/.config/kicad")
-    if not keep_display:
-        e.pop("DISPLAY", None)
-    return e
+    """kicad-cli / pcbnew of the MCP tools in an isolated KiCad home `home` (harness.kicad_env.isolated_env: even
+    `kicad-cli version` rewrites the user's kicad_common.json otherwise)."""
+    return isolated_env(Path(home), keep_display=keep_display)
 
 
 def kicad_cli_path() -> str:
@@ -207,6 +193,16 @@ _PTS = re.compile(r"\((start|mid|end|at)\s+(-?[\d.]+)\s+(-?[\d.]+)")
 _W = re.compile(r"\((?:width|size)\s+([\d.]+)\)")
 
 
+_ESC = {"slash": "/", "backslash": "\\", "colon": ":", "dblquote": '"', "quote": "'", "lt": "<", "gt": ">",
+        "bar": "|", "tab": "\t", "return": "\n", "space": " ", "brace": "{"}
+
+
+def net_name(s) -> str:
+    """A net name as KiCad SHOWS it (DRC text): the board file, the plugin's result.json and the engine keep
+    KiCad's escaped form ("D out{slash}in" for "D out/in"). Every net comparison here goes through this. O(len)."""
+    return re.sub(r"\{(\w+)\}", lambda m: _ESC.get(m.group(1), m.group(0)), s) if s else (s or "")
+
+
 _TSTAMP = re.compile(r'\(tstamp\s+"?([0-9A-Za-z\-]+)"?\s*\)')
 _NET_TABLE = re.compile(r'^\s*\(net\s+(\d+)\s+"((?:[^"\\]|\\.)*)"\)', re.M)
 
@@ -228,7 +224,7 @@ def board_items(text: str) -> dict:
         lay = _LAYERS.search(body)
         pts = {k: (float(x), float(y)) for k, x, y in _PTS.findall(body)}
         w = _W.search(body)
-        net = (n.group(1) if n.group(1) is not None else names.get(n.group(2), n.group(2))) if n else ""
+        net = net_name(n.group(1) if n.group(1) is not None else names.get(n.group(2), n.group(2))) if n else ""
         out[sp.uuid] = {"kind": "via" if sp.kind == "via" else "track", "net": net,
                         "layers": re.findall(r'"([^"]+)"', lay.group(1)) if lay else [], "pts": pts,
                         "width": float(w.group(1)) if w else None}
@@ -354,7 +350,7 @@ def conn_map(items: dict, ours: set, connections: list) -> dict:
         members[r].append(u)
     by_name = collections.defaultdict(list)
     for c in connections or []:
-        by_name[c.get("name")].append(c)
+        by_name[net_name(c.get("name"))].append(c)
     out = {}
     for root, us in members.items():
         net = items[us[0]]["net"]
@@ -423,7 +419,7 @@ def index(input_text: str, input_doc: dict, routed_text: str, routed_doc: dict, 
                         | {lay for i in its if i["ours"] for lay in rout[i["uuid"]]["layers"]})
         near = None
         if x is not None:
-            cand = [e for e in ev if (e.get("name") in nets or not nets) and math.hypot(e["x"] - x, e["y"] - y) < ENGINE_NEAR_MM]
+            cand = [e for e in ev if (net_name(e.get("name")) in nets or not nets) and math.hypot(e["x"] - x, e["y"] - y) < ENGINE_NEAR_MM]
             if cand:
                 near = min(cand, key=lambda e: math.hypot(e["x"] - x, e["y"] - y))
         rows.append({"type": v.get("type"), "class": vclass(v), "sev": v.get("severity", ""), "nets": nets,
@@ -458,7 +454,7 @@ def newly_unconnected(before_doc: dict, after_doc: dict, connections: list, befo
     ub, ua = unconnected_by_net(before_doc), unconnected_by_net(after_doc)
     by_name = collections.defaultdict(list)
     for c in connections or []:
-        by_name[c.get("name")].append(c)
+        by_name[net_name(c.get("name"))].append(c)
     out = {}
     for net in sorted(set(ub) | set(ua)):
         seen = {p["key"] for p in ub.get(net, [])}

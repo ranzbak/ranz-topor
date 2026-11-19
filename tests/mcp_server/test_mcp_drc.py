@@ -561,3 +561,18 @@ def test_a_timed_out_x_tool_is_a_step_error_with_the_command():
     assert isinstance(ex, G.STEP_ERRORS) and "xdotool windowactivate --sync" in G.describe(ex)
     from harness import gui_e2e
     assert gui_e2e.X_TIMEOUT_S <= 60 and gui_e2e.E2E.x.__kwdefaults__["timeout"] == gui_e2e.X_TIMEOUT_S
+
+
+def test_escaped_net_names_match_the_drc_text():
+    """Board file / result.json say "D out{slash}in", the DRC text "D out/in" (wiccon e2e: conns were [])."""
+    assert D.net_name("D out{slash}in") == "D out/in" and D.net_name("A{unknown}") == "A{unknown}"
+    board = "(kicad_pcb\n" + _seg("s1", "D out{slash}in", (0, 0), (5, 0)) + ")"
+    items = D.board_items(board)
+    assert items["s1"]["net"] == "D out/in"
+    conns = [_conn(4, "D out{slash}in", (0, 0), (5, 0))]
+    assert D.conn_map(items, {"s1"}, conns)["s1"] == [{"conn": 4, "d_mm": 0.0}]
+    after = {"unconnected_items": [{"items": [
+        {"uuid": "p1", "description": "Pad 1 [D out/in] of U1 on F.Cu", "pos": {"x": 0, "y": 0}},
+        {"uuid": "p2", "description": "Pad 2 [D out/in] of U2 on F.Cu", "pos": {"x": 5, "y": 0}}]}]}
+    out = D.newly_unconnected({"unconnected_items": []}, after, conns, items, {"s1"}, D.conn_map(items, {"s1"}, conns))
+    assert out["D out/in"]["new"][0]["conns"][0]["conn"] == 4 and out["D out/in"]["lost_copper"][0]["conns"] == [4]

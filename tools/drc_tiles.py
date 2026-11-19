@@ -64,9 +64,11 @@ def tile(pcb, x0, y0, x1, y1, margin, outdir):
     pcbnew.SaveBoard(dst, b)
     j = os.path.join(outdir, "drc.json")
     # The harness's own DRC flags (toporlib/drc.py).
-    subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--units", "mm",
-                    "--refill-zones", "--all-track-errors", "-o", j, dst],
-                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from harness.kicad_env import run as kicad_run  # isolated KiCad home: never the user's config
+    kicad_run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--units", "mm",
+               "--refill-zones", "--all-track-errors", "-o", j, dst],
+              check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600)
     for f in os.listdir(outdir):
         if f != "drc.json":
             os.remove(os.path.join(outdir, f))  # the tile's board copy (12 MB on bornhack): only its DRC is kept

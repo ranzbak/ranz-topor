@@ -612,7 +612,7 @@ def cleanup_step(e: E2E, main: str, pcb: Path, name: str, opts: dict) -> dict:
     saved, kicad-cli DRC runs on copies from before and after, and harness.cleanup_check replays the same options on
     the copy from before: the replay must remove exactly the items the dialog removed. Returns the result dict
     (also checks on `e`). O(two DRC runs + one replay + KiCad's cleanup)."""
-    from toporlib.drc import run_drc
+    from harness.kicad_env import run_drc
     cdir = e.out / "cleanup"
     if cdir.exists():
         shutil.rmtree(cdir)

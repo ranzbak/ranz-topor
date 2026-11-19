@@ -31,7 +31,7 @@ def filled_copy(pcb: Path, dst: Path) -> Path:
     zones refilled by kicad-cli DRC `--save-board`. A board saved by KiCad after Accept keeps the fills from before
     routing until the user refills (B); pictures of it must show the refilled pours. O(one DRC run)."""
     import shutil
-    from toporlib.drc import run_drc
+    from harness.kicad_env import run_drc
     pcb = Path(pcb)
     dst.mkdir(parents=True, exist_ok=True)
     for ext in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
@@ -46,7 +46,8 @@ def filled_copy(pcb: Path, dst: Path) -> Path:
 def board_metrics(routed: Path, input_pcb: Path, hand: Path, *, work: Path, report_dir: Path | None = None,
                   png: Path | None = None, name: str = "board") -> dict:
     from toporlib import pcbfile
-    from toporlib.drc import classify, run_drc
+    from harness.kicad_env import run_drc
+    from toporlib.drc import classify
 
     work.mkdir(parents=True, exist_ok=True)
     rtext, itext = Path(routed).read_text(), Path(input_pcb).read_text()

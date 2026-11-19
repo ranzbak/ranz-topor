@@ -83,7 +83,14 @@ The loop "route -> KiCad DRC -> look at each spot -> Cleanup -> what broke" (ski
 `register_run`) -> `drc` -> `drc_spots` -> `cleanup` -> `compare` between builds/settings; `gui_session stop` at the
 end. Design note: [design/mcp-drc.md](design/mcp-drc.md).
 
-- **DRC.** `mcp_server/drc.py`. Each DRC copy lives in `<out>/mcp/drc/<tag>-<key>/` with the project files written
+- **Isolated KiCad home, always.** Every KiCad process the tools start (`kicad-cli version`, `kicad-cli pcb drc`,
+  `route`'s route_board.sh with its pcbnew / kicad-cli, the GUI session) runs with HOME/XDG/KICAD_CONFIG_HOME in
+  a directory of the run: even `kicad-cli version` rewrites `~/.config/kicad/10.0/kicad_common.json` otherwise.
+  One helper for the whole repo's agent paths: `harness/kicad_env.py` (`isolated_env`, `run`, `run_drc`; importing
+  `harness` makes it toporlib's run_cli default); `tests/test_kicad_env.py` guards every entry point.
+  Tested: the env of every subprocess call, and a real kicad-cli run leaves `~/.config/kicad` byte- and
+  mtime-identical.
+- **DRC.** `mcp_server/drc.py`. No `.kicad_pro` beside the input board = `DRC_WITHOUT_PROJECT` (no numbers). Each DRC copy lives in `<out>/mcp/drc/<tag>-<key>/` with the project files written
   from the snapshot taken once (`topor.run.project_snapshot` / `_variant` / `project_missing`, the plugin's
   drc-project-fix code); they must be there with the same sha256 before and after kicad-cli, and every clearance
   kicad-cli quotes must be one the project defines. kicad-cli runs with an isolated HOME (template library tables
@@ -94,8 +101,10 @@ end. Design note: [design/mcp-drc.md](design/mcp-drc.md).
   nearest one flagged `approx` (the engine writes no per-item wire id).
 - **Session.** `mcp_server/kicad_gui.py` `GuiSession` (reuses `harness/gui_e2e.py` `E2E`): free display :20..:29,
   isolated home under `<out>/mcp/gui/session-*`, pcbnew on `<out>/mcp/gui/board/<copy>`. One session per server
-  process, reused while the same board copy is open and pcbnew lives; idle timeout 600 s, stopped at exit, every
-  process stopped by its own pid. Every step has a timeout and verifies its effect (window present, results page +
+  process, reused while the same board copy is open and pcbnew lives; idle timeout 600 s, stopped at exit and on
+  SIGTERM / SIGHUP (`kicad_gui.install_signal_stop`, called by the server's `main`), every process stopped by its
+  own pid. Every X tool call is bounded (`harness.gui_e2e.X_TIMEOUT_S` 30 s, replay 600 s); a timeout is a step
+  error like any other. Every step has a timeout and verifies its effect (window present, results page +
   "Completed", "Update PCB" shown, dialog gone, file sha changed) and otherwise fails loudly with a screenshot.
   `drc_spots` and `cleanup` refuse a board already changed by a cleanup (`board_state`).
 - **Helper.** `harness/gui_helper/topor_gui_helper.py`, test-only: copied only into the session home's

@@ -112,7 +112,8 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     from harness.rip import record_widths
     from harness.rules import resolve_rules
     from toporlib.detour import detour_stats
-    from toporlib.drc import classify, run_drc
+    from harness.kicad_env import run_drc
+    from toporlib.drc import classify
     from topor import run as run_mod
     from topor.config import Config
     from topor.fake import FakeBoard, ScriptedUi

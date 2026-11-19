@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import re
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
@@ -23,16 +24,18 @@ from mcp_server import kicad_gui as G
 from mcp_server import tools
 
 pytestmark = pytest.mark.gui
+ROOT = Path(__file__).resolve().parents[2]
 
 SEG = re.compile(r'\(segment\s+\(start ([-\d.]+) ([-\d.]+)\)\s+\(end ([-\d.]+) ([-\d.]+)\)\s+\(width ([\d.]+)\)\s+'
-                 r'\(layer "([^"]+)"\)\s+\(net (?:"([^"]*)"|(\d+))\)')
+                 r'\(layer "([^"]+)"\)\s+\(net (?:"([^"]*)"|(\d+))\)\s+\((?:uuid|tstamp)\s+"?([^")\s]+)')
 
 
-def add_short(pcb: Path) -> tuple[str, str]:
-    """Append one F.Cu track of net A joining the closest pair of A / B track ends (A != B). O(n^2) in ends."""
+def add_short(pcb: Path, skip: set = frozenset()) -> tuple[str, str]:
+    """Append one F.Cu track of net A joining the closest pair of A / B track ends (A != B; tracks whose uuid is
+    in `skip` are not used). O(n^2) in ends."""
     text = pcb.read_text()
     ends = [((float(m[1]), float(m[2])), (float(m[3]), float(m[4])), m[5], m[6], m[7] or m[8])
-            for m in SEG.finditer(text) if m[6] == "F.Cu"]
+            for m in SEG.finditer(text) if m[6] == "F.Cu" and m[9] not in skip]
     best = None
     for i, a in enumerate(ends):
         for b in ends[i + 1:]:
@@ -85,6 +88,44 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
             assert {"before", "after", "new", "lost_copper"} <= set(v)
             assert all("items" in n and "conns" in n for n in v["new"])
         assert isinstance(c["newly_unconnected_total"], int)
+    finally:
+        tools.gui_session("stop")
+    assert G.session_status()["session"] is None
+
+
+@pytest.mark.skipif(not all(shutil.which(t) for t in ("Xephyr", "xdotool", "wmctrl", "xwd", "pcbnew", "metacity",
+                                                      "kicad-cli")),
+                    reason="needs Xephyr, xdotool, wmctrl, xwd, metacity and KiCad 10")
+@pytest.mark.skipif(not Path(BENCH_BOARDS["wiccon-2023"]).is_file(), reason="wiccon-2023 board not on this host")
+def test_wiccon_topor_route_connection_ids_end_to_end(tmp_path, monkeypatch):
+    """route (result.json) -> one synthetic short between two of OUR tracks -> drc rows carry engine connection ids
+    -> cleanup's newly unconnected connections name ids of that result.json."""
+    monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
+    if not (ROOT / ".venv").is_dir():
+        monkeypatch.setenv("TOPOR_VENV", sys.prefix)
+    hand, _, _ = strip.prepare("wiccon-2023", tmp_path / "boards", name="w")
+    r = tools.route(str(hand.pcb), {"png": False})
+    rid = r["run_id"]
+    info = tools._run(rid)
+    inp, rout = tools._boards(info)
+    res = tools._result_or_none(info)
+    ids = {c["id"] for c in (res.get("route", res).get("connections") or [])}
+    assert ids, "the run's result.json has no connections"
+    from mcp_server import drc as D
+    add_short(rout, skip=set(D.board_items(inp.read_text())))  # between two tracks topor drew
+    d = tools.drc(rid)
+    short = [x for x in d["rows"] if x["type"] in ("shorting_items", "tracks_crossing")]
+    assert short, d["by_class"]
+    conns = {c["conn"] for x in short for o in x["ours"] for c in o["conns"]}
+    assert conns and conns <= ids  # our copper -> engine connection ids of this result.json
+    try:
+        s = tools.drc_spots(rid, cls=short[0]["class"])
+        assert s["kicad_starts_this_call"] == 1 and all(x["match"] for x in s["records"]), s["errors"]
+        c = tools.cleanup(rid)
+        assert c["session"]["reused"]
+        got = {cc["conn"] for v in c["newly_unconnected"].values() for n in v["new"] for cc in n["conns"]}
+        got |= {i for v in c["newly_unconnected"].values() for lc in v["lost_copper"] for i in lc["conns"]}
+        assert c["newly_unconnected_total"] >= 1 and got and got <= ids, c["newly_unconnected"]
     finally:
         tools.gui_session("stop")
     assert G.session_status()["session"] is None

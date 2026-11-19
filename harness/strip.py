@@ -88,12 +88,12 @@ def copy_whole(src_pcb: Path, dst_dir: Path) -> ProjectCopy:
 def upgrade_copy(pcb: Path) -> bool:
     """`kicad-cli pcb upgrade` on a COPY whose file version is older than KiCad 10 (the plugin refuses old
     formats with PCB_FORMAT_OLD). True when it was upgraded."""
-    import subprocess
     ver = pcbfile.file_version(Path(pcb).read_text())
     if ver is not None and ver >= pcbfile.KICAD10_VERSION:
         return False
     from toporlib.kicad_cli import kicad_cli
-    subprocess.run([str(kicad_cli()), "pcb", "upgrade", str(pcb)], check=True, capture_output=True)
+    from harness.kicad_env import run as kicad_run
+    kicad_run([str(kicad_cli()), "pcb", "upgrade", str(pcb)], check=True, capture_output=True, timeout=600)
     return True
 
 
