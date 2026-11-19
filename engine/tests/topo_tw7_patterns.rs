@@ -199,6 +199,7 @@ fn evasion_loops_and_kind_names() {
         (st, ws)
     };
     assert!(st3.crossings(w3[1]).iter().any(|x| x.other == w3[0]), "N crosses M");
+    assert!(xrules::u_clinches(&st3, &|_| false).is_empty(), "a wire that crosses is not a U-clinch");
     assert!(xrules::same_net_loops(&st3).is_empty());
     st3.wires[w3[1]].net = 2;
     assert_eq!(xrules::same_net_loops(&st3), vec![(w3[0].min(w3[1]), w3[0].max(w3[1]))]);
