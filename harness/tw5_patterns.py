@@ -69,8 +69,10 @@ def layering_zero_vias() -> Pattern:
 
 # ------------------------------------------------------------------------------------------------ 2. fig. 11
 def oscillating_cross() -> Pattern:
+    # The pads 0.55 mm from the board edge: no wire passes between a pad and the edge (0.5 + 0.25 + 0.2 needed), so
+    # neither wire can go round the other (tw5r5: with room there topor took a 0-via detour, +4.3 mm).
     W, H = 16.0, 12.0
-    a, b = [(2.0, 6.0), (14.0, 6.0)], [(8.0, 1.5), (8.0, 10.5)]
+    a, b = [(1.05, 6.0), (14.95, 6.0)], [(8.0, 1.05), (8.0, 10.95)]
     d = 0.3 + CLEAR + W_SIG / 2 + EPS  # via radius + clearance + half width: the dive's vias next to W1
     fps = [_smd("U1", "W1", a[0]), _smd("U2", "W1", a[1]), _smd("U3", "W2", b[0]), _smd("U4", "W2", b[1])]
     y0, y1 = round(6.0 - d, 4), round(6.0 + d, 4)
@@ -90,7 +92,7 @@ def oscillating_cross() -> Pattern:
         connections=[("W1", "U1.1", "U2.1"), ("W2", "U3.1", "U4.1")], cuts=[],
         classes=[dict(DEFAULT_CLASS)], ref_tracks=tr, ref_vias=[Via("W2", (8.0, y0)), Via("W2", (8.0, y1))],
         witness={"W1": ("F.Cu", a), "W2": ("F.Cu", b)},
-        extra={"tw5": {"figure": "11", "source": SRC + ", p. 108 fig. 11", "ref_len": 21.0, "vias": 2,
+        extra={"tw5": {"figure": "11", "source": SRC + ", p. 108 fig. 11", "ref_len": 23.8, "vias": 2,
                        "also_optimal": "W1 dives instead of W2 (mirror)"}})
 
 
