@@ -297,6 +297,27 @@ fn stub_frame(side: Side, c: Vec2, u0: Vec2, v: Vec2, ep: f64, em: f64, eq: f64,
     }
 }
 
+/// (c) as one self-contained term (lead 2026-11-19: TW6 part A prices the same quantity, a via
+/// disc too near a neighbour pin, as one graded site room, and redirects this function there so
+/// it counts once): the planned vias `vias` (radius `r`, clearance `s`) of the exit's wire in the
+/// exit zone (within the stub's length plus `r + s + w_e` of the stub) nearer than their
+/// clearance to the exit's neighbour pins, each over-full one priced by [`super::viacut::price`]
+/// at the via's pitch. O(vias x neighbours x polygon sizes).
+pub fn exit_via_room(st: &State, g: &ExitGeo, vias: &[Vec2], r: f64, s: f64, ramp: f64) -> super::viacut::Over {
+    let mut o = super::viacut::Over::default();
+    let zone = (g.b - g.a).len() + r + s + g.w_e;
+    for &p in vias {
+        if super::draw::seg_dist(p, g.a, g.b) > zone {
+            continue;
+        }
+        if let Some((f, c)) = super::viacut::price(via_deficit(st, &g.neigh, p, r, s), (2.0 * r + s).max(1.0), ramp) {
+            o.count += c as usize;
+            o.graded += f;
+        }
+    }
+    o
+}
+
 /// (c): how far a via of radius `r` and clearance `s` at `p` comes nearer than its clearance to
 /// the neighbour copper `neigh` (nm, <= 0: clear). O(neighbours x polygon sizes).
 pub fn via_deficit(st: &State, neigh: &[ObsId], p: Vec2, r: f64, s: f64) -> f64 {

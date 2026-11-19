@@ -1219,17 +1219,9 @@ impl<'a> Frame<'a> {
                 }
             }
             add(&mut tot, best);
-            // (c)
-            let zone = (g.b - g.a).len() + r + wi.s + g.w_e;
-            for &(_, p) in m.vpts(w).iter().flatten() {
-                if super::draw::seg_dist(p, g.a, g.b) > zone {
-                    continue;
-                }
-                let def = super::padexit::via_deficit(st, &g.neigh, p, r, wi.s);
-                if let Some((f, c)) = viacut::price(def, (2.0 * r + wi.s).max(1.0), ramp) {
-                    add(&mut tot, viacut::Over { count: c as usize, graded: f });
-                }
-            }
+            // (c), one self-contained term (TW6 part A redirects it to its site room).
+            let vias: Vec<Vec2> = m.vpts(w).iter().flatten().map(|&(_, p)| p).collect();
+            add(&mut tot, super::padexit::exit_via_room(st, g, &vias, r, wi.s, ramp));
         }
         tot
     }
