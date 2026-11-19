@@ -47,8 +47,25 @@ M = {
     "s_allows_ge": (S, "self.unbounded() || self.credit > 0.0", "self.unbounded() || self.credit >= 0.0"),
     "k_kind_zero": (C, "                        cs.pat_kinds[p.kind.idx()][0] += 1;", "                        cs.pat_kinds[0][0] += 1;"),
     "k_line_share": (C, "    if share < 1.0 {\n        s.push_str(&format!(\n            \"; work budget", "    if share <= 1.0 {\n        s.push_str(&format!(\n            \"; work budget"),
+    # round 4: [optimize] pattern_stuck, C via trade (+ hold), E pour move, the report line
+    "st_rank_plain": (C, "out.push((rank(amt, &key), PatCand { kind: p.kind,", "out.push((amt, PatCand { kind: p.kind,"),
+    "st_rank_fn": (C, "    amt / (1.0 + w * f64::from(stuck))", "    amt / (1.0 + w)"),
+    "st_no_count": (C, "*self.tw7.stuck.entry(p.key).or_insert(0) += tries as u32;", "let _ = self.tw7.stuck.entry(p.key).or_insert(0);"),
+    "st_no_reset": (C, "                            self.tw7.stuck.remove(&p.key);", "                            let _ = &p.key;"),
+    "st_retried_off": (C, "cs.pat_retried += usize::from(self.tw7.stuck.get(&p.key).is_some_and(|&n| n > 0));", "cs.pat_retried += 0;"),
+    "vt_off": (C, "                if has(Kind::ViaTrade) {", "                if false && has(Kind::ViaTrade) {"),
+    "vt_no_hold": (C, "if let (0, Some(l)) = (k, hold) {", "if let (usize::MAX, Some(l)) = (k, hold) {"),
+    "vt_crossed_mover": (X, "if o == w || st.wires[o].net == wi.net || crossed.contains(&o) {", "if o == w || st.wires[o].net == wi.net {"),
+    "vt_no_subject_filter": (X, "if !subject(w) || detour_amount(st, w) <= 0.0 {", "if detour_amount(st, w) <= 0.0 {"),
+    "vt_movers_unplain": (C, "if !movers.iter().all(|&o| plain(o)) ||", "if false ||"),
+    "vt_one_mover_dup": (C, "|| (movers.len() == 1 && seen.contains(&(w.min(movers[0]), w.max(movers[0]))))", "|| false"),
+    "e_off": (C, "                if has(Kind::PourCut) {", "                if false && has(Kind::PourCut) {"),
+    "e_no_bump": (C, "self.st.history[e] = h + p.bump_h;", "self.st.history[e] = h;"),
+    "e_warn_off": (C, "if !pour_on && kinds.iter().any(|k| k == Kind::PourCut.name()) {", "if false {"),
+    "e_line_pass": (C, "stuck_w, opts.pour_cuts, &rep.stats));", "stuck_w, false, &rep.stats));"),
+    "f_relay_detour": (C, "self.held_relay(&[], obs, None, self.move_detour, seed, amp, via_w)", "self.held_relay(&[], obs, None, 0.0, seed, amp, via_w)"),
 }
-TESTS = ["--lib", "--test", "topo_tw7_patterns", "--", "pourplan", "u_clinch", "evasion", "unknown_pattern", "detour_coefficient", "pattern_share", "the_pattern_moves_line"]
+TESTS = ["--lib", "--test", "topo_tw7_patterns", "--test", "topo_site_social", "--", "--include-ignored", "pourplan", "u_clinch", "evasion", "unknown_pattern", "detour_coefficient", "pattern_share", "the_pattern_moves_line", "pattern_stuck", "the_pattern_rank", "via_trade", "pour_move", "terminal_clinch", "site_move", "branch_move", "detour"]
 
 
 def run(out: Path) -> int:

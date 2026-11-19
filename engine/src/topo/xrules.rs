@@ -50,6 +50,13 @@ pub enum Kind {
     UClinch,
     /// TW7 (sign 4, mutual evasion): two wires each going round the other's end.
     MutualEvasion,
+    /// TW7 C (fig. 21b, Luzin 2015 pp. 9-10): a wire on one layer that goes round wires of other
+    /// nets crossing its straight line (the via pair traded for a detour); the move lays it
+    /// straight first, held to its layer, then those wires ([`via_trades`]).
+    ViaTrade,
+    /// TW7 E (tw4-r2 (3)): a pour piece the plan cuts off from its main copper; the move lays
+    /// the wires bounding it again ([`super::pourplan::cut_components`]).
+    PourCut,
 }
 
 impl Kind {
@@ -61,10 +68,18 @@ impl Kind {
             Kind::Unlayerable => "unlayerable",
             Kind::UClinch => "u_clinch",
             Kind::MutualEvasion => "evasion",
+            Kind::ViaTrade => "via_trade",
+            Kind::PourCut => "pour",
         }
     }
+    /// The number of kinds (the per-kind counters).
+    pub const N: usize = 7;
     /// Every kind, in [`Kind::idx`] order.
-    pub const ALL: [Kind; 5] = [Kind::TerminalClinch, Kind::DoubleCrossing, Kind::Unlayerable, Kind::UClinch, Kind::MutualEvasion];
+    pub const ALL: [Kind; Kind::N] = [Kind::TerminalClinch, Kind::DoubleCrossing, Kind::Unlayerable, Kind::UClinch, Kind::MutualEvasion, Kind::ViaTrade, Kind::PourCut];
+    /// The known `[optimize] pattern_moves` entries, comma separated (the report's warning).
+    pub fn known() -> String {
+        Kind::ALL.iter().map(|k| k.name()).collect::<Vec<_>>().join(", ")
+    }
     /// The kind of a `[optimize] pattern_moves` entry.
     pub fn parse(s: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.name() == s)
@@ -251,6 +266,51 @@ pub fn mutual_evasions(st: &State, uc: &[Pair]) -> Vec<Pair> {
             Pair { first, second, kind: Kind::MutualEvasion }
         })
         .collect()
+}
+
+/// TW7 C, the via trade of fig. 21b (Luzin 2015 pp. 9-10: re-layering removes no via, a single
+/// re-lay removes them at +36 % length, fig. 21c has none at +7 % "but cannot be obtained by a
+/// single reroute"; Luzin, Popov & Popov 2013 p. 134 step 8.1: lead the crossing wires round the
+/// terminal): per wire `w` that `subject` admits (the caller's: a plain wire on one layer, no via)
+/// and that is longer than its straight distance (graded detour amount > 0), the wires of other
+/// nets whose projections cross `w`'s straight pad-to-pad line (any number of times) and do not
+/// cross `w` itself: laid straight, `w` would cross each of them, so they are the wires the move
+/// leads round `w`'s terminal. `(w, movers)` for every `w` with at least one; the movers in id
+/// order. Read-only. O(wires^2) box tests + O(segments) per overlapping box.
+pub fn via_trades(st: &State, subject: &dyn Fn(WireId) -> bool) -> Vec<(WireId, Vec<WireId>)> {
+    let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
+    let mut polys: BTreeMap<WireId, (Vec<V2>, Bb)> = BTreeMap::new();
+    let mut out = Vec::new();
+    for &w in &alive {
+        if !subject(w) || detour_amount(st, w) <= 0.0 {
+            continue;
+        }
+        let wi = &st.wires[w];
+        let (ca, cb) = (st.proj.pos[wi.a], st.proj.pos[wi.b]);
+        if (cb - ca).len() <= 0.0 {
+            continue;
+        }
+        let lb = bbox(&[ca, cb]);
+        let crossed: BTreeSet<WireId> = st.crossings(w).into_iter().map(|x| x.other).collect();
+        let mut movers = Vec::new();
+        for &o in &alive {
+            if o == w || st.wires[o].net == wi.net || crossed.contains(&o) {
+                continue;
+            }
+            let (pl, b) = polys.entry(o).or_insert_with(|| {
+                let pl = st.polyline(o);
+                let b = bbox(&pl);
+                (pl, b)
+            });
+            if boxes_meet(lb, *b) && line_crossings(pl, ca, cb) > 0 {
+                movers.push(o);
+            }
+        }
+        if !movers.is_empty() {
+            out.push((w, movers));
+        }
+    }
+    out
 }
 
 /// Same-net loops (Luzin 2015 p. 7, fig. 15: "projections of wires of the same net intersect"):

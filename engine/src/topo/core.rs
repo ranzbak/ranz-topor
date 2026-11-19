@@ -4183,6 +4183,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 _ => (0, 0.0),
             }
         };
+        // TW7 E (`[optimize] pattern_moves` "pour"): the cut-off pour pieces of the plan with the
+        // wires bounding them (the movers of the pour move).
+        let pour_comps_fn = |st: &State, evl: &[Vec<(usize, f64, i32)>]| -> Vec<super::pourplan::CutComp> {
+            match pour_base.as_ref() {
+                Some(pb) if pb.any => super::pourplan::cut_components(model, &super::pourplan::plan_items(st, &packer, b, evl, bottom), pb),
+                _ => Vec::new(),
+            }
+        };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
             let _pg = super::prof::g(super::prof::K::Measure);
             let pour = if pour_base.is_some() {
@@ -4597,6 +4605,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             len: f64,
             price: f64,
         }
+        /// TW7 B/C/E: one found pattern as one move ([`Sp::pattern_cands`]): its kind, the wires
+        /// laid first in this order (`first`), the wires laid after them in route order (`obs`),
+        /// the layer the first wire is held to while the others are laid (C: the via trade), and
+        /// its key in the fruitless-try counts (`[optimize] pattern_stuck`).
+        struct PatCand {
+            kind: super::xrules::Kind,
+            first: Vec<WireId>,
+            obs: Vec<WireId>,
+            hold: Option<i32>,
+            key: (usize, usize),
+            /// E: the edges priced for this move only (the search's history, [`State::history`]),
+            /// and the price per edge (history units).
+            bump: Vec<usize>,
+            bump_h: f64,
+        }
         /// TW5 ESCAPE (docs/dev/design/tw5-escape.md): the loop's escape settings and its
         /// loop-wide memory (not part of a variant: a restore keeps it).
         /// TW7 (docs/dev/design/tw7-moves.md): part B's pattern kinds that become targeted moves
@@ -4724,6 +4747,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             dbg_tag: u64,
             /// TW3: this run's pre-loop decisions (every snapshot carries them).
             pre: std::sync::Arc<PreLoop>,
+            /// TW7 E: the pour pieces the plan's copper cuts off, with the wires bounding them
+            /// ([`super::pourplan::cut_components`] on the layering's plan; None = `[capacity]
+            /// pour_cuts` off, so the "pour" pattern kind finds nothing).
+            pour_comps: Option<&'a dyn Fn(&State, &[Vec<(usize, f64, i32)>]) -> Vec<super::pourplan::CutComp>>,
             /// The run's control: the test hook's markers between the cycle's stages.
             ctl: &'a RunControl,
             /// TW5 ESCAPE.
@@ -5330,7 +5357,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// `[optimize] pattern_stuck`, `stuck` = the pair's fruitless tries since its last kept
             /// move, [`Sp::pattern_key`]: graded, no cutoff); ties by wire ids. Detection only
             /// reads the state. O(detectors).
-            fn pattern_cands(&self) -> Vec<super::xrules::Pair> {
+            fn pattern_cands(&self) -> Vec<PatCand> {
                 use super::xrules::{self as xr, Kind};
                 let _pg = super::prof::g(super::prof::K::XrDetect);
                 let tree_now: BTreeSet<WireId> = if self.tw7.tree_free { tree::junctions(self.st).iter().flat_map(|j| [j.0, j.2]).collect() } else { BTreeSet::new() };
@@ -5362,25 +5389,73 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 if has(Kind::Unlayerable) {
                     v.extend(self.lr.unlayerable_pairs.iter().map(|&(a, b)| xr::Pair { first: a.min(b), second: a.max(b), kind: Kind::Unlayerable }));
                 }
+                let rank = |amt: f64, key: &(usize, usize)| pattern_rank(amt, self.tw7.stuck.get(key).copied().unwrap_or(0), self.tw7.stuck_w);
                 let mut seen: BTreeSet<(WireId, WireId)> = BTreeSet::new();
-                let mut out: Vec<(f64, xr::Pair)> = Vec::new();
+                let mut out: Vec<(f64, PatCand)> = Vec::new();
                 for p in v {
                     if p.first == p.second || !plain(p.first) || !plain(p.second) || !seen.insert((p.first.min(p.second), p.first.max(p.second))) {
                         continue;
                     }
                     let amt = xr::detour_amount(self.st, p.first) + xr::detour_amount(self.st, p.second);
-                    let n = self.tw7.stuck.get(&self.pattern_key(&p)).copied().unwrap_or(0);
-                    out.push((pattern_rank(amt, n, self.tw7.stuck_w), p));
+                    let key = self.pattern_key(p.first, p.second);
+                    out.push((rank(amt, &key), PatCand { kind: p.kind, first: vec![p.first, p.second], obs: Vec::new(), hold: None, key, bump: Vec::new(), bump_h: 0.0 }));
                 }
-                out.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.first.cmp(&b.1.first)).then(a.1.second.cmp(&b.1.second)));
+                // C (fig. 21b): a plain wire on one layer (no via) going round the wires that
+                // cross its straight line; every one of those plain (a net tree's wire keeps its
+                // place, so the wire could not go straight); one mover alone is the U-clinch's
+                // pair when that kind found it. Ranked by the wire's own excess length.
+                if has(Kind::ViaTrade) {
+                    let layer = |w: WireId| -> Option<i32> {
+                        let ev = self.lr.events.get(w).map_or(&[][..], |e| &e[..]);
+                        ev.windows(2).all(|x| x[0].2 == x[1].2).then(|| ev.first().map_or(self.bottom, |e| e.2))
+                    };
+                    for (w, movers) in xr::via_trades(self.st, &|w| plain(w) && layer(w).is_some()) {
+                        if !movers.iter().all(|&o| plain(o)) || (movers.len() == 1 && seen.contains(&(w.min(movers[0]), w.max(movers[0])))) {
+                            continue;
+                        }
+                        let key = self.pattern_key(w, w);
+                        out.push((rank(xr::detour_amount(self.st, w), &key), PatCand { kind: Kind::ViaTrade, first: vec![w], obs: movers, hold: layer(w), key, bump: Vec::new(), bump_h: 0.0 }));
+                    }
+                }
+                // E (tw4-r2 (3)): a pour piece the plan cuts off, its plain bounding wires laid
+                // again; a predicted violation, so it ranks before the excess lengths (graded by
+                // the pads it cuts off, as the measure: 1 + 0.25 per further pad).
+                if has(Kind::PourCut) {
+                    if let Some(f) = self.pour_comps {
+                        for c in f(self.st, &self.lr.events) {
+                            let obs: Vec<WireId> = c.bounding.iter().copied().filter(|&w| plain(w)).collect();
+                            if obs.is_empty() {
+                                continue;
+                            }
+                            let key = (usize::MAX, c.pads.first().copied().unwrap_or(usize::MAX));
+                            let g = 1.0 + 0.25 * c.pads.len().saturating_sub(1) as f64;
+                            // The bounding wires' passes near the piece (within twice its radius
+                            // plus 1 mm of its centroid) carry the cut's violation price for the
+                            // move's search, spread over them (tw7-moves.md E: priced through the
+                            // search's history, no new search term), so the wires look for a way
+                            // that leaves the piece open; the judge is the board's evaluation.
+                            let r = 2.0 * (c.area.max(0.0) / std::f64::consts::PI).sqrt() + MM;
+                            let mut bump: Vec<usize> = obs
+                                .iter()
+                                .flat_map(|&w| self.st.wires[w].passes.iter().filter(|&&p| (self.st.pass_point(p) - c.at).len() <= r).map(|&p| self.st.passes[p].edge))
+                                .collect();
+                            bump.sort_unstable();
+                            bump.dedup();
+                            let cong = self.reg.price(&super::factors::Event::Congestion { wire: 0, edge: 0, history: 1.0 }, &super::factors::WireCtx { net: c.net, tier: 3 });
+                            let bump_h = if cong > 0.0 && !bump.is_empty() { self.viol_mm * g / (cong * bump.len() as f64) } else { 0.0 };
+                            out.push((rank(POUR_RANK * g, &key), PatCand { kind: Kind::PourCut, first: Vec::new(), obs, hold: None, key, bump, bump_h }));
+                        }
+                    }
+                }
+                out.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.first.cmp(&b.1.first)).then_with(|| a.1.obs.cmp(&b.1.obs)));
                 out.into_iter().map(|x| x.1).collect()
             }
             /// TW7 B: a pattern's key in the fruitless-try counts (`[optimize] pattern_stuck`): its
             /// two wires' connections, the lower first (wire ids change at every re-lay, the
             /// connections stay).
-            fn pattern_key(&self, p: &super::xrules::Pair) -> (usize, usize) {
+            fn pattern_key(&self, x: WireId, y: WireId) -> (usize, usize) {
                 let c = |w: WireId| self.wire_conn.get(w).copied().unwrap_or(usize::MAX);
-                let (a, b) = (c(p.first), c(p.second));
+                let (a, b) = (c(x), c(y));
                 (a.min(b), a.max(b))
             }
             /// TW7 B: one targeted pattern move. The wires `order` (and the branches on their
@@ -5394,64 +5469,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// order). Whether it was kept.
             fn pattern_move(&mut self, order: &[WireId], seed: u64, amp: f64, via_w: f64) -> bool {
                 let _pg = super::prof::g(super::prof::K::PatternMove);
-                let e0 = self.eval_now();
-                let before = self.snapshot();
-                let own: Vec<usize> = order.iter().map(|&x| self.wire_conn[x]).collect();
-                let gone: BTreeSet<WireId> = order.iter().copied().collect();
-                let set: Vec<WireId> = gone.iter().copied().chain(tree::dependents(self.st, &gone)).collect();
-                let mut rest: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).filter(|ci| !own.contains(ci)).collect();
-                rest.sort_by_key(|&ci| (self.rank[ci], ci));
-                rest.dedup();
-                let mut cis = own.clone();
-                cis.dedup();
-                cis.extend(rest);
-                for &x in &set {
-                    tree::remove_wire(self.st, x);
-                }
-                for &ci in &cis {
-                    self.forced.borrow_mut().remove(&self.conn_of[ci]);
-                }
-                let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
-                let n0 = self.st.wires.len();
-                self.st.took_part.clear();
-                let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
-                let mut kept = false;
-                if placed {
-                    if let Some(local) = self.local {
-                        let new: Vec<WireId> = (n0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive).collect();
-                        let (lr, p) = local(self.st, &before.topo, &set, &new, &before.lr, &before.pred, self.ties);
-                        self.set_lr(lr, Some(p));
-                        self.pred_local = true;
-                    } else {
-                        let lr = (self.assign_t)(self.st, self.ties);
-                        self.set_lr(lr, None);
-                    }
-                    let e1 = self.eval_now();
-                    if self.dbg {
-                        eprintln!("LOOPDBG[{}] pattern move: wires {order:?} laid again in that order, eval {e0:.3} -> {e1:.3}", self.dbg_tag);
-                    }
-                    if e1 < e0 - 1e-6 {
-                        for &ci in &cis {
-                            self.reroutes[ci] += 1;
-                        }
-                        kept = true;
-                    }
-                }
-                if !kept {
-                    self.restore(&before);
-                }
-                let mut own_u = own;
-                own_u.sort_unstable();
-                own_u.dedup();
-                for ci in own_u {
-                    self.tries[ci] += 1;
-                    if kept {
-                        self.stuck[ci] = 0;
-                    } else {
-                        self.stuck[ci] += 1;
-                    }
-                }
-                kept
+                self.held_relay(order, &[], None, 0.0, seed, amp, via_w)
+            }
+            /// TW7 E (`[optimize] pattern_moves` "pour"): the wires bounding a cut-off pour piece
+            /// laid again together in route order, kept by the board's evaluation (with `[capacity]
+            /// pour_cuts` the cut is a predicted violation in it). Whether it was kept.
+            fn relay_pattern(&mut self, obs: &[WireId], seed: u64, amp: f64, via_w: f64) -> bool {
+                let _pg = super::prof::g(super::prof::K::PatternMove);
+                self.held_relay(&[], obs, None, 0.0, seed, amp, via_w)
+            }
+            /// TW7 C (`[optimize] pattern_moves` "via_trade", fig. 21b -> 21c; Luzin 2015 pp. 9-10,
+            /// Luzin, Popov & Popov 2013 p. 134 step 8.1): wire `w` (on one layer) laid first, alone
+            /// in the way it was going round (its movers taken out with it), then held to `layer`
+            /// while the wires `movers` that cross its straight line are laid again in route order:
+            /// each prices crossing it as the via it would imply ([`State::held_layers`]) and goes
+            /// round its terminal where that is cheaper. Kept by the board's evaluation (as every
+            /// pattern move); else everything comes back exactly. Whether it was kept.
+            fn via_trade_move(&mut self, w: WireId, movers: &[WireId], layer: i32, seed: u64, amp: f64, via_w: f64) -> bool {
+                let _pg = super::prof::g(super::prof::K::PatternMove);
+                self.held_relay(&[w], movers, Some(layer), 0.0, seed, amp, via_w)
             }
             /// 5.8: the obstructed via pairs of wire `w` (Luzin, Popov & Popov 2013 p. 134 steps
             /// 1-8): a stretch of events `i..=j` on layer `l` between two layer changes `v`
@@ -5640,16 +5676,36 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// violation weight; after minus before) drops, else everything comes back exactly.
             /// Each connection counts the try. A priced move, no gate. Whether it was kept.
             fn relay_kept(&mut self, obs: &[WireId], seed: u64, amp: f64, via_w: f64) -> bool {
+                self.held_relay(&[], obs, None, self.move_detour, seed, amp, via_w)
+            }
+            /// TW7 F: the one held re-lay of TW6 E's site / branch moves and TW7's pattern moves.
+            /// The wires `first` and `obs` (and the branches on their junctions) are taken out
+            /// together; `first`'s connections are laid again first, in that order (a pattern's
+            /// rule order), then every other connection in route order, each with its own try
+            /// coefficients at the via weight `via_w`. With `hold` the first connection's new
+            /// wires are held to that layer for the search of the others ([`State::layers_now`]:
+            /// crossing them prices the via it implies). The board is layered again (the local
+            /// judge when on) and the change kept when the archive's evaluation of the whole
+            /// board ([`evaluation`]) plus the relaid connections' graded detour price (`detour`
+            /// = the excess-ratio scale, [`conn_detour_price`] at the violation weight; 0 = none)
+            /// drops ([`site_keep`]), else everything comes back exactly. Every connection of
+            /// `first` and `obs` counts the try. A priced move, no gate. Whether it was kept.
+            #[allow(clippy::too_many_arguments)]
+            fn held_relay(&mut self, first: &[WireId], obs: &[WireId], hold: Option<i32>, detour: f64, seed: u64, amp: f64, via_w: f64) -> bool {
                 let e0 = self.eval_now();
                 let before = self.snapshot();
-                let obs_cis: BTreeSet<usize> = obs.iter().map(|&x| self.wire_conn[x]).collect();
-                let gone: BTreeSet<WireId> = obs.iter().copied().collect();
+                let own: Vec<usize> = first.iter().map(|&x| self.wire_conn[x]).collect();
+                let try_cis: BTreeSet<usize> = first.iter().chain(obs).map(|&x| self.wire_conn[x]).collect();
+                let gone: BTreeSet<WireId> = first.iter().chain(obs).copied().collect();
                 let set: Vec<WireId> = gone.iter().copied().chain(tree::dependents(self.st, &gone)).collect();
-                let mut cis: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).collect();
-                cis.sort_by_key(|&ci| (self.rank[ci], ci));
+                let mut rest: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).filter(|ci| !own.contains(ci)).collect();
+                rest.sort_by_key(|&ci| (self.rank[ci], ci));
+                rest.dedup();
+                let mut cis = own;
                 cis.dedup();
+                cis.extend(rest);
                 let det_cis: BTreeSet<usize> = cis.iter().copied().filter(|&c| c != usize::MAX).collect();
-                let det_old = self.viol_mm * conn_detour_price(self.st, self.wire_conn, self.conns, &det_cis, self.move_detour);
+                let det_old = self.viol_mm * conn_detour_price(self.st, self.wire_conn, self.conns, &det_cis, detour);
                 for &x in &set {
                     tree::remove_wire(self.st, x);
                 }
@@ -5659,7 +5715,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
                 let n0 = self.st.wires.len();
                 self.st.took_part.clear();
-                let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
+                let mut placed = true;
+                for (k, (&ci, reg)) in cis.iter().zip(&regs).enumerate() {
+                    if !(self.place)(self.st, ci, self.cap, self.wire_conn, reg) {
+                        placed = false;
+                        break;
+                    }
+                    if let (0, Some(l)) = (k, hold) {
+                        // C: the subject's new wires on its layer for the others' search.
+                        let bit = 1u64 << l.clamp(0, 63);
+                        for x in n0..self.st.wires.len() {
+                            if self.st.wires[x].alive && self.wire_conn.get(x) == Some(&ci) {
+                                if self.st.layers_now.len() <= x {
+                                    self.st.layers_now.resize(x + 1, Vec::new());
+                                }
+                                self.st.layers_now[x] = vec![bit; self.st.wires[x].tris.len()];
+                            }
+                        }
+                    }
+                }
                 let mut kept = false;
                 if placed {
                     if let Some(local) = self.local {
@@ -5672,9 +5746,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         self.set_lr(lr, None);
                     }
                     let e1 = self.eval_now();
-                    let det_new = self.viol_mm * conn_detour_price(self.st, self.wire_conn, self.conns, &det_cis, self.move_detour);
+                    let det_new = self.viol_mm * conn_detour_price(self.st, self.wire_conn, self.conns, &det_cis, detour);
                     if self.dbg {
-                        eprintln!("LOOPDBG[{}] site/branch move: wires {obs:?} laid again, eval {e0:.3} -> {e1:.3}, detour price {det_old:.3} -> {det_new:.3}", self.dbg_tag);
+                        eprintln!("LOOPDBG[{}] held re-lay: wires {first:?} first (hold {hold:?}), then {obs:?}: eval {e0:.3} -> {e1:.3}, detour price {det_old:.3} -> {det_new:.3}", self.dbg_tag);
                     }
                     let (keep, refused) = site_keep(e0, e1, det_old, det_new);
                     if keep {
@@ -5688,7 +5762,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 if !kept {
                     self.restore(&before);
                 }
-                for ci in obs_cis {
+                for ci in try_cis {
                     self.tries[ci] += 1;
                     if kept {
                         self.stuck[ci] = 0;
@@ -6047,21 +6121,35 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             break;
                         }
                         let live = |x: WireId| self.st.wires.get(x).is_some_and(|wi| wi.alive) && self.wire_conn.get(x).is_some_and(|&ci| ci != usize::MAX);
-                        if !live(p.first) || !live(p.second) {
+                        if !p.first.iter().chain(&p.obs).all(|&x| live(x)) {
                             continue;
                         }
                         let k0 = self.work_mark();
-                        let key = self.pattern_key(p);
-                        cs.pat_retried += usize::from(self.tw7.stuck.get(&key).is_some_and(|&n| n > 0));
+                        cs.pat_retried += usize::from(self.tw7.stuck.get(&p.key).is_some_and(|&n| n > 0));
                         let mut tries = 1usize;
                         cs.pat_moved += 1;
-                        ripped += 2;
-                        let mut kept = self.pattern_move(&[p.first, p.second], c.seed ^ 0x7E7E, c.amp, c.emphasis.via_at(1.0));
+                        ripped += p.first.len() + p.obs.len();
+                        let via_w = c.emphasis.via_at(1.0);
+                        let mut kept = match (p.kind, p.hold) {
+                            (super::xrules::Kind::ViaTrade, Some(l)) => self.via_trade_move(p.first[0], &p.obs, l, c.seed ^ 0x7E80, c.amp, via_w),
+                            (super::xrules::Kind::PourCut, _) => {
+                                let old: Vec<(usize, f64)> = p.bump.iter().filter_map(|&e| self.st.history.get(e).map(|&h| (e, h))).collect();
+                                for &(e, h) in &old {
+                                    self.st.history[e] = h + p.bump_h;
+                                }
+                                let kept = self.relay_pattern(&p.obs, c.seed ^ 0x7E81, c.amp, via_w);
+                                for &(e, h) in &old {
+                                    self.st.history[e] = h;
+                                }
+                                kept
+                            }
+                            _ => self.pattern_move(&p.first, c.seed ^ 0x7E7E, c.amp, via_w),
+                        };
                         if !kept && p.kind == super::xrules::Kind::MutualEvasion && ripped < self.max_ripped && !stop() {
                             tries += 1;
                             cs.pat_moved += 1;
                             ripped += 2;
-                            kept = self.pattern_move(&[p.second, p.first], c.seed ^ 0x7E7F, c.amp, c.emphasis.via_at(1.0));
+                            kept = self.pattern_move(&[p.first[1], p.first[0]], c.seed ^ 0x7E7F, c.amp, via_w);
                         }
                         // Its work: the counted layering and measuring, at least one unit per try
                         // (a try whose placing failed still searched).
@@ -6073,9 +6161,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         cs.pat_kept += usize::from(kept);
                         // `[optimize] pattern_stuck`: the pattern's fruitless tries (graded order).
                         if kept {
-                            self.tw7.stuck.remove(&key);
+                            self.tw7.stuck.remove(&p.key);
                         } else {
-                            *self.tw7.stuck.entry(key).or_insert(0) += tries as u32;
+                            *self.tw7.stuck.entry(p.key).or_insert(0) += tries as u32;
                         }
                     }
                     self.tw7.mark = Some(self.work_mark());
@@ -6235,6 +6323,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
         let place_ref = &place;
+        let pour_comps_ref: Option<&dyn Fn(&State, &[Vec<(usize, f64, i32)>]) -> Vec<super::pourplan::CutComp>> = pour_base.as_ref().filter(|pb| pb.any).map(|_| &pour_comps_fn as &dyn Fn(&State, &[Vec<(usize, f64, i32)>]) -> Vec<super::pourplan::CutComp>);
         let assign_ref = &assign_t;
         let assign_esc_ref = &assign_esc;
         let measure_ref = &measure;
@@ -6367,6 +6456,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 stuck: BTreeMap::new(),
             },
             pre: pre_loop.clone(),
+            pour_comps: pour_comps_ref,
         };
         let bounded_osc = opts.oscillation == "bounded";
         // TW3 (D6): the dialog run has no cycle cap (OK, Cancel or the time limit end it); headless
@@ -6743,8 +6833,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             o.insert(
                 "pattern_share".into(),
                 serde_json::json!({
-                    "share": opts.pattern_share,
-                    "stuck_w": opts.pattern_stuck,
+                    "share": super::escape::Share::new(opts.pattern_share).share,
+                    "stuck_w": if opts.pattern_stuck.is_finite() { opts.pattern_stuck.max(0.0) } else { 0.0 },
                     "retried": rep.stats.pat_retried,
                     "stuck_patterns": rep.stats.pat_stuck,
                     "waited": rep.stats.pat_waited,
@@ -6756,7 +6846,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         if !opts.pattern_moves.is_empty() {
             let stuck_w = if opts.pattern_stuck.is_finite() { opts.pattern_stuck.max(0.0) } else { 0.0 };
-            warnings.push(pattern_moves_line(&opts.pattern_moves, super::escape::Share::new(opts.pattern_share).share, stuck_w, &rep.stats));
+            warnings.push(pattern_moves_line(&opts.pattern_moves, super::escape::Share::new(opts.pattern_share).share, stuck_w, opts.pour_cuts, &rep.stats));
         }
         if opts.via_pair_min {
             warnings.push(format!(
@@ -9545,6 +9635,12 @@ fn patdbg(model: &BoardModel, st: &State, unlayerable: &[(WireId, WireId)], seed
     }
 }
 
+/// TW7 E: the rank scale of a cut-off pour piece in the pattern moves' order, in the units of the
+/// excess-length amounts `(r - 1)^2` (10 = a wire 4.2 times its straight distance): the measure
+/// prices the cut as a predicted violation, so it comes before the excess lengths (graded by its
+/// pads, and by its fruitless tries like every pattern).
+const POUR_RANK: f64 = 10.0;
+
 /// TW7 B (`[optimize] pattern_stuck` = `w`): a found pattern's place in the moves' order, its
 /// excess length `amt` (the graded detour amounts of its two wires) times `1 / (1 + w x stuck)`,
 /// `stuck` = its fruitless tries since its last kept move. Graded, no cutoff: it falls with every
@@ -9554,7 +9650,7 @@ fn pattern_rank(amt: f64, stuck: u32, w: f64) -> f64 {
 }
 
 /// TW7 B: the run report line of `[optimize] pattern_moves` (and its entries no kind matches).
-fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, st: &super::optimise::CycleStats) -> String {
+fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, pour_on: bool, st: &super::optimise::CycleStats) -> String {
     use super::xrules::Kind;
     let bad: Vec<&str> = kinds.iter().map(String::as_str).filter(|k| Kind::parse(k).is_none()).collect();
     let per: Vec<String> = Kind::ALL
@@ -9588,8 +9684,11 @@ fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, st: &super::op
     } else {
         s.push_str("; order: excess length alone ([optimize] pattern_stuck = 0)");
     }
+    if !pour_on && kinds.iter().any(|k| k == Kind::PourCut.name()) {
+        s.push_str("; \"pour\" finds nothing without [capacity] pour_cuts = true (the plan's pour check)");
+    }
     if !bad.is_empty() {
-        s.push_str(&format!("; unknown entries ignored: {} (known: clinch, double, unlayerable, u_clinch, evasion)", bad.join(", ")));
+        s.push_str(&format!("; unknown entries ignored: {} (known: {})", bad.join(", "), Kind::known()));
     }
     s
 }
@@ -9621,18 +9720,26 @@ mod tests {
         st.pat_kinds[super::super::xrules::Kind::UClinch.idx()] = [6, 3, 1];
         st.pat_kinds[super::super::xrules::Kind::MutualEvasion.idx()] = [3, 2, 1];
         let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let a = super::pattern_moves_line(&k(&["u_clinch", "evasion"]), 0.25, 1.0, &st);
+        let a = super::pattern_moves_line(&k(&["u_clinch", "evasion"]), 0.25, 1.0, false, &st);
         assert!(a.contains("2 of 5 moves kept (9 patterns found; u_clinch 1/3 kept, 6 found; evasion 1/2 kept, 3 found;"), "{a}");
         assert!(a.contains("pattern_share = 0.25: the moves took 25.0 % of the loop's work, 4 found pattern(s) waited"), "{a}");
         assert!(!a.contains("unknown") && !a.contains("no work budget"), "{a}");
         assert!(a.ends_with("; order: excess length x 1 / (1 + 1 x the pattern's fruitless tries) ([optimize] pattern_stuck = 1)"), "{a}");
-        let b = super::pattern_moves_line(&k(&["u_clinch", "bogus"]), 1.0, 0.0, &st);
+        let b = super::pattern_moves_line(&k(&["u_clinch", "bogus"]), 1.0, 0.0, false, &st);
         assert!(b.contains("u_clinch 1/3 kept, 6 found;") && !b.contains("evasion 1/2"), "{b}");
         assert!(b.contains("no work budget ([optimize] pattern_share = 1): the moves took 25.0 %"), "{b}");
-        assert!(b.ends_with("; order: excess length alone ([optimize] pattern_stuck = 0); unknown entries ignored: bogus (known: clinch, double, unlayerable, u_clinch, evasion)"), "{b}");
-        let h = super::pattern_moves_line(&k(&["u_clinch"]), 0.25, 0.5, &st);
+        assert!(b.ends_with("; order: excess length alone ([optimize] pattern_stuck = 0); unknown entries ignored: bogus (known: clinch, double, unlayerable, u_clinch, evasion, via_trade, pour)"), "{b}");
+        let h = super::pattern_moves_line(&k(&["u_clinch"]), 0.25, 0.5, false, &st);
         assert!(h.contains("(1 + 0.5 x the pattern's fruitless tries) ([optimize] pattern_stuck = 0.5)"), "{h}");
-        let c = super::pattern_moves_line(&k(&["bogus"]), 1.0, 1.0, &super::super::optimise::CycleStats::default());
+        assert!(!a.contains("pour") && !h.contains("pour"), "{a}");
+        let mut sp = st.clone();
+        sp.pat_kinds[super::super::xrules::Kind::PourCut.idx()] = [2, 2, 1];
+        sp.pat_kinds[super::super::xrules::Kind::ViaTrade.idx()] = [4, 3, 0];
+        let p_off = super::pattern_moves_line(&k(&["via_trade", "pour"]), 0.25, 1.0, false, &sp);
+        assert!(p_off.contains("via_trade 0/3 kept, 4 found; pour 1/2 kept, 2 found;") && p_off.contains("; \"pour\" finds nothing without [capacity] pour_cuts = true"), "{p_off}");
+        let p_on = super::pattern_moves_line(&k(&["via_trade", "pour"]), 0.25, 1.0, true, &sp);
+        assert!(!p_on.contains("finds nothing"), "{p_on}");
+        let c = super::pattern_moves_line(&k(&["bogus"]), 1.0, 1.0, false, &super::super::optimise::CycleStats::default());
         assert!(c.contains("0 of 0 moves kept (0 patterns found; no known kind;") && c.contains("took 0.0 %"), "{c}");
     }
 

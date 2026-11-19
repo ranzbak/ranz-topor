@@ -229,3 +229,42 @@ IO8_SCL R17.2-U2.13 (base ratio 1.6-2.0 with DRC), +BATT U4.28 (DRC in 6/8 base 
 qmtech JS_CS, ADV_CLK and FPGA_UART1_CTS lose their detours. The detour factor (d) adds a via pair on short
 connections (Net-(D9-Pad4) 0 -> 2 vias in 5/8 seeds for ratio 1.24 -> 1.07; IO8_SCL U4.13-U4.18 in ud), u does not.
 Default pattern_share = 0.25 (pattern_moves stays opt-in, so default copper is unchanged).
+
+## 12. Work round 4 (lead brief 2026-11-19: C, E, F after TW6 E; stuck-graded order; flip evidence; d retry)
+**Budget order by fruitless tries** (`[optimize] pattern_stuck` = `w`, float >= 0, default 1; 0 = the round-3 order).
+A found pattern runs by `excess x 1 / (1 + w x stuck)`, `stuck` = the fruitless tries of its key (its two
+connections; wire ids change at every re-lay) since its last kept move (`Tw7::stuck`, loop-wide, a restore keeps
+it). Graded, no cutoff: a pattern that keeps failing moves down, never out (it runs once the fresher ones have
+had their turn, and a kept move resets it). Why: at share 0.25 round 3 kept 0-24 of 548-705 tries on esp, the
+same top candidates failing every cycle. Literature: Polubasov 2010 fig. 11 (the re-lay counter: a wire's
+fruitless re-lays change its coefficients, so the loop does not repeat itself). Counters: JSON
+`loop.pattern_share.retried` (moves on a pattern with earlier fruitless tries) and `stuck_patterns` (most
+patterns with fruitless tries at a stage-4 end); report line "order: ...". Tests: lib
+`the_pattern_rank_is_graded_by_fruitless_tries`; topo_tw7_patterns `pattern_stuck_lets_a_fresh_pattern_past_a_fruitless_one`
+(two u_clinch boards side by side, share 0.25: weight 0 retries only the fruitless one, weight 3 lets the other in).
+
+**C, via trade** (`pattern_moves` "via_trade", `Kind::ViaTrade`; fig. 21b -> 21c, Luzin 2015 pp. 9-10; Luzin,
+Popov & Popov 2013 p. 134 step 8.1). Detector `xrules::via_trades`: a plain wire on one layer (no via in the
+layering) with excess length > 0 and the other-net wires that cross its straight pad-to-pad line and not the wire
+(any count). Each such wire with its movers is one candidate (ranked by its own excess; a single mover already
+found as that U-clinch pair is skipped). Move `Sp::via_trade_move`: the subject laid first (movers out), its new
+wires held to its layer in `State::layers_now` for the movers' search (a crossing prices the via it implies), then
+the movers in route order; judged by the board's evaluation like every pattern move. ViaPair (21a, `pair_move`)
+keeps its own code (the stretch hold of a via pair is a different hold); both now end in the one held re-lay.
+**F, one core**: `Sp::held_relay(first, obs, hold, detour, ...)` replaces the bodies of `pattern_move` and TW6's
+`relay_kept` (copper unchanged: same take-out set, same lay order, same keep rule with detour 0 = `e1 < e0`).
+**E, pour move** (`pattern_moves` "pour", `Kind::PourCut`, only with `[capacity] pour_cuts`): candidates from
+`pourplan::cut_components` on the plan (now with the piece's centroid and area); the bounding wires' passes within
+twice the piece's radius + 1 mm carry the cut's violation price for the move's search only, spread over them
+(`viol_mm x g / (congestion price x passes)`, through `State::history`, restored after the move: no new search
+term), ranked before the excess lengths (`POUR_RANK` 10 x the pads grade). Without pour_cuts the report says the
+kind finds nothing. **Finding** on the pour fixture: the move is kept on the plan's pour check, but the drawn copper
+is unchanged (the relaid plan changes the triangles, not the way round the pads; the plan check reads the pass
+points, not the taut path), so E needs the plan check on the taut path or the price on the piece's homotopy first.
+Not done this round: SameNetLoop (needs a re-branch at the crossing that the plain placer has no form for),
+`loop = "cycles"` removal (touches ~10 test files and the drawing feedback path: own round), R6-R10 (wait for the
+pattern_moves flip / C's A/B).
+**detour_trade** stays PROPOSED: the sketch's rails (x 10-50) are no local minimum for the loop (it reaches 21c
+without moves); with rails x 22-38 it is (A 25.1 mm round the rails, the U-clinch move cannot leave it, the via
+trade lays A straight, rails +4.6 mm each, less length in all). Ignored test
+`proposed_detour_trade_via_trade_reaches_fig_21c` until the user approves a redrawn sketch.

@@ -136,6 +136,9 @@ pub struct CutComp {
     pub pads: Vec<usize>,
     pub islands: Vec<(usize, u32, u32)>,
     pub bounding: Vec<WireId>,
+    /// The islands' area-weighted centroid (math frame, the projection's) and fill area (nm²).
+    pub at: crate::geom::Vec2,
+    pub area: f64,
 }
 
 /// TW7 E: the components [`pour_cuts`] counts (cut off, holding a pad not in `base`), each with
@@ -200,7 +203,7 @@ pub fn cut_components(model: &BoardModel, items: &[Item], base: &PourBase) -> Ve
                 }
             }
         }
-        out.push(CutComp { net: c.net, pads, islands: c.islands.clone(), bounding: bounding.into_iter().collect() });
+        out.push(CutComp { net: c.net, pads, islands: c.islands.clone(), bounding: bounding.into_iter().collect(), at: c.at, area: c.area });
     }
     out
 }
@@ -302,6 +305,9 @@ mod tests {
         let comps = cut_components(&m, &[cut.clone(), far.clone()], &base);
         assert_eq!(comps.len(), 1);
         assert_eq!((comps[0].net, comps[0].pads.clone(), comps[0].bounding.clone()), (1, vec![0, 1], vec![4]));
+        // The west piece [2, 7] x [2, 32] mm: its centroid near (4.5, -17) mm (math frame), its area near 5 x 30 mm².
+        assert!((comps[0].at.x / MM as f64 - 4.4).abs() < 0.6 && (comps[0].at.y / MM as f64 + 17.0).abs() < 0.6, "{:?}", comps[0].at);
+        assert!((comps[0].area / (MM * MM) as f64 - 145.0).abs() < 20.0, "{}", comps[0].area / (MM * MM) as f64);
         let mut open = seg(2, (7 * MM, 2_300_000), (7 * MM, 20 * MM));
         if let Item::Track(t) = &mut open {
             t.wire = Some(4);

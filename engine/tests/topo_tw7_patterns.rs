@@ -321,10 +321,8 @@ fn pattern_share_bounds_the_moves_graded() {
     assert_eq!(all["pattern_share"]["waited"], 0, "no budget: nothing waits");
     assert_eq!(all["pattern_share"]["retried"].as_u64().unwrap(), pm(&all, 1) - 1, "one pattern, every try fruitless: each try after the first is a retry");
     assert_eq!(all["pattern_share"]["stuck_patterns"], 1);
-    for j in [&all] {
-        assert_eq!((uc(j, 2), uc(j, 1), uc(j, 0)), (pm(j, 0), pm(j, 1), pm(j, 2)), "per kind = totals (one kind on)");
-        assert_eq!(j["pattern_kinds"]["clinch"], serde_json::json!([0, 0, 0]));
-    }
+    assert_eq!((uc(&all, 2), uc(&all, 1), uc(&all, 0)), (pm(&all, 0), pm(&all, 1), pm(&all, 2)), "per kind = totals (one kind on)");
+    assert_eq!(all["pattern_kinds"]["clinch"], serde_json::json!([0, 0, 0]));
     let low = run(0.02);
     let mid = run(0.3);
     assert!(pm(&low, 1) >= 1, "the first move runs on the first cycle's other work");
@@ -380,4 +378,160 @@ fn pattern_stuck_lets_a_fresh_pattern_past_a_fruitless_one() {
     let graded = run(3.0);
     assert_eq!(plain["pattern_share"]["stuck_patterns"], 1, "excess alone: only A's pattern is retried: {}", plain["pattern_share"]);
     assert_eq!(graded["pattern_share"]["stuck_patterns"], 2, "graded: B's reversed pattern gets its tries too: {}", graded["pattern_share"]);
+}
+
+/// Part C (`[optimize] pattern_moves` "via_trade", Luzin 2015 pp. 9-10 fig. 21b; Luzin, Popov &
+/// Popov 2013 p. 134 step 8.1) on the approved u_clinch board: careless N (one layer, round M's
+/// end) is a via trade with one mover, M (it crosses N's straight line, not N). The move lays N
+/// first, held to its layer, then M round N's pad: N straight, no via, as the U-clinch move; the
+/// report counts it under via_trade.
+#[test]
+fn via_trade_lays_the_wire_straight_and_leads_the_crosser_round() {
+    let m = u_clinch_board();
+    for seed in [0u64, 1] {
+        let o = opts(&["via_trade"], seed);
+        let r = route_with(&m, &o, &RunControl::new());
+        assert_eq!(r.failed, 0, "seed {seed}: {:?}", r.warnings);
+        assert_eq!(vias(&r.items), 0, "seed {seed}");
+        assert!(net_len(&r.items, 1) < 4.5, "seed {seed}: N {} (straight)", net_len(&r.items, 1));
+        assert!(net_len(&r.items, 2) < 15.0, "seed {seed}: M {} (round N's pad)", net_len(&r.items, 2));
+        let j = loop_json(&m, &o);
+        let vt = &j["pattern_kinds"]["via_trade"];
+        assert!(vt[2].as_u64().unwrap() >= 1 && vt[0].as_u64().unwrap() >= 1, "seed {seed}: the via trade found and kept: {}", j["pattern_kinds"]);
+        assert_eq!(j["pattern_kinds"]["u_clinch"], serde_json::json!([0, 0, 0]), "seed {seed}: only the listed kind");
+        let rep = Checker::new(&m, &Options::default()).check_items(&r.items);
+        assert!(rep.violations.is_empty(), "seed {seed}: {:?}", rep.violations.first());
+    }
+}
+
+/// Part C, the detector alone: on the careless u_clinch state N (round M's end, not crossing it)
+/// has the one mover M; M (nearly straight) has N's wire across its line? No: N goes round M's
+/// end, so N's projection does not cross M's straight line and M has no via trade. A subject the
+/// caller refuses has none; a wire that crosses the line and the subject too is no mover.
+#[test]
+fn via_trades_are_found_on_the_careless_state() {
+    let m = u_clinch_board();
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let (st, w) = routed_x(&b, &m, &[2, 1], Some(1e9));
+    let (wm, wn) = (w[0], w[1]);
+    assert_eq!(xrules::via_trades(&st, &|_| true), vec![(wn, vec![wm])]);
+    assert!(xrules::via_trades(&st, &|x| x != wn).is_empty(), "the caller's subject filter");
+    // N laid straight across M (the crossing priced away): M crosses N's line and N itself, so no mover.
+    let (st3, w3) = routed_x(&b, &m, &[2, 1], Some(0.0));
+    assert!(st3.crossings(w3[1]).iter().any(|x| x.other == w3[0]));
+    assert!(xrules::via_trades(&st3, &|_| true).iter().all(|(s, mv)| *s != w3[1] || !mv.contains(&w3[0])), "{:?}", xrules::via_trades(&st3, &|_| true));
+    assert_eq!(Kind::parse("via_trade"), Some(Kind::ViaTrade));
+    assert_eq!(Kind::parse("pour"), Some(Kind::PourCut));
+    assert_eq!(Kind::known(), "clinch, double, unlayerable, u_clinch, evasion, via_trade, pour");
+}
+
+/// PROPOSED pattern `detour_trade` (tools/tw7_sketch.py `p_detour_trade`, fig. 21b -> 21c; the
+/// expected answer is NOT yet user-approved, so this test is ignored and not a regression test).
+/// The sketch's rails (x 10-50) are no local minimum for the loop (it lays A straight and dips the
+/// rails without any move), so the rails here are shorter, x 22-38 (round 4): two 0.5 mm rails B1,
+/// B2 (nets 2, 3) across the line of a 0.25 mm wire A (net 1, 14 mm straight). Without moves A
+/// goes round the rails' ends (25.1 mm), 0 vias; the U-clinch move (one rail at a time) cannot
+/// leave it. The via trade (A first, held, then both rails) leads both rails round A2 (about
+/// +4.6 mm each): A straight, 0 vias, less length in all.
+#[test]
+#[ignore = "PROPOSED pattern detour_trade: expected answer not yet user-approved"]
+fn proposed_detour_trade_via_trade_reaches_fig_21c() {
+    let m = board(
+        60.0,
+        30.0,
+        &[(2, 22.0, 14.0, 1.0), (2, 38.0, 14.0, 1.0), (3, 22.0, 15.5, 1.0), (3, 38.0, 15.5, 1.0), (1, 30.0, 5.0, 1.0), (1, 30.0, 19.0, 1.0)],
+        &[0.25, 0.5, 0.5],
+    );
+    let r0 = route_with(&m, &opts(&[], 0), &RunControl::new());
+    let u = route_with(&m, &opts(&["u_clinch", "evasion"], 0), &RunControl::new());
+    let r = route_with(&m, &opts(&["via_trade"], 0), &RunControl::new());
+    eprintln!("detour_trade: off A {:.2} vias {}; u_clinch A {:.2} vias {}; via_trade A {:.2} B1 {:.2} B2 {:.2} vias {}", net_len(&r0.items, 1), vias(&r0.items), net_len(&u.items, 1), vias(&u.items), net_len(&r.items, 1), net_len(&r.items, 2), net_len(&r.items, 3), vias(&r.items));
+    assert_eq!(r.failed, 0, "{:?}", r.warnings);
+    let all = |r: &topor_engine::route::RouteResult| net_len(&r.items, 1) + net_len(&r.items, 2) + net_len(&r.items, 3);
+    assert!(net_len(&r0.items, 1) > 20.0 && vias(&r0.items) == 0, "careless without the move: A {} vias {}", net_len(&r0.items, 1), vias(&r0.items));
+    assert!(net_len(&u.items, 1) > 20.0, "the U-clinch move cannot leave it: A {}", net_len(&u.items, 1));
+    assert_eq!(vias(&r.items), 0);
+    assert!(net_len(&r.items, 1) < 14.5, "A straight: {}", net_len(&r.items, 1));
+    assert!(net_len(&r.items, 2) < 22.0 && net_len(&r.items, 3) < 22.0, "rails round A2: {} {}", net_len(&r.items, 2), net_len(&r.items, 3));
+    assert!(all(&r) < all(&r0), "less length in all: {} vs {}", all(&r), all(&r0));
+    let rep = Checker::new(&m, &Options::default()).check_items(&r.items);
+    assert!(rep.violations.is_empty(), "{:?}", rep.violations.first());
+}
+
+
+/// The pour board of `pourplan`'s tests as a routable board: 50 x 40 mm, GND pour on B.Cu over
+/// [2, 32] x [2, 32] mm listing U1.1 (4, 15), U2.1 (4, 25) and U3.1 (20, 15), U4.1 (20, 25),
+/// U5.1 (25, 20); SIG pads A (7, 2.3), B (7, 31.7); every pad SMD on B.Cu (1 mm square).
+fn pour_board() -> BoardModel {
+    const M: i64 = 1_000_000;
+    let pad = |r: &str, net: i32, x: i64, y: i64| {
+        format!(
+            r#"{{"uuid":"{r}","ref":"{r}","number":"1","net":{net},"attr":"smd","center":[{x},{y}],"rotation_deg":0.0,"layers":[31],
+                "shapes":{{"31":{{"kind":"rect","w":1000000,"h":1000000}}}},"drill":null}}"#
+        )
+    };
+    let pads = [pad("U1", 1, 4 * M, 15 * M), pad("U2", 1, 4 * M, 25 * M), pad("U3", 1, 20 * M, 15 * M), pad("U4", 1, 20 * M, 25 * M), pad("U5", 1, 25 * M, 20 * M), pad("A", 2, 7 * M, 2_300_000), pad("B", 2, 7 * M, 31_700_000)];
+    let s = format!(
+        r#"{{"units":"nm","board":"t",
+            "layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":31,"name":"B.Cu","kind":"signal"}}],
+            "nets":[{{"code":1,"name":"GND"}},{{"code":2,"name":"SIG"}}],
+            "outline":[{{"kind":"seg","a":[0,0],"b":[50000000,0]}},{{"kind":"seg","a":[50000000,0],"b":[50000000,40000000]}},
+                       {{"kind":"seg","a":[50000000,40000000],"b":[0,40000000]}},{{"kind":"seg","a":[0,40000000],"b":[0,0]}}],
+            "pads":[{}],
+            "pours":[{{"uuid":"zz","net":1,"layers":[31],"pads":["U1.1","U2.1","U3.1","U4.1","U5.1"],"vias":[],"clearance":200000,
+                       "min_thickness":254000,"thermal_gap":500000,"spoke_width":500000,"pad_connection":1,
+                       "fills":[{{"layer":31,"outer":[[2000000,2000000],[32000000,2000000],[32000000,32000000],[2000000,32000000]]}}]}}],
+            "rules":{{"min_clearance":200000,"min_track_width":200000,"min_via_diameter":450000,"min_via_drill":250000,
+                     "min_annular":100000,"hole_to_hole":250000,"edge_clearance":500000,
+                     "default":{{"clearance":200000,"width":250000,"via_d":600000,"via_drill":300000}},"per_net":{{}}}}}}"#,
+        pads.join(",")
+    );
+    BoardModel::from_json(&s).unwrap()
+}
+
+/// Part E (`[optimize] pattern_moves` "pour", tw4-r2 (3); needs `[capacity] pour_cuts`): SIG's
+/// straight plan (x = 7 mm, on B.Cu, its pads' layer) cuts U1.1 and U2.1 off the pour, a predicted
+/// violation with the cut priced. The pour move is found and tried, and lays SIG again with the
+/// cut's price on its passes near the cut-off piece. Round-4 finding (kept as the test's record,
+/// not as the wanted answer): the move is kept on the plan's pour check (plan eval 1279.4 ->
+/// 30.9, TOPO_LOOPDBG), but the drawn copper is the same straight track: the relaid plan only
+/// changes the triangles SIG passes, not its way round U1/U2, and the plan's check (on the pass
+/// points, not the taut path) no longer sees the cut. Without pour_cuts the kind finds nothing
+/// and the report says so.
+#[test]
+fn pour_move_is_found_and_tried_and_needs_pour_cuts() {
+    let m = pour_board();
+    let o = Options { pour_cuts: true, ..opts(&["pour"], 0) };
+    let j = loop_json(&m, &o);
+    let pk = &j["pattern_kinds"]["pour"];
+    assert!(pk[0].as_u64().unwrap() >= 1 && pk[1].as_u64().unwrap() >= 1, "found and tried: {}", j["pattern_kinds"]);
+    let r = route_with(&m, &o, &RunControl::new());
+    assert_eq!(r.failed, 0, "{:?}", r.warnings);
+    assert!(r.warnings.iter().any(|w| w.contains("[optimize] pattern_moves = pour") && !w.contains("finds nothing")), "{:?}", r.warnings);
+    let off = Options { pour_cuts: false, ..opts(&["pour"], 0) };
+    let ro = route_with(&m, &off, &RunControl::new());
+    assert!(ro.warnings.iter().any(|w| w.contains("\"pour\" finds nothing without [capacity] pour_cuts = true")), "{:?}", ro.warnings);
+    assert_eq!(loop_json(&m, &off)["pattern_kinds"]["pour"], serde_json::json!([0, 0, 0]));
+}
+
+/// Verifier round 3, F1 (reports/verify-tw7-moves-data/terminal_clinch_test.rs): the user-approved
+/// `terminal_clinch` pattern at the sketch's geometry (tools/tw7_sketch.py p_terminal_clinch;
+/// Luzin 2015 p. 9 fig. 18): M (0.5 mm) runs straight past N's terminal b1. Expected answer: N
+/// straight (15 mm), M round b1 (about 16.8 mm drawn), no via. Seed 1 without pattern moves ends
+/// careless (N about 26.4 mm round M's end); with the moves the U-clinch move reaches the answer.
+#[test]
+fn terminal_clinch_pattern_reaches_the_expected_answer() {
+    let m = board(26.0, 20.0, &[(1, 20.0, 10.0, 1.0), (1, 5.0, 10.0, 1.0), (2, 18.8, 2.5, 1.0), (2, 18.8, 17.5, 1.0)], &[0.25, 0.5]);
+    let all = ["clinch", "double", "unlayerable", "u_clinch", "evasion"];
+    let base = Options { seed: 1, ..Options::default() };
+    let r0 = route_with(&m, &base, &RunControl::new());
+    assert!(net_len(&r0.items, 1) > 20.0, "moves off, seed 1: careless N {}", net_len(&r0.items, 1));
+    for seed in [0u64, 1] {
+        let o = Options { seed, pattern_moves: all.iter().map(|s| s.to_string()).collect(), ..Options::default() };
+        let r = route_with(&m, &o, &RunControl::new());
+        assert_eq!((r.failed, vias(&r.items)), (0, 0), "seed {seed}: {:?}", r.warnings);
+        assert!(net_len(&r.items, 1) < 15.5, "seed {seed}: N {} (straight)", net_len(&r.items, 1));
+        assert!(net_len(&r.items, 2) < 17.5, "seed {seed}: M {} (round b1)", net_len(&r.items, 2));
+        assert!(Checker::new(&m, &Options::default()).check_items(&r.items).violations.is_empty(), "seed {seed}");
+    }
 }
