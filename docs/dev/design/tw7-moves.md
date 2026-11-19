@@ -274,3 +274,27 @@ the pitch of a rail pair round a bend is not kept), not C; the expected answer i
 seed 1 ends careless (A round the rails, 49.07 mm; seed 0 reaches (c) without moves), the test asserts that as
 the reason for C. The shorter-rail variant (x 22-38, A 25.1 mm careless, only the via trade leaves it) stays as
 the ignored `proposed_detour_trade_short_rails_needs_the_via_trade`.
+
+**Round 4 A/B** (ccx33 timing slots, 300 s wall, rev 152d3438 = before the sync-wait merge, so its cycles/min
+are read only within the job; tags tw7ra/tw7rb-152d3438; reports/tw7-moves-data/r4/). Arms: `-` moves off;
+`u` = the five kinds + share 0.25 + pattern_stuck 1 + detour 0; `uz` = u with pattern_stuck 0; `ul` / `um` = u
+with `[factors] detour` 0.25 / 0.5. Means (unconnected / drc_new / vias / detour>1.5; cycles per min):
+
+| arm | qmtech s0-4 | esp s0-7 |
+|---|---|---|
+| - | 20.4 / 251 / 160.4 / 27.8; 5.6 | 8.6 / 140 / 59.1 / 14.6; 13.7 |
+| u | 21.0 / 256 / 154.0 / 23.0; 6.5 | 8.6 / 125 / 55.1 / 13.9; 16.9 |
+| uz | 20.8 / 246 / 154.4 / 23.4; 6.1 | 9.9 / 139 / 56.5 / 13.9; 16.9 |
+| ul | 20.6 / 225 / 152.4 / 21.6; 6.2 | 8.6 / 118 / 55.6 / 14.1; 17.2 |
+| um | 19.4 / 248 / 153.4 / 20.2; 6.3 | 6.9 / 141 / 59.2 / 14.2; 16.2 |
+
+Paired per seed vs `-` on qmtech: u vias 4/1 seeds better (sum -32), detour>1.5 4/1 (-24), unconnected 2/3 (+3);
+um vias 5/0 (-35), detour>1.5 5/0 (-38), unconnected 4/1 (-5); ul vias 5/0 (-40), detour 5/0 (-31),
+unconnected 2/2 (+1). esp um: unconnected 5/3 (-14), vias and detours level. Stuck order: uz vs u on esp
+unconnected 1/7 seeds better (+10), qmtech level: `pattern_stuck` 1 stays. d: both k help qmtech, k 0.5 also
+completion on both boards (esp vias +33 vs u, 1/7), so D stays (opt-in) with 0.5 the candidate; k 1 (round 3) added
+via pairs. Per connection (conn3 over seeds): u 20 better / 20 worse, um 28 / 21. Systematic worse in every u arm:
+qmtech ADV_CEC / ADV_TXC- / JS2_9 (1-2 DRC in seeds 1-4, base 0): vias dropped into the U3 pin row 14-16
+(shorting_items ADV_CEC via on pad 15 ADV_TXC-) and JS2_4/JS2_9 at RN3; the drawing's via site in a pad row, not the
+moves' plan (parking list). Flip proposal (lead/user): `pattern_moves` = the five kinds with `[factors] detour`
+0.5 (um) holds over all qmtech seeds on vias and detours and 4/5 on completion.
