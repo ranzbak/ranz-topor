@@ -44,6 +44,54 @@ geometries (cached run-wide as today) and 9 pricings per repricing of that via; 
 new threshold; a via over at every point of its triangle still costs a violation).
 Not done: a smooth price below over = 0 (the per-edge model has the same step; changing it is its own stage).
 
+## (2b) The via disc on an edge at the via's height (lead decision (B), 2026-11-19)
+**Finding** (equal time, rev 3d0bb071; sweep trace, throw-away branch `tw4r2-dbg2`): `via_best_point` takes IO6's
+CM1 price at the gap triangles 4108/4109 to 0, and the sweep still leaves the via under the chip. In the sweep key,
+the price at the gap is about +1.4 k against about -8 under the chip. That price is the **per-edge packing of the
+via disc** (`pack::wire_discs`). It puts the full disc on the edge the wire enters the via triangle by and on the
+edge it leaves by, as if the via sat on each edge line. In a pad gap these edges are the narrow chords, so the
+disc there is the same fixed-point error as the gap cut at one fixed point. `via_over_ramp` hid it on IO6 by
+pricing the CM1 term low, and moved the error to ENABLE (1.07 -> 1.8). The pattern probe `via_gap_best_point`
+(rounds 1) takes the far gap with every option.
+
+**Model.** A via of wire w in traversal k lies at its point V (the point CM1 prices: the planned via point; with
+via_best_point, the best point). It packs on the entry edge e_in (pass k-1) and the exit edge e_out (pass k), as
+today, but at its height h_e = the distance from V to edge e's line, on the via's side, instead of on the line.
+- Pair requirement (`pack::pair_req`), disc a against neighbour b (track width w_b, or disc d_b) at copper gap g.
+  Today: R = d_a/2 + g + w_b/2 along the edge. New: x = sqrt(max(0, R^2 - h_e^2)), stretched by the neighbour's
+  oblique factor as today. The neighbour's centre line must clear the disc, and the disc centre is h_e off the line.
+  This is exact for a round via against a straight track crossing the edge. Two discs on one edge use their
+  heights' difference.
+- End margin (`Packer::margin_all`): the smallest offset along the edge where the disc centre, at the point
+  h_e off the line, clears the end obstacle's polygon (`margin` already steps along the edge testing polygon
+  distance; the test point moves by h_e along the edge normal). This is exact against the obstacle.
+  - A straight pad side parallel to the via's offset keeps its full margin.
+  - A round pad, or a pad corner, gives room as the via moves off the line.
+- A disc-only item (the wire is on another layer at this edge) has no track term. Its requirement is the sqrt term
+  alone, so it goes to 0 when the via sits R or more off the edge, and the via's room is then the CM1 gap cut.
+- **Graded.** h_e = 0 gives today's numbers exactly. Every term is continuous in h_e: no threshold, no step.
+
+Maley 1987 pp. 32-33, 40: a via is a point feature, and a cut's capacity is what lies on the cut. A via off the
+edge line is on that edge's cut only by the part of its disc the line passes through. Popov & Popov 2012
+pp. 117-118: the via is a round pad, and the room of a passage counts what passes it. D3 (wire_discs doc): the
+disc counts on both edges; that stays.
+
+**Code.** The per-pass disc of the capacity model gains the via's height per side, `Disc` = [d0, d1] + h (0 = today).
+- `CapModel::apply` writes h from the via point it already computes (`vpts`). A changed height reprices the pass
+  like a changed disc (`layers_changed`, the build memo key, the undo log).
+- The drawing's packing passes h = 0 and is unchanged.
+- Option `[capacity] via_disc_height` (default off until the A/B).
+
+**Tests.**
+- Unit: `pair_req` at h = 0 equals today's value. It falls continuously to the track-only term, and exactly at
+  sqrt(R^2 - h^2). `margin_all` at an offset against a straight side (unchanged) and against a circle (smaller).
+- Integration: stored = fresh prices (`viacheck`), and local judge focus exact on the qmtech crop.
+- Off = main copper on 4 boards. TOPO_LOCALCHECK 0. Mutants per changed line.
+- Probe: via_gap_best_point (not in the suite).
+- **Acceptance** (lead): equal time for b / r / br + disc, 300 s, esp s0-4 + qmtech s0. A default flips only if
+  all of these hold: IO6 is removed, no connection (ENABLE included) gets a new det > 1.5, and KiCad new does not
+  rise.
+
 ## (1) T1 part 2: the pad exit as a plan object
 Per wire end at a pad with another net's copper closer than w + 2s (the 5.10 fine-pitch test, `board::exit_stub`'s
 gate, without its stub), the plan holds `Exit { wire, end, pad, side, at, dir, w_e, reach }`, read from the plan:
