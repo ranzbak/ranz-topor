@@ -4102,6 +4102,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn set_lr(&mut self, lr: layers::LayerReport, p: Option<Predicted>) {
                 *self.lr = lr;
                 self.st.layers_now = layers_now(self.st, &self.lr.events, self.bottom);
+                self.st.mark_free_wires(&self.lr.events);
                 if p.is_none() {
                     self.pred_local = false;
                 }
@@ -5029,6 +5030,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let cross_vias0 = st.cross_vias;
         st.cross_vias = true;
         st.layers_now = layers_now(&st, &lr.events, bottom);
+        // TW5 (4): crossing a wire that crosses nothing is priced by its freedom (free_wire_cross).
+        st.free_wire_a = opts.free_wire_cross;
+        st.mark_free_wires(&lr.events);
         let pred0 = measure(&st, &lr);
         // TW5: the board's alive wires (the throttle's first escape), the re-lay counts and the
         // history the loop starts from.
@@ -5231,6 +5235,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         st.cross_vias = cross_vias0;
         st.layers_now.clear();
+        st.free_wire_a = 1.0;
+        st.mark_free_wires(&[]);
         let loop_s = t_loop.elapsed().as_secs_f64();
         let time_hit = rep.stop == "time limit" || rep.stop == "loop_time_share";
         loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit });

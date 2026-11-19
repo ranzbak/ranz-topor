@@ -1195,6 +1195,16 @@ pub struct Options {
     /// (`[search] reroute_rounds`) before the loop (true, default, before TW5) or leave their work
     /// to the loop's history and escapes (false, with TW5).
     pub preloop_p4: bool,
+    /// TW5 (4) `[optimize] free_wire_cross` (`loop = "topor"`): the crossing price of the loop's
+    /// reroutes for crossing a wire with no crossing of its own, graded by the crossed wire's
+    /// crossings k: share a + (1 - a) k/(1 + k) of the crossing factor's loop share (k = 0: a;
+    /// many: 1). With a < 1 such a wire is also seen on every layer its own stretch allows instead
+    /// of the bottom layer it is drawn on while nothing crosses it. A layering separates a
+    /// crossing with a free wire without a via, so TopoR's objective (length, vias) does not
+    /// count it (Polubasov 2010 «Оптимизация разводки», fig. 4: only a crossing of a stretch with a
+    /// via is penalised). 1 (default) = every crossing at the full loop share, a crossing-free
+    /// wire held to the bottom layer (before TW5 (4)).
+    pub free_wire_cross: f64,
     /// Tests (engine only): every refinement epoch evaluates at least this many candidates, also
     /// past a kept one ([`crate::topo::refine_par::lanes::with_window`]); 0 = off.
     pub refine_test_window: usize,
@@ -1641,6 +1651,7 @@ impl Default for Options {
             loop_history_fade: 0.8,
             float_wire: false,
             preloop_p4: true,
+            free_wire_cross: 1.0,
             refine_test_window: 0,
             draw_lanes: 0,
             draw_test_reverse: false,

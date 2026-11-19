@@ -709,3 +709,39 @@ fn the_layering_walk_moves_to_other_layerings_per_seed() {
         assert!(walked > 0 && moved > 0, "{n_layers} layers: walked {walked}, moved {moved} of 24");
     }
 }
+
+/// TW5 (4), Polubasov 2010 fig. 10 (p. 108): W1 (THT, horizontal) crosses W2 (THT, vertical) and
+/// W3 (SMD pads on F.Cu, vertical). The optimum is all three straight with 0 vias: W3 on F.Cu,
+/// W1 on B.Cu, W2 on F.Cu (25 mm). A wire that crosses nothing is drawn on the bottom layer and,
+/// with `free_wire_cross` = 1 (default), a crossing with it is priced as if it were held there, so
+/// a re-lay detours round it instead of crossing it (the paper's local minimum, fig. 10a). With
+/// `free_wire_cross` < 1 the crossing is priced by its freedom (no via; a share of the crossing
+/// price), and the loop reaches the optimum. Each seed of 0..4 at 0, the default reported.
+#[test]
+fn a_wire_that_crosses_nothing_is_crossed_at_its_freedom() {
+    let pads = [
+        ("J1", 1, 2.0, 5.5, 1.2, 1.2, 99), ("J2", 1, 12.0, 5.5, 1.2, 1.2, 99),
+        ("J3", 2, 5.0, 2.0, 1.2, 1.2, 99), ("J4", 2, 5.0, 9.0, 1.2, 1.2, 99),
+        ("U1", 3, 8.5, 1.5, 0.8, 0.8, 0), ("U2", 3, 8.5, 9.5, 0.8, 0.8, 0),
+    ];
+    let m = board_layers(14.0, 11.0, 3, &pads, 2);
+    let run = |extra: &str| {
+        let o = loop_opts(&format!(r#""topo_rounds": 8, {extra}"#));
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        let r = route_with(&m, &o, &ctl);
+        let len: f64 = r.connections.iter().map(|c| c.length_nm as f64 / 1e6).sum();
+        let vias: usize = r.connections.iter().map(|c| c.vias).sum();
+        let routed = r.connections.iter().filter(|c| c.status == "routed").count();
+        let lay: Vec<String> = r.connections.iter().map(|c| format!("{} {}", c.name, c.layers.join("/"))).collect();
+        (len, vias, routed, lay.join("; "))
+    };
+    let d = run(r#""seed": 3"#);
+    eprintln!("default: {:.2} mm, {} vias, {} routed: {}", d.0, d.1, d.2, d.3);
+    for seed in 0..4 {
+        let f = run(&format!(r#""seed": {seed}, "free_wire_cross": 0.0"#));
+        eprintln!("free_wire_cross 0, seed {seed}: {:.2} mm, {} vias, {} routed: {}", f.0, f.1, f.2, f.3);
+        assert_eq!((f.1, f.2), (0, 3), "seed {seed}: 0 vias, 3 routed: {}", f.3);
+        assert!(f.0 <= 25.0 * 1.05, "seed {seed}: {:.2} mm > 1.05 x 25 mm (all straight): {}", f.0, f.3);
+    }
+}
