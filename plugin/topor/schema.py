@@ -485,6 +485,7 @@ ENGINE_INTERNAL = {
     "pour_served": "passed through from [nets] pour_served (boolean entries only) by run.build_options",
     "refine_reference": "test/debug switch: run the serial reference refine instead of the lane executor (same result by construction)",
     "refine_test_window": "test-only switch that caps the lane look-ahead window to force speculation conflicts",
+    "loop_p4_test_fail": "test-only switch (TW5 f): every in-loop P4 round treats its second placing as failed, so the round's restore is tested",
     "draw_test_reverse": "test-only switch: the drawing's first lane units start late, so they finish last (par-draw determinism tests)",
 }
 

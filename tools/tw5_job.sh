@@ -221,6 +221,11 @@ case ${1:-} in
     i=""; for s_ in 0 1 2 3 4 5 6 7 8 9; do i+="Ofr16s$s_:p-inner_layer_room Nefr16s$s_:p-inner_layer_room "; done
     u e 4 "Ofr16s1:esp Ofr16s2:esp Ofr16s3:esp" "Nefr16s1:esp Nefr16s2:esp Nefr16s3:esp" "$i" "Or1:eprom Or1:wiccon Or1:esp Or1:qmtech"
     wait; note "all done" ;;
+  py)
+    # The pytest files a schema change touches (after the merge trial's one new failure, test_config_docs).
+    ( hzq run --pin --threads 2 --name py -- bash -c "cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config_docs.py tests/plugin/test_config.py tests/test_engine_surface.py > $R/pytest-t.log 2>&1; echo rc \$? >> $R/pytest-t.log" > /dev/null 2>&1
+      note "pytest targeted: $(tail -2 $R/pytest-t.log | tr '\n' ' ')" ) & sleep 1
+    wait; note "all done" ;;
   r12)
     # Round 12 (main 5a105d3c, via_cuts on): the single-part ablations again (TW5 r2's were before via_cuts), 16 cycles,
     # qmtech s0-2 (2 threads, as tw5r11's O/F) and esp s1-3; parts a-e and c+e. O and F come from tw5r11 (same engine).
