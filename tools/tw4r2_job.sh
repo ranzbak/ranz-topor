@@ -3,7 +3,8 @@
 #   tw4r2_job.sh one <run>   one run; <run> = <cfg>:<board>[:<threads>]
 #   tw4r2_job.sh tests       cargo tests of the round (viacut unit tests, topo_cm1_room)
 #   tw4r2_job.sh io6         tests + esp/qmtech rounds=1 for every option of item (2)
-#   tw4r2_job.sh eq <cfgs>   equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads)
+#   tw4r2_job.sh eq <cfgs>   equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults),
+#                            plus eprom/wiccon rounds=1 with the defaults (off = main copper)
 # Every run: harness.score_runs (cpu clock 2400 s unless equal time), optimize.runs=1, --no-png, realise erbs.
 # cfg: K = rounds=1; e<k> = equal time (wall 300 s) seed k; suffixes (any order, at the end):
 #   b = [capacity] via_best_point = true; r = [capacity] via_over_ramp = 0.05; R = via_over_ramp = 0.1;
@@ -56,7 +57,9 @@ case ${1:-} in
     wait; note "all done" ;;
   eq)
     shift
+    ( hzq run --threads 2 --name t4r2-off -- bash -c "bash $ROOT/tools/tw4r2_job.sh one K:eprom & bash $ROOT/tools/tw4r2_job.sh one K:wiccon & wait" > $R/u-off.log 2>&1; note "unit off rc $?" ) &
     for c in "$@"; do
+      [ "$c" = "-" ] && c=""
       for s in 0 1 2 3 4; do
         ( hzq run --threads 4 --name t4r2-e$s$c-esp -- bash $ROOT/tools/tw4r2_job.sh one e$s$c:esp:4 > $R/u-e$s$c-esp.log 2>&1; note "unit e$s$c esp rc $?" ) &
       done
