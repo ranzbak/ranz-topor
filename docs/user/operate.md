@@ -604,6 +604,7 @@ the preview summary names the warnings (*After routing, check: …*), report.md 
 | [`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit) | the time limit stopped the run before its work caps |
 | [`DRC_NEW_VIOLATIONS`](troubleshoot.md#drc_new_violations) | KiCad's DRC of the routed copy finds new violations: counted by type, the first places with nets and position (mm); a warning only — Accept still works (costly, not failed), then fix them in KiCad → Inspect → Design Rules Checker |
 | [`RULES_MISMATCH`](troubleshoot.md#rules_mismatch) | error, self-check: KiCad's DRC required a larger clearance between two nets than topor gave the router (topor read the design rules wrong); the run stops before the preview with an error dialog naming the nets and both values, nothing is applied — please report it |
+| [`DRC_WITHOUT_PROJECT`](troubleshoot.md#drc_without_project) | error, self-check: KiCad's DRC of the routed copy did not see the board's project file and judged with its built-in defaults, so its numbers are void (not a rules problem); the run stops before the preview, nothing is applied — route again |
 | [`ENGINE_FAILED`](troubleshoot.md#engine_failed) | error: all or most connections failed with the same engine error (e.g. the board's projection could not be built); with nothing routed the run ends in an error dialog naming the cause, never as a normal run that routed nothing |
 
 The pre-flight also warns about pads inside a track keepout on all their layers
@@ -630,7 +631,10 @@ works.
 
 If KiCad's DRC requires a larger clearance between two nets than topor gave the router, topor read the design rules
 wrong: the run stops before the preview with the error [`RULES_MISMATCH`](troubleshoot.md#rules_mismatch), naming
-the nets and both values, and nothing is applied. Please report it.
+the nets and both values, and nothing is applied. Please report it. The check only runs when the DRC provably used the
+board's own project file; an item without a net counts with the Default net class clearance (KiCad takes the larger of
+the two items' clearances). If the DRC copy lacked the project file you get
+[`DRC_WITHOUT_PROJECT`](troubleshoot.md#drc_without_project) instead.
 
 ## Accept, Reject and undo
 
