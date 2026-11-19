@@ -9647,7 +9647,7 @@ mod tests {
                 ahead_late.store(a_back.load(Ordering::SeqCst), Ordering::SeqCst);
                 slots.release();
             });
-            while slots.st.lock().unwrap().queue.len() < 1 {
+            while slots.st.lock().unwrap().queue.is_empty() {
                 std::thread::yield_now();
             }
             let kept = !slots.turn(4, 0);

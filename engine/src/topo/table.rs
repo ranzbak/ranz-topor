@@ -399,6 +399,8 @@ impl<V> SharedTable<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A toy offer: (run, cycle, mid-cycle offer, criteria, check).
+    type ToyOffer = (usize, usize, bool, Criteria, u8);
 
     fn c(errors: usize, vias: usize, length_mm: f64) -> Criteria {
         Criteria { errors, violations: errors, vias, length_mm, ..Criteria::default() }
@@ -575,7 +577,7 @@ mod tests {
 
     /// The toy offer stream of `runs` runs over cycles 0..=`last`: every cycle's end offer, plus a
     /// mid-cycle offer in some cycles; `check` marks a restart now and then (the stable series).
-    fn toy_offers(runs: usize, last: usize) -> Vec<(usize, usize, bool, Criteria, u8)> {
+    fn toy_offers(runs: usize, last: usize) -> Vec<ToyOffer> {
         let mut v = Vec::new();
         for r in 0..runs {
             for cy in 0..=last {
@@ -628,7 +630,7 @@ mod tests {
                 let t: SharedTable<usize> = SharedTable::new(runs, 3, obj, 2).with_lag(lag);
                 // each run's own offers stay in order; the runs interleave at random, and a run that
                 // just finished a cycle reads the table now and then, as at a sync point
-                let mut per: Vec<Vec<(usize, usize, bool, Criteria, u8)>> = (0..runs).map(|r| offers.iter().copied().filter(|o| o.0 == r).collect()).collect();
+                let mut per: Vec<Vec<ToyOffer>> = (0..runs).map(|r| offers.iter().copied().filter(|o| o.0 == r).collect()).collect();
                 while per.iter().any(|p| !p.is_empty()) {
                     let mut live: Vec<usize> = (0..runs).filter(|&r| !per[r].is_empty()).collect();
                     live.shuffle(&mut rng);
