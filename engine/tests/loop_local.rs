@@ -783,3 +783,24 @@ fn free_wire_cross_reaches_the_fig10_optimum_for_some_seed() {
     eprintln!("optimum reached: default {hit_d} of 8, free_wire_cross 0 {hit_f} of 8");
     assert!(hit_f > 0, "free_wire_cross 0: no seed of 8 reaches the optimum (default {hit_d})");
 }
+
+/// TW5 (4): the crossing price multiplier grows smoothly with the crossed wire's events k,
+/// a + (1 - a) k/(1 + k): a for a free wire (which alone counts as free), towards 1 for a wire
+/// with many; a = 1 (default) clears both marks.
+#[test]
+fn free_wire_cross_is_graded_by_the_crossed_wires_events() {
+    let (m, b) = fig10();
+    let wt = InitWeights::default();
+    let mut st = State::new(&b.proj);
+    let (w2, _) = st.route_conn(&conn(&m, b, 2, "J3", "J4"), &wt, 1.0).expect("W2");
+    let (w3, _) = st.route_conn(&conn(&m, b, 3, "U1", "U2"), &wt, 1.0).expect("W3");
+    let mut ev: Vec<Vec<(usize, f64, i32)>> = vec![Vec::new(); st.wires.len()];
+    ev[w3] = vec![(0, 0.2, 0), (0, 0.8, 0)];
+    st.free_wire_a = 0.4;
+    st.mark_free_wires(&ev);
+    assert!((st.cross_k[w2] - 0.4).abs() < 1e-12 && st.free_now[w2], "{:?} {:?}", st.cross_k, st.free_now);
+    assert!((st.cross_k[w3] - (0.4 + 0.6 * 2.0 / 3.0)).abs() < 1e-12 && !st.free_now[w3], "{:?}", st.cross_k);
+    st.free_wire_a = 1.0;
+    st.mark_free_wires(&ev);
+    assert!(st.cross_k.is_empty() && st.free_now.is_empty());
+}

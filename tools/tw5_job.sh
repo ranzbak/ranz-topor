@@ -191,6 +191,11 @@ case ${1:-} in
     u i 1 "$ln"
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  r10)
+    # Round 10: merge trial on the tip (main 94b1c848 merged) + the free_wire_cross mutants.
+    ( hzq run --pin --threads 2 --name fw-mut -- bash $ROOT/tools/tw5_job.sh mutfw > $R/mutfw.log 2>&1; note "mutfw rc $?" ) & sleep 1
+    ( bash $ROOT/tools/tw5_job.sh final > $R/final-mode.log 2>&1 ) & sleep 1
+    wait; note "all done" ;;
   r9)
     # Round 9: the rewritten free_wire_cross tests + mutants, the fit fixture/test checks, the pattern pytest that the
     # build_board fix touches, the run-flow press test alone (flaky under load in tw5r7?); qmtech single parts c/d/e and
@@ -220,7 +225,7 @@ case ${1:-} in
     I=$ROOT/engine/src/topo/init.rs
     sub 'cross += wt.cross_mm * f' 'cross += wt.cross_mm' | mut f1_share $I --test loop_local -- free_wire_cross_reaches a_wire_that_crosses_nothing
     sub 'if self.free_now.get(w).copied().unwrap_or(false) {' 'if false {' | mut f2_free_held $I --test loop_local -- free_wire_cross_reaches a_wire_that_crosses_nothing
-    sub 'self.cross_k = (0..self.wires.len()).map(|w| a + (1.0 - a) * k(w) as f64 / (1.0 + k(w) as f64)).collect();' 'self.cross_k = (0..self.wires.len()).map(|_| a).collect();' | mut f3_graded $I --test loop_local -- free_wire_cross_reaches a_wire_that_crosses_nothing ;;
+    sub 'self.cross_k = (0..self.wires.len()).map(|w| a + (1.0 - a) * k(w) as f64 / (1.0 + k(w) as f64)).collect();' 'self.cross_k = (0..self.wires.len()).map(|_| a).collect();' | mut f3_graded $I --test loop_local -- free_wire_cross ;;
   r7)
     # Round 7 (TW5 default off, main 1503c13b merged, inner_layer_room declares In2.Cu power): the fit fixtures
     # regenerated (In1 routed) into the tree, then the merge trial; qmtech 16 cycles single-part ablations for the
