@@ -57,11 +57,20 @@ pricing the CM1 term low, and moved the error to ENABLE (1.07 -> 1.8). The patte
 **Model.** A via of wire w in traversal k lies at its point V (the point CM1 prices: the planned via point; with
 via_best_point, the best point). It packs on the entry edge e_in (pass k-1) and the exit edge e_out (pass k), as
 today, but at its height h_e = the distance from V to edge e's line, on the via's side, instead of on the line.
-- Pair requirement (`pack::pair_req`), disc a against neighbour b (track width w_b, or disc d_b) at copper gap g.
-  Today: R = d_a/2 + g + w_b/2 along the edge. New: x = sqrt(max(0, R^2 - h_e^2)), stretched by the neighbour's
-  oblique factor as today. The neighbour's centre line must clear the disc, and the disc centre is h_e off the line.
-  This is exact for a round via against a straight track crossing the edge. Two discs on one edge use their
-  heights' difference.
+- Pair requirement (`pack::pair_req`), disc a against a neighbour at copper gap g. The note's first version had
+  sqrt(R^2 - h^2) for a track neighbour. That is wrong (lead OK on the correction, 2026-11-19): a track crossing the
+  edge runs on through the via's triangle.
+  - Disc against a track: the track crosses the edge at angle θ (sin θ with today's floor, the oblique factor's
+    0.4) and leans into the via's half-plane with signed cosine c. c comes from the pass's taut direction inside
+    the via's triangle (`Packer::taut`), not from the straight chord. With the via at (Δx, h), the track's
+    distance is Δx sinθ - h c >= R, where R = d_a/2 + g + w_b/2. So the requirement is
+    max(0, (R + h c) / sinθ).
+    - At h = 0 it is today's R / sinθ.
+    - It shrinks for a track leaning away from the via and grows for one leaning toward it.
+    - A perpendicular track is unchanged.
+  - Disc against disc: signed heights h1, h2 on the edge's normal. The difference is h1 - h2 on the same side and
+    h1 + h2 on opposite sides (vias in the two triangles that share the edge). The requirement is
+    sqrt(max(0, R^2 - (h1 - h2)^2)) with signed h.
 - End margin (`Packer::margin_all`): the smallest offset along the edge where the disc centre, at the point
   h_e off the line, clears the end obstacle's polygon (`margin` already steps along the edge testing polygon
   distance; the test point moves by h_e along the edge normal). This is exact against the obstacle.
@@ -83,8 +92,10 @@ disc counts on both edges; that stays.
 - Option `[capacity] via_disc_height` (default off until the A/B).
 
 **Tests.**
-- Unit: `pair_req` at h = 0 equals today's value. It falls continuously to the track-only term, and exactly at
-  sqrt(R^2 - h^2). `margin_all` at an offset against a straight side (unchanged) and against a circle (smaller).
+- Unit: `pair_req` at h = 0 bit-equal to today. Disc against track for perpendicular, leaning-away (clamped at 0)
+  and leaning-toward tracks. Disc against disc on the same side and on opposite sides. `margin_all` at an offset
+  against a straight side (unchanged) and against a circle (smaller).
+- stored = fresh (`viacheck`) also covers the heights and the cosines (both are inputs of the edge prices).
 - Integration: stored = fresh prices (`viacheck`), and local judge focus exact on the qmtech crop.
 - Off = main copper on 4 boards. TOPO_LOCALCHECK 0. Mutants per changed line.
 - Probe: via_gap_best_point (not in the suite).
