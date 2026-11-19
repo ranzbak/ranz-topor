@@ -136,6 +136,14 @@ pub struct Progress {
     pub rounds_ended: u32,
     #[serde(default)]
     pub round_lines: Vec<String>,
+    /// sync-wait: TopoR loop cycles logged so far over all runs, and the last [`CYCLE_LINES`]
+    /// lines (line `i` is number `cycles_logged - len + i + 1`): one per loop cycle (run, cycle,
+    /// wall, cycle time, table wait, slot wait, errors) and one per loop end (the slots' idle
+    /// share); the run flow writes each one once to log.txt.
+    #[serde(default)]
+    pub cycles_logged: u64,
+    #[serde(default)]
+    pub cycle_lines: Vec<String>,
     /// M2.TL soft time limit: the limit has passed while the run goes on (the step that runs
     /// finishes, then the best kept variant is drawn; Cancel stops now). Live in
     /// [`RunControl::snapshot`]; false after Cancel and once the run is done.
@@ -172,6 +180,10 @@ pub fn limit_notice(step: &str, hard: bool, capped: bool) -> String {
 /// Round lines [`Progress`] keeps (the run flow polls every 0.25 s; a round takes longer).
 pub const ROUND_LINES: usize = 32;
 
+/// Cycle lines [`Progress`] keeps (the run flow polls every 0.25 s; the shortest loop cycles take
+/// about 20 ms, so 5 runs give about 60 lines per poll).
+pub const CYCLE_LINES: usize = 256;
+
 impl Progress {
     /// The steps that compute now: of a best-of-N call each run's that computes ("run k: step",
     /// joined by "; "), else the stage text. O(runs).
@@ -187,6 +199,15 @@ impl Progress {
             self.round_lines.remove(0);
         }
         self.round_lines.push(line);
+    }
+
+    /// Note a loop cycle's log line (the last [`CYCLE_LINES`] stay). O(CYCLE_LINES).
+    pub(crate) fn push_cycle_line(&mut self, line: String) {
+        self.cycles_logged += 1;
+        if self.cycle_lines.len() >= CYCLE_LINES {
+            self.cycle_lines.remove(0);
+        }
+        self.cycle_lines.push(line);
     }
 }
 
@@ -921,6 +942,11 @@ impl RunControl {
     /// The same cancel flag and progress, as run `run` (1-based) of a best-of-N call. O(1).
     pub(crate) fn for_run(&self, run: u32) -> RunControl {
         RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), stop_kind: self.stop_kind.clone(), run, test_hook: self.test_hook.clone() }
+    }
+
+    /// sync-wait: a TopoR loop cycle's line for the run log ([`Progress::push_cycle_line`]). O(CYCLE_LINES).
+    pub(crate) fn cycle_line(&self, line: String) {
+        self.with_progress(|p| p.push_cycle_line(line));
     }
 
     /// Change the progress under the lock (the M-B0 coordinator's fields). O(1) + `f`.

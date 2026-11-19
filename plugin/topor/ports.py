@@ -157,6 +157,11 @@ class Progress:
     last_delta: float = 0.0
     rounds_ended: int = 0
     round_lines: list = field(default_factory=list)
+    # sync-wait: TopoR loop cycle lines logged so far over all runs and the last ones (cycle_lines[i] is line number
+    # cycles_logged - len(cycle_lines) + i + 1): one per loop cycle (run, cycle, wall, cycle time, table wait, slot
+    # wait, errors) and one per loop end (the compute slots' idle share); the run flow writes each to log.txt once.
+    cycles_logged: int = 0
+    cycle_lines: list = field(default_factory=list)
     # M2.TL soft time limit (engine): the limit has passed and the step that runs finishes ([run] timeout_mode =
     # soft); the step that ran then; the dialog's line ("time limit reached, waiting for the current step to finish
     # (<step>); press Cancel to stop now").
@@ -165,7 +170,8 @@ class Progress:
     notice: str = ""
 
     _INT = ("best_errors", "best_open", "best_shrinkages", "best_round", "last_run", "last_round", "last_errors",
-            "last_open", "last_violations", "last_vias", "last_shrinkages", "last_routed", "rounds_ended")
+            "last_open", "last_violations", "last_vias", "last_shrinkages", "last_routed", "rounds_ended",
+            "cycles_logged")
 
     @staticmethod
     def from_json(d: dict) -> "Progress":
@@ -185,6 +191,7 @@ class Progress:
                         last_decider=str(d.get("last_decider", "") or ""),
                         last_delta=float(d.get("last_delta", 0.0) or 0.0),
                         round_lines=[str(x) for x in (d.get("round_lines") or [])],
+                        cycle_lines=[str(x) for x in (d.get("cycle_lines") or [])],
                         limit_reached=bool(d.get("limit_reached", False)),
                         limit_step=str(d.get("limit_step", "") or ""), notice=str(d.get("notice", "") or ""),
                         **{k: int(d.get(k, 0) or 0) for k in Progress._INT})

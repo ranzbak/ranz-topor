@@ -301,6 +301,26 @@ pub trait Shared<V> {
     fn end(&self);
     /// This run's pre-loop key ([`super::table::Row::compat`]) and its index.
     fn me(&self) -> (usize, u64);
+    /// sync-wait: a cycle ended (its timing and errors, for the per-cycle log). Default: nothing.
+    fn cycle_done(&self, _note: &CycleNote) {}
+}
+
+/// sync-wait: what a finished loop cycle reports to the per-cycle log ([`Shared::cycle_done`]).
+/// Timing only; nothing of it feeds back into the loop.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CycleNote {
+    pub cycle: usize,
+    /// Wall seconds of the cycle's own work, and of the wait at the variant table before it.
+    pub cycle_s: f64,
+    pub sync_s: f64,
+    /// The predicted errors (shorts among them) of the state the cycle ended in.
+    pub errors: usize,
+    pub shorts: usize,
+    /// The run's pick after the cycle: its errors and its value (the objective's, mm).
+    pub pick_errors: usize,
+    pub pick_value: f64,
+    /// The cycle began with a restart from this row (origin run, cycle).
+    pub restart_from: Option<(usize, usize)>,
 }
 
 /// TW3 `[optimize] restart` (D7; Polubasov 2010 «Многовариантная оптимизация»: "TopoR periodically
@@ -483,18 +503,18 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
     };
     // TW3: the state goes to the shared table too (always a copy: whether it is kept is known only
     // at the commit); returns its fingerprint.
-    let share = |sp: &mut S, label: &str, gen: usize, cycle: usize, check: u8| -> u64 {
-        let Some(sh) = shared else { return 0 };
+    let share = |sp: &mut S, label: &str, gen: usize, cycle: usize, check: u8| -> (u64, Criteria) {
+        let Some(sh) = shared else { return (0, Criteria::default()) };
         let fp = sp.fingerprint();
         let crit = sp.criteria();
         let var = sp.snapshot();
         sh.offer(cycle, label.to_string(), gen, crit, var, fp, check);
-        fp
+        (fp, crit)
     };
     super::prof::mark("pre-loop");
     offer(sp, arch, "initial plan (gen 0)".into(), 0, 0, &mut rep);
     super::prof::mark("offer0");
-    let mut my_fp = share(sp, &format!("run {} initial plan (gen 0)", p.run + 1), 0, 0, super::table::CHECK_NONE);
+    let mut my_fp = share(sp, &format!("run {} initial plan (gen 0)", p.run + 1), 0, 0, super::table::CHECK_NONE).0;
     let Some((s0, v0)) = score(arch) else { return rep };
     on_pick(0, &arch.items[arch.pick(&obj).expect("scored")].crit, false);
     meter.push(s0);
@@ -519,6 +539,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             rep.stop = "re-lay budget".into();
             break;
         }
+        let (mut sync_s, mut restart_from) = (0.0f64, None);
         let stalled = hybrid && p.restart_after > 0 && since_gain >= p.restart_after;
         let due = periodic && since_check >= p.restart_min_cycles.max(1) && work >= boundary;
         if stalled || due {
@@ -527,7 +548,10 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             // yield needs the compute slot the wait has given back
             let view = {
                 let _pg = super::prof::g(super::prof::K::TableSync);
-                sh.sync(cycle, inner)
+                let t_sync = std::time::Instant::now();
+                let v = sh.sync(cycle, inner);
+                sync_s = t_sync.elapsed().as_secs_f64();
+                v
             };
             let Some(view) = view else {
                 rep.stop = "time limit".into();
@@ -561,6 +585,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
                     gen = row.gen;
                     rep.restarts.push((cycle, label.clone()));
                     rep.restart_from.push((cycle, row.run));
+                    restart_from = Some((row.run, row.cycle));
                     check = super::table::CHECK_RESTART;
                     rep.stall_restarts += usize::from(stalled);
                 }
@@ -584,6 +609,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         // `inner()` is latched for the cycle: once it said stop the cycle is dropped, also when a
         // raised limit would let the check pass again afterwards.
         let mut hit = false;
+        let t_cycle = std::time::Instant::now();
         let cs = {
             let mut latched = || {
                 hit = hit || inner();
@@ -591,6 +617,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             };
             sp.cycle(&ctx, &mut latched)
         };
+        let cycle_s = t_cycle.elapsed().as_secs_f64();
         rep.stats.add(&cs);
         rep.cycles = cycle;
         if hit || inner() {
@@ -622,12 +649,16 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         rep.relays += cs.tried + cs.relaid + cs.pair_moved_wires;
         since_check += 1;
         let kept = offer(sp, arch, format!("cycle {cycle} (gen {gen})"), gen, cycle, &mut rep);
-        my_fp = share(sp, &format!("run {} cycle {cycle} (gen {gen})", p.run + 1), gen, cycle, std::mem::take(&mut check));
+        let (fp, crit_now) = share(sp, &format!("run {} cycle {cycle} (gen {gen})", p.run + 1), gen, cycle, std::mem::take(&mut check));
+        my_fp = fp;
         if kept {
             rep.first_variant_s.get_or_insert_with(clock);
         }
         let (sc, v) = score(arch).expect("the archive holds the initial plan's line");
         rep.pick_values.push(v);
+        if let Some(sh) = shared {
+            sh.cycle_done(&CycleNote { cycle, cycle_s, sync_s, errors: crit_now.errors, shorts: crit_now.shorts, pick_errors: sc.incomplete, pick_value: v, restart_from });
+        }
         let gained = meter.push(sc);
         since_gain = if gained { 0 } else { since_gain + 1 };
         sched.after_cycle(gained, sc.incomplete > 0);
@@ -1359,8 +1390,14 @@ mod tests {
     /// reports.
     #[allow(clippy::type_complexity)]
     fn shared_run(runs: usize, jitter: Option<u64>, restart: Restart, relays: usize, stable: bool) -> (Vec<(Vec<(usize, String)>, Vec<Vec<i64>>, Vec<Vec<i64>>)>, Vec<String>, Vec<LoopReport>) {
+        shared_run_lag(runs, jitter, restart, relays, stable, 0)
+    }
+
+    /// [`shared_run`] with the table read at lag `lag` (`[optimize] table_lag`).
+    #[allow(clippy::type_complexity)]
+    fn shared_run_lag(runs: usize, jitter: Option<u64>, restart: Restart, relays: usize, stable: bool, lag: usize) -> (Vec<(Vec<(usize, String)>, Vec<Vec<i64>>, Vec<Vec<i64>>)>, Vec<String>, Vec<LoopReport>) {
         let obj = Objective::from_options("length_vias", 25.0, "best");
-        let t = super::super::table::SharedTable::new(runs, 4, obj, 3);
+        let t = super::super::table::SharedTable::new(runs, 4, obj, 3).with_lag(lag);
         let out: Vec<(Vec<(usize, String)>, Vec<Vec<i64>>, Vec<Vec<i64>>, LoopReport)> = std::thread::scope(|sc| {
             let hs: Vec<_> = (0..runs)
                 .map(|k| {
@@ -1393,6 +1430,25 @@ mod tests {
             let r = shared_run(3, Some(j), Restart::Periodic, 16, false);
             assert_eq!(r.0, base.0, "jitter {j}");
             assert_eq!(r.1, base.1, "jitter {j}");
+        }
+    }
+
+    /// sync-wait: with the table read at a lag the loop is as independent of the runs' speed as in
+    /// lock-step, and its restarts differ from lock-step's (the views are older).
+    #[test]
+    fn the_lagged_shared_loop_does_not_depend_on_the_runs_speed() {
+        let lock = shared_run_lag(3, None, Restart::Hybrid, 16, false, 0);
+        for lag in [1usize, 2] {
+            let base = shared_run_lag(3, None, Restart::Hybrid, 16, false, lag);
+            assert!(base.2.iter().map(|r| r.restarts.len()).sum::<usize>() > 0, "lag {lag}: the toy restarts");
+            for j in 1..4u64 {
+                let r = shared_run_lag(3, Some(j), Restart::Hybrid, 16, false, lag);
+                assert_eq!(r.0, base.0, "lag {lag} jitter {j}");
+                assert_eq!(r.1, base.1, "lag {lag} jitter {j}");
+            }
+            if lag == 2 {
+                assert_ne!(base.0, lock.0, "lag 2 reads older tables than lock-step (premise: the lag is used)");
+            }
         }
     }
 
