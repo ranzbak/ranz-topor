@@ -4438,13 +4438,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let vias1 = self.via_counts();
                 for w in 0..self.st.wires.len() {
                     if let Some(&ci) = self.wire_conn.get(w).filter(|&&ci| ci != usize::MAX && self.st.wires[w].alive) {
-                        // Once per cycle per wire (the re-lay counter's role, Polubasov 2010 fig. 11):
-                        // the front cannot refill forever, the sweep ends within 2 x alive re-lays.
-                        if fronted.len() <= w {
-                            fronted.resize(w + 1, false);
+                        // Once per cycle per connection (the re-lay counter's role, Polubasov 2010
+                        // fig. 11; a re-lay may give the wire a new id, the connection keeps its
+                        // index): the front cannot refill forever, the sweep ends within
+                        // alive + connections re-lays.
+                        if fronted.len() <= ci {
+                            fronted.resize(ci + 1, false);
                         }
-                        if vias1.get(&ci).copied().unwrap_or(0) > vias0.get(&ci).copied().unwrap_or(0) && !fronted[w] {
-                            fronted[w] = true;
+                        if vias1.get(&ci).copied().unwrap_or(0) > vias0.get(&ci).copied().unwrap_or(0) && !fronted[ci] {
+                            fronted[ci] = true;
                             front.push_back(w);
                         }
                     }
@@ -4734,7 +4736,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
                 let mut front: std::collections::VecDeque<WireId> = std::collections::VecDeque::new();
-                let mut fronted: Vec<bool> = vec![false; self.st.wires.len()];
+                let mut fronted: Vec<bool> = vec![false; self.tries.len()];
                 let mut j = 0usize;
                 loop {
                     let (w, rose) = match front.pop_front() {
