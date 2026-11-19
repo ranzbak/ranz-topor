@@ -45,6 +45,28 @@ pub enum Kind {
     DoubleCrossing,
     /// A crossing whose two stretches are held to the same layer.
     Unlayerable,
+    /// TW7 (sign 2, U-clinch): another net's wire crosses the straight line between a wire's
+    /// terminals and not the wire itself, so the wire goes round that wire's end.
+    UClinch,
+    /// TW7 (sign 4, mutual evasion): two wires each going round the other's end.
+    MutualEvasion,
+}
+
+impl Kind {
+    /// Short name (`[optimize] pattern_moves` entries, debug dump).
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::TerminalClinch => "clinch",
+            Kind::DoubleCrossing => "double",
+            Kind::Unlayerable => "unlayerable",
+            Kind::UClinch => "u_clinch",
+            Kind::MutualEvasion => "evasion",
+        }
+    }
+    /// The kind of a `[optimize] pattern_moves` entry.
+    pub fn parse(s: &str) -> Option<Kind> {
+        [Kind::TerminalClinch, Kind::DoubleCrossing, Kind::Unlayerable, Kind::UClinch, Kind::MutualEvasion].into_iter().find(|k| k.name() == s)
+    }
 }
 
 /// Clinches at terminals (sign 1, generalised to the detour form of Fig. 3a): a wire `w2` of
@@ -110,4 +132,144 @@ pub fn double_crossings(st: &State) -> Vec<Pair> {
             Pair { first, second, kind: Kind::DoubleCrossing }
         })
         .collect()
+}
+
+type V2 = super::super::geom::Vec2;
+/// Axis-aligned box `(x0, y0, x1, y1)`.
+type Bb = (f64, f64, f64, f64);
+
+/// Length of a polyline (nm).
+pub fn poly_len(pl: &[V2]) -> f64 {
+    pl.windows(2).map(|x| (x[1] - x[0]).len()).sum()
+}
+
+/// TW7: the graded detour amount of wire `w` (Luzin 2015 p. 7: loops, half-loops and clinches
+/// "lead to excess length"): `(r - 1)^2` with `r` = its projected length over the straight
+/// distance of its two ends (0 for a straight wire or ends that coincide). No threshold: a wire
+/// 10 % long has 0.01, one twice as long 1. O(path).
+pub fn detour_amount(st: &State, w: WireId) -> f64 {
+    let wi = &st.wires[w];
+    let d = (st.proj.pos[wi.b] - st.proj.pos[wi.a]).len();
+    if d <= 0.0 {
+        return 0.0;
+    }
+    let r = poly_len(&st.polyline(w)) / d;
+    (r - 1.0).max(0.0).powi(2)
+}
+
+/// Axis-aligned box of a polyline.
+fn bbox(pl: &[V2]) -> Bb {
+    pl.iter().fold((f64::MAX, f64::MAX, f64::MIN, f64::MIN), |b, p| (b.0.min(p.x), b.1.min(p.y), b.2.max(p.x), b.3.max(p.y)))
+}
+
+fn boxes_meet(a: Bb, b: Bb) -> bool {
+    a.0 <= b.2 && b.0 <= a.2 && a.1 <= b.3 && b.1 <= a.3
+}
+
+/// U-clinches (Luzin, Popov & Popov 2012 p. 117 sign 2, Fig. 4: "an edge between equipotential
+/// objects is crossed by wires of other nets while their own wire does not run along it"; Luzin
+/// 2015 p. 8 b, fig. 19), taken on the projection: a wire `o` of another net that does not cross
+/// `w` but crosses the straight line between `w`'s two ends an odd number of times has one end
+/// inside the region `w` and that line bound, so `w` goes round it. One pair per (`w`, `o`), `w`
+/// first (removal, 2012 p. 118: the interfering wire to the other side of `w`'s terminal, `w`
+/// along the edge, i.e. `w` laid first, `o` after it). Wires `skip` says are left out (the
+/// caller's tree wires). O(wires^2) box tests + O(segments) per overlapping box.
+pub fn u_clinches(st: &State, skip: &dyn Fn(WireId) -> bool) -> Vec<Pair> {
+    let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive && !skip(w)).collect();
+    let polys: BTreeMap<WireId, (Vec<V2>, Bb)> = alive
+        .iter()
+        .map(|&w| {
+            let pl = st.polyline(w);
+            let b = bbox(&pl);
+            (w, (pl, b))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for &w in &alive {
+        let wi = &st.wires[w];
+        let (ca, cb) = (st.proj.pos[wi.a], st.proj.pos[wi.b]);
+        if (cb - ca).len() <= 0.0 {
+            continue;
+        }
+        let lb = bbox(&[ca, cb]);
+        let mut crossed: Option<BTreeSet<WireId>> = None;
+        for &o in &alive {
+            let oi = &st.wires[o];
+            if o == w || oi.net == wi.net || !boxes_meet(lb, polys[&o].1) {
+                continue;
+            }
+            let n = polys[&o].0.windows(2).filter(|s| seg_cross(s[0], s[1], ca, cb)).count();
+            if n % 2 == 1 && !crossed.get_or_insert_with(|| st.crossings(w).into_iter().map(|x| x.other).collect()).contains(&o) {
+                out.push(Pair { first: w, second: o, kind: Kind::UClinch });
+            }
+        }
+    }
+    out
+}
+
+/// Mutual evasion (2012 p. 117 sign 4; Luzin 2015 p. 8 c, fig. 20): two wires each a U-clinch of
+/// the other (each goes round the other's end). From the U-clinches `uc`; the shorter wire first
+/// (the move tries both orders). O(|uc| log |uc|).
+pub fn mutual_evasions(st: &State, uc: &[Pair]) -> Vec<Pair> {
+    let set: BTreeSet<(WireId, WireId)> = uc.iter().map(|p| (p.first, p.second)).collect();
+    let len = |w: WireId| poly_len(&st.polyline(w));
+    set.iter()
+        .filter(|&&(a, b)| a < b && set.contains(&(b, a)))
+        .map(|&(a, b)| {
+            let (first, second) = if len(a) <= len(b) { (a, b) } else { (b, a) };
+            Pair { first, second, kind: Kind::MutualEvasion }
+        })
+        .collect()
+}
+
+/// Same-net loops (Luzin 2015 p. 7, fig. 15: "projections of wires of the same net intersect"):
+/// pairs of wires of one net whose projections cross properly (detection only: the move is
+/// TW7 part C, after TW6 E's branch move). O(wires^2) box tests + segments of overlapping boxes.
+pub fn same_net_loops(st: &State) -> Vec<(WireId, WireId)> {
+    let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
+    let polys: Vec<(WireId, Vec<V2>, Bb)> = alive.iter().map(|&w| {
+        let pl = st.polyline(w);
+        let b = bbox(&pl);
+        (w, pl, b)
+    }).collect();
+    let mut out = Vec::new();
+    for (i, (a, pa, ba)) in polys.iter().enumerate() {
+        for (b, pb, bb) in &polys[i + 1..] {
+            if st.wires[*a].net != st.wires[*b].net || !boxes_meet(*ba, *bb) {
+                continue;
+            }
+            if pa.windows(2).any(|s| pb.windows(2).any(|t| seg_cross(s[0], s[1], t[0], t[1]))) {
+                out.push((*a, *b));
+            }
+        }
+    }
+    out
+}
+
+/// TW7 A debug attribution (`TOPO_PATDBG`): per live wire whose projected length is more than
+/// `ratio` times its straight distance, `(wire, ratio, [(kind, other wire)])` for every pattern
+/// it takes part in (`pairs`: the detectors' output; `loops`: [`same_net_loops`], reported with
+/// kind `None`). O(pairs + wires x path).
+#[allow(clippy::type_complexity)]
+pub fn attribute(st: &State, pairs: &[Pair], loops: &[(WireId, WireId)], ratio: f64) -> Vec<(WireId, f64, Vec<(Option<Kind>, WireId)>)> {
+    let mut out = Vec::new();
+    for (w, wi) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
+        let d = (st.proj.pos[wi.b] - st.proj.pos[wi.a]).len();
+        if d <= 0.0 {
+            continue;
+        }
+        let r = poly_len(&st.polyline(w)) / d;
+        if r <= ratio {
+            continue;
+        }
+        let mut with: Vec<(Option<Kind>, WireId)> = pairs
+            .iter()
+            .filter_map(|p| if p.first == w { Some((Some(p.kind), p.second)) } else if p.second == w { Some((Some(p.kind), p.first)) } else { None })
+            .collect();
+        with.extend(loops.iter().filter_map(|&(a, b)| if a == w { Some((None, b)) } else if b == w { Some((None, a)) } else { None }));
+        with.sort();
+        with.dedup();
+        out.push((w, r, with));
+    }
+    out
 }

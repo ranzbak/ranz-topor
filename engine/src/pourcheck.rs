@@ -138,6 +138,11 @@ impl Raster {
         self.label_at(p)
     }
 
+    /// The cell size (nm).
+    pub fn res(&self) -> f64 {
+        self.res
+    }
+
     /// Centres of the cells of island `l` whose fill depth is at least `min_depth`, on a lattice
     /// of every `step`-th cell (deterministic, row-major). O(cells).
     pub fn island_sites(&self, l: u32, min_depth: f64, step: usize) -> Vec<Vec2> {

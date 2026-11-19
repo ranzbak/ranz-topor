@@ -92,8 +92,8 @@ table protects the bests, no board gate). Kinds and their move:
 | SameNetLoop | same-net projections cross, or a wire crosses one edge twice (sign 3, fig. 15) | re-branch: the later arm joins at the crossing | no; = TW6 E `branch_move` with another trigger |
 | PourCut | pour cut-off component (tw4-r2 (3)) | movers = foreign wires bounding it; the component's edges priced for the move | no |
 
-Order per cycle: candidates sorted by graded price (detour amount of the subject, crossings, cut pads), cheapest
-move first, work-unit throttle like `loop_p4`; a wire moved in this cycle's pattern stage is not a mover again in it
+Order per cycle: candidates sorted by the summed graded detour amounts of their two wires, largest excess length
+first (ties by wire ids), budget = the cycle's `max_ripped` like pair_move; a wire moved in this cycle's pattern stage is not a mover again in it
 (re-lay counter, Polubasov fig. 11). Graded, no cutoff: the detour amount is `ghost * (r - 1)^2` with `r` = topological
 length / ghost; the move set size enters the price (work), it is never refused by a count.
 **Incremental detection (F8a):** per-wire candidate cache keyed by the wire's path and the paths it crosses;
@@ -112,9 +112,9 @@ refreshed for the wires a move or re-lay changed (`took_part`, `set_lr`'s change
 ## 5. Options and defaults (judgement calls; defaults only after the equal-time A/B)
 | option | part | default now | meaning |
 |---|---|---|---|
-| `[optimize] crossing_rules` | B | `true` = today | becomes `"pass"` (today) / `"moves"` (per candidate) / `"off"`; bool kept as alias one release |
-| `[optimize] pattern_moves` | A-C, E | `[]` | kinds enabled in the loop (`u_clinch`, `evasion`, `via_trade`, `loop`, `pour`); listed kinds only |
-| `[optimize] pattern_work` | A-C | 0.25 | share of a cycle's work units the pattern stage may take (throttle, like loop_p4) |
+| `[optimize] crossing_rules` | B | `true` = today | unchanged bool: the pre-loop passes (stage 0/1) and, with `pattern_moves` empty, the in-loop batch pass |
+| `[optimize] pattern_moves` | B (C, E later) | `[]` | kinds that become per-candidate moves in the loop, replacing the in-loop batch pass: `clinch`, `double`, `unlayerable`, `u_clinch`, `evasion` (later `via_trade`, `loop`, `pour`); unknown entries warned |
+| (no `pattern_work`) | B | - | dropped in the work round: the moves share the cycle's `max_ripped` budget and `stop()` like pair_move (fewer knobs) |
 | `[factors] detour` | D | 0 | per-wire length coefficient from the last path's detour amount |
 Flip rule (lead/TW6 style): a default flips only with no new det > 1.5 and KiCad new not up, per connection.
 
@@ -158,3 +158,13 @@ Rendered on the VM (tag tw7s-53a2bef, tools/tw7_sketch.py; each state's copper g
 2. Part D (detour coefficient) as an option at all, or only the moves (TopoR has no detour criterion, the user rule does)?
 3. Metric finding: ghost = 1.00 mm on USB-C A/B bridges (3 of the 44 baseline detours) looks like a clamp; harness owner.
 Budget: this round EUR < 0.02 (one 33 s job on the shared ccx43).
+
+## 10. Work round 1 (after the lead's reply 2026-11-19)
+Lead: (1) C builds on TW6 E's held re-lay (`relay_kept`, tw6 8ccfb0e0) after E lands; (2) D stays `[factors] detour`,
+default 0; (3) terminal_clinch + u_clinch approved, detour_trade re-drawn (45 deg dip at constant rail pitch, tag
+tw7s2-17228bd) and sent back; loop = "cycles" (F1-F3) removal approved; R6-R10 approved if equal-time results stay
+equal or better per connection. Implemented opt-in: A (detectors `u_clinches`, `mutual_evasions`, `same_net_loops`,
+`detour_amount`, `attribute`; `TOPO_PATDBG` dump; prof keys `xr_detect` / `xr_replan` / `xr_judge` / `pattern_move`),
+B (`Sp::pattern_cands`, `Sp::pattern_move` = TW6's `relay_kept` with an explicit order; fold the two in part F),
+D (`Sp::detour_amounts`, length coefficient in `conn_reg_w`), E-detect (`pourplan::cut_components`). The
+incremental detection cache (F8a) waits for the `xr_*` profile: only if `xr_detect` is a real share.

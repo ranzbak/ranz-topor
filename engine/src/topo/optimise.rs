@@ -140,6 +140,10 @@ pub struct CycleStats {
     pub float_kept: usize,
     /// Crossing-rule passes kept (clinches, double crossings, unlayerable crossings).
     pub cross_kept: usize,
+    /// TW7 B (`[optimize] pattern_moves`): patterns found, moves tried, moves kept.
+    pub pat_found: usize,
+    pub pat_moved: usize,
+    pub pat_kept: usize,
     /// Whole-board moves (floating up, crossing passes) undone because the board's evaluation
     /// rose ([`evaluation`]).
     pub undone: usize,
@@ -219,6 +223,9 @@ impl CycleStats {
         self.layer_s += o.layer_s;
         self.float_kept += o.float_kept;
         self.cross_kept += o.cross_kept;
+        self.pat_found += o.pat_found;
+        self.pat_moved += o.pat_moved;
+        self.pat_kept += o.pat_kept;
         self.undone += o.undone;
         self.busy_s += o.busy_s;
         self.pair_lifts += o.pair_lifts;

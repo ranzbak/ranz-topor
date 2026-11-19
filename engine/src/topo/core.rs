@@ -3755,6 +3755,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 (wi.a, wi.b) == (c.a, c.b) || (wi.a, wi.b) == (c.b, c.a)
             }
         };
+        let pd = super::prof::g(super::prof::K::XrDetect);
         let mut pairs: Vec<super::xrules::Pair> = super::xrules::terminal_clinches(st);
         pairs.extend(super::xrules::double_crossings(st));
         for &(a, b) in &lr.unlayerable_pairs {
@@ -3762,11 +3763,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         xadd(0, pairs.len());
         let pairs: Vec<_> = pairs.into_iter().filter(|p| plain(st, wire_conn, p.first) && plain(st, wire_conn, p.second)).collect();
+        drop(pd);
         if pairs.is_empty() {
             return;
         }
+        let pj = super::prof::g(super::prof::K::XrJudge);
         let before = score(st, lr);
         let saved = (st.clone(), wire_conn.clone(), reroutes.clone(), lr.clone(), *ripped_total);
+        drop(pj);
+        let pr = super::prof::g(super::prof::K::XrReplan);
         let mut topo = Topo {
             reg: if opts.fluctuation > 0.0 { reg.fluctuated(seed_of(opts.seed, round, 2000 + stage), opts.fluctuation) } else { reg.clone() },
             conns: conns.clone(),
@@ -3803,9 +3808,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 resolved += 1;
             }
         }
+        drop(pr);
         if resolved == 0 {
             return;
         }
+        let _pj = super::prof::g(super::prof::K::XrJudge);
         st.uncross_all(50);
         let lr2 = assign(st);
         let after = score(st, &lr2);
@@ -4513,6 +4520,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         /// TW5 ESCAPE (docs/dev/design/tw5-escape.md): the loop's escape settings and its
         /// loop-wide memory (not part of a variant: a restore keeps it).
+        /// TW7 (docs/dev/design/tw7-moves.md): part B's pattern kinds that become targeted moves
+        /// (empty = the batch crossing pass), whether net trees are free (their wires are not
+        /// moved by the patterns), and part D's detour coefficient with its per-connection amounts
+        /// (refreshed at each cycle's start).
+        struct Tw7 {
+            kinds: Vec<super::xrules::Kind>,
+            tree_free: bool,
+            detour_k: f64,
+            detour_amt: Vec<f64>,
+        }
         struct Tw5<'a, 'p> {
             /// (a) `[optimize] oscillation = "bounded"` and its amplitude bounds.
             bounded: bool,
@@ -4617,6 +4634,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ctl: &'a RunControl,
             /// TW5 ESCAPE.
             tw5: Tw5<'a, 'p>,
+            /// TW7 B + D.
+            tw7: Tw7,
         }
         impl<'p> Sp<'_, 'p> {
             /// Debug: the criteria now as one short text.
@@ -4746,6 +4765,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         via_w
                     } else if name == "overflow" {
                         over_k
+                    } else if name == "length" && self.tw7.detour_k > 0.0 {
+                        // TW7 D: the connection's last detour raises its length coefficient.
+                        1.0 + self.tw7.detour_k * self.tw7.detour_amt.get(ci).copied().unwrap_or(0.0)
                     } else {
                         1.0
                     };
@@ -5170,6 +5192,143 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     cs.float_w_kept += 1;
                 }
             }
+            /// TW7 D: per connection its detour amount `(r - 1)^2` now, `r` = the projected length
+            /// of its wires over the straight distance of its ends (0 for none). O(wires x path).
+            fn detour_amounts(&self) -> Vec<f64> {
+                let mut len = vec![0.0f64; self.conns.len()];
+                for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive) {
+                    if let Some(&ci) = self.wire_conn.get(w).filter(|&&ci| ci < len.len()) {
+                        len[ci] += super::xrules::poly_len(&self.st.polyline(w));
+                    }
+                }
+                self.conns
+                    .iter()
+                    .zip(&len)
+                    .map(|(c, &l)| {
+                        let d = (self.st.proj.pos[c.b] - self.st.proj.pos[c.a]).len();
+                        if d > 0.0 && l > 0.0 { (l / d - 1.0).max(0.0).powi(2) } else { 0.0 }
+                    })
+                    .collect()
+            }
+            /// TW7 B: the patterns of the kinds `[optimize] pattern_moves` lists, between plain
+            /// pad-to-pad wires of their own connection (as the batch pass: a wire of a free net
+            /// tree keeps its place), each pair once (the first kind found wins: mutual evasion
+            /// before U-clinch), the pair with the most excess length first (the graded detour
+            /// amounts, [`super::xrules::detour_amount`]; ties by wire ids). Detection only reads
+            /// the state. O(detectors).
+            fn pattern_cands(&self) -> Vec<super::xrules::Pair> {
+                use super::xrules::{self as xr, Kind};
+                let _pg = super::prof::g(super::prof::K::XrDetect);
+                let tree_now: BTreeSet<WireId> = if self.tw7.tree_free { tree::junctions(self.st).iter().flat_map(|j| [j.0, j.2]).collect() } else { BTreeSet::new() };
+                let plain = |w: WireId| {
+                    let Some(wi) = self.st.wires.get(w) else { return false };
+                    let Some(&ci) = self.wire_conn.get(w) else { return false };
+                    wi.alive && ci != usize::MAX && wi.turns.is_empty() && wi.pa != NO_OBS && wi.pb != NO_OBS && !tree_now.contains(&w) && {
+                        let c = &self.conns[ci];
+                        (wi.a, wi.b) == (c.a, c.b) || (wi.a, wi.b) == (c.b, c.a)
+                    }
+                };
+                let has = |k: Kind| self.tw7.kinds.contains(&k);
+                let mut v: Vec<xr::Pair> = Vec::new();
+                if has(Kind::MutualEvasion) || has(Kind::UClinch) {
+                    let uc = xr::u_clinches(self.st, &|w| !plain(w));
+                    if has(Kind::MutualEvasion) {
+                        v.extend(xr::mutual_evasions(self.st, &uc));
+                    }
+                    if has(Kind::UClinch) {
+                        v.extend(uc);
+                    }
+                }
+                if has(Kind::TerminalClinch) {
+                    v.extend(xr::terminal_clinches(self.st));
+                }
+                if has(Kind::DoubleCrossing) {
+                    v.extend(xr::double_crossings(self.st));
+                }
+                if has(Kind::Unlayerable) {
+                    v.extend(self.lr.unlayerable_pairs.iter().map(|&(a, b)| xr::Pair { first: a.min(b), second: a.max(b), kind: Kind::Unlayerable }));
+                }
+                let mut seen: BTreeSet<(WireId, WireId)> = BTreeSet::new();
+                let mut out: Vec<(f64, xr::Pair)> = Vec::new();
+                for p in v {
+                    if p.first == p.second || !plain(p.first) || !plain(p.second) || !seen.insert((p.first.min(p.second), p.first.max(p.second))) {
+                        continue;
+                    }
+                    out.push((xr::detour_amount(self.st, p.first) + xr::detour_amount(self.st, p.second), p));
+                }
+                out.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.first.cmp(&b.1.first)).then(a.1.second.cmp(&b.1.second)));
+                out.into_iter().map(|x| x.1).collect()
+            }
+            /// TW7 B: one targeted pattern move. The wires `order` (and the branches on their
+            /// junctions) are taken out together and laid again, `order`'s connections first in
+            /// that order (the rule's order: Luzin, Popov & Popov 2012 p. 118, the clinched wire
+            /// first, the interfering one after it), the branches' after them in route order, each
+            /// with its own try coefficients at the via weight `via_w`; the board is layered again
+            /// (the local judge when on) and the move kept when the archive's evaluation of the
+            /// whole board drops, else everything comes back exactly. Each connection of `order`
+            /// counts the try. A priced move, no gate (as TW6's held re-lay, which lays in route
+            /// order). Whether it was kept.
+            fn pattern_move(&mut self, order: &[WireId], seed: u64, amp: f64, via_w: f64) -> bool {
+                let _pg = super::prof::g(super::prof::K::PatternMove);
+                let e0 = self.eval_now();
+                let before = self.snapshot();
+                let own: Vec<usize> = order.iter().map(|&x| self.wire_conn[x]).collect();
+                let gone: BTreeSet<WireId> = order.iter().copied().collect();
+                let set: Vec<WireId> = gone.iter().copied().chain(tree::dependents(self.st, &gone)).collect();
+                let mut rest: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).filter(|ci| !own.contains(ci)).collect();
+                rest.sort_by_key(|&ci| (self.rank[ci], ci));
+                rest.dedup();
+                let mut cis = own.clone();
+                cis.dedup();
+                cis.extend(rest);
+                for &x in &set {
+                    tree::remove_wire(self.st, x);
+                }
+                for &ci in &cis {
+                    self.forced.borrow_mut().remove(&self.conn_of[ci]);
+                }
+                let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
+                let n0 = self.st.wires.len();
+                self.st.took_part.clear();
+                let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
+                let mut kept = false;
+                if placed {
+                    if let Some(local) = self.local {
+                        let new: Vec<WireId> = (n0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive).collect();
+                        let (lr, p) = local(self.st, &before.topo, &set, &new, &before.lr, &before.pred, self.ties);
+                        self.set_lr(lr, Some(p));
+                        self.pred_local = true;
+                    } else {
+                        let lr = (self.assign_t)(self.st, self.ties);
+                        self.set_lr(lr, None);
+                    }
+                    let e1 = self.eval_now();
+                    if self.dbg {
+                        eprintln!("LOOPDBG[{}] pattern move: wires {order:?} laid again in that order, eval {e0:.3} -> {e1:.3}", self.dbg_tag);
+                    }
+                    if e1 < e0 - 1e-6 {
+                        for &ci in &cis {
+                            self.reroutes[ci] += 1;
+                        }
+                        kept = true;
+                    }
+                }
+                if !kept {
+                    self.restore(&before);
+                }
+                let mut own_u = own;
+                own_u.sort_unstable();
+                own_u.dedup();
+                for ci in own_u {
+                    self.tries[ci] += 1;
+                    if kept {
+                        self.stuck[ci] = 0;
+                    } else {
+                        self.stuck[ci] += 1;
+                    }
+                }
+                kept
+            }
             /// 5.8: the obstructed via pairs of wire `w` (Luzin, Popov & Popov 2013 p. 134 steps
             /// 1-8): a stretch of events `i..=j` on layer `l` between two layer changes `v`
             /// (from `Lv`, the layer of event `i-1`) and `u` (to `Lu`, event `j+1`; an SMD pad end
@@ -5419,6 +5578,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn cycle_body(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool, t0: Instant) -> CycleStats {
                 let mut plap = Instant::now();
                 let mut cs = CycleStats::default();
+                if self.tw7.detour_k > 0.0 {
+                    self.tw7.detour_amt = self.detour_amounts();
+                }
                 if self.dbg {
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} start (amp {:.3}): {t}", self.dbg_tag, c.cycle, c.amp);
@@ -5650,6 +5812,31 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 self.ctl.test_point("loop stage 4 begin");
                 // The crossing rules (clinches, double crossings, crossings no layer separates),
                 // taken when the board's evaluation does not rise.
+                if !self.tw7.kinds.is_empty() {
+                    // TW7 B (`[optimize] pattern_moves`): each found pattern is one targeted move,
+                    // judged alone by the board's evaluation (Luzin 2015 p. 7; Luzin, Popov &
+                    // Popov 2012 p. 118 «Устранение клинчей»), instead of the batch pass below.
+                    let found = self.pattern_cands();
+                    cs.pat_found += found.len();
+                    for p in found {
+                        if ripped >= self.max_ripped || stop() {
+                            break;
+                        }
+                        let live = |x: WireId| self.st.wires.get(x).is_some_and(|wi| wi.alive) && self.wire_conn.get(x).is_some_and(|&ci| ci != usize::MAX);
+                        if !live(p.first) || !live(p.second) {
+                            continue;
+                        }
+                        cs.pat_moved += 1;
+                        ripped += 2;
+                        let mut kept = self.pattern_move(&[p.first, p.second], c.seed ^ 0x7E7E, c.amp, c.emphasis.via_at(1.0));
+                        if !kept && p.kind == super::xrules::Kind::MutualEvasion && ripped < self.max_ripped && !stop() {
+                            cs.pat_moved += 1;
+                            ripped += 2;
+                            kept = self.pattern_move(&[p.second, p.first], c.seed ^ 0x7E7F, c.amp, c.emphasis.via_at(1.0));
+                        }
+                        cs.pat_kept += usize::from(kept);
+                    }
+                } else {
                 let x0 = (self.xkept)();
                 self.resync();
                 let before = self.snapshot();
@@ -5666,6 +5853,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         self.restore(&before);
                         cs.undone += 1;
                     }
+                }
                 }
                 super::prof::lap(&mut plap, super::prof::K::StCross);
                 // 5.4 `[vias] pair_min`, the re-lay half (Luzin-Popov 2013 step 8.1, here for the
@@ -5854,6 +6042,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 offer_on: opts.escape_offer,
                 floor: Vec::new(),
                 offers: Vec::new(),
+            },
+            tw7: Tw7 {
+                kinds: opts.pattern_moves.iter().filter_map(|k| super::xrules::Kind::parse(k)).collect(),
+                tree_free,
+                detour_k: opts.detour_k.max(0.0),
+                detour_amt: Vec::new(),
             },
             pre: pre_loop.clone(),
         };
@@ -6201,6 +6395,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "reroutes": [rep.stats.kept, rep.stats.tried],
             "via_rose": [rep.stats.relaid_kept, rep.stats.relaid],
             "floating_up": rep.stats.float_kept,
+            "pattern_moves": [rep.stats.pat_kept, rep.stats.pat_moved, rep.stats.pat_found],
             "crossing_passes": rep.stats.cross_kept,
             "undone": rep.stats.undone,
             "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
@@ -6218,6 +6413,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "shadow": [rep.stats.shadow_n, rep.stats.shadow_agree, rep.stats.shadow_err_graded, rep.stats.shadow_err_vias, rep.stats.shadow_unl_diff, rep.stats.shadow_base_graded],
             },
         }));
+        if !opts.pattern_moves.is_empty() {
+            warnings.push(pattern_moves_line(&opts.pattern_moves, &rep.stats));
+        }
         if opts.via_pair_min {
             warnings.push(format!(
                 "TopoR loop, local via-pair minimisation ([vias] pair_min; Luzin, Popov & Popov 2013): {} via pair(s) lifted onto their neighbours' layer, {} of {} wires with a via pair laid again kept",
@@ -6240,6 +6438,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             r.stage("after the TopoR loop", &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));
         }
         tlog("TopoR loop", t_loop);
+        // TW7 A (`TOPO_PATDBG`, debug): per wire of the loop's pick with a projected detour over
+        // 1.5, the patterns it takes part in (every detector, whatever `pattern_moves` says), so
+        // each detour of a run can be attributed to a detector (docs/dev/design/tw7-moves.md A).
+        if std::env::var_os("TOPO_PATDBG").is_some() {
+            patdbg(model, &st, &lr.unlayerable_pairs, opts.seed);
+        }
         // The one drawing of the loop's pick runs to its end (soft limit: nothing cuts it; hard:
         // the time limit); a run whose pick another run draws stops here, before any copper.
         if let Some(why) = skip_draw {
@@ -8972,6 +9176,44 @@ fn out_vias(out: &[Outcome], reqs: &[planes::Req], _conns: &[Connection]) -> Vec
     reqs.iter().filter(|r| out[r.conn].routed).filter_map(|r| out[r.conn].vias.first().map(|v| (r.conn, v.0))).collect()
 }
 
+/// TW7 A debug dump (`TOPO_PATDBG`): one line per live wire whose projected length is over 1.5
+/// times its straight distance, with every pattern it takes part in ([`super::xrules`]: terminal
+/// clinch, double crossing, unlayerable, U-clinch, mutual evasion; `loop` = a same-net wire whose
+/// projection crosses it) and the other wire's net. Read-only. O(detectors).
+fn patdbg(model: &BoardModel, st: &State, unlayerable: &[(WireId, WireId)], seed: u64) {
+    use super::xrules::{self as xr, Kind, Pair};
+    let mut pairs: Vec<Pair> = xr::terminal_clinches(st);
+    pairs.extend(xr::double_crossings(st));
+    pairs.extend(unlayerable.iter().map(|&(a, b)| Pair { first: a.min(b), second: a.max(b), kind: Kind::Unlayerable }));
+    let uc = xr::u_clinches(st, &|_| false);
+    pairs.extend(xr::mutual_evasions(st, &uc));
+    pairs.extend(uc);
+    let loops = xr::same_net_loops(st);
+    let name = |w: WireId| model.nets.iter().find(|n| n.code == st.wires[w].net).map_or_else(|| st.wires[w].net.to_string(), |n| n.name.clone());
+    let mm = |v: crate::geom::Vec2| format!("({:.2},{:.2})", v.x / 1e6, -v.y / 1e6);
+    for (w, r, with) in xr::attribute(st, &pairs, &loops, 1.5) {
+        let wi = &st.wires[w];
+        let kinds: Vec<String> = with.iter().map(|&(k, o)| format!("{}:{}", k.map_or("loop", Kind::name), name(o))).collect();
+        eprintln!("PATDBG[{seed}] wire {w} net {} {}-{} ratio {r:.2} patterns [{}]", name(w), mm(st.proj.pos[wi.a]), mm(st.proj.pos[wi.b]), kinds.join(", "));
+    }
+}
+
+/// TW7 B: the run report line of `[optimize] pattern_moves` (and its entries no kind matches).
+fn pattern_moves_line(kinds: &[String], st: &super::optimise::CycleStats) -> String {
+    let bad: Vec<&str> = kinds.iter().map(String::as_str).filter(|k| super::xrules::Kind::parse(k).is_none()).collect();
+    let mut s = format!(
+        "TopoR loop, pattern moves ([optimize] pattern_moves = {}; Luzin 2015 p. 7, Luzin, Popov & Popov 2012 p. 118): {} of {} moves kept ({} patterns found; each pattern's wires laid again in the rule's order, kept when the board's evaluation dropped; the batch crossing pass is off in the loop)",
+        kinds.join(", "),
+        st.pat_kept,
+        st.pat_moved,
+        st.pat_found
+    );
+    if !bad.is_empty() {
+        s.push_str(&format!("; unknown entries ignored: {} (known: clinch, double, unlayerable, u_clinch, evasion)", bad.join(", ")));
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     /// TW5 (f): the in-loop P4 cap keeps the heaviest victims, then the routed-last ones, then by id;
@@ -9528,3 +9770,4 @@ mod tests {
         assert_eq!(super::assign_runs(&rows, &compat, 2).len(), 2);
     }
 }
+

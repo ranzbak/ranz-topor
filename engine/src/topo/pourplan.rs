@@ -127,6 +127,85 @@ pub fn pour_cuts(model: &BoardModel, items: &[Item], base: &PourBase) -> (usize,
     (n, g)
 }
 
+/// TW7 E (detection; docs/dev/design/tw7-moves.md E, tw4-r2.md (3)): one component of a pour
+/// net cut off from its main copper by the plan, the pads in it that were not cut off before
+/// routing, its islands `(pour, layer, island)`, and the plan wires of other nets whose copper
+/// bounds it (the movers of the pour repair move).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CutComp {
+    pub net: i32,
+    pub pads: Vec<usize>,
+    pub islands: Vec<(usize, u32, u32)>,
+    pub bounding: Vec<WireId>,
+}
+
+/// TW7 E: the components [`pour_cuts`] counts (cut off, holding a pad not in `base`), each with
+/// the wires that bound it: a plan track (or via) of another net on an island's layer whose
+/// copper has the island on one side, probed at its clearance plus 1.5 cells off its edge (both
+/// sides of a track, along it every two cells, at most 32 probes; eight directions round a via).
+/// Read-only. O(one pour check + islands x items x probes).
+pub fn cut_components(model: &BoardModel, items: &[Item], base: &PourBase) -> Vec<CutComp> {
+    if !base.any {
+        return Vec::new();
+    }
+    let r = crate::pourcheck::check_pour_reach_cells(model, items, &[], None, base.cells);
+    let math = |x: i64, y: i64| crate::geom::Vec2 { x: x as f64, y: -(y as f64) };
+    let mut out = Vec::new();
+    for c in &r.cuts {
+        let pads: Vec<usize> = c.pads.iter().copied().filter(|p| !base.cut_pads.contains(p)).collect();
+        if pads.is_empty() {
+            continue;
+        }
+        let clr = model.rules.net_rule(c.net).clearance.max(model.rules.min_clearance) as f64;
+        let mut bounding: BTreeSet<WireId> = BTreeSet::new();
+        for &(zi, layer, l) in &c.islands {
+            let Some(ras) = r.raster(zi, layer) else { continue };
+            let res = ras.res();
+            for it in items {
+                match it {
+                    Item::Track(t) if t.layer == layer && t.net != c.net => {
+                        let (Some(w), crate::geom::TrackPrim::Seg { a, b }) = (t.wire, t.prim) else { continue };
+                        if bounding.contains(&w) {
+                            continue;
+                        }
+                        let (pa, pb) = (math(i64::from(a.x), i64::from(a.y)), math(i64::from(b.x), i64::from(b.y)));
+                        let d = pb - pa;
+                        let len = d.len();
+                        if len <= 0.0 {
+                            continue;
+                        }
+                        let nrm = crate::geom::Vec2 { x: -d.y / len, y: d.x / len };
+                        let off = t.width as f64 / 2.0 + clr + 1.5 * res;
+                        let n = ((len / (2.0 * res)).ceil() as usize).clamp(1, 32);
+                        let hit = (0..n).any(|i| {
+                            let p = pa + d * ((i as f64 + 0.5) / n as f64);
+                            ras.island_at(p + nrm * off) == l || ras.island_at(p - nrm * off) == l
+                        });
+                        if hit {
+                            bounding.insert(w);
+                        }
+                    }
+                    Item::Via(v) if v.net != c.net && (v.layers.is_empty() || v.layers.contains(&layer)) => {
+                        let Some(w) = v.wire else { continue };
+                        let at = math(v.at.x, v.at.y);
+                        let rr = v.d as f64 / 2.0 + clr + 1.5 * res;
+                        let hit = (0..8).any(|k| {
+                            let a = std::f64::consts::FRAC_PI_4 * k as f64;
+                            ras.island_at(at + crate::geom::Vec2 { x: rr * a.cos(), y: rr * a.sin() }) == l
+                        });
+                        if hit {
+                            bounding.insert(w);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.push(CutComp { net: c.net, pads, islands: c.islands.clone(), bounding: bounding.into_iter().collect() });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +285,32 @@ mod tests {
         assert_eq!(pour_cuts(&m, &cut, &base), (1, 1.0));
         base.cut_pads.insert(1);
         assert_eq!(pour_cuts(&m, &cut, &base), (0, 0.0));
+    }
+
+    /// TW7 E: the cut-off component of `a_track_across_the_pour_...` (U1.1, U2.1) is bounded by
+    /// the track's wire; a second track of another wire far inside the main side is not; a pour
+    /// left open gives no component; pads cut off before routing do not count.
+    #[test]
+    fn cut_components_name_the_bounding_wires() {
+        let m = model();
+        let base = PourBase::new(&m, 1.0e5);
+        let mut cut = seg(2, (7 * MM, 2_300_000), (7 * MM, 31_700_000));
+        let mut far = seg(2, (26 * MM, 10 * MM), (26 * MM, 12 * MM));
+        if let (Item::Track(t), Item::Track(f)) = (&mut cut, &mut far) {
+            t.wire = Some(4);
+            f.wire = Some(9);
+        }
+        let comps = cut_components(&m, &[cut.clone(), far.clone()], &base);
+        assert_eq!(comps.len(), 1);
+        assert_eq!((comps[0].net, comps[0].pads.clone(), comps[0].bounding.clone()), (1, vec![0, 1], vec![4]));
+        let mut open = seg(2, (7 * MM, 2_300_000), (7 * MM, 20 * MM));
+        if let Item::Track(t) = &mut open {
+            t.wire = Some(4);
+        }
+        assert!(cut_components(&m, &[open], &base).is_empty());
+        let mut b2 = base.clone();
+        b2.cut_pads.extend([0, 1]);
+        assert!(cut_components(&m, &[cut], &b2).is_empty());
     }
 
     /// A board without a filled pour never runs the check.

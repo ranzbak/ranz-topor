@@ -75,6 +75,10 @@ pub enum K {
     LoopP4,
     TableSync,
     Fingerprint,
+    XrDetect,
+    XrReplan,
+    XrJudge,
+    PatternMove,
 }
 
 const NAMES: &[&str] = &[
@@ -128,6 +132,10 @@ const NAMES: &[&str] = &[
     "loop_p4",           // TW5 (f) Sp::loop_p4: one in-loop P4 rip-up round (victims, placing, layering)
     "table_sync",        // TW3: a run's sync with the shared variant table (wait for the other runs + commit + view)
     "fingerprint",       // TW3: Sp::fingerprint (the state hash a restart compares)
+    "xr_detect",         // TW7 A: crossing-pass detection (xrules detectors + plain filter)
+    "xr_replan",         // TW7 A: crossing-pass re-plans (Topo setup + try_joint / try_reroute)
+    "xr_judge",          // TW7 A: crossing-pass judge (state clone, uncross_all, assign, score)
+    "pattern_move",      // TW7 B: Sp::pattern_move (one targeted move: remove, place in rule order, layer, judge)
 ];
 const N: usize = NAMES.len();
 
