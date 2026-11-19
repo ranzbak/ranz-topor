@@ -6,7 +6,7 @@
 #   tw6_ab.sh pats           planned_crossing_window + site_or_stay + lead_via_end, K and M per cfg in PCFG (default "- s p sh shp")
 #   tw6_ab.sh eq <cfgs>      equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults)
 #   tw6_ab.sh ac <cfgs>      tests + off + pats + eq <cfgs> (the A+C round)
-#   tw6_ab.sh be <cfgs>      tests + lint (clippy) + pytest (CI=1, full) + pats + eq <cfgs> (the B search + E round)
+#   tw6_ab.sh be <cfgs>      tests + lint (clippy) + off + pytest (CI=1, full) + pats + eq <cfgs> (the B search + E round)
 # cfg: K = rounds=1; M = rounds=40; e<k> = equal time seed k; suffixes (any order, at the end):
 #   s = [vias] site_price = "graded"; h = [capacity] via_disc_height = true; x = [capacity] pad_exits = true;
 #   p = [vias] pair_room = true; b = [factors] weight via_site_social = $SITE_W (default 50);
@@ -87,6 +87,7 @@ case ${1:-} in
     shift
     ( hzq run --threads 4 --name tw6-tests -- bash $ROOT/tools/tw6_ab.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
     ( hzq run --threads 4 --name tw6-lint -- bash $ROOT/tools/tw6_ab.sh lint > $R/u-lint.log 2>&1; note "unit lint rc $?" ) &
+    ( hzq run --threads 4 --name tw6-off -- bash $ROOT/tools/tw6_ab.sh off > $R/u-off.log 2>&1; note "unit off rc $?" ) &
     ( hzq run --threads 4 --name tw6-py -- bash $ROOT/tools/tw6_ab.sh pytest > $R/u-py.log 2>&1; note "unit pytest rc $?" ) &
     ( hzq run --threads 4 --name tw6-pats -- bash $ROOT/tools/tw6_ab.sh pats > $R/u-pats.log 2>&1; note "unit pats rc $?" ) &
     bash $ROOT/tools/tw6_ab.sh eq "$@"
