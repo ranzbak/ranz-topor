@@ -271,6 +271,70 @@ pub struct Taut {
     pub dir: Vec<Vec2>,
 }
 
+/// The body of [`Packer::site_room`] over the cache `cache` (shared by [`SiteRooms`]).
+fn site_room_of(pr: &Projection, eps: f64, cache: &Mutex<FxHashMap<(usize, i32), f64>>, t: super::state::TriId, net: i32, s: f64) -> f64 {
+    if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let key = (t, net ^ ((s as i64 as i32) << 8));
+    if let Some(&f) = lock(cache).get(&key) {
+        return f;
+    }
+    let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
+    let pts = tri_site_points(a, b, c);
+    let mut free = [f64::INFINITY; 9];
+    for o in pr.obstacles.iter().filter(|o| pr.via_foreign(o, net)) {
+        for (q, f) in pts.iter().zip(free.iter_mut()) {
+            let d = if super::state::point_in_poly(*q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(*q, &o.poly) - o.clear.max(s) - eps };
+            *f = f.min(d);
+        }
+    }
+    // A keepout that forbids vias: the disc may not touch it (a hard rule, D6a).
+    for k in &pr.no_via {
+        for (q, f) in pts.iter().zip(free.iter_mut()) {
+            let d = if super::state::point_in_poly(*q, k) { f64::NEG_INFINITY } else { poly_dist(*q, k) - eps };
+            *f = f.min(d);
+        }
+    }
+    let f = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    lock(cache).insert(key, f);
+    f
+}
+
+/// TW6 part B search (`[factors] via_site_social`): the packer's site rooms ([`Packer::site_room`],
+/// same cache) and via sizes, held by the state so the search prices a crossing where neither
+/// wire has a via site. Cheap to clone (shared maps).
+#[derive(Clone)]
+pub struct SiteRooms<'a> {
+    pr: &'a Projection,
+    eps: f64,
+    cache: Arc<Mutex<FxHashMap<(usize, i32), f64>>>,
+    via_d: Arc<FxHashMap<i32, f64>>,
+    via_d0: f64,
+}
+
+impl std::fmt::Debug for SiteRooms<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SiteRooms").field("eps", &self.eps).field("via_d0", &self.via_d0).finish()
+    }
+}
+
+impl SiteRooms<'_> {
+    /// [`Packer::site_room`]. O(obstacles) per new key.
+    pub fn room(&self, t: super::state::TriId, net: i32, s: f64) -> f64 {
+        site_room_of(self.pr, self.eps, &self.cache, t, net, s)
+    }
+    /// [`Packer::via_d`].
+    pub fn via_d(&self, net: i32) -> f64 {
+        self.via_d.get(&net).copied().unwrap_or(self.via_d0)
+    }
+    /// [`Packer::site_amount`] of a via of `net` (clearance `s`) at the best room over `tris`.
+    pub fn amount(&self, tris: impl Iterator<Item = super::state::TriId>, net: i32, s: f64) -> f64 {
+        let room = tris.map(|t| self.room(t, net, s)).fold(f64::NEG_INFINITY, f64::max);
+        Packer::site_amount(room, self.via_d(net), s)
+    }
+}
+
 pub struct Packer<'a> {
     pr: &'a Projection,
     outline: Vec<(Vec2, Vec2)>,
@@ -298,7 +362,7 @@ pub struct Packer<'a> {
     via_d0: f64,
     /// Free radius against other nets' obstacles at the incentre / centroid of a triangle, per
     /// (triangle, net). Cached.
-    free_cache: Mutex<FxHashMap<(usize, i32), f64>>,
+    free_cache: Arc<Mutex<FxHashMap<(usize, i32), f64>>>,
     /// Price (mm) of a via disc that leaves its passage-layer no slack (the `via_squeeze`
     /// factor); 0 = off.
     pub via_squeeze: f64,
@@ -395,7 +459,7 @@ impl<'a> Packer<'a> {
             via_static: Mutex::new(fxmap()),
             via_d: fxmap(),
             via_d0: 0.0,
-            free_cache: Mutex::new(fxmap()),
+            free_cache: Arc::new(Mutex::new(fxmap())),
             via_squeeze: 0.0,
             reserve_sites: false,
             via_between: false,
@@ -457,33 +521,13 @@ impl<'a> Packer<'a> {
     /// plan ([`Packer::via_site`] = room >= r, the graded site price), the drawing and the pad
     /// exits' via term. Cached per (triangle, net, s). O(obstacles) per new key.
     pub fn site_room(&self, t: super::state::TriId, net: i32, s: f64) -> f64 {
-        let pr = self.pr;
-        if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
-            return f64::NEG_INFINITY;
-        }
-        let key = (t, net ^ ((s as i64 as i32) << 8));
-        if let Some(&f) = lock(&self.free_cache).get(&key) {
-            return f;
-        }
-        let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
-        let pts = tri_site_points(a, b, c);
-        let mut free = [f64::INFINITY; 9];
-        for o in pr.obstacles.iter().filter(|o| pr.via_foreign(o, net)) {
-            for (q, f) in pts.iter().zip(free.iter_mut()) {
-                let d = if super::state::point_in_poly(*q, &o.poly) { f64::NEG_INFINITY } else { poly_dist(*q, &o.poly) - o.clear.max(s) - self.eps };
-                *f = f.min(d);
-            }
-        }
-        // A keepout that forbids vias: the disc may not touch it (a hard rule, D6a).
-        for k in &pr.no_via {
-            for (q, f) in pts.iter().zip(free.iter_mut()) {
-                let d = if super::state::point_in_poly(*q, k) { f64::NEG_INFINITY } else { poly_dist(*q, k) - self.eps };
-                *f = f.min(d);
-            }
-        }
-        let f = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        lock(&self.free_cache).insert(key, f);
-        f
+        site_room_of(self.pr, self.eps, &self.free_cache, t, net, s)
+    }
+
+    /// TW6 part B search: the site rooms of this packer as a value the state can hold
+    /// ([`SiteRooms`]; the same cache, so plan, layering and search read one measure). O(nets).
+    pub fn site_rooms(&self) -> SiteRooms<'a> {
+        SiteRooms { pr: self.pr, eps: self.eps, cache: Arc::clone(&self.free_cache), via_d: Arc::new(self.via_d.clone()), via_d0: self.via_d0 }
     }
 
     /// TW6 part A (`[vias] site_price = "graded"`): how far a via of diameter `d` falls short of
@@ -492,6 +536,22 @@ impl<'a> Packer<'a> {
     /// p. 133: S = sum k_i x_i; graded, no threshold). O(1).
     pub fn site_deficit(room: f64, d: f64) -> f64 {
         (0.5 * d - room).max(0.0).min(d)
+    }
+
+    /// TW6: the graded site amount of a via of diameter `d` and clearance `s` where the best room
+    /// is `room`: `1 + deficit / (d + s)` without a site ([`Packer::site_deficit`] > 0), 0 with
+    /// one (the count of the predicted violation plus its graded depth, as CM1's `1 + over /
+    /// pitch`). 0 when `d` <= 0 (no via sizes). O(1).
+    pub fn site_amount(room: f64, d: f64, s: f64) -> f64 {
+        if d <= 0.0 {
+            return 0.0;
+        }
+        let def = Packer::site_deficit(room, d);
+        if def > 0.0 {
+            1.0 + def / (d + s).max(1.0)
+        } else {
+            0.0
+        }
     }
 
     /// The packer of `model` over the projection `pr`, with the drawing's tolerance and edge rule.

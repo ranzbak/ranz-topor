@@ -60,6 +60,9 @@ pub struct InitWeights {
     /// `dangling_turn` price per mm of width + clearance at 90° off a continued dangling end's
     /// direction (exist-term; the factor's weight).
     pub dangling_turn_mm: f64,
+    /// TW6 part B (`via_site_social`): per different-net crossing, per unit of the smaller of the
+    /// two wires' graded site amounts there ([`State::site_rooms`], [`State::site_k`]); 0 = off.
+    pub site_mm: f64,
     /// Search cap per connection.
     pub max_expansions: usize,
 }
@@ -84,6 +87,7 @@ impl InitWeights {
             same_layer_mm: reg.price(&Event::Overflow { wire: 0, edge: 0 }, w),
             wall_mm: 0.0,
             dangling_turn_mm: reg.price(&Event::DanglingTurn { at: Vec2 { x: 0.0, y: 0.0 }, deg: 90.0, ws_mm: 1.0 }, w),
+            site_mm: reg.price(&Event::ViaSite { a: 0, b: 1, tri: 0, amount: 1.0 }, w),
             max_expansions: 2_000_000,
         }
     }
@@ -279,8 +283,9 @@ pub struct TreeEnd {
 /// A chord `(a, b, net, wire, held, allowed)` of a traversal of a triangle: `held` = the layers
 /// that wire's stretch is held to there ([`State::stretch_layers`]), `allowed` = the layers the
 /// triangle allows it.
-/// (b1, b2, net, wire, held, allowed, crossing price multiplier [`State::cross_k`]).
-type Chord = (f64, f64, i32, WireId, u64, u64, f64);
+/// (b1, b2, net, wire, held, allowed, crossing price multiplier [`State::cross_k`], the crossed
+/// wire's site amount there [`State::site_k_at`]).
+type Chord = (f64, f64, i32, WireId, u64, u64, f64, f64);
 
 /// What crossing another net's stretch does to a wire's layers ([`cross_pin`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,6 +358,9 @@ struct Search<'s, 'p> {
     /// Chords `(a, b, net, wire)` of the traversals of a triangle, computed on first use in this
     /// search.
     tc: Vec<Option<Vec<Chord>>>,
+    /// TW6 part B: this connection's own site amount per triangle ([`State::site_own`]), filled
+    /// with `tc` (0 when `via_site_social` is off).
+    own_site: Vec<f64>,
     /// Per wire met in this search: its stretch layers per traversal ([`State::stretch_layers`]).
     held: std::collections::HashMap<WireId, Vec<u64>>,
     needs: Vec<f64>,
@@ -452,7 +460,11 @@ impl Search<'_, '_> {
             let held = self.held.entry(o).or_insert_with(|| st.held_layers(o))[ok];
             let oall = st.proj.allowed(t, net).map_or(0, |m| m.0);
             let f = st.cross_k.get(o).copied().unwrap_or(1.0);
-            v.extend(st.chords(o, ok).into_iter().map(|(b1, b2)| (b1, b2, net, o, held, oall, f)));
+            let a = if self.wt.site_mm > 0.0 && net != self.c.net { st.site_k_at(o, ok) } else { 0.0 };
+            v.extend(st.chords(o, ok).into_iter().map(|(b1, b2)| (b1, b2, net, o, held, oall, f, a)));
+        }
+        if self.wt.site_mm > 0.0 {
+            self.own_site[t] = st.site_own(t, self.c.net, self.c.s);
         }
         self.tc[t] = Some(v);
     }
@@ -462,9 +474,9 @@ impl Search<'_, '_> {
     /// `crossing` price, plus a via where both are held to one layer and one can leave it, or
     /// the `overflow` price where neither can.
     #[allow(clippy::too_many_arguments)]
-    fn arc_chords(tc: &[Chord], wt: &InitWeights, net: i32, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>], vias: bool) -> (f64, u64) {
+    fn arc_chords(tc: &[Chord], wt: &InitWeights, net: i32, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>], vias: bool, own_site: f64) -> (f64, u64) {
         let (mut cross, mut pg) = (0.0, pin);
-        for &(b1, b2, onet, o, held, oall, f) in tc {
+        for &(b1, b2, onet, o, held, oall, f, osite) in tc {
             if skip.contains(&Some(o)) || !interleave(xb, yb, b1, b2) {
                 continue;
             }
@@ -474,6 +486,8 @@ impl Search<'_, '_> {
             }
             let (k, p2) = cross_pin(pg, mine, held, oall, vias);
             pg = p2;
+            // TW6 part B: the crossing predicts a via without a site when neither wire has one.
+            cross += wt.site_mm * own_site.min(osite);
             cross += wt.cross_mm * f
                 + match k {
                     CrossLayer::Free => 0.0,
@@ -485,7 +499,7 @@ impl Search<'_, '_> {
     }
 
     fn arc(&self, t: TriId, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>]) -> (f64, u64) {
-        Self::arc_chords(self.tc[t].as_deref().expect("filled"), &self.wt, self.c.net, xb, yb, pin, mine, skip, self.st.cross_vias)
+        Self::arc_chords(self.tc[t].as_deref().expect("filled"), &self.wt, self.c.net, xb, yb, pin, mine, skip, self.st.cross_vias, self.own_site.get(t).copied().unwrap_or(0.0))
     }
 
     fn slot(&self, e: EdgeId, g: usize, into: TriId) -> usize {
@@ -643,7 +657,7 @@ impl Search<'_, '_> {
                 let b0 = if taut { base_root } else { base };
                 let f = (2.0 * g as f64 + 1.0) / (2.0 * n as f64 + 2.0);
                 let yb = side as f64 + if fwd { f } else { 1.0 - f };
-                let (cross, pg) = Self::arc_chords(self.tc[t].as_deref().expect("filled above"), &wt, c.net, xb, yb, pin, mine, &[except], st.cross_vias);
+                let (cross, pg) = Self::arc_chords(self.tc[t].as_deref().expect("filled above"), &wt, c.net, xb, yb, pin, mine, &[except], st.cross_vias, self.own_site.get(t).copied().unwrap_or(0.0));
                 let (extra, pin2, room1, room) = if pg == pin { base_pass } else { through(pg) };
                 // A pin narrowed by a crossing may meet a finite room the base pin did not.
                 if self.needs.is_empty() && (room.is_some_and(f64::is_finite) || room1.is_some_and(f64::is_finite)) {
@@ -834,6 +848,59 @@ impl<'p> State<'p> {
         self.free_now = (0..self.wires.len()).map(|w| self.wires[w].alive && k(w) == 0).collect();
     }
 
+    /// TW6 part B search: the graded site amount of a via of `net` (clearance `s`) in triangle
+    /// `t` ([`super::pack::Packer::site_amount`] of [`super::pack::Packer::site_room`]); 0 without
+    /// [`State::site_rooms`]. O(1) cached.
+    pub fn site_own(&self, t: TriId, net: i32, s: f64) -> f64 {
+        self.site_rooms.as_ref().map_or(0.0, |r| r.amount(std::iter::once(t), net, s))
+    }
+
+    /// TW6 part B search: the site amount of wire `o`'s via near its traversal `k`: the via
+    /// interval through `k` under the loop's layering ([`State::mark_site_k`]), else `o`'s own
+    /// room in that traversal's triangle (a crossing there would put the via there). 0 without
+    /// [`State::site_rooms`]. O(1).
+    pub fn site_k_at(&self, o: WireId, k: usize) -> f64 {
+        if let Some(&a) = self.site_k.get(o).and_then(|v| v.get(k)) {
+            return a;
+        }
+        let wi = &self.wires[o];
+        match wi.tris.get(k) {
+            Some(&t) => self.site_own(t, wi.net, wi.s),
+            None => 0.0,
+        }
+    }
+
+    /// TW6 part B search: [`State::site_k`] from the layering `events` (`(traversal, fraction,
+    /// layer)` per wire): inside a via interval ([`super::refine::via_ranges`], strict with
+    /// [`State::site_strict`]) the amount at the best room over the interval (the via may sit
+    /// anywhere in it, Polubasov 2001 p. 4), elsewhere the traversal's own room. Cleared without
+    /// [`State::site_rooms`]. O(traversals) cached rooms.
+    pub fn mark_site_k(&mut self, events: &[Vec<(usize, f64, i32)>]) {
+        self.site_k.clear();
+        let Some(rooms) = self.site_rooms.as_ref() else { return };
+        let mut out = Vec::with_capacity(self.wires.len());
+        for (w, wi) in self.wires.iter().enumerate() {
+            let n = wi.tris.len();
+            if !wi.alive || n == 0 {
+                out.push(Vec::new());
+                continue;
+            }
+            let mut a: Vec<f64> = wi.tris.iter().map(|&t| rooms.amount(std::iter::once(t), wi.net, wi.s)).collect();
+            if let Some(ev) = events.get(w) {
+                let (iv, _) = super::refine::via_ranges(ev, self.site_strict);
+                for &(lo, hi) in &iv {
+                    let (lo, hi) = (lo.min(n - 1), hi.min(n - 1));
+                    let x = rooms.amount(wi.tris[lo..=hi].iter().copied(), wi.net, wi.s);
+                    for v in &mut a[lo..=hi] {
+                        *v = v.min(x);
+                    }
+                }
+            }
+            out.push(a);
+        }
+        self.site_k = out;
+    }
+
     pub fn held_layers(&self, w: WireId) -> Vec<u64> {
         let held = self.stretch_layers(w);
         if self.free_now.get(w).copied().unwrap_or(false) {
@@ -914,6 +981,7 @@ impl<'p> State<'p> {
             best: vec![u32::MAX; off.last().copied().unwrap_or(0)],
             off: off[..off.len() - 1].to_vec(),
             tc: vec![None; pr.tris.len()],
+            own_site: if wt.site_mm > 0.0 { vec![0.0; pr.tris.len()] } else { Vec::new() },
             held: std::collections::HashMap::new(),
             needs: Vec::new(),
             needs_n: Vec::new(),

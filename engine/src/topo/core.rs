@@ -4644,6 +4644,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 *self.lr = lr;
                 self.st.layers_now = layers_now(self.st, &self.lr.events, self.bottom);
                 self.st.mark_free_wires(&self.lr.events);
+                self.st.mark_site_k(&self.lr.events);
                 if p.is_none() {
                     self.pred_local = false;
                 }
@@ -5763,6 +5764,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // TW5 (4): crossing a wire that crosses nothing is priced by its freedom (free_wire_cross).
         st.free_wire_a = opts.free_wire_cross;
         st.mark_free_wires(&lr.events);
+        // TW6 part B search (`[factors] via_site_social` > 0): a crossing where neither wire has a
+        // via site is priced by the smaller of their site amounts (the packer's one measure).
+        if opts.factors.weight.get("via_site_social").is_some_and(|&w| w > 0.0) {
+            st.site_rooms = Some(packer.site_rooms());
+            st.site_strict = packer.via_between;
+            st.mark_site_k(&lr.events);
+        }
         // TW3: the pre-loop decisions of this run (a draw-only round takes its row's).
         let pre_loop: std::sync::Arc<PreLoop> = match draw_row {
             Some(d) => {
@@ -6044,6 +6052,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.layers_now.clear();
         st.free_wire_a = 1.0;
         st.mark_free_wires(&[]);
+        st.site_rooms = None;
+        st.site_k.clear();
         let loop_s = t_loop.elapsed().as_secs_f64();
         let time_hit = rep.stop == "time limit" || rep.stop == "loop_time_share";
         loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit, relay_stop: rep.stop == "re-lay budget" });

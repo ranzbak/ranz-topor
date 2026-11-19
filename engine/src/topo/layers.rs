@@ -722,12 +722,7 @@ fn site_amount(st: &State, pk: &Packer, w: WireId, ka: usize, kb: usize, between
     let (lo, hi) = (ka.min(kb), ka.max(kb));
     let (a, b) = if between && hi > lo + 1 { (lo + 1, hi - 1) } else { (lo, hi) };
     let room = (a..=b).map(|k| pk.site_room(wi.tris[k.min(tl)], wi.net, wi.s)).fold(f64::NEG_INFINITY, f64::max);
-    let def = Packer::site_deficit(room, d);
-    if def > 0.0 {
-        1.0 + def / (d + wi.s).max(1.0)
-    } else {
-        0.0
-    }
+    Packer::site_amount(room, d, wi.s)
 }
 
 /// The stretches, vias and vias without a site of one wire ([`stretches_and_vias`]): the pieces
