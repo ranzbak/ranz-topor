@@ -36,11 +36,10 @@ pub mod meter {
     use std::sync::atomic::{AtomicU64, Ordering};
     pub static GLOBAL: AtomicU64 = AtomicU64::new(0);
     pub static LOCAL: AtomicU64 = AtomicU64::new(0);
-    pub static LOCAL_SKIP: AtomicU64 = AtomicU64::new(0);
     pub static NS: AtomicU64 = AtomicU64::new(0);
-    /// `(whole-board calls, local calls, local judgements that kept the old value, ms in calls)`.
-    pub fn read() -> (u64, u64, u64, f64) {
-        (GLOBAL.load(Ordering::Relaxed), LOCAL.load(Ordering::Relaxed), LOCAL_SKIP.load(Ordering::Relaxed), NS.load(Ordering::Relaxed) as f64 / 1e6)
+    /// `(whole-board calls, local calls, ms in calls)`.
+    pub fn read() -> (u64, u64, f64) {
+        (GLOBAL.load(Ordering::Relaxed), LOCAL.load(Ordering::Relaxed), NS.load(Ordering::Relaxed) as f64 / 1e6)
     }
 }
 

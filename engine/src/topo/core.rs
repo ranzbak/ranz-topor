@@ -6705,8 +6705,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         m["move_cost"] = serde_json::json!({"moves": mv_n, "us_per_move": (mv_us * 10.0).round() / 10.0, "via_positions": vp_n, "us_per_via_position": (vp_us * 10.0).round() / 10.0});
         let (vc_n, vc_ms, bd_n, bd_ms) = super::refine::meter::read_cm1();
         m["move_cost"]["via_cut"] = serde_json::json!({"calls": vc_n, "ms_in": vc_ms.round(), "builds": bd_n, "ms_builds": bd_ms.round()});
-        let (pg_n, pl_n, pl_skip, p_ms) = super::pourplan::meter::read();
-        m["move_cost"]["pour_cut"] = serde_json::json!({"global": pg_n, "local": pl_n, "local_kept": pl_skip, "ms_in": p_ms.round()});
+        let (pg_n, pl_n, p_ms) = super::pourplan::meter::read();
+        m["move_cost"]["pour_cut"] = serde_json::json!({"global": pg_n, "local": pl_n, "ms_in": p_ms.round()});
         // par-refine: the lane executor's epochs, lane-epochs, candidates evaluated past a kept one
         // (wasted) and again for an end-site fill (redone); the build memo's hits and misses.
         {
