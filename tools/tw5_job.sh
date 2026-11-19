@@ -72,6 +72,8 @@ one() {
     O) SETS+=("${OLD[@]}") ;;
     N) SETS+=("${NEW[@]}") ;;
     N[a-e]) mapfile -t x < <(part ${o#N}); SETS+=("${x[@]}") ;;
+    Of) SETS+=("${OLD[@]}" --set optimize.loop_p4=true) ;;  # TW5 (f): O + one in-loop P4 round per cycle
+    Nef) x=("${OLD[@]}"); x[13]='optimize.preloop_p4=false'; SETS+=("${x[@]}" --set optimize.loop_p4=true) ;;  # (e) + (f): the pre-loop rounds folded into the loop
     Nce) x=("${OLD[@]}"); x[9]='optimize.loop_history=true'; x[13]='optimize.preloop_p4=false'; SETS+=("${x[@]}") ;;  # (e) with (c), its intended stand-in
     F) SETS+=(--set optimize.free_wire_cross=0.0) ;;  # the defaults (TW5 off) with crossing-free wires crossed at their freedom
     NF) SETS+=("${NEW[@]}" --set optimize.free_wire_cross=0.0) ;;
@@ -135,7 +137,7 @@ mutants() {  # the TW5 changed lines; each mutant against the tests that guard i
 }
 tests() {
   cd $ROOT/engine
-  cargo test --release --lib -- escape:: layers::tests 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $? $(grep 'test result' $R/cargo-lib.log | tail -1)"
+  cargo test --release --lib -- escape:: layers::tests topo::core::tests::p4 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $? $(grep 'test result' $R/cargo-lib.log | tail -1)"
   cargo test --release --no-fail-fast --test topo_p5_loop --test loop_local --test topo_g0 --test tw5_escape -- --nocapture 9>&- > $R/cargo-int.log 2>&1; note "cargo int rc $? $(grep -c 'test result: ok' $R/cargo-int.log) ok binaries"
   cd $ROOT
 }
@@ -209,6 +211,16 @@ case ${1:-} in
     wait
     PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns_png $R/d8 $R $R/d8out > $R/d8-png.log 2>&1; note "d8 png rc $? $(grep -v Debug $R/d8-png.log | tr '\n' ';')"
     note "all done" ;;
+  r13)
+    # Round 13 (TW5 (f) loop_p4): targeted tests; O at 1 cycle on 4 boards (the victim refactor: copper = tw5r11 Or1);
+    # A/B at 16 cycles Of (O + loop_p4) and Nef (pre-loop off + loop_p4) on qmtech s0-2 (2 threads), esp s1-3,
+    # inner_layer_room seeds 0-9 (KiCad types, In1 routed).
+    ( hzq run --pin --threads 2 --name tw5-tests -- bash $ROOT/tools/tw5_job.sh tests > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
+    gen
+    for s_ in 0 1 2; do u q$s_ 4 "Ofr16s$s_:qmtech:2" "Nefr16s$s_:qmtech:2"; done
+    i=""; for s_ in 0 1 2 3 4 5 6 7 8 9; do i+="Ofr16s$s_:p-inner_layer_room Nefr16s$s_:p-inner_layer_room "; done
+    u e 4 "Ofr16s1:esp Ofr16s2:esp Ofr16s3:esp" "Nefr16s1:esp Nefr16s2:esp Nefr16s3:esp" "$i" "Or1:eprom Or1:wiccon Or1:esp Or1:qmtech"
+    wait; note "all done" ;;
   r12)
     # Round 12 (main 5a105d3c, via_cuts on): the single-part ablations again (TW5 r2's were before via_cuts), 16 cycles,
     # qmtech s0-2 (2 threads, as tw5r11's O/F) and esp s1-3; parts a-e and c+e. O and F come from tw5r11 (same engine).
