@@ -67,7 +67,7 @@ case ${1:-} in
     # mutants in their own tree copy + target dir (never beside a suite)
     mkdir -p $R/mt && git -C $ROOT archive HEAD 2>/dev/null | tar -x -C $R/mt 2>/dev/null || rsync -a --exclude target --exclude scratch $ROOT/ $R/mt/
     find $R/mt -name '*.rs' -exec touch {} +
-    ( hzq run --pin --threads 4 --name mut -- bash -c "cd $R/mt && CARGO_TARGET_DIR=$R/mt/engine/target python3 tools/syncwait_mut.py $R/mt $R/mutants.tsv > $R/mut.log 2>&1 9>&-"; note "unit mut rc $?" )
+    ( hzq run --pin --threads 4 --name mut -- bash -c "cd $R/mt && CARGO_TARGET_DIR=$R/mt/engine/target python3 tools/syncwait_mut.py $R/mt $R/mutants.tsv ${2:-0} > $R/mut.log 2>&1 9>&-"; note "unit mut rc $?" )
     note "all done" ;;
   lane) shift; lane "$@" ;;
   hash)

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """sync-wait mutants (DoD 1): each mutant changes one line of this branch; the named test must fail.
 
-    python3 tools/syncwait_mut.py <tree-copy> <out.tsv>
+    python3 tools/syncwait_mut.py <tree-copy> <out.tsv> [<first mutant index>]
 
 Runs in a COPY of the tree (own target dir: <tree-copy>/engine/target). Per mutant: apply, run its test command,
-restore; killed = the test command failed. O(mutants x (build + test)).
+restore; killed = the test command failed, or hung past 600 s (a wait that never ends). O(mutants x (build + test)).
 """
 import subprocess
 import sys
@@ -34,10 +34,10 @@ MUTANTS = [
 ]
 
 
-def main(tree: str, out: str):
+def main(tree: str, out: str, first: int = 0):
     root = Path(tree)
     rows = []
-    for name, f, old, new, cmd in MUTANTS:
+    for name, f, old, new, cmd in MUTANTS[first:]:
         p = root / f
         src = p.read_text()
         if src.count(old) != 1:
@@ -46,9 +46,12 @@ def main(tree: str, out: str):
         p.write_text(src.replace(old, new))
         try:
             cwd = root / "engine" if cmd[0] == "cargo" else root
-            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=1800)
-            tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
-            rows.append((name, "killed" if r.returncode != 0 else "SURVIVED", tail[0][:160]))
+            try:
+                r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=600)
+                tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+                rows.append((name, "killed" if r.returncode != 0 else "SURVIVED", tail[0][:160]))
+            except subprocess.TimeoutExpired:
+                rows.append((name, "killed (hang)", "test still running after 600 s"))
         finally:
             p.write_text(src)
         print("\t".join(rows[-1]), flush=True)
@@ -56,4 +59,4 @@ def main(tree: str, out: str):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1], sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 0)
