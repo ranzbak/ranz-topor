@@ -436,6 +436,9 @@ fn loop_opts(extra: &str) -> Options {
     Options::from_json(&serde_json::Value::Object(o).to_string()).unwrap()
 }
 
+/// Every TW5 option at its TW5 value (off by default until qmtech is analysed, docs/dev/design/tw5-escape.md).
+const TW5: &str = r#""oscillation": "bounded", "escape": "layering", "escape_take": "always", "relay_count_fade": 0.8, "loop_history": true, "float_wire": true, "preloop_p4": false"#;
+
 /// The TW5 escape report line ("TopoR loop escapes (TW5): ...").
 fn escape_line(m: &BoardModel, o: &Options) -> String {
     let ctl = RunControl::new();
@@ -474,8 +477,9 @@ fn local_judge_layers_the_board_a_few_times_per_cycle() {
         assert!(l <= 4.0, "{n_layers} layers, local: {ln}");
         // TW5 (b): the layering escapes run inside the sweep, as many as the work-unit throttle allows
         // ([optimize] escape_share 0.35 of the work), so more whole-board layerings, within the share.
-        let (le, _, lne) = judge_line(&m, &loop_opts(r#""loop_judge": "local""#));
-        let esc = escape_line(&m, &loop_opts(r#""loop_judge": "local""#));
+        let tw5 = loop_opts(&format!(r#""loop_judge": "local", {TW5}"#));
+        let (le, _, lne) = judge_line(&m, &tw5);
+        let esc = escape_line(&m, &tw5);
         let share: f64 = esc.split("work share of the escapes ").nth(1).and_then(|t| t.split(' ').next()).and_then(|t| t.parse().ok())
             .unwrap_or_else(|| panic!("share in {esc}"));
         assert!(share <= 35.0 + 1e-6, "{n_layers} layers, escape share {share} % > 35 %: {esc}");
@@ -649,16 +653,17 @@ fn escape_json(m: &BoardModel, o: &Options) -> serde_json::Value {
     e
 }
 
-/// TW5 (b): with the defaults the layering escapes run inside the sweep and change layers of free
+/// TW5 (b): with the TW5 options the layering escapes run inside the sweep and change layers of free
 /// positions (a random via-optimal layering, Polubasov 2010 figs. 8-10), deterministic per seed;
-/// `escape = "ties"` (before TW5) runs none. 2 and 4 layers.
+/// the default (`escape = "ties"`, before TW5) runs none. 2 and 4 layers.
 #[test]
 fn layering_escapes_change_free_positions_deterministically() {
     for n_layers in [2, 4] {
         let mut pads = fan_pads();
         pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
         let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
-        let e = escape_json(&m, &loop_opts(r#""loop_judge": "local""#));
+        let tw5 = loop_opts(&format!(r#""loop_judge": "local", {TW5}"#));
+        let e = escape_json(&m, &tw5);
         let n = |k: &str| e[k].as_f64().unwrap_or_else(|| panic!("{k} in {e}"));
         assert_eq!(e["mode"], "layering", "{e}");
         assert!(n("escapes") > 0.0 && n("free_positions") > 0.0, "{n_layers} layers: {e}");
@@ -666,13 +671,15 @@ fn layering_escapes_change_free_positions_deterministically() {
         assert!(n("work_share") <= 0.35 + 1e-9, "{n_layers} layers: {e}");
         // TW5 (c): the loop history is updated after every escape's whole-board measure.
         assert_eq!(n("history_updates"), n("escapes"), "{n_layers} layers: {e}");
-        assert_eq!(e, escape_json(&m, &loop_opts(r#""loop_judge": "local""#)), "{n_layers} layers: deterministic per seed");
+        assert_eq!(e, escape_json(&m, &tw5), "{n_layers} layers: deterministic per seed");
         // A dear escape (escape_kappa 10: one escape's work is ten re-lays' per wire): the throttle spaces
         // the escapes so they stay within the share.
-        let k = escape_json(&m, &loop_opts(r#""loop_judge": "local", "escape_kappa": 10.0"#));
+        let k = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", "escape_kappa": 10.0, {TW5}"#)));
         assert!(k["escapes"].as_f64().unwrap_or(0.0) > 0.0 && k["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, kappa 10: {k}");
-        let t = escape_json(&m, &loop_opts(r#""loop_judge": "local", "escape": "ties""#));
-        assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, escape = ties: {t}");
+        let t = escape_json(&m, &loop_opts(r#""loop_judge": "local""#));
+        assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, default (escape = ties): {t}");
+        let t = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", {TW5}, "escape": "ties""#)));
+        assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, TW5 with escape = ties: {t}");
     }
 }
 

@@ -9,7 +9,7 @@
 #           d-<pattern> = a PROPOSED D8 pattern (harness/tw5_patterns.py, generated into $HZ_RUN_DIR/d8),
 #           e-<X> = esp with min_copper_edge_clearance X mm (edge_boards).
 # cfg = <opts><rounds>[s<seed>]:
-#   opts  O = every TW5 option at its old value (must give main's copper), N = the TW5 defaults,
+#   opts  O = every TW5 option at its old value (the defaults since fa0b28f0+1; must give main's copper), N = every TW5 option on,
 #         Na/Nb/Nc/Nd/Ne = O with only that part on (a oscillation, b escape+take, c loop history, d float_wire, e no pre-loop P4)
 #   rounds  r<N> = optimize.rounds=N, stable_patience=N (no stable stop before N cycles)
 # Out: $HZ_RUN_DIR/<cfg>/<board>/, logs $HZ_RUN_DIR/<cfg>-<board>.log.
@@ -50,6 +50,8 @@ PY
 }
 OLD=(--set 'optimize.oscillation="cooling"' --set 'optimize.escape="ties"' --set 'optimize.escape_take="not_worse"'
      --set optimize.relay_count_fade=1.0 --set optimize.loop_history=false --set optimize.float_wire=false --set optimize.preloop_p4=true)
+NEW=(--set 'optimize.oscillation="bounded"' --set 'optimize.escape="layering"' --set 'optimize.escape_take="always"'
+     --set optimize.relay_count_fade=0.8 --set optimize.loop_history=true --set optimize.float_wire=true --set optimize.preloop_p4=false)
 part() {  # the OLD settings with part $1 at its TW5 value
   local a=("${OLD[@]}") i
   case $1 in
@@ -68,7 +70,7 @@ one() {
   local n=${rr%%s*}; [ "$rr" != "$n" ] && seed=${rr#*s}
   case $o in
     O) SETS+=("${OLD[@]}") ;;
-    N) ;;
+    N) SETS+=("${NEW[@]}") ;;
     N[a-e]) mapfile -t x < <(part ${o#N}); SETS+=("${x[@]}") ;;
     *) note "unknown cfg $c"; return ;;
   esac

@@ -33,16 +33,16 @@ fn layers_of(r: &RouteResult) -> String {
 }
 
 /// TW5 (e), D9: with the TopoR loop the negotiated rip-up rounds before it are folded into the
-/// loop (default `preloop_p4 = false`); `true` runs them as before TW5. inner_layer_room is
+/// loop with `preloop_p4 = false` (TW5); the default `true` runs them as before TW5. inner_layer_room is
 /// over-full on F.Cu when every wire takes the top layer (5 wires, room for 2), so the rounds have
 /// work to do there.
 #[test]
 fn preloop_p4_rounds_run_only_when_asked() {
     let m = model("inner_layer_room");
     let p4 = |r: &RouteResult| r.warnings.iter().find(|w| w.starts_with("P4 negotiated rip-up")).cloned();
-    let on = route(&m, &opts(r#""preloop_p4": true"#));
-    let off = route(&m, &opts(""));
-    eprintln!("preloop_p4 = true: {:?}\n  {}\ndefault: {:?}\n  {}", p4(&on), layers_of(&on), p4(&off), layers_of(&off));
-    assert!(p4(&off).is_none(), "default (preloop_p4 = false): no P4 rounds before the loop: {:?}", p4(&off));
-    assert!(p4(&on).is_some(), "preloop_p4 = true: the P4 rounds run on an over-full board: {:?}", on.warnings);
+    let on = route(&m, &opts(""));
+    let off = route(&m, &opts(r#""preloop_p4": false"#));
+    eprintln!("default (preloop_p4 = true): {:?}\n  {}\npreloop_p4 = false: {:?}\n  {}", p4(&on), layers_of(&on), p4(&off), layers_of(&off));
+    assert!(p4(&off).is_none(), "preloop_p4 = false: no P4 rounds before the loop: {:?}", p4(&off));
+    assert!(p4(&on).is_some(), "default (preloop_p4 = true): the P4 rounds run on an over-full board: {:?}", on.warnings);
 }
