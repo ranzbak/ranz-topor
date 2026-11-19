@@ -52,3 +52,6 @@ then `let _pg = super::prof::g(super::prof::K::MyKey);` at the top of the functi
 names (`prof::mark("label")`; the label to stage map is `stage_of`, covered by a unit test). Keep call sites one line;
 nothing in the hooks may read or change routing state. `engine/tests/topo_prof.rs` checks that counters on give the same
 copper and that the windows cover the run.
+
+TW5 adds two inclusive keys inside the sweep lap (`st_sweep`): `escape` (one layering escape, `Sp::escape`) and
+`float_wire` (one floating up of a wire, `Sp::float_up`). The escape time share of the loop is `escape` / `cycle`.

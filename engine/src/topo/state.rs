@@ -625,6 +625,16 @@ pub struct State<'p> {
     /// ([`State::held_layers`]). Empty (default, every other caller): the stretch's own held
     /// layers only, as before.
     pub layers_now: Vec<Vec<u64>>,
+    /// TW5 (4), `[optimize] free_wire_cross` < 1: per wire, the multiplier of the crossing price
+    /// for crossing it (a + (1 - a) k/(1 + k), k its crossings); empty (default) = 1 for every
+    /// wire.
+    pub cross_k: Vec<f64>,
+    /// TW5 (4): per wire, whether it has no crossing in the loop's layering, so a crossing sees
+    /// its own held layers ([`State::stretch_layers`]) instead of its drawn layer
+    /// ([`State::held_layers`]); empty (default) = none.
+    pub free_now: Vec<bool>,
+    /// TW5 (4): `[optimize] free_wire_cross` while the TopoR loop runs (1 = off).
+    pub free_wire_a: f64,
     /// exist-term: vertex pairs the board's existing copper already joins (the copper cluster of
     /// a terminal on existing copper: its kept-end terminals, pads and vias); the net trees
     /// ([`super::tree::components`]) start from them.
@@ -683,6 +693,9 @@ impl<'p> State<'p> {
             relay_after_uncross: true,
             took_part: Vec::new(),
             layers_now: Vec::new(),
+            cross_k: Vec::new(),
+            free_now: Vec::new(),
+            free_wire_a: 1.0,
             pre_join: Vec::new(),
             cont_dir: BTreeMap::new(),
         }

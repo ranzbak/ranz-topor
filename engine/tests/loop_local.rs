@@ -291,7 +291,19 @@ fn stretch_cache_sees_each_input_alone() {
 
 /// The fan's wires laid (A, B, C, F, E, G) on `n_layers`.
 fn laid(n_layers: usize) -> (BoardModel, &'static Board, State<'static>) {
-    let (m, b) = fan_layers(n_layers);
+    laid_on(n_layers, false)
+}
+
+/// [`laid`]; `both` = every fan pad on both layers (as THT pads: no event is fixed to a layer).
+fn laid_on(n_layers: usize, both: bool) -> (BoardModel, &'static Board, State<'static>) {
+    let (m, b) = if both {
+        let pads: Vec<_> = fan_pads().into_iter().map(|(r, n, x, y, w, h, _)| (r, n, x, y, w, h, 99)).collect();
+        let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
+        let b = board::build(&m, &BuildOpts { existing_vias: true, keepouts: true, copper_shapes: true, ..BuildOpts::default() }).unwrap();
+        (m, b)
+    } else {
+        fan_layers(n_layers)
+    };
     let b: &'static Board = Box::leak(Box::new(b));
     let wt = InitWeights::default();
     let mut st = State::new(&b.proj);
@@ -424,6 +436,17 @@ fn loop_opts(extra: &str) -> Options {
     Options::from_json(&serde_json::Value::Object(o).to_string()).unwrap()
 }
 
+/// Every TW5 option at its TW5 value (off by default until qmtech is analysed, docs/dev/design/tw5-escape.md).
+const TW5: &str = r#""oscillation": "bounded", "escape": "layering", "escape_take": "always", "relay_count_fade": 0.8, "loop_history": true, "float_wire": true, "preloop_p4": false"#;
+
+/// The TW5 escape report line ("TopoR loop escapes (TW5): ...").
+fn escape_line(m: &BoardModel, o: &Options) -> String {
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let r = route_with(m, o, &ctl);
+    r.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).unwrap_or_else(|| panic!("escape line: {:?}", r.warnings)).clone()
+}
+
 /// The loop judge's report line: (whole-board layerings per cycle, local layerings per cycle, the
 /// line).
 fn judge_line(m: &BoardModel, o: &Options) -> (f64, f64, String) {
@@ -449,8 +472,18 @@ fn local_judge_layers_the_board_a_few_times_per_cycle() {
         pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
         let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
         let (g, gl, lg) = judge_line(&m, &loop_opts(r#""loop_judge": "global""#));
-        let (l, ll, ln) = judge_line(&m, &loop_opts(r#""loop_judge": "local""#));
+        // The per-cycle layer pass of the old loop (escape = "ties"): a few whole-board layerings per cycle.
+        let (l, ll, ln) = judge_line(&m, &loop_opts(r#""loop_judge": "local", "escape": "ties""#));
         assert!(l <= 4.0, "{n_layers} layers, local: {ln}");
+        // TW5 (b): the layering escapes run inside the sweep, as many as the work-unit throttle allows
+        // ([optimize] escape_share 0.35 of the work), so more whole-board layerings, within the share.
+        let tw5 = loop_opts(&format!(r#""loop_judge": "local", {TW5}"#));
+        let (le, _, lne) = judge_line(&m, &tw5);
+        let esc = escape_line(&m, &tw5);
+        let share: f64 = esc.split("work share of the escapes ").nth(1).and_then(|t| t.split(' ').next()).and_then(|t| t.parse().ok())
+            .unwrap_or_else(|| panic!("share in {esc}"));
+        assert!(share <= 35.0 + 1e-6, "{n_layers} layers, escape share {share} % > 35 %: {esc}");
+        assert!(le > 0.0 && esc.contains("escapes ("), "{n_layers} layers, escapes: {lne} / {esc}");
         assert!(ll > 0.0, "{n_layers} layers, local re-lays: {ln}");
         assert!(gl == 0.0 && g > l, "{n_layers} layers, global: {lg} vs local {ln}");
         assert!(lg.contains("loop_judge = \"global\"") && ln.contains("loop_judge = \"local\""));
@@ -603,4 +636,170 @@ fn local_depth_two_frees_more_and_stays_exact() {
         }
     }
     assert!(f2 > f1, "depth 2 frees more wires somewhere: {f1} vs {f2}");
+}
+
+/// The loop's `plan metrics` block "loop" -> "escape" (TW5 report, docs/dev/design/tw5-escape.md).
+fn escape_json(m: &BoardModel, o: &Options) -> serde_json::Value {
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let r = route_with(m, o, &ctl);
+    let line = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).unwrap_or_else(|| panic!("plan metrics line: {:?}", r.warnings));
+    let v: serde_json::Value = serde_json::from_str(line.trim_start_matches("plan metrics:").trim()).expect("plan metrics JSON");
+    let mut e = v["loop"]["escape"].clone();
+    // Clock fields differ run to run; the copper and every count must not.
+    if let Some(x) = e.as_object_mut() {
+        x.retain(|k, _| !k.ends_with("_s"));
+    }
+    e
+}
+
+/// TW5 (b): with the TW5 options the layering escapes run inside the sweep and change layers of free
+/// positions (a random via-optimal layering, Polubasov 2010 figs. 8-10), deterministic per seed;
+/// the default (`escape = "ties"`, before TW5) runs none. 2 and 4 layers.
+#[test]
+fn layering_escapes_change_free_positions_deterministically() {
+    for n_layers in [2, 4] {
+        let mut pads = fan_pads();
+        pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
+        let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
+        let tw5 = loop_opts(&format!(r#""loop_judge": "local", {TW5}"#));
+        let e = escape_json(&m, &tw5);
+        let n = |k: &str| e[k].as_f64().unwrap_or_else(|| panic!("{k} in {e}"));
+        assert_eq!(e["mode"], "layering", "{e}");
+        assert!(n("escapes") > 0.0 && n("free_positions") > 0.0, "{n_layers} layers: {e}");
+        assert!(n("changed_positions") > 0.0, "{n_layers} layers, the escapes moved no free position: {e}");
+        assert!(n("work_share") <= 0.35 + 1e-9, "{n_layers} layers: {e}");
+        // TW5 (c): the loop history is updated after every escape's whole-board measure.
+        assert_eq!(n("history_updates"), n("escapes"), "{n_layers} layers: {e}");
+        assert_eq!(e, escape_json(&m, &tw5), "{n_layers} layers: deterministic per seed");
+        // A dear escape (escape_kappa 10: one escape's work is ten re-lays' per wire): the throttle spaces
+        // the escapes so they stay within the share.
+        let k = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", "escape_kappa": 10.0, {TW5}"#)));
+        assert!(k["escapes"].as_f64().unwrap_or(0.0) > 0.0 && k["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, kappa 10: {k}");
+        let t = escape_json(&m, &loop_opts(r#""loop_judge": "local""#));
+        assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, default (escape = ties): {t}");
+        let t = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", {TW5}, "escape": "ties""#)));
+        assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, TW5 with escape = ties: {t}");
+    }
+}
+
+/// TW5 (b) at the layering itself: `LayerParams.walk` > 0 with random ties moves the whole-board
+/// layering to another one (2 layers: the plateau walk on the domain graph; 4 layers: one random
+/// layer pair re-solved with the walk) for some seeds, the same per seed. The fan's pads on both
+/// layers (THT-like): no SMD pad fixes an event, so equal layerings exist (with the SMD fan the
+/// 2-layer optimum is unique: 0 of 24 walked). (The walk keeps the domain graph's via optimum:
+/// escape::/layers:: unit tests; here the capacity refinement follows.)
+#[test]
+fn the_layering_walk_moves_to_other_layerings_per_seed() {
+    for n_layers in [2, 4] {
+        let (_m, b, st) = laid_on(n_layers, true);
+        let smd = |o: usize| b.smd_layer(o);
+        let base = LayerParams { via_between: true, via_site_r: 0.5e6, ..LayerParams::default() };
+        let (mut moved, mut walked) = (0, 0);
+        for seed in 1..=24u64 {
+            let plain = layers::assign(&st, &smd, &LayerParams { ties: seed, ..base });
+            let p = LayerParams { ties: seed, walk: 4, ..base };
+            let w = layers::assign(&st, &smd, &p);
+            assert_eq!(w.events, layers::assign(&st, &smd, &p).events, "{n_layers} layers seed {seed}: deterministic");
+            walked += usize::from(w.walked > 0);
+            moved += usize::from(w.events != plain.events);
+            eprintln!("{n_layers} layers seed {seed}: walked {}, vias {} (plain {})", w.walked, w.vias, plain.vias);
+        }
+        eprintln!("{n_layers} layers: walked {walked} of 24, other layering {moved} of 24");
+        assert!(walked > 0 && moved > 0, "{n_layers} layers: walked {walked}, moved {moved} of 24");
+    }
+}
+
+/// TW5 (4), Polubasov 2010 fig. 10 (p. 108): W1 (THT, horizontal) crosses W2 (THT, vertical) and
+/// W3 (SMD pads on F.Cu, vertical). The optimum is all three straight with 0 vias: W3 on F.Cu,
+/// W1 on B.Cu, W2 on F.Cu (25 mm).
+fn fig10() -> (BoardModel, &'static Board) {
+    let pads = [
+        ("J1", 1, 2.0, 5.5, 1.2, 1.2, 99), ("J2", 1, 12.0, 5.5, 1.2, 1.2, 99),
+        ("J3", 2, 5.0, 2.0, 1.2, 1.2, 99), ("J4", 2, 5.0, 9.0, 1.2, 1.2, 99),
+        ("U1", 3, 8.5, 1.5, 0.8, 0.8, 0), ("U2", 3, 8.5, 9.5, 0.8, 0.8, 0),
+    ];
+    let m = board_layers(14.0, 11.0, 3, &pads, 2);
+    let b = board::build(&m, &BuildOpts { existing_vias: true, keepouts: true, copper_shapes: true, ..BuildOpts::default() }).unwrap();
+    (m, Box::leak(Box::new(b)))
+}
+
+/// TW5 (4) at the search: W2 and W3 laid, neither crosses anything, so the loop's layering draws
+/// both on the bottom layer (W3 held to F.Cu by its pads). W1 must cross W3 on B.Cu. With
+/// `free_wire_cross` = 1 (default) W2 counts as held to B.Cu, so crossing it implies a via pair and
+/// W1 goes round W2's end; with a = 0 W2 counts on every layer its own stretch allows (THT ends:
+/// both), crossing it is free of vias and of the crossing price (k = 0), and W1 crosses it straight.
+/// The crossing price at the loop's level (crossing factor x loop share 0.25 = 5 mm).
+#[test]
+fn a_wire_that_crosses_nothing_is_crossed_at_its_freedom() {
+    let (m, b) = fig10();
+    let wt = InitWeights { cross_mm: 5.0, ..InitWeights::default() };
+    let lay = |a: f64| {
+        let mut st = State::new(&b.proj);
+        let (w2, _) = st.route_conn(&conn(&m, b, 2, "J3", "J4"), &wt, 1.0).expect("W2");
+        st.route_conn(&conn(&m, b, 3, "U1", "U2"), &wt, 1.0).expect("W3");
+        st.cross_vias = true;
+        let none: Vec<Vec<(usize, f64, i32)>> = vec![Vec::new(); st.wires.len()];
+        st.layers_now = topor_engine::topo::optimise::layers_now(&st, &none, 1);
+        st.free_wire_a = a;
+        st.mark_free_wires(&none);
+        let (w1, _) = st.route_conn(&conn(&m, b, 1, "J1", "J2"), &wt, 1.0).expect("W1");
+        let over_w2 = st.crossings(w1).iter().filter(|x| x.other == w2).count();
+        let len: f64 = st.taut_points(w1).windows(2).map(|p| (p[1] - p[0]).len()).sum::<f64>() / MM;
+        (over_w2, len)
+    };
+    let (d, f, h) = (lay(1.0), lay(0.0), lay(0.5));
+    eprintln!("free_wire_cross 1: W1 crosses W2 {} times, {:.2} mm; 0: {} times, {:.2} mm; 0.5: {} times, {:.2} mm", d.0, d.1, f.0, f.1, h.0, h.1);
+    assert_eq!(d.0, 0, "default: the crossing-free W2 counts as held to B.Cu, W1 goes round it ({:.2} mm)", d.1);
+    assert_eq!(f.0, 1, "a = 0: W1 crosses the free W2 ({:.2} mm)", f.1);
+    assert!(f.1 < d.1 - 1.0 && f.1 <= 10.0 * 1.05, "a = 0: W1 straight ({:.2} mm) vs round ({:.2} mm)", f.1, d.1);
+}
+
+/// TW5 (4) routed, the fig. 10 board: with `free_wire_cross` = 0 some seed of 0..8 reaches the
+/// optimum (0 vias, all straight); the default's seeds are reported (the D8 proposal of the
+/// paper's board measures both: 7 of 10 seeds with a = 0, 0 of 11 with a = 1).
+#[test]
+fn free_wire_cross_reaches_the_fig10_optimum_for_some_seed() {
+    let (m, _) = fig10();
+    let run = |extra: &str| {
+        let o = loop_opts(&format!(r#""topo_rounds": 16, {extra}"#));
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        let r = route_with(&m, &o, &ctl);
+        let len: f64 = r.connections.iter().map(|c| c.length_nm as f64 / 1e6).sum();
+        let vias: usize = r.connections.iter().map(|c| c.vias).sum();
+        let routed = r.connections.iter().filter(|c| c.status == "routed").count();
+        (len, vias, routed)
+    };
+    let (mut hit_f, mut hit_d) = (0, 0);
+    for seed in 0..8 {
+        let (d, f) = (run(&format!(r#""seed": {seed}"#)), run(&format!(r#""seed": {seed}, "free_wire_cross": 0.0"#)));
+        eprintln!("seed {seed}: default {:.2} mm {} vias {} routed; a = 0 {:.2} mm {} vias {} routed", d.0, d.1, d.2, f.0, f.1, f.2);
+        let opt = |x: (f64, usize, usize)| x.1 == 0 && x.2 == 3 && x.0 <= 25.0 * 1.05;
+        hit_d += usize::from(opt(d));
+        hit_f += usize::from(opt(f));
+    }
+    eprintln!("optimum reached: default {hit_d} of 8, free_wire_cross 0 {hit_f} of 8");
+    assert!(hit_f > 0, "free_wire_cross 0: no seed of 8 reaches the optimum (default {hit_d})");
+}
+
+/// TW5 (4): the crossing price multiplier grows smoothly with the crossed wire's events k,
+/// a + (1 - a) k/(1 + k): a for a free wire (which alone counts as free), towards 1 for a wire
+/// with many; a = 1 (default) clears both marks.
+#[test]
+fn free_wire_cross_is_graded_by_the_crossed_wires_events() {
+    let (m, b) = fig10();
+    let wt = InitWeights::default();
+    let mut st = State::new(&b.proj);
+    let (w2, _) = st.route_conn(&conn(&m, b, 2, "J3", "J4"), &wt, 1.0).expect("W2");
+    let (w3, _) = st.route_conn(&conn(&m, b, 3, "U1", "U2"), &wt, 1.0).expect("W3");
+    let mut ev: Vec<Vec<(usize, f64, i32)>> = vec![Vec::new(); st.wires.len()];
+    ev[w3] = vec![(0, 0.2, 0), (0, 0.8, 0)];
+    st.free_wire_a = 0.4;
+    st.mark_free_wires(&ev);
+    assert!((st.cross_k[w2] - 0.4).abs() < 1e-12 && st.free_now[w2], "{:?} {:?}", st.cross_k, st.free_now);
+    assert!((st.cross_k[w3] - (0.4 + 0.6 * 2.0 / 3.0)).abs() < 1e-12 && !st.free_now[w3], "{:?}", st.cross_k);
+    st.free_wire_a = 1.0;
+    st.mark_free_wires(&ev);
+    assert!(st.cross_k.is_empty() && st.free_now.is_empty());
 }

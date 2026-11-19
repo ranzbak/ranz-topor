@@ -22,6 +22,7 @@ pub mod cutmodel;
 pub mod demand;
 pub mod diffpair;
 pub mod draw;
+pub mod escape;
 pub mod erbs;
 pub mod dwitness;
 pub mod exact;
