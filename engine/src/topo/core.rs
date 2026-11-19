@@ -3078,9 +3078,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // measures, local layerings and their sizes, the shadow check), read per cycle.
     let lctr = LoopCtr::default();
     // TW5 (b): `walk` > 0 = the layering escape's plateau walk (tries per domain).
+    // TW5 (e): the escape's capacity refinement may add a via when it removes more over-full price
+    // than the via costs, as the P4 label moves the loop replaces do (`add_vias: priced && cut_vias`
+    // there; the pre-loop P4 rounds are off by default with the TopoR loop). Without it a wire that
+    // crosses nothing (no event to relabel) never leaves an over-full cut: inner_layer_room with its
+    // declared layers, N 0 of 10 seeds at DRC 0 against 3 of 10 with the P4 rounds (tw5r3).
+    let esc_cap_vias = (packer.cuts.is_some() || opts.edges_test != "refuse") && opts.cut_vias;
     let assign_tw = |st: &State, ties: u64, walk: usize| {
         lctr.layer_global.set(lctr.layer_global.get() + 1);
-        let lp = LayerParams { ties, walk, ..lp };
+        let lp = LayerParams { ties, walk, cap_vias: lp.cap_vias || (walk > 0 && esc_cap_vias), ..lp };
         let mut lr = layers::assign_cached(st, &|ob| b.smd_layer(ob), &lp, Some(&packer), scache_ref);
         if tree_free && proj.n_layers != 2 && st.wires.iter().any(|w| w.alive && !w.turns.is_empty()) {
             let mut evl = lr.events.clone();
