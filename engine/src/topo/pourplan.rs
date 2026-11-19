@@ -143,9 +143,10 @@ mod tests {
     }
 
     /// 50 x 40 mm board, GND pour on B.Cu [2, 32] x [2, 32] mm listing U1.1 (4, 15), U2.1 (4, 25)
-    /// and U3.1 (20, 15); SIG pads A (7, 2.3) and B (7, 31.7).
+    /// (west of x = 7) and U3.1 (20, 15), U4.1 (20, 25), U5.1 (25, 20) (east: the main component
+    /// holds the most listed pads, `pourcheck`); SIG pads A (7, 2.3) and B (7, 31.7).
     fn model() -> BoardModel {
-        let pads = [pad("U1", 1, 4 * MM, 15 * MM), pad("U2", 1, 4 * MM, 25 * MM), pad("U3", 1, 20 * MM, 15 * MM), pad("A", 2, 7 * MM, 2_300_000), pad("B", 2, 7 * MM, 31_700_000)];
+        let pads = [pad("U1", 1, 4 * MM, 15 * MM), pad("U2", 1, 4 * MM, 25 * MM), pad("U3", 1, 20 * MM, 15 * MM), pad("U4", 1, 20 * MM, 25 * MM), pad("U5", 1, 25 * MM, 20 * MM), pad("A", 2, 7 * MM, 2_300_000), pad("B", 2, 7 * MM, 31_700_000)];
         let s = format!(
             r#"{{ "layers": [ {{ "id": 0, "name": "F.Cu" }}, {{ "id": 31, "name": "B.Cu" }} ],
               "nets": [ {{ "code": 1, "name": "GND" }}, {{ "code": 2, "name": "SIG" }} ],
@@ -154,7 +155,7 @@ mod tests {
                 {{ "kind": "seg", "a": [50000000, 40000000], "b": [0, 40000000] }},
                 {{ "kind": "seg", "a": [0, 40000000], "b": [0, 0] }} ],
               "pads": [ {} ],
-              "pours": [ {{ "uuid": "zz", "net": 1, "layers": [31], "pads": ["U1.1", "U2.1", "U3.1"],
+              "pours": [ {{ "uuid": "zz", "net": 1, "layers": [31], "pads": ["U1.1", "U2.1", "U3.1", "U4.1", "U5.1"],
                 "vias": [], "clearance": 200000, "min_thickness": 254000, "thermal_gap": 500000,
                 "spoke_width": 500000, "pad_connection": 1,
                 "fills": [ {{ "layer": 31, "outer": [[2000000, 2000000], [32000000, 2000000],
@@ -179,7 +180,7 @@ mod tests {
     }
 
     /// A SIG track across the whole fill at x = 7 mm cuts U1.1 and U2.1 (west) off the main side
-    /// (U3.1, east): one cut-off component of two pads, graded 1 + 0.25.
+    /// (U3.1, U4.1, U5.1, east): one cut-off component of two pads, graded 1 + 0.25.
     #[test]
     fn a_track_across_the_pour_cuts_off_the_small_side_graded_by_its_pads() {
         let m = model();

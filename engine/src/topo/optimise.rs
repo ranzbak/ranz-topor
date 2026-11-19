@@ -1007,7 +1007,8 @@ mod tests {
         let p = Predicted::of((2, 2.5), 1, 0).with_pour((1, 1.25));
         assert_eq!((p.count, p.graded), (4, 4.75));
         assert_eq!(p.parts.pour, (1, 1.25));
-        assert_eq!(Predicted::from_parts(p.parts, false, 1.0), p);
+        // The loop-local prediction of the same parts (shorts ranked at weight 1 keep `of`'s shorts).
+        assert_eq!(Predicted::from_parts(p.parts, true, 1.0), p);
         assert_eq!(Predicted::of((2, 2.5), 1, 0).with_pour((0, 0.0)), Predicted::of((2, 2.5), 1, 0));
     }
     use super::*;

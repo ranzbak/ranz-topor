@@ -53,6 +53,15 @@ def run(out: Path) -> int:
     out.mkdir(parents=True, exist_ok=True)
     rows = []
     only = [x for x in os.environ.get("TW4R2_MUT_ONLY", "").split(",") if x]
+    # The unmutated tree must pass the targeted tests first (a failing base kills every mutant).
+    r = subprocess.run(["cargo", "test", "--release", *TESTS], cwd=ROOT / "engine", capture_output=True, text=True, timeout=2400,
+                       env={**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target-mut")})
+    (out / "baseline.log").write_text(r.stdout[-20000:] + r.stderr[-20000:])
+    if r.returncode:
+        (out / "summary.txt").write_text(f"BASELINE-FAIL rc {r.returncode}: no mutant run (see baseline.log)\n")
+        print("BASELINE-FAIL", flush=True)
+        return 1
+    rows.append("baseline ok")
     for name, (f, old, new) in M.items():
         if only and name not in only:
             continue
