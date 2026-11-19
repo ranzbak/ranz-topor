@@ -1484,20 +1484,32 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
     let none = Vec::new();
     let no_skip = BTreeSet::new();
     let time = std::env::var_os("TOPO_ERBS_TIME").is_some();
-    let mut out = LayerErbs::default();
-    for si in own.into_iter().filter(|&si| sts[si].band.len() >= 2) {
+    let ids: Vec<usize> = own.into_iter().filter(|&si| sts[si].band.len() >= 2).collect();
+    // par-draw phase A: every stretch is a pure unit (its obstacles come from the plan, never from
+    // another ERBS) and may run on its own lane ([`super::par::map`]); the fold below takes the
+    // results in stretch order. A stretch that starts after the limit is cut (`None`); from the
+    // first cut one in stretch order on, every later stretch counts as cut too, as when they ran
+    // one after the other (the limit only moves forward).
+    type Unit = Result<(Result<Erbs, String>, f64), ErbsStop>;
+    let res: Vec<Unit> = super::par::map(&ids, |k, &si| {
         if let Some(why) = opts.expired() {
-            out.timed_out += 1;
-            out.stopped.get_or_insert(why);
-            continue;
+            return Err(why);
         }
         let t = std::time::Instant::now();
-        let s = &sts[si];
-        let r = if opts.fail_first && out.es.is_empty() && out.failed.is_empty() {
+        let r = if opts.fail_first && k == 0 {
             Err("injected sleeve failure (test hook)".to_string())
         } else {
-            erbs_stretch(sh, &fg, fclear, s, si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts)
+            erbs_stretch(sh, &fg, fclear, &sts[si], si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts)
         };
+        Ok((r, t.elapsed().as_secs_f64()))
+    });
+    let mut out = LayerErbs::default();
+    let (kept, cut, stopped) = cut_prefix(res);
+    out.timed_out += cut;
+    out.stopped = stopped;
+    for (k, (r, secs)) in kept {
+        let si = ids[k];
+        let s = &sts[si];
         // Debug: `TOPO_ERBS_SLEEVE=bad` prints the sleeve of a failed stretch or one longer
         // than 1.3 x its band (run again with the print on).
         if std::env::var_os("TOPO_ERBS_SLEEVE").is_some_and(|v| v == "bad") && r.as_ref().map_or(true, |e| e.len > 1.3 * e.band_len) {
@@ -1508,8 +1520,8 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         }
         if time {
             match &r {
-                Ok(e) => eprintln!("ERBS time st {si} wire {} points {} portals {} conflicts {} len/band {:.4} {:.2} ms", s.wire, e.points, e.portals, e.conflicts, e.len / e.band_len.max(1.0), t.elapsed().as_secs_f64() * 1e3),
-                Err(m) => eprintln!("ERBS time st {si} wire {} FAILED {m} {:.2} ms", s.wire, t.elapsed().as_secs_f64() * 1e3),
+                Ok(e) => eprintln!("ERBS time st {si} wire {} points {} portals {} conflicts {} len/band {:.4} {:.2} ms", s.wire, e.points, e.portals, e.conflicts, e.len / e.band_len.max(1.0), secs * 1e3),
+                Err(m) => eprintln!("ERBS time st {si} wire {} FAILED {m} {:.2} ms", s.wire, secs * 1e3),
             }
         }
         match r {
@@ -1518,6 +1530,26 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         }
     }
     out
+}
+
+/// The prefix rule of the ERBS fold (par-draw phase A): the units' results in unit order; from
+/// the first cut unit (`Err`) on, every later unit counts as cut too, also one that a lane
+/// finished (the limit only moves forward: one after the other, they would not have started).
+/// The kept results with their unit index, the cut count and the first stop. O(n).
+fn cut_prefix<T, E>(res: Vec<Result<T, E>>) -> (Vec<(usize, T)>, usize, Option<E>) {
+    let (mut kept, mut cut, mut stopped) = (Vec::new(), 0usize, None);
+    for (k, x) in res.into_iter().enumerate() {
+        match x {
+            Ok(v) if stopped.is_none() => kept.push((k, v)),
+            other => {
+                cut += 1;
+                if let Err(why) = other {
+                    stopped.get_or_insert(why);
+                }
+            }
+        }
+    }
+    (kept, cut, stopped)
 }
 
 /// `pts` without repeated points and without points within `tol` of the line of their
@@ -2275,7 +2307,9 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     let t0 = std::time::Instant::now();
     let none: Vec<Vec<usize>> = Vec::new();
     let plan = super::cutflow::Plan { st, events, via_k: &none, bottom, packer, conn, placed: Some(placed), ends: Some(ends) };
+    let t_m = std::time::Instant::now();
     let m = super::cutflow::measure(&plan, outline, mo, layers)?;
+    super::par::meter::time(super::par::meter::ERBS_MEASURE, t_m);
     let ords = super::radii::from_measure(&m, &|p| st.proj.regime_at(p));
     let mut out = Realised::default();
     let mut before: BTreeSet<(usize, usize)> = BTreeSet::new();
@@ -2286,7 +2320,9 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     for (lf, o) in m.layers.iter().zip(&ords) {
         out.unbanded += lf.walk_failed;
         let eo = ErbsOpts { fail_first: inject, margin: m.opts.margin, ..stops.clone() };
+        let t_s = std::time::Instant::now();
         let le = erbs_layer_with(&lf.sheet, &m.stretches, &lf.stretches, o, &eo);
+        super::par::meter::time(super::par::meter::ERBS_STRETCHES, t_s);
         if !le.es.is_empty() || !le.failed.is_empty() {
             inject = false;
         }
@@ -2336,6 +2372,22 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ERBS fold's prefix rule (par-draw phase A): from the first cut stretch in stretch
+    /// order on, every later one counts as cut, also those a lane finished after the limit; the
+    /// first stop is kept, the order of the kept ones too.
+    #[test]
+    fn erbs_fold_cuts_every_stretch_after_the_first_cut_one() {
+        let res: Vec<Result<char, &str>> = vec![Ok('a'), Ok('b'), Err("limit"), Ok('c'), Err("cancel"), Ok('d')];
+        let (kept, cut, stopped) = cut_prefix(res);
+        assert_eq!(kept, vec![(0, 'a'), (1, 'b')]);
+        assert_eq!(cut, 4);
+        assert_eq!(stopped, Some("limit"));
+        let (kept, cut, stopped) = cut_prefix::<char, &str>(vec![Ok('a'), Ok('b')]);
+        assert_eq!((kept, cut, stopped), (vec![(0, 'a'), (1, 'b')], 0, None));
+        let (kept, cut, stopped) = cut_prefix::<char, &str>(vec![Err("limit"), Ok('a')]);
+        assert_eq!((kept, cut, stopped), (vec![], 2, Some("limit")));
+    }
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x: x * 1e6, y: y * 1e6 }

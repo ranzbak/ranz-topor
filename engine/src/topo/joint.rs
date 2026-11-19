@@ -166,7 +166,21 @@ impl<'a> Drawer<'a> {
             octi: bool,
             n: usize,
         }
-        let mut bands: Vec<Band> = Vec::new();
+        // par-draw phase A: every run's band is an order-free unit (its realise and octilinear
+        // form see only the vias and the static copper; nothing is committed until all are
+        // formed), so the units run on lanes ([`super::par::map`]) and the bands are taken in
+        // order (wire order, then run).
+        struct Job<'a> {
+            w: WireId,
+            r: usize,
+            n: usize,
+            layer: usize,
+            pts: Vec<Vec2>,
+            gap: bool,
+            vs: &'a [(usize, Vec2, ViaSize)],
+            pneck: std::sync::Arc<Option<super::exact::Neck>>,
+        }
+        let mut jobs: Vec<Job> = Vec::new();
         for &w in order {
             let (Some(pl), Some(vs)) = (plans.get(&w), placed.get(&w)) else { continue };
             if self.split_at.get(&w).is_some_and(|v| !v.is_empty()) {
@@ -176,7 +190,7 @@ impl<'a> Drawer<'a> {
             if n == 0 || vs.len() + 1 < n {
                 continue;
             }
-            let pneck = self.plan_neck(w);
+            let pneck = std::sync::Arc::new(self.plan_neck(w));
             for r in 0..n {
                 if skip.contains(&(w, r)) {
                     continue;
@@ -195,20 +209,27 @@ impl<'a> Drawer<'a> {
                 let m = pts.len();
                 pts[m - 1] = e;
                 self.joint.bands += 1;
-                // Static check: only vias and static copper are in the index now.
-                let lid = self.layer_id(layer);
-                match self.realise(w, layer, lid, &pts, &pneck) {
-                    Some((items, pn)) if !items.is_empty() => bands.push(Band { w, r, pts, items, pneck: pn, gap, octi: false, n }),
-                    // As attempt -1 does: the band's octilinear form where the any-angle one misses.
-                    _ => match self.band_octi(w, r, n, vs, layer, &pts, &pneck) {
-                        Some((o, items, pn)) => {
-                            bands.push(Band { w, r, pts: o, items, pneck: pn, gap, octi: true, n });
-                        }
-                        None => {
-                            self.joint.class.insert((w, r), CutClass::Static);
-                            self.joint.n_static += 1;
-                        }
-                    },
+                jobs.push(Job { w, r, n, layer, pts, gap, vs: vs.as_slice(), pneck: pneck.clone() });
+            }
+        }
+        type Formed = Option<(bool, Option<Vec<Vec2>>, Vec<Item>, Option<(f64, [f64; super::exact::NECK_ZONES])>)>;
+        let this: &Self = self;
+        let formed: Vec<Formed> = super::par::map(&jobs, |_, j| {
+            // Static check: only vias and static copper are in the index now.
+            let lid = this.layer_id(j.layer);
+            match this.realise(j.w, j.layer, lid, &j.pts, &j.pneck) {
+                Some((items, pn)) if !items.is_empty() => Some((false, None, items, pn)),
+                // As attempt -1 does: the band's octilinear form where the any-angle one misses.
+                _ => this.band_octi(j.w, j.r, j.n, j.vs, j.layer, &j.pts, &j.pneck).map(|(o, items, pn)| (true, Some(o), items, pn)),
+            }
+        });
+        let mut bands: Vec<Band> = Vec::with_capacity(jobs.len());
+        for (j, f) in jobs.into_iter().zip(formed) {
+            match f {
+                Some((octi, o, items, pn)) => bands.push(Band { w: j.w, r: j.r, pts: o.unwrap_or(j.pts), items, pneck: pn, gap: j.gap, octi, n: j.n }),
+                None => {
+                    self.joint.class.insert((j.w, j.r), CutClass::Static);
+                    self.joint.n_static += 1;
                 }
             }
         }
@@ -229,8 +250,10 @@ impl<'a> Drawer<'a> {
         // with the deepest overlap of the clearance (nm) and where it is (KiCad frame).
         let mut deep: BTreeMap<(usize, usize), Overlap> = BTreeMap::new();
         let mut stat = vec![false; bands.len()];
-        for (bi, b) in bands.iter().enumerate() {
-            let rep = self.checker.check_against(&self.idx, &b.items, &[]);
+        // par-draw phase A: each band against the fixed index (all bands committed), on lanes.
+        let this: &Self = self;
+        let reps: Vec<_> = super::par::map(&bands, |_, b| this.checker.check_against(&this.idx, &b.items, &[]));
+        for ((bi, b), rep) in bands.iter().enumerate().zip(reps) {
             for v in &rep.violations {
                 match v.against.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)) {
                     Some(&bj) if bj != bi => {

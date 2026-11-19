@@ -465,6 +465,7 @@ impl<'a> Packer<'a> {
     /// The crossing directions of every pass of every wire (empty for dead wires), indexed like
     /// [`State::wires`] and the pass lists. O(passes) when cached.
     pub fn taut_dirs(&self, st: &State) -> Vec<Vec<Vec2>> {
+        let _pg = super::prof::g(super::prof::K::TautDirs);
         (0..st.wires.len()).map(|w| if st.wires[w].alive { self.taut(st, w).dir.clone() } else { Vec::new() }).collect()
     }
 

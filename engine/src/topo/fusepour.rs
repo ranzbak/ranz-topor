@@ -146,6 +146,17 @@ pub fn clash_seed(moves: &[Move], live: &[bool], clashes: &dyn Fn(usize) -> bool
     first.into_iter().filter(|(w, _)| clashes(*w)).map(|(_, i)| i).collect()
 }
 
+/// The re-check of the moves kept after a partial undo (verify V3): the moves to undo next,
+/// `viols(wire)` being the rule violations of the wire's tracks now and `pre` those of each wire
+/// with a kept move before the undo (no entry = 0). A wire clashes when its count went UP: its own
+/// forced violations (never drop) are in both counts and undo nothing, but one an undone move had
+/// cleared and the undo brings back raises the count, which counts as a clash (safe: undoing goes
+/// back toward the drawing's own copper). The earliest kept move of each clashing wire, with
+/// [`with_dependents`]. O(moves + wires x viols).
+pub fn recheck_seed(moves: &[Move], live: &[bool], pre: &std::collections::BTreeMap<usize, usize>, viols: &dyn Fn(usize) -> usize) -> BTreeSet<usize> {
+    with_dependents(moves, &clash_seed(moves, live, &|w| viols(w) > pre.get(&w).copied().unwrap_or(0)))
+}
+
 /// The moved copper is kept as it is when it leaves no more pieces cut off than the copper
 /// without the moves (the errors criterion first; length decides the rest). O(1).
 pub fn fused_ok(fused_left: usize, unfused_left: usize) -> bool {
@@ -215,6 +226,36 @@ mod tests {
         assert_eq!(clash_seed(&moves, &[false, false, true, true], &|w| w == 2), BTreeSet::from([2]));
         assert!(clash_seed(&moves, &[false, true, true, true], &|_| false).is_empty());
         assert!(clash_seed(&moves, &[false, true, true, true], &|w| w == 1).is_empty(), "wire 1 has no kept move");
+    }
+
+    #[test]
+    fn the_recheck_undoes_a_wire_only_where_its_violations_went_up() {
+        use std::collections::BTreeMap;
+        let moves = [
+            Move { w: 1, onto: 9, ..Move::default() },
+            Move { w: 2, onto: 9, ..Move::default() },
+            Move { w: 3, onto: 2, ..Move::default() }, // onto wire 2: depends on its move
+            Move { w: 4, onto: 9, ..Move::default() },
+        ];
+        let live = [true; 4];
+        let pre = BTreeMap::from([(1, 0), (2, 0), (3, 0), (4, 2)]);
+        let seed = |now: [usize; 5]| recheck_seed(&moves, &live, &pre, &|w| now[w]);
+        // Nothing went up: none.
+        assert!(seed([0, 0, 0, 0, 2]).is_empty());
+        // A real clash (0 -> 1) is undone, the move onto it with it (v1: comparison false).
+        assert_eq!(seed([0, 0, 1, 0, 2]), BTreeSet::from([1, 2]));
+        // Wire 4's own forced violations (2 before, 2 now) undo nothing (v2: compare against 0).
+        assert!(seed([0, 0, 0, 0, 2]).is_empty());
+        // Fewer than before: none. One more than before: undone.
+        assert!(seed([0, 0, 0, 0, 1]).is_empty());
+        assert_eq!(seed([0, 0, 0, 0, 3]), BTreeSet::from([3]));
+        // The own-copper case: an undone move had cleared wire 1's forced violations, the undo
+        // brings them back (0 -> 2): a clash, wire 1's kept move is undone too.
+        assert_eq!(seed([0, 2, 0, 0, 2]), BTreeSet::from([0]));
+        // A wire with no entry in `pre` counts from 0; an undone move is not a candidate.
+        assert_eq!(recheck_seed(&moves, &live, &BTreeMap::new(), &|w| usize::from(w == 4)), BTreeSet::from([3]));
+        assert!(recheck_seed(&moves, &[true, true, true, false], &pre, &|_| 9).contains(&0));
+        assert!(!recheck_seed(&moves, &[true, true, true, false], &pre, &|_| 9).contains(&3));
     }
 
     #[test]

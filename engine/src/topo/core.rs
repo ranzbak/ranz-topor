@@ -189,6 +189,7 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 /// finishing of the copper, `route::route_with`: ignored pads, edge trims, the Cleanup-safe tidy),
 /// so a wait of the drawing counts to the copper handed back.
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
+    super::prof::begin();
     let t0 = Instant::now();
     // tw4 T3 (user 2026-11-18): with `[search] dangling_lead_choice` the `dangling_turn` factor
     // defaults to `DANGLING_TURN_WITH_CHOICE` (a weight the user sets wins).
@@ -226,6 +227,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         eprintln!("[topo call] plane stubs: {:.3} s", t_stubs.elapsed().as_secs_f64());
     }
     ctl.stage(1, opts.topo_rounds.max(1) as u32, "projection of the board");
+    super::prof::mark("stubs");
     let t_fx = Instant::now();
     // Cancel / OK during the projection (cancel-fix; the cut room of `[capacity] model = "cuts"`
     // took 150-200 s on qmtech and did not look at Cancel): the sheets stop at once and no run begins.
@@ -233,6 +235,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     if std::env::var_os("TOPO_TIMES").is_some() {
         eprintln!("[topo call] projection built once (decomposition, triangulation, cut room): {:.3} s", t_fx.elapsed().as_secs_f64());
     }
+    super::prof::mark("projection built once");
     if ctl.is_cancelled() && opts.capacity_model == "cuts" {
         // M2.TL (fail fast): no plan kept yet, so nothing to draw, said loudly.
         let why = format!("{NOTHING_TO_DRAW}: Cancel / OK came during the projection of the board (the cut room of [capacity] model = \"cuts\"), before any run began, so no plan was kept and no copper is written");
@@ -1445,6 +1448,7 @@ impl Run {
             Some((cycle, end)),
         );
         self.busy_s += t.elapsed().as_secs_f64();
+        super::prof::mark("round tail");
         if std::env::var_os("TOPO_TIMES").is_some() {
             eprintln!("[topo run {} cycle {cycle}] cycle: {:.3} s", self.k + 1, t.elapsed().as_secs_f64());
         }
@@ -2499,6 +2503,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
+        super::prof::mark(what);
         if times {
             eprintln!("[topo round {round}] {what}: {:.2} s", t.elapsed().as_secs_f64());
         }
@@ -3261,6 +3266,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         xstats.set(x);
     };
     let crossing_pass = |st: &mut State, wire_conn: &mut Vec<usize>, reroutes: &mut Vec<u32>, lr: &mut layers::LayerReport, ripped_total: &mut usize, stage: usize| {
+        let _pg = super::prof::g(super::prof::K::CrossingPass);
         if !opts.crossing_rules || expired() {
             return;
         }
@@ -3701,6 +3707,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // violation weight (graded only: price = viol_mm x graded).
         let neck_k = if viol_mm > 0.0 { reg.weight("neck_depth").unwrap_or(0.0).max(0.0) / viol_mm } else { 0.0 };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
+            let _pg = super::prof::g(super::prof::K::Measure);
             let neck = if neck_k > 0.0 { neck_k * st.neck_depth(None) } else { 0.0 };
             // tw4 fix round 2 (verifier F2, test hook): the neck-depth part of the last whole-board measure.
             super::optimise::neckcheck::LAST.store(neck.to_bits(), std::sync::atomic::Ordering::Relaxed);
@@ -4008,6 +4015,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         impl<'p> Rerouter<'p> for Rr<'_, 'p> {
             fn price(&mut self, st: &mut State<'p>, w: WireId) -> f64 {
+                let _pg = super::prof::g(super::prof::K::RrPrice);
                 let ci = self.wire_conn[w];
                 let path = st.detach(w);
                 let wire = st.wires[w].clone();
@@ -4016,6 +4024,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 c
             }
             fn place(&mut self, st: &mut State<'p>, gone: &[WireId]) -> Option<Vec<WireId>> {
+                let _pg = super::prof::g(super::prof::K::RrPlace);
                 let mut cis: Vec<usize> = gone.iter().map(|&g| self.wire_conn[g]).collect();
                 cis.sort_by_key(|&ci| self.rank[ci]);
                 cis.dedup();
@@ -4041,6 +4050,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // by the archive's measure: its predicted violations and its vias (5.2c: the vias
                 // the reroute adds or removes on the whole board, also on the wires it crosses,
                 // not the wire's own estimate against the present layers).
+                let _pg = super::prof::g(super::prof::K::RrViolAfter);
                 let lr = (self.assign_t)(st, self.ties);
                 let p = (self.measure)(st, &lr);
                 let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
@@ -4159,6 +4169,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 format!("viol {} (graded {:.3}) vias {} len {:.3} shr {} eval {:.3}", c.errors, self.pred.graded, c.vias, c.length_mm, c.shrinkages, evaluation(&self.obj, &c, self.viol_mm))
             }
             fn via_counts(&self) -> BTreeMap<usize, usize> {
+                let _pg = super::prof::g(super::prof::K::ViaCounts);
                 let mut m = BTreeMap::new();
                 for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive && w < self.lr.events.len()) {
                     if let Some(&ci) = self.wire_conn.get(w).filter(|&&c| c != usize::MAX) {
@@ -4200,6 +4211,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// comes back. Whether it was taken.
             fn try_layers(&mut self, lr: layers::LayerReport, ties: u64) -> bool {
                 self.resync();
+                let _pg = super::prof::g(super::prof::K::TryLayers);
                 let e0 = self.eval_now();
                 let (lr0, p0) = (self.lr.clone(), self.pred);
                 self.set_lr(lr, None);
@@ -4247,6 +4259,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// One single-wire rip-up and reroute of `w` (and the branches on its junctions) with the
             /// wire's oscillating coefficients and the via weight `via_w`; whether it was kept.
             fn reroute(&mut self, topo: &mut Topo, w: WireId, seed: u64, amp: f64, via_w: f64) -> bool {
+                let _pg = super::prof::g(super::prof::K::Reroute);
                 let ci = self.wire_conn[w];
                 let (reg_w, amp_i) = self.try_reg(w, seed, amp, via_w);
                 // The price the move is kept by (5.2a): the same coefficients without the search's
@@ -4378,6 +4391,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 self.tries[ci] += 1;
                 if out.kept {
                     let (lr, p) = pending.expect("a kept reroute was measured");
+                    let _pg2 = super::prof::g(super::prof::K::RrSetLr);
                     self.set_lr(lr, Some(p));
                     self.pred_local = self.local.is_some();
                     for c in cis {
@@ -4469,6 +4483,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// (its fruitless tries widen its coefficients, as a reroute's). A priced move, not a
             /// gate: nothing is refused by a threshold. Whether it was kept.
             fn pair_move(&mut self, a: WireId, c: &PairCand, seed: u64, amp: f64, via_w: f64) -> bool {
+                let _pg = super::prof::g(super::prof::K::PairMove);
                 let e0 = self.eval_now();
                 let before = self.snapshot();
                 let ev = self.lr.events[a].clone();
@@ -4553,6 +4568,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         impl<'p> Space for Sp<'_, 'p> {
             type Var = LoopVar;
             fn criteria(&mut self) -> Criteria {
+                let _pg = super::prof::g(super::prof::K::Criteria);
                 let (mut len_mm, mut area_mm, mut shr) = (0.0, 0.0, 0usize);
                 for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive) {
                     let l = self.st.wire_len(w) / MM;
@@ -4567,9 +4583,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr + self.pred.shrink_n, area)
             }
             fn snapshot(&mut self) -> LoopVar {
+                let _pg = super::prof::g(super::prof::K::Snapshot);
                 LoopVar { topo: self.st.topology(), wire_conn: self.wire_conn.clone(), lr: self.lr.clone(), forced: self.forced.borrow().clone(), reroutes: self.reroutes.clone(), pred: self.pred, pred_local: self.pred_local }
             }
             fn restore(&mut self, v: &LoopVar) {
+                let _pg = super::prof::g(super::prof::K::SpRestore);
                 self.st.restore(v.topo.clone());
                 self.wire_conn.clone_from(&v.wire_conn);
                 self.reroutes.clone_from(&v.reroutes);
@@ -4578,6 +4596,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 self.pred_local = v.pred_local;
             }
             fn cycle(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats {
+                let _pg = super::prof::g(super::prof::K::Cycle);
+                if super::prof::on() {
+                    super::prof::units(super::prof::K::Cycle, self.st.wires.iter().filter(|w| w.alive).count());
+                }
                 let t0 = Instant::now();
                 let k0 = (self.lctr.layer_global.get(), self.lctr.measure_global.get(), self.lctr.layer_local.get(), self.lctr.local_free.get(), self.lctr.local_model.get(), self.shadow);
                 let mut cs = self.cycle_body(c, stop, t0);
@@ -4599,6 +4621,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         impl<'p> Sp<'_, 'p> {
             /// One TopoR loop cycle ([`Space::cycle`]; the counters are taken round it).
             fn cycle_body(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool, t0: Instant) -> CycleStats {
+                let mut plap = Instant::now();
                 let mut cs = CycleStats::default();
                 if self.dbg {
                     let t = self.dbg_crit();
@@ -4628,6 +4651,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let mut ws: Vec<(f64, WireId)> = ids.into_iter().map(|w| (topo.potential(self.st, w), w)).collect();
                 ws.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
                 let n = ws.len().max(1);
+                super::prof::lap(&mut plap, super::prof::K::TopoSetup);
                 let mut ripped = 0usize;
                 for (j, &(_, w)) in ws.iter().enumerate() {
                     if ripped >= self.max_ripped || stop() {
@@ -4649,6 +4673,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 // limit_grace_s: the cycle's later steps are not begun once the loop is to stop (the
                 // caller drops a cycle cut short, so the state it leaves is never offered).
+                super::prof::lap(&mut plap, super::prof::K::StSweep);
                 self.ctl.test_point("loop stage 1 check");
                 if stop() {
                     cs.busy_s = t0.elapsed().as_secs_f64();
@@ -4685,6 +4710,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 cs.layer_s += tl.elapsed().as_secs_f64();
                 // The wires whose via count rose are laid again, at the end-of-cycle via weight.
                 let vias1 = self.via_counts();
+                super::prof::lap(&mut plap, super::prof::K::StUncrossReopt);
                 let rose: Vec<WireId> = (0..self.st.wires.len())
                     .filter(|&w| self.st.wires[w].alive && self.wire_conn.get(w).is_some_and(|&ci| ci != usize::MAX && vias1.get(&ci).copied().unwrap_or(0) > vias0.get(&ci).copied().unwrap_or(0)))
                     .collect();
@@ -4717,6 +4743,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     cs.layer_runs += 1;
                     cs.layer_s += tl.elapsed().as_secs_f64();
                 }
+                super::prof::lap(&mut plap, super::prof::K::StViarose);
                 self.ctl.test_point("loop stage 2 check");
                 if stop() {
                     cs.busy_s = t0.elapsed().as_secs_f64();
@@ -4772,6 +4799,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} after floating up (kept {}, undone {}): {t}", self.dbg_tag, c.cycle, cs.float_kept, cs.undone);
                 }
+                super::prof::lap(&mut plap, super::prof::K::StFloat);
                 self.ctl.test_point("loop stage 3 check");
                 if stop() {
                     cs.busy_s = t0.elapsed().as_secs_f64();
@@ -4797,6 +4825,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         cs.undone += 1;
                     }
                 }
+                super::prof::lap(&mut plap, super::prof::K::StCross);
                 // 5.4 `[vias] pair_min`, the re-lay half (Luzin-Popov 2013 step 8.1, here for the
                 // wire itself): a wire that dives to another layer and comes back over a short
                 // stretch is laid again at the end-of-cycle via weight, so a way round on its own
@@ -4834,6 +4863,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // per wire (id order) its obstructed via pairs, each tried once at the
                 // end-of-cycle via weight; after a kept move the wire's pairs are read again from
                 // the new layering (the pair it removed is gone, the next one moves up).
+                super::prof::lap(&mut plap, super::prof::K::StPairrelay);
                 if let Some(scale) = self.pair_move {
                     let mut w = 0;
                     while w < self.st.wires.len() {
@@ -4861,6 +4891,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         w += 1;
                     }
                 }
+                super::prof::lap(&mut plap, super::prof::K::StPairmove);
                 // loop-local: the variant this cycle offers carries the board's measure.
                 self.resync();
                 cs.busy_s = t0.elapsed().as_secs_f64();
@@ -4996,6 +5027,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             live(&LiveLoop { pick: *pick, planned, total, stable });
         };
         let mut rep = crate::control::in_loop_scope(|| optimise(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock, &mut on_pick));
+        super::prof::mark("loop-end");
         if yields.get() > 0 {
             warnings.push(format!(
                 "TopoR loop: stable after cycle {}, it gave its compute slot to a run not yet begun {} time(s) (fewer engine threads than runs) and waited {:.1} s for one again",
@@ -5186,6 +5218,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let lr = lr;
     let t_draw = Instant::now();
+    // par-draw phase A: the drawing's order-free units run on `[drawing] draw_lanes` lanes (results
+    // folded in unit order: the copper does not depend on the lanes), until this round returns.
+    let _par = super::par::set_mode(Some(super::refine_par::lanes::mode_of(opts.draw_lanes)), opts.draw_test_reverse);
     // One path for `hard` and the overrun cap (user 2026-11-13): the limit acted as hard before
     // the drawing began, so it cut a planning step; the kept plan is drawn in full.
     draw_exempt.set(ctl.limit.is_hard() && ctl.over_limit());
@@ -6429,6 +6464,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let causes_before = causes(&plans, &drawn);
     tlog("drawing + feedback", t_draw);
+    if super::par::meter::on() {
+        eprintln!("[topo round {round}] {}", super::par::meter::report());
+    }
     ctl.stage(rnd, rnds, "via reduction and fuse");
     let t_red = Instant::now();
     // The result as drawn is a variant of its own (more vias, maybe shorter).
@@ -6664,6 +6702,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let pc_cut = std::cell::Cell::new(false);
         // Test hook "fuse pour cut": the stitching is cut at once.
         let test_cut = ctl.test_point("fuse pour cut");
+        // Test point (acts, e.g. reaches the limit; the answer is not used): the stitching begins.
+        let _ = ctl.test_point("fuse pour check begin");
         let pc_stop = || {
             let c = test_cut || ctl.is_cancelled() || limit_cut();
             if c {
@@ -6717,12 +6757,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let undo_all = ctl.test_point("fuse pour undo all");
         let partial = ctl.test_point("fuse pour partial undo");
         let fake_clash = std::cell::Cell::new(ctl.test_point("fuse pour clash"));
+        // Hook "fuse pour worse": the first round judges the copper worse whatever the counts and
+        // seeds its undo with the first kept fuse move (the nearest-move choice, which needs a real
+        // new piece), so `fuse_pour_rounds` (0: every move at once) decides what is undone.
+        let worse = ctl.test_point("fuse pour worse");
         let mut rechecked = 0usize;
-        while !pc_cut.get() && (undo_all || (partial && rounds == 0) || !fusepour::fused_ok(cur.len(), base.len())) && !ctl.is_cancelled() {
+        while !pc_cut.get() && (undo_all || (partial && rounds == 0) || (worse && rounds == 0) || !fusepour::fused_ok(cur.len(), base.len())) && !ctl.is_cancelled() {
             let mut seed: BTreeSet<usize> = BTreeSet::new();
             if partial && rounds == 0 {
                 seed.extend(mv.iter().position(|m| m.onto != fusepour::NO_WIRE));
             } else if rounds < opts.fuse_pour_rounds && !undo_all {
+                if worse {
+                    seed.extend(mv.iter().zip(&live).position(|(m, l)| *l && m.onto != fusepour::NO_WIRE));
+                }
                 for c in fusepour::new_pieces(&cur, &base) {
                     seed.extend(fusepour::nearest_move(&mv, &live, &fusepour::piece_points(model, c)));
                 }
@@ -6744,11 +6791,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             while !all && live.iter().any(|l| *l) {
                 let fake_w = fake_clash.get().then(|| mv.iter().zip(&live).find(|(m, l)| **l && m.onto != fusepour::NO_WIRE).map(|(m, _)| m.w)).flatten();
                 fake_clash.set(false);
-                let clash = fusepour::clash_seed(&mv, &live, &|w| fake_w == Some(w) || drawn.get(&w).is_some_and(|wo| dr.wire_viols(wo) > pre.get(&w).copied().unwrap_or(0)));
+                let clash = fusepour::recheck_seed(&mv, &live, &pre, &|w| drawn.get(&w).map_or(0, |wo| dr.wire_viols(wo)) + if fake_w == Some(w) { 1_000_000 } else { 0 });
                 if clash.is_empty() {
                     break;
                 }
-                rechecked += undo(&fusepour::with_dependents(&mv, &clash), &mut live, &mut drawn, &mut out, &mut necking, &mut dr, &mut undone_nets);
+                rechecked += undo(&clash, &mut live, &mut drawn, &mut out, &mut necking, &mut dr, &mut undone_nets);
             }
             rounds += 1;
             if all || live.iter().all(|l| !l) {

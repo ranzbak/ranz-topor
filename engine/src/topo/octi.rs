@@ -43,6 +43,50 @@ const MM: f64 = 1e6;
 const MAX_NODES: usize = 260;
 /// Connector window: a node connects to the next `WINDOW` nodes in path order, and to every node
 /// up to `REACH_MM` further along the taut path (at most `WINDOW_MAX` nodes).
+/// par-draw (docs/dev/design/par-draw.md section 13): a node of the octilinear DP whose
+/// (arrival state, successor) pairs reach this count runs its successors on the drawing's lanes
+/// ([`super::par::map`]); a smaller one stays on the calling thread. A work-size rule: the copper
+/// is the same either way.
+const OCTI_LANE_MIN_PAIRS: usize = 64;
+
+/// par-draw: an `octilinear` call with at least this many nodes takes its lanes (a crew,
+/// [`super::par::crew`]) for the whole call; a smaller one stays on the calling thread. A
+/// work-size rule, as [`OCTI_LANE_MIN_PAIRS`].
+const OCTI_CREW_MIN_NODES: usize = 24;
+
+/// Nodes whose successors went to [`super::par::map`] (tests: the lanes were used).
+pub static OCTI_NODES_LANED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The memo of the leg prices and the legality of one `octilinear` call (pure functions of the
+/// leg, keyed by its end points' bits).
+#[derive(Default)]
+struct Memo {
+    room: FxHashMap<[u64; 4], f64>,
+    follow: FxHashMap<[u64; 4], f64>,
+    legal: FxHashMap<[u64; 4], bool>,
+}
+
+impl Memo {
+    /// A lane's overlay into the call's memo (the values are the same whoever computed them).
+    fn merge(&mut self, o: Memo) {
+        self.room.extend(o.room);
+        self.follow.extend(o.follow);
+        self.legal.extend(o.legal);
+    }
+}
+
+fn leg_key(a: Vec2, b: Vec2) -> [u64; 4] {
+    [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()]
+}
+
+/// `f()` memoised: the shared memo (read only), else the own one, else computed into the own one.
+fn memo_get<V: Copy>(shared: Option<&FxHashMap<[u64; 4], V>>, own: &mut FxHashMap<[u64; 4], V>, key: [u64; 4], f: impl FnOnce() -> V) -> V {
+    if let Some(&v) = shared.and_then(|m| m.get(&key)) {
+        return v;
+    }
+    *own.entry(key).or_insert_with(f)
+}
+
 const WINDOW: usize = 36;
 const WINDOW_MAX: usize = 160;
 const REACH_MM: f64 = 12.0;
@@ -186,6 +230,11 @@ thread_local! {
     pub(super) static OCTI_REF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test coverage: legs with a bundle length > 0, legs with a room price > 0 (cached loop).
     pub(super) static OCTI_HITS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
+    /// Tests: the lane rule's pair count instead of [`OCTI_LANE_MIN_PAIRS`] (0 = the constant).
+    pub(super) static OCTI_LANE_MIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Tests: nodes with successors done on this thread alone and on the crew (both read on the
+    /// thread that called `octilinear`, the pool worker inside a `pool.install`).
+    pub(super) static OCTI_NODE_SPLIT: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
 }
 
 /// Where the run ends at a pad: the pad's long axis (unit, pointing out of the pad towards the
@@ -240,6 +289,15 @@ impl Drawer<'_> {
     /// `relax` (nm, 0 = the rule): the clearance to foreign objects is kept only up to this much
     /// less (a run drawn by force, never drop: no deeper than its own violations).
     pub(super) fn octilinear(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], relax: f64) -> Option<OctiOut> {
+        let t = std::time::Instant::now();
+        let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, relax);
+        super::par::meter::time(super::par::meter::OCTI, t);
+        super::par::meter::count(super::par::meter::OCTI_CALLS, 1);
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], relax: f64) -> Option<OctiOut> {
         let cfg = self.octi;
         let mut taut: Vec<Vec2> = pts.to_vec();
         taut.dedup_by(|a, b| (*a - *b).len2() < 1.0);
@@ -446,15 +504,14 @@ impl Drawer<'_> {
             Vec::new()
         };
         let tol = 0.05 * pitch + 1_000.0;
-        let mut follow_cache: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
+        // The leg prices and the legality below are pure functions of the leg (the board, the
+        // strip and the neighbours are fixed during the call); [`Memo`] memoises them per leg
+        // (par-draw: a lane reads the call's memo and writes its own overlay, merged after the
+        // node; the values do not depend on who computed them).
         // Length of the leg `a-b` (direction `k`) that runs beside a drawn neighbour at its
         // clearance (the overlap of their projections). The scan of every neighbour: the
-        // reference of `follow` below (tests, `OCTI_REF`).
-        let mut follow_ref = |a: Vec2, b: Vec2, k: usize| -> f64 {
-            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
-            if let Some(&v) = follow_cache.get(&key) {
-                return v;
-            }
+        // reference of `follow_x` below (tests, `OCTI_REF`).
+        let follow_f = |a: Vec2, b: Vec2, k: usize| -> f64 {
             let u = dir(k);
             let (t0, t1) = (0.0f64, (b - a).dot(u));
             let mut best = 0.0f64;
@@ -470,21 +527,13 @@ impl Drawer<'_> {
                 let ov = (t1.min(s0.max(s1)) - t0.max(s0.min(s1))).max(0.0);
                 best = best.max(ov);
             }
-            follow_cache.insert(key, best);
             best
         };
         // `planned_room` price of the leg `a-b`: its length inside the planned room of an undrawn
         // lane neighbour (`zones`), each piece weighted by `x + x^2`, `x` = depth over the pitch
         // (midpoint rule, pieces of at most a quarter pitch or 1/24 of the leg).
-        let mut room_cache: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
-        let mut room_ref = |a: Vec2, b: Vec2| -> f64 {
-            if (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0 {
-                return 0.0;
-            }
-            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
-            if let Some(&v) = room_cache.get(&key) {
-                return v;
-            }
+        let room_none = (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0;
+        let room_f = |a: Vec2, b: Vec2| -> f64 {
             let l = (b - a).len();
             let mut tot = 0.0;
             if l >= 1.0 {
@@ -530,58 +579,36 @@ impl Drawer<'_> {
                     tot += pitch * (x + x * x);
                 }
             }
-            let v = cfg.room * tot;
-            room_cache.insert(key, v);
-            v
+            cfg.room * tot
         };
-        // The same two prices with the per-leg work cut, exactly (see `RoomPre`, `FollowIdx`).
+        // The same two prices with the per-leg work cut, exactly (see `RoomPre`, `FollowIdx`);
+        // the cached loop's (the scans above are the reference loop's, `OCTI_REF`).
         let rpre = RoomPre::new(&zones, &gates);
         let fidx = FollowIdx::new(&side);
-        let mut follow_cache2: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
-        let mut follow = |a: Vec2, b: Vec2, k: usize| -> f64 {
-            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
-            if let Some(&v) = follow_cache2.get(&key) {
-                return v;
-            }
+        let follow_x = |a: Vec2, b: Vec2, k: usize| -> f64 {
             let best = fidx.follow(&side, tol, a, b, k);
             #[cfg(test)]
             OCTI_HITS.with(|h| h.set([h.get()[0] + usize::from(best > 0.0), h.get()[1]]));
-            follow_cache2.insert(key, best);
             best
         };
-        let mut room_cache2: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
-        let mut room = |a: Vec2, b: Vec2| -> f64 {
-            if (zones.is_empty() && gates.is_empty()) || cfg.room <= 0.0 {
-                return 0.0;
-            }
-            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
-            if let Some(&v) = room_cache2.get(&key) {
-                return v;
-            }
+        let room_x = |a: Vec2, b: Vec2| -> f64 {
             let v = cfg.room * rpre.room(pitch, a, b);
             #[cfg(test)]
             OCTI_HITS.with(|h| h.set([h.get()[0], h.get()[1] + usize::from(v > 0.0)]));
-            room_cache2.insert(key, v);
             v
         };
-        let mut legal_cache: FxHashMap<[u64; 4], bool> = crate::fxhash::map();
-        let mut legal = |a: Vec2, b: Vec2| -> bool {
-            let key = [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()];
-            if let Some(&v) = legal_cache.get(&key) {
-                return v;
-            }
+        let legal_f = |a: Vec2, b: Vec2| -> bool {
             let bb = bbox_of(&[a, b]);
-            let v = bb.min.x >= region.min.x
+            bb.min.x >= region.min.x
                 && bb.min.y >= region.min.y
                 && bb.max.x <= region.max.x
                 && bb.max.y <= region.max.y
                 && strip.contains(b)
                 && strip.contains((a + b) * 0.5)
                 && !strip.crosses_wall(a, b)
-                && self.seg_clear_near(&nr, a, b);
-            legal_cache.insert(key, v);
-            v
+                && self.seg_clear_near(&nr, a, b)
         };
+        let mut memo = Memo::default();
         // DP state per node: arrival direction 0..7, or 8 (the start / an any-angle leg).
         const ND: usize = 9;
         let mut dist = vec![[f64::INFINITY; ND]; n];
@@ -672,6 +699,11 @@ impl Drawer<'_> {
         #[cfg(not(test))]
         let reference = false;
         if reference {
+            let mut room = |a: Vec2, b: Vec2| if room_none { 0.0 } else { memo_get(None, &mut memo.room, leg_key(a, b), || room_f(a, b)) };
+            let mut fmemo: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
+            let mut follow = |a: Vec2, b: Vec2, k: usize| memo_get(None, &mut fmemo, leg_key(a, b), || follow_f(a, b, k));
+            let mut lmemo: FxHashMap<[u64; 4], bool> = crate::fxhash::map();
+            let mut legal = |a: Vec2, b: Vec2| memo_get(None, &mut lmemo, leg_key(a, b), || legal_f(a, b));
             for i in 0..n {
                 for din in 0..ND {
                     let d0 = dist[i][din];
@@ -737,9 +769,9 @@ impl Drawer<'_> {
                                     ok = false;
                                     break;
                                 }
-                                c += len + b + room_ref(from, e);
+                                c += len + b + room(from, e);
                                 if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
-                                    c -= cfg.pull * follow_ref(from, e, kk);
+                                    c -= cfg.pull * follow(from, e, kk);
                                 }
                                 if dk.is_none() {
                                     c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
@@ -787,147 +819,218 @@ impl Drawer<'_> {
                 }
             }
         } else {
-            for i in 0..n {
-                let mut js: Option<Vec<usize>> = None;
-                let mut pre: Vec<Option<Vec<Shape>>> = Vec::new();
-                for din in 0..ND {
-                    let d0 = dist[i][din];
-                    if !d0.is_finite() {
-                        continue;
-                    }
-                    let (u_in, l_in) = last[i][din];
-                    let js = js.get_or_insert_with(|| {
-                        let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
-                        if let Some(j) = next_on[i] {
-                            if !js.contains(&j) {
-                                js.push(j);
+            // One successor `j` of node `i`: its shapes (built once, shared by the arrival
+            // states), then for every finite arrival state of `i` in order the relaxation of
+            // `dist[j]` as the serial loop did it (the prune against `j`'s row as updated so far,
+            // the lazy legality). It reads only `i`'s row (final: every edge goes from `i` to a
+            // later node) and its own copy of `j`'s row, so the successors of one node are
+            // independent units (par-draw, docs/dev/design/par-draw.md section 13); it returns
+            // the states of `j` it improved, (state, price, last leg, back pointer).
+            #[allow(clippy::type_complexity)]
+            let relax = |i: usize, j: usize, fin: &[(usize, f64, Vec2, f64)], dj: [f64; ND], shared: Option<&Memo>, own: &mut Memo| -> Vec<(usize, f64, (Vec2, f64), (usize, usize, Vec<Leg>))> {
+                let (p, q) = (nodes[i].0, nodes[j].0);
+                let (sh_room, sh_follow, sh_legal) = (shared.map(|m| &m.room), shared.map(|m| &m.follow), shared.map(|m| &m.legal));
+                let (own_room, own_follow, own_legal) = (&mut own.room, &mut own.follow, &mut own.legal);
+                let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
+                if i == 0 {
+                    if let Some(x) = exits[0] {
+                        let p2 = p + x.axis * x.reach;
+                        if (q - p).dot(x.axis) > x.reach {
+                            for mut s in connectors(p2, q) {
+                                s.insert(0, (p2, octi_dir(x.axis)));
+                                shapes.push(s);
                             }
-                        }
-                        if !js.contains(&(n - 1)) && n - 1 > i {
-                            js.push(n - 1);
-                        }
-                        js
-                    });
-                    if pre.len() < js.len() {
-                        pre.resize_with(js.len(), || None);
-                    }
-                    for (jx, &j) in js.iter().enumerate() {
-                        let (p, q) = (nodes[i].0, nodes[j].0);
-                        let shapes = pre[jx].get_or_insert_with(|| {
-                            let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
-                            if i == 0 {
-                                if let Some(x) = exits[0] {
-                                    let p2 = p + x.axis * x.reach;
-                                    if (q - p).dot(x.axis) > x.reach {
-                                        for mut s in connectors(p2, q) {
-                                            s.insert(0, (p2, octi_dir(x.axis)));
-                                            shapes.push(s);
-                                        }
-                                    }
-                                }
-                            }
-                            if j == n - 1 {
-                                if let Some(x) = exits[1] {
-                                    let q2 = q + x.axis * x.reach;
-                                    if (p - q).dot(x.axis) > x.reach {
-                                        for mut s in connectors(p, q2) {
-                                            s.push((q, octi_dir(-x.axis)));
-                                            shapes.push(s);
-                                        }
-                                    }
-                                }
-                            }
-                            // A piece of the taut path itself (any angle), between consecutive nodes on it.
-                            if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
-                                shapes.push(vec![(q, None)]);
-                            }
-                            shapes
-                                .into_iter()
-                                .map(|s| {
-                                    let mut legs = Vec::with_capacity(s.len());
-                                    let mut from = p;
-                                    for (k, &(e, dk)) in s.iter().enumerate() {
-                                        let d = e - from;
-                                        let len = d.len();
-                                        if len < 1.0 {
-                                            continue;
-                                        }
-                                        let v = d * (1.0 / len);
-                                        let rv = room(from, e);
-                                        let fv = match (dk, pull_on) {
-                                            (Some(kk), true) => follow(from, e, kk),
-                                            _ => 0.0,
-                                        };
-                                        legs.push((k, len, v, rv, fv, dk));
-                                        from = e;
-                                    }
-                                    Shape { s, legs, legal: None }
-                                })
-                                .collect()
-                        });
-                        for sh in shapes.iter_mut() {
-                            // Price.
-                            let mut c = 0.0;
-                            let (mut u, mut l) = (u_in, l_in);
-                            // One any-angle stretch pays its per-stretch price once, however many
-                            // pieces of the taut path it is made of.
-                            let mut prev_any = din == 8 && i != 0;
-                            let mut ok = true;
-                            let sn = sh.s.len();
-                            for &(k, len, v, rv, fv, dk) in &sh.legs {
-                                let b = bend(u, l, v);
-                                if !b.is_finite() {
-                                    ok = false;
-                                    break;
-                                }
-                                c += len + b + rv;
-                                if let (Some(_), true) = (dk, pull_on) {
-                                    c -= cfg.pull * fv;
-                                }
-                                if dk.is_none() {
-                                    c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
-                                }
-                                prev_any = dk.is_none();
-                                if i == 0 && k == 0 {
-                                    c += axis_price(&exits[0], v, len);
-                                }
-                                if j == n - 1 && k == sn - 1 {
-                                    c += axis_price(&exits[1], v, len);
-                                    if let Some(ul) = lead_out {
-                                        // on into the lead (from its end back to the hand track)
-                                        c += bend(v, len, -ul);
-                                    }
-                                }
-                                u = v;
-                                l = len;
-                            }
-                            if !ok {
-                                continue;
-                            }
-                            let dout = sh.s.last().and_then(|x| x.1).unwrap_or(8);
-                            if d0 + c >= dist[j][dout] {
-                                continue;
-                            }
-                            // Legality (the taut segment is legal as drawn).
-                            let leg_ok = *sh.legal.get_or_insert_with(|| {
-                                let mut from = p;
-                                for &(e, dk) in &sh.s {
-                                    if (e - from).len2() >= 1.0 && dk.is_some() && !legal(from, e) {
-                                        return false;
-                                    }
-                                    from = e;
-                                }
-                                true
-                            });
-                            if !leg_ok {
-                                continue;
-                            }
-                            dist[j][dout] = d0 + c;
-                            last[j][dout] = (u, l);
-                            back[j][dout] = Some((i, din, sh.s.clone()));
                         }
                     }
                 }
+                if j == n - 1 {
+                    if let Some(x) = exits[1] {
+                        let q2 = q + x.axis * x.reach;
+                        if (p - q).dot(x.axis) > x.reach {
+                            for mut s in connectors(p, q2) {
+                                s.push((q, octi_dir(-x.axis)));
+                                shapes.push(s);
+                            }
+                        }
+                    }
+                }
+                // A piece of the taut path itself (any angle), between consecutive nodes on it.
+                if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
+                    shapes.push(vec![(q, None)]);
+                }
+                let mut shapes: Vec<Shape> = shapes
+                    .into_iter()
+                    .map(|s| {
+                        let mut legs = Vec::with_capacity(s.len());
+                        let mut from = p;
+                        for (k, &(e, dk)) in s.iter().enumerate() {
+                            let d = e - from;
+                            let len = d.len();
+                            if len < 1.0 {
+                                continue;
+                            }
+                            let v = d * (1.0 / len);
+                            let rv = if room_none { 0.0 } else { memo_get(sh_room, own_room, leg_key(from, e), || room_x(from, e)) };
+                            let fv = match (dk, pull_on) {
+                                (Some(kk), true) => memo_get(sh_follow, own_follow, leg_key(from, e), || follow_x(from, e, kk)),
+                                _ => 0.0,
+                            };
+                            legs.push((k, len, v, rv, fv, dk));
+                            from = e;
+                        }
+                        Shape { s, legs, legal: None }
+                    })
+                    .collect();
+                let mut dj = dj;
+                let mut best: [Option<((Vec2, f64), usize, usize)>; ND] = [None; ND];
+                for &(din, d0, u_in, l_in) in fin {
+                    for (si, sh) in shapes.iter_mut().enumerate() {
+                        // Price.
+                        let mut c = 0.0;
+                        let (mut u, mut l) = (u_in, l_in);
+                        // One any-angle stretch pays its per-stretch price once, however many
+                        // pieces of the taut path it is made of.
+                        let mut prev_any = din == 8 && i != 0;
+                        let mut ok = true;
+                        let sn = sh.s.len();
+                        for &(k, len, v, rv, fv, dk) in &sh.legs {
+                            let b = bend(u, l, v);
+                            if !b.is_finite() {
+                                ok = false;
+                                break;
+                            }
+                            c += len + b + rv;
+                            if let (Some(_), true) = (dk, pull_on) {
+                                c -= cfg.pull * fv;
+                            }
+                            if dk.is_none() {
+                                c += cfg.any_nm * (any_angle_amount(len) - if prev_any { 1.0 } else { 0.0 });
+                            }
+                            prev_any = dk.is_none();
+                            if i == 0 && k == 0 {
+                                c += axis_price(&exits[0], v, len);
+                            }
+                            if j == n - 1 && k == sn - 1 {
+                                c += axis_price(&exits[1], v, len);
+                                if let Some(ul) = lead_out {
+                                    // on into the lead (from its end back to the hand track)
+                                    c += bend(v, len, -ul);
+                                }
+                            }
+                            u = v;
+                            l = len;
+                        }
+                        if !ok {
+                            continue;
+                        }
+                        let dout = sh.s.last().and_then(|x| x.1).unwrap_or(8);
+                        if d0 + c >= dj[dout] {
+                            continue;
+                        }
+                        // Legality (the taut segment is legal as drawn).
+                        let leg_ok = *sh.legal.get_or_insert_with(|| {
+                            let mut from = p;
+                            for &(e, dk) in &sh.s {
+                                if (e - from).len2() >= 1.0 && dk.is_some() && !memo_get(sh_legal, own_legal, leg_key(from, e), || legal_f(from, e)) {
+                                    return false;
+                                }
+                                from = e;
+                            }
+                            true
+                        });
+                        if !leg_ok {
+                            continue;
+                        }
+                        dj[dout] = d0 + c;
+                        best[dout] = Some(((u, l), din, si));
+                    }
+                }
+                (0..ND).filter_map(|dout| best[dout].map(|(ul, din, si)| (dout, dj[dout], ul, (i, din, shapes[si].s.clone())))).collect()
+            };
+            #[cfg(test)]
+            let test_min = OCTI_LANE_MIN.with(|f| f.get());
+            #[cfg(not(test))]
+            let test_min = 0usize;
+            let (lane_min, crew_min) = if test_min > 0 { (test_min, 2) } else { (OCTI_LANE_MIN_PAIRS, OCTI_CREW_MIN_NODES) };
+            // One laned node's job: its successors in runs (about three per lane, one memo
+            // overlay each), their rows as the node found them, the call's memo (read only).
+            struct OJob {
+                i: usize,
+                fin: Vec<(usize, f64, Vec2, f64)>,
+                js: Vec<usize>,
+                dj: Vec<[f64; ND]>,
+                runs: Vec<(usize, usize)>,
+                memo: Memo,
+            }
+            let unit = |jb: &OJob, r: usize| {
+                let (a, b) = jb.runs[r];
+                let mut own = Memo::default();
+                let ups: Vec<_> = (a..b).map(|x| relax(jb.i, jb.js[x], &jb.fin, jb.dj[x], Some(&jb.memo), &mut own)).collect();
+                (ups, own)
+            };
+            #[allow(clippy::type_complexity)]
+            let mut nodes_loop = |mut crew: Option<&mut super::par::Crew<'_, OJob, (Vec<Vec<(usize, f64, (Vec2, f64), (usize, usize, Vec<Leg>))>>, Memo)>>| {
+                for i in 0..n {
+                    let fin: Vec<(usize, f64, Vec2, f64)> = (0..ND).filter(|&d| dist[i][d].is_finite()).map(|d| (d, dist[i][d], last[i][d].0, last[i][d].1)).collect();
+                    if fin.is_empty() {
+                        continue;
+                    }
+                    let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
+                    if let Some(j) = next_on[i] {
+                        if !js.contains(&j) {
+                            js.push(j);
+                        }
+                    }
+                    if !js.contains(&(n - 1)) && n - 1 > i {
+                        js.push(n - 1);
+                    }
+                    // Work-size rule (never a timing rule): a node with few (state, successor)
+                    // pairs stays on this thread; the copper is the same either way.
+                    match crew.as_deref_mut() {
+                        Some(c) if fin.len() * js.len() >= lane_min => {
+                            let t_node = std::time::Instant::now();
+                            let nc = (3 * c.lanes()).min(js.len()).max(1);
+                            let runs: Vec<(usize, usize)> = (0..nc).map(|k| (k * js.len() / nc, (k + 1) * js.len() / nc)).collect();
+                            let dj: Vec<[f64; ND]> = js.iter().map(|&j| dist[j]).collect();
+                            let nr = runs.len();
+                            let (jb, res) = c.round(OJob { i, fin, js, dj, runs, memo: std::mem::take(&mut memo) }, nr);
+                            memo = jb.memo;
+                            for (&(a, b), (ups, own)) in jb.runs.iter().zip(res) {
+                                for (&j, up) in jb.js[a..b].iter().zip(ups) {
+                                    for (dout, d, ul, bk) in up {
+                                        dist[j][dout] = d;
+                                        last[j][dout] = ul;
+                                        back[j][dout] = Some(bk);
+                                    }
+                                }
+                                memo.merge(own);
+                            }
+                            OCTI_NODES_LANED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            #[cfg(test)]
+                            OCTI_NODE_SPLIT.with(|c| c.set([c.get()[0], c.get()[1] + 1]));
+                            super::par::meter::time(super::par::meter::OCTI_LANED, t_node);
+                        }
+                        _ => {
+                            #[cfg(test)]
+                            OCTI_NODE_SPLIT.with(|c| c.set([c.get()[0] + usize::from(!js.is_empty()), c.get()[1]]));
+                            for &j in &js {
+                                let mut own = std::mem::take(&mut memo);
+                                let up = relax(i, j, &fin, dist[j], None, &mut own);
+                                memo = own;
+                                for (dout, d, ul, bk) in up {
+                                    dist[j][dout] = d;
+                                    last[j][dout] = ul;
+                                    back[j][dout] = Some(bk);
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            // The crew (persistent lanes for the call) only for a call with enough nodes.
+            match if n >= crew_min { super::par::lease(n) } else { None } {
+                Some(lease) => super::par::crew(lease, unit, |c| nodes_loop(Some(c))),
+                None => nodes_loop(None),
             }
         }
         // TOPO_OCTINODES=<wire>: the nodes, their best price and the arrival state.
@@ -952,7 +1055,7 @@ impl Drawer<'_> {
             let mut from = taut[0];
             for s in &chain {
                 for &(e, dk) in s {
-                    eprintln!("OCTILEG w{w} ({:.3},{:.3})->({:.3},{:.3}) dir {:?} len {:.3} room {:.3} zones {} gates {}", from.x / MM, -from.y / MM, e.x / MM, -e.y / MM, dk, (e - from).len() / MM, room(from, e) / MM, zones.len(), gates.len());
+                    eprintln!("OCTILEG w{w} ({:.3},{:.3})->({:.3},{:.3}) dir {:?} len {:.3} room {:.3} zones {} gates {}", from.x / MM, -from.y / MM, e.x / MM, -e.y / MM, dk, (e - from).len() / MM, (if room_none { 0.0 } else { room_f(from, e) }) / MM, zones.len(), gates.len());
                     from = e;
                 }
             }

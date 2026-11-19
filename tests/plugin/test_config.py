@@ -280,6 +280,20 @@ def test_refine_lanes_auto_or_count(tmp_path):
         assert cfg.engine_options()["refine_lanes"] == 0 and [x for x in f if "refine_lanes" in str(x)], bad
 
 
+
+def test_draw_lanes_auto_or_count(tmp_path):
+    """par-draw: [drawing] draw_lanes = "auto" (default) reaches the engine as 0, a count as itself; a bad word
+    or 0 is a finding and keeps the default."""
+    cfg, _ = load_config(tmp_path)
+    assert cfg.engine_options()["draw_lanes"] == 0
+    (tmp_path / "topor.toml").write_text('version = 1\n[drawing]\ndraw_lanes = 3\n')
+    cfg, _ = load_config(tmp_path)
+    assert cfg.engine_options()["draw_lanes"] == 3
+    for bad in ('"many"', "0"):
+        (tmp_path / "topor.toml").write_text(f'version = 1\n[drawing]\ndraw_lanes = {bad}\n')
+        cfg, f = load_config(tmp_path)
+        assert cfg.engine_options()["draw_lanes"] == 0 and [x for x in f if "draw_lanes" in str(x)], bad
+
 def test_m6_removed_keys_name_m6_and_leave_the_engine_alone(tmp_path):
     """M6 (6b, user 2026-11-18): [search] neck_in_drawing and [drawing] lane_walls are removed keys. Every value an
     old topor.toml can hold (true / false, "price" / "hard") is ignored with CFG_REMOVED_KEY naming M6, the engine
@@ -364,3 +378,37 @@ def test_finite_list_and_table_values_still_accepted(tmp_path):
     cfg, findings = load_config(tmp_path)
     assert not [f for f in findings if f.code.startswith("CFG_")], [f.message for f in findings]
     assert cfg.get("factors", "weight") == {"via": 30.5}
+
+
+def test_toml_setting_of_a_later_release_is_a_visible_warning(tmp_path):
+    """A topor.toml value of a `since` > plugin version setting never reaches the engine: loud, naming setting + version."""
+    (tmp_path / "topor.toml").write_text('version = 1\n[search]\ndangling_ends = "fixed"\ndangling_lead_mm = 1.5\n')
+    cfg, findings = load_config(tmp_path)
+    got = {f.items[0]: f for f in findings if f.code == "CFG_NOT_YET_AVAILABLE"}
+    assert set(got) == {"search.dangling_ends", "search.dangling_lead_mm"}
+    f = got["search.dangling_ends"]
+    assert f.severity == "warning" and "0.5.0" in f.message and "line 3" in f.message
+    assert "dangling_ends" not in str(cfg.engine_options())  # the gate itself stays
+    # a value equal to the default changes nothing: quiet
+    (tmp_path / "topor.toml").write_text('version = 1\n[search]\ndangling_lead_mm = 0.0\n')
+    assert "CFG_NOT_YET_AVAILABLE" not in codes(load_config(tmp_path)[1])
+
+
+def test_unavailable_overrides_and_opt_in(monkeypatch):
+    from topor.config import unavailable_overrides
+    monkeypatch.delenv("TOPOR_UNRELEASED_SETTINGS", raising=False)
+    assert unavailable_overrides([("search", "dangling_ends"), "optimize.rounds", ("nope", "x")]) == ["search.dangling_ends (since 0.5.0)"]
+    monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")
+    assert unavailable_overrides([("search", "dangling_ends")]) == []
+
+
+def test_opt_in_reaches_engine_options(monkeypatch):
+    from topor.config import Config
+    cfg = Config.defaults()
+    cfg.values[("search", "dangling_ends")] = "fixed"
+    monkeypatch.delenv("TOPOR_UNRELEASED_SETTINGS", raising=False)
+    without = cfg.engine_options()
+    monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")
+    with_ = cfg.engine_options()
+    assert "dangling_ends" not in str(without)
+    assert "dangling_ends" in str(with_) and "fixed" in str(with_)

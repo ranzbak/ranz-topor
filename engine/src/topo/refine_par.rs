@@ -798,6 +798,17 @@ pub mod lanes {
     /// The lanes for the next epoch on this thread. O(1).
     pub fn lease() -> Lease {
         let ctx = CTX.with(|c| c.borrow().clone());
+        lease_of(ctx)
+    }
+
+    /// The lanes for `mode` (par-draw, `[drawing] draw_lanes`) from this thread's pool: `Auto` =
+    /// one plus the free slots of the run's pool (one without a pool), `Fixed(n)` = `n`. O(1).
+    pub fn lease_with(mode: Mode) -> Lease {
+        let pool = CTX.with(|c| c.borrow().as_ref().and_then(|x| x.1.clone()));
+        lease_of(Some((mode, pool)))
+    }
+
+    fn lease_of(ctx: Option<Ctx>) -> Lease {
         match ctx {
             Some((Mode::Fixed(n), _)) => Lease { n: n.max(1), taken: 0, pool: None },
             Some((Mode::Auto, Some(p))) => {

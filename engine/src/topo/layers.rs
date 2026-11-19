@@ -765,6 +765,7 @@ pub fn relabel(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep:
 
 /// [`relabel`] with the per-wire stretch cache ([`StretchCache`]; bit-identical).
 pub fn relabel_cached(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParams, rep: &mut LayerReport, cache: Option<&StretchCache>) {
+    let _pg = super::prof::g(super::prof::K::Relabel);
     let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
     rep.stretches.clear();
     rep.events.clear();
@@ -791,6 +792,10 @@ pub fn assign_with(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &L
 /// [`assign_with`] with the per-wire stretch cache ([`StretchCache`]; the same report bit for
 /// bit, the untouched wires' via sites not searched again).
 pub fn assign_cached(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerParams, packer: Option<&Packer>, cache: Option<&StretchCache>) -> LayerReport {
+    let _pg = super::prof::g(super::prof::K::AssignWith);
+    if super::prof::on() {
+        super::prof::units(super::prof::K::AssignWith, st.wires.iter().filter(|w| w.alive).count());
+    }
     if st.proj.n_layers == 2 {
         assign_two(st, smd_layer, p, packer, cache, None)
     } else {
@@ -819,6 +824,10 @@ pub fn assign_local(
     cache: Option<&StretchCache>,
     held: &Held,
 ) -> LayerReport {
+    let _pg = super::prof::g(super::prof::K::AssignWith);
+    if super::prof::on() {
+        super::prof::units(super::prof::K::AssignWith, st.wires.iter().filter(|w| w.alive).count());
+    }
     if st.proj.n_layers == 2 {
         assign_two(st, smd_layer, p, packer, cache, Some(held))
     } else {
