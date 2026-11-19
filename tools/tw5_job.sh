@@ -217,7 +217,7 @@ case ${1:-} in
     # inner_layer_room seeds 0-9 (KiCad types, In1 routed).
     ( hzq run --pin --threads 2 --name tw5-tests -- bash $ROOT/tools/tw5_job.sh tests > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
     gen
-    for s_ in 0 1 2; do u q$s_ 4 "Ofr16s$s_:qmtech:2" "Nefr16s$s_:qmtech:2"; done
+    u q 12 "Ofr16s0:qmtech:2" "Nefr16s0:qmtech:2" "Ofr16s1:qmtech:2" "Nefr16s1:qmtech:2" "Ofr16s2:qmtech:2" "Nefr16s2:qmtech:2"
     i=""; for s_ in 0 1 2 3 4 5 6 7 8 9; do i+="Ofr16s$s_:p-inner_layer_room Nefr16s$s_:p-inner_layer_room "; done
     u e 4 "Ofr16s1:esp Ofr16s2:esp Ofr16s3:esp" "Nefr16s1:esp Nefr16s2:esp Nefr16s3:esp" "$i" "Or1:eprom Or1:wiccon Or1:esp Or1:qmtech"
     wait; note "all done" ;;
