@@ -87,6 +87,21 @@ scratch/agent-wt/reports/tw6-via-sites-data/vsite.py.
   violation weight. This is the same form as CM1's 1 + over/pitch, and there is no new threshold.
   - The step at d = 0 is the violation itself, as in CM1.
   - The slack above 0 is already priced by `via_squeeze`, which is graded.
+- **One measure for plan and drawing (lead 2026-11-19, from tw4-r2 (2b)).** tw4-r2's `via_disc_height` (the via disc
+  on an edge at the via's height h) lost its A/B because the drawing still packs with h = 0. The plan's predicted errors
+  fell 197 to 74-83, but drawn drawing_loss rose 198 to 229-255 and drawn pad_exit rose 25 to 41-52 (tw4-r2.md "(2b)
+  result"). So `site_room` and the via disc at its height are one function, read by:
+  - the plan: `Frame::apply` (vpts, discs at h), `CapModel::nosite` / the graded amount, and `layers::wire_stretches`;
+  - the drawing: `Drawer::set_wire_layers` (draw.rs:1287, `wire_discs` at the drawn via point's height, not h = 0),
+    `Drawer::relayer` (draw.rs:3032), and the site tests in `Drawer::place_vias` (draw.rs:1799, the planned site's
+    room) and `Drawer::via_candidates` (draw.rs:1518, ranked by the same room). The height is read at the via point
+    the drawing puts (planned site, or the searched one), so the packed lanes match the drawn via.
+  - tw4-r2's (1c) reads it too (one count, see below).
+- Test: plan vs drawing agree per via. For every drawn via, the room the plan read at its planned point equals the room
+  the drawing read at that point (a `viacheck`-style stored = fresh check, unit test on planned_crossing_window and
+  site_or_stay). Board check: drawing_loss and drawn pad_exit do not rise when `via_disc_height` and `site_price` are
+  on together (the tw4-r2 (2b) nets: IO6, ENABLE, IO7, IO5, IO10_SDA on esp; ADV_DVDD, JS1_1, Net-(U7-PVSS) on qmtech
+  are re-measured by name).
 
 **B. The no-via alternative priced against it.**
 - Layering: each domain-graph edge weighs `via_mm + viol_mm·amount(d_edge)`.
@@ -140,12 +155,17 @@ scratch/agent-wt/reports/tw6-via-sites-data/vsite.py.
 | factors/ | `via_site_social.rs` (new), `Event::ViaSite` | none |
 | viaopt.rs | `relocate_vias`, `gap_at` (D) | none |
 | core.rs | `Sp::{site_move, branch_move, set_lr}`, candidate list beside `obstructed_pairs`, `route_round` option plumbing, warning lines | `route_round` plumbing (text merge only) |
+| draw.rs | `Drawer::set_wire_layers`, `Drawer::relayer` (via discs at the drawn via point's height), `Drawer::place_vias` / `via_candidates` (read `site_room`), `lead_via_site` (C) | tw4-r2 (1) pad exit plan object and `Disc` = [d0, d1, h]: **after merge** |
 | compass.rs | via_site items carry the amount | none |
 | model.rs, schema.py, configuration.md | options | own options (text merge) |
 
 **Decision for the lead:** tw4-r2 (1c) ("a planned via inside the exit zone, its disc closer than r + s to a neighbour
 pin") prices the same quantity as A's deficit against pins. It should be counted once. Proposal: (1c) is dropped from
 tw4-r2, or reads `site_room`. A via short of room then pays the site price and not also pad_exit (c).
+**Lead decision (2026-11-19):** tw4-r2 lands first and keeps (1c); TW6 part A builds `site_room` so that (1c) reads it
+(one function, one count). TW6 does not edit tw4-r2's branch. Part D also waits for the merge: `git diff
+main...tw4-r2` touches core.rs, model.rs, schema.py, configuration.md and viacut.rs, which D needs (viaopt.rs itself is
+untouched). Order after the merge: A+C, D, B (search term), E; all opt-in until the equal-time A/B.
 
 ## Options (judgement calls; defaults are set only after the A/B)
 | option | part | default now | meaning |

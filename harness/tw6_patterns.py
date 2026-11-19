@@ -104,6 +104,8 @@ def lead_via_end() -> Pattern:
     dy = (o_y[1] - half) - Y  # 0.45
     xv = _r(xo - half - math.sqrt(need * need - dy * dy))  # the lead's via end (last point with room)
     xv2 = _r(xo + half + math.sqrt(need * need - dy * dy))  # first point with room past the pads
+    lim = VIA_D / 2 + CLEAR  # the exact room limits (the drawing's via end sits on them, 8.982)
+    ok_x = [[8.0, round(xo - half - math.sqrt(lim * lim - dy * dy) + 5e-4, 3)], [round(xo + half + math.sqrt(lim * lim - dy * dy) - 5e-4, 3), 12.5]]
     tip = (end[0] + lead, Y)
     sig_f = [end, (xv, Y)]
     sig_b = [(xv, Y), r2.pads[0].pos]
@@ -130,7 +132,7 @@ def lead_via_end() -> Pattern:
         witness={"SIG": ("F.Cu", sig_f)},
         kept_tracks=[hand],
         extra={"tw6": {"ref_len": _r(_len(hand.pts) + _len(sig_f) + _len(sig_b)), "vias": 1, "via_end": [xv, Y],
-                       "via_ok_x": [[8.0, xv], [xv2, 12.5]], "tip": list(tip), "no_site_marks": [list(tip)],
+                       "via_ok_x": ok_x, "tip": list(tip), "no_site_marks": [list(tip)],
                        "options": {"search.dangling_ends": "continue", "search.dangling_lead_mm": lead,
                                    "search.dangling_lead_via": True},
                        "problem_drc_allowed": ["track_dangling"],
