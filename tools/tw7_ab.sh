@@ -68,8 +68,8 @@ case ${1:-} in
       done
     done
     wait ;;
-  ec)  # cpu-clock A/B on the shared VM (fair between cfgs, not a timing run): ec <seeds> <boards> <cfgs...>
-    shift; S=$1 B=$2; shift 2
+  ec)  # cpu-clock A/B on the shared VM (fair between cfgs, not a timing run): ec 0,1,2 qmtech,esp <cfgs...>
+    shift; S=${1//,/ } B=${2//,/ }; shift 2  # comma lists (hz.sh job word-splits quoted args)
     for c in "$@"; do [ "$c" = "-" ] && c=""
       for b in $B; do for s in $S; do
         thr; ( TW7_CLOCK=cpu TW7_TIMEOUT=1200 hzq run --threads 4 --name tw7-e$s$c-$b -- env TW7_CLOCK=cpu TW7_TIMEOUT=1200 bash $ROOT/tools/tw7_ab.sh one e$s$c:$b:4 > $R/u-e$s$c-$b.log 2>&1; note "unit e$s$c $b rc $?" ) &
