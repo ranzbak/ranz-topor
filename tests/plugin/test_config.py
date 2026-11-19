@@ -280,6 +280,20 @@ def test_refine_lanes_auto_or_count(tmp_path):
         assert cfg.engine_options()["refine_lanes"] == 0 and [x for x in f if "refine_lanes" in str(x)], bad
 
 
+
+def test_draw_lanes_auto_or_count(tmp_path):
+    """par-draw: [drawing] draw_lanes = "auto" (default) reaches the engine as 0, a count as itself; a bad word
+    or 0 is a finding and keeps the default."""
+    cfg, _ = load_config(tmp_path)
+    assert cfg.engine_options()["draw_lanes"] == 0
+    (tmp_path / "topor.toml").write_text('version = 1\n[drawing]\ndraw_lanes = 3\n')
+    cfg, _ = load_config(tmp_path)
+    assert cfg.engine_options()["draw_lanes"] == 3
+    for bad in ('"many"', "0"):
+        (tmp_path / "topor.toml").write_text(f'version = 1\n[drawing]\ndraw_lanes = {bad}\n')
+        cfg, f = load_config(tmp_path)
+        assert cfg.engine_options()["draw_lanes"] == 0 and [x for x in f if "draw_lanes" in str(x)], bad
+
 def test_m6_removed_keys_name_m6_and_leave_the_engine_alone(tmp_path):
     """M6 (6b, user 2026-11-18): [search] neck_in_drawing and [drawing] lane_walls are removed keys. Every value an
     old topor.toml can hold (true / false, "price" / "hard") is ignored with CFG_REMOVED_KEY naming M6, the engine

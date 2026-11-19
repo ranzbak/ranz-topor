@@ -678,6 +678,7 @@ impl Checker {
         let parts: Vec<CheckReport> = if items.len() < PAR_MIN_ITEMS {
             items.iter().enumerate().map(one).collect()
         } else {
+            crate::topo::par::assert_no_crew("Checker::check_against");
             items.par_iter().enumerate().map(one).collect()
         };
         let mut rep = CheckReport::default();

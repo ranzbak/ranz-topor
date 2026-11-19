@@ -38,6 +38,7 @@ pub mod schedule;
 pub mod sheet;
 pub mod radii;
 pub mod refine;
+pub mod par;
 pub mod refine_par;
 pub mod rtrace;
 pub mod metrize;
