@@ -717,7 +717,7 @@ pub struct Widths<'a> {
     pub pass_w: Vec<f64>,
     pub min_w: Vec<f64>,
     #[allow(clippy::type_complexity)]
-    pub seg: Box<dyn Fn(WireId, usize, Vec2, Vec2) -> f64 + 'a>,
+    pub seg: Box<dyn Fn(WireId, usize, Vec2, Vec2) -> f64 + Send + Sync + 'a>,
 }
 
 /// Where a pass sits in its packing: `(edge, layer, index in the lane, lmin, rmax)` (nm).
@@ -886,7 +886,7 @@ pub struct Drawer<'a> {
     /// The wire of each drawn (dynamic) object that has one, by ent id ([`Drawer::pair_disc_clear`]).
     ent_wire: BTreeMap<usize, usize>,
     /// Diagnosis: ignore the copper drawn so far.
-    pub(super) only_static: std::cell::Cell<bool>,
+    pub(super) only_static: std::sync::atomic::AtomicBool,
     /// Trial drawing (via reduction): a rejected run is not diagnosed or recorded.
     pub quiet: bool,
     /// Per-stretch widths (the drawing witness); `None`: every wire has its own single width.
@@ -1037,7 +1037,7 @@ impl<'a> Drawer<'a> {
             qgrow: 0.0,
             n_static: 0,
             ent_wire: BTreeMap::new(),
-            only_static: std::cell::Cell::new(false),
+            only_static: std::sync::atomic::AtomicBool::new(false),
             quiet: false,
             widths: None,
             tight: false,
@@ -4398,9 +4398,9 @@ impl<'a> Drawer<'a> {
         };
         let bumps = last_pts.len().saturating_sub(pre0.len());
         let deep = std::env::var("TOPO_DIAG_DEEP").is_ok();
-        self.only_static.set(deep);
+        self.only_static.store(deep, std::sync::atomic::Ordering::Relaxed);
         let static_infeasible = deep && self.exact_fix(w, k0, k1, layer, pre0.clone(), neck).is_none();
-        self.only_static.set(false);
+        self.only_static.store(false, std::sync::atomic::Ordering::Relaxed);
         if std::env::var("TOPO_DEBUG").is_ok() {
             // Diagnosis (D1): per pass of the run, the room its packed lane promised (`lmin ..
             // rmax`) and what the neighbours drawn so far left of it (`tight_span`).

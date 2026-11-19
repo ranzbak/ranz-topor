@@ -1152,6 +1152,17 @@ pub struct Options {
     /// Tests (engine only): every refinement epoch evaluates at least this many candidates, also
     /// past a kept one ([`crate::topo::refine_par::lanes::with_window`]); 0 = off.
     pub refine_test_window: usize,
+    /// `[drawing] draw_lanes` (par-draw, docs/dev/design/par-draw.md): how many lanes compute the
+    /// drawing's order-free units at once (the extended rubber band of every stretch, the cut
+    /// measurement of every layer; [`crate::topo::par`]). JSON `"auto"` (default; 0 in Rust) = one
+    /// plus the run's spare compute slots at that moment (as `refine_lanes`), a number = that many
+    /// lanes. The units' results are folded in their own order, so the copper does not depend on
+    /// it; only the time does.
+    #[serde(with = "lanes_opt")]
+    pub draw_lanes: usize,
+    /// Tests (engine only): the drawing's first units start late ([`crate::topo::par`] reverse
+    /// hook), so with several lanes they finish last; the copper must not change.
+    pub draw_test_reverse: bool,
     /// `[optimize] loop_crossing` (5.2, `loop = "topor"`): the share of the `crossing` factor's
     /// weight the loop's layer-aware reroute keeps for a crossing itself. The loop prices the via
     /// a crossing implies against the crossed stretch's present layer as a via (Polubasov 2010
@@ -1571,6 +1582,8 @@ impl Default for Options {
             loop_shadow: 0,
             local_depth: 1,
             refine_test_window: 0,
+            draw_lanes: 0,
+            draw_test_reverse: false,
             loop_crossing: 0.25,
             crossing_vias: "crossing".into(),
             junction_pad_mm: 0.0,

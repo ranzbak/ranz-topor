@@ -5074,6 +5074,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let lr = lr;
     let t_draw = Instant::now();
+    // par-draw phase A: the drawing's order-free units run on `[drawing] draw_lanes` lanes (results
+    // folded in unit order: the copper does not depend on the lanes), until this round returns.
+    let _par = super::par::set_mode(Some(super::refine_par::lanes::mode_of(opts.draw_lanes)), opts.draw_test_reverse);
     // One path for `hard` and the overrun cap (user 2026-11-13): the limit acted as hard before
     // the drawing began, so it cut a planning step; the kept plan is drawn in full.
     draw_exempt.set(ctl.limit.is_hard() && ctl.over_limit());
@@ -6313,6 +6316,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let causes_before = causes(&plans, &drawn);
     tlog("drawing + feedback", t_draw);
+    if super::par::meter::on() {
+        eprintln!("[topo round {round}] {}", super::par::meter::report());
+    }
     ctl.stage(rnd, rnds, "via reduction and fuse");
     let t_red = Instant::now();
     // The result as drawn is a variant of its own (more vias, maybe shorter).

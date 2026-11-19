@@ -377,7 +377,7 @@ impl Drawer<'_> {
             // narrower than the minimum (they are kept apart without a clearance).
             // An exit stub (5.10) is no copper: the wires of its own net pass through it freely.
             let own_pad = e.net == Some(wp.net) && i < n_obs && !wp.own.contains(&i) && !self.is_exit_stub(i) && !self.is_kept_end(i);
-            e.live && (wp.layer == usize::MAX || (e.mask >> wp.layer) & 1 == 1) && (e.net != Some(wp.net) || own_pad) && (i < self.n_static || !self.only_static.get())
+            e.live && (wp.layer == usize::MAX || (e.mask >> wp.layer) & 1 == 1) && (e.net != Some(wp.net) || own_pad) && (i < self.n_static || !self.only_static.load(std::sync::atomic::Ordering::Relaxed))
         });
         ids
     }
@@ -1494,7 +1494,9 @@ mod tests {
     /// runs of the routed wire with and without pad exits.
     #[test]
     fn octilinear_shape_cache_matches_the_reference_loop() {
-        use super::super::octi::{OCTI_HITS, OCTI_REF};
+        use super::super::octi::{OCTI_HITS, OCTI_LANE_MIN, OCTI_NODE_SPLIT, OCTI_REF};
+        // per lane count: nodes done alone and on the crew (lanes 2, 4, 8 must do every node on the crew)
+        let mut split = [[0usize; 2]; 4];
         let (mut some, mut runs) = (0, 0);
         with_octi_fields(&mut |dr, g| {
             let wi = &dr.st.wires[0];
@@ -1513,6 +1515,25 @@ mod tests {
                 let relax = [0.0, 20_000.0][g.int(0, 1) as usize];
                 OCTI_REF.with(|f| f.set(false));
                 let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
+                // par-draw: every node's successors on 1/2/4/8 lanes (pair rule 1, the reverse
+                // hook: the first successors finish last). The test switch and the node counts are
+                // thread-locals of the thread that calls `octilinear`: the pool's worker.
+                let laned: Vec<_> = [1usize, 2, 4, 8]
+                    .iter()
+                    .enumerate()
+                    .map(|(ki, &k)| {
+                        let pool = rayon::ThreadPoolBuilder::new().num_threads(k).build().expect("pool");
+                        pool.install(|| {
+                            OCTI_LANE_MIN.with(|f| f.set(1));
+                            OCTI_NODE_SPLIT.with(|c| c.set([0, 0]));
+                            let r = super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax));
+                            let c = OCTI_NODE_SPLIT.with(|c| c.get());
+                            OCTI_LANE_MIN.with(|f| f.set(0));
+                            split[ki] = [split[ki][0] + c[0], split[ki][1] + c[1]];
+                            r
+                        })
+                    })
+                    .collect();
                 OCTI_REF.with(|f| f.set(true));
                 let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
                 OCTI_REF.with(|f| f.set(false));
@@ -1520,9 +1541,17 @@ mod tests {
                 some += usize::from(want.is_some());
                 let bits = |v: &Option<super::super::octi::OctiOut>| v.as_ref().map(|o| o.pts.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>());
                 assert_eq!(bits(&got), bits(&want));
+                for (k, l) in [1usize, 2, 4, 8].iter().zip(&laned) {
+                    assert_eq!(bits(l), bits(&want), "{k} lanes");
+                }
             }
         });
         let hits = OCTI_HITS.with(|h| h.get());
         assert!(some > 10 && hits[0] > 20, "{some} of {runs}, hits {hits:?}");
+        // one lane: every node alone; 2, 4, 8 lanes: every node on the crew
+        assert!(split[0][0] > 0 && split[0][1] == 0, "1 lane: {:?}", split[0]);
+        for (ki, k) in [(1usize, 2usize), (2, 4), (3, 8)] {
+            assert!(split[ki][1] > 0 && split[ki][0] == 0, "{k} lanes: nodes alone / on the crew {:?}", split[ki]);
+        }
     }
 }
