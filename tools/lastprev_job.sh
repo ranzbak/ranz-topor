@@ -17,6 +17,9 @@ one() {
 }
 case ${1:-} in
   one) one "$2" ;;
+  pytest)  # one full pytest (CI=1) at the branch tip
+    ( hzq run --threads 4 --name lp-pytest -- bash -c "cd $ROOT && CI=1 python -m pytest -q -p no:cacheprovider" > $R/pytest.log 2>&1 9>&-; note "unit pytest rc $?" ) &
+    wait; note "all done" ;;
   cost)  # timing on its own (no SCHED_IDLE pre-start: hzq run waits for real tokens)
     ( hzq run --threads 4 --name lp-cost -- python -m harness.preview_cost $E $R/cost --reps 3 > $R/cost.log 2>&1 9>&-; note "unit cost rc $?" ) &
     wait; note "all done" ;;
@@ -26,5 +29,5 @@ case ${1:-} in
     ( hzq run --threads 4 --name lp-suite -- bash -c "cargo clippy --release --all-targets > $R/clippy.log 2>&1; echo clippy rc \$? >> $R/rc.txt; cd $ROOT/engine && cargo test --release --no-fail-fast" > $R/suite.log 2>&1 9>&-; note "unit suite rc $?" ) &
     ( hzq run --threads 4 --name lp-pytest -- bash -c "cd $ROOT && CI=1 python -m pytest -q -p no:cacheprovider" > $R/pytest.log 2>&1 9>&-; note "unit pytest rc $?" ) &
     wait; note "all done" ;;
-  *) echo "usage: $0 merge | cost | one <board>"; exit 2 ;;
+  *) echo "usage: $0 merge | pytest | cost | one <board>"; exit 2 ;;
 esac
