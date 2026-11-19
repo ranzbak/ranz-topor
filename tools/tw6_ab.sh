@@ -59,13 +59,18 @@ case ${1:-} in
     python -m harness.tw6_patterns $R/tw6p > $R/tw6p-gen.log 2>&1; note "gen rc $?"
     for c in ${PCFG:-- s p sh shp}; do [ "$c" = "-" ] && c=""; for k in K M; do for b in pcw sos lve; do bash $ROOT/tools/tw6_ab.sh one $k$c:$b & done; wait; done; done ;;
   eq)
+    # long boards first; at most EQ_MAX (default 5) units in flight (AGENT_RULES: <= 4 waiting units per job)
     shift
+    thr() { while [ "$(jobs -rp | wc -l)" -ge "${EQ_MAX:-5}" ]; do wait -n; done; }
+    for c in "$@"; do
+      [ "$c" = "-" ] && c=""
+      thr; ( hzq run --threads 4 --name tw6-e0$c-qm -- bash $ROOT/tools/tw6_ab.sh one e0$c:qmtech:4 > $R/u-e0$c-qm.log 2>&1; note "unit e0$c qmtech rc $?" ) &
+    done
     for c in "$@"; do
       [ "$c" = "-" ] && c=""
       for s in 0 1 2 3 4; do
-        ( hzq run --threads 4 --name tw6-e$s$c-esp -- bash $ROOT/tools/tw6_ab.sh one e$s$c:esp:4 > $R/u-e$s$c-esp.log 2>&1; note "unit e$s$c esp rc $?" ) &
+        thr; ( hzq run --threads 4 --name tw6-e$s$c-esp -- bash $ROOT/tools/tw6_ab.sh one e$s$c:esp:4 > $R/u-e$s$c-esp.log 2>&1; note "unit e$s$c esp rc $?" ) &
       done
-      ( hzq run --threads 4 --name tw6-e0$c-qm -- bash $ROOT/tools/tw6_ab.sh one e0$c:qmtech:4 > $R/u-e0$c-qm.log 2>&1; note "unit e0$c qmtech rc $?" ) &
     done
     wait ;;
   ac)
