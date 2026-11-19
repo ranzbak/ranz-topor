@@ -218,30 +218,32 @@ fn the_cycle_count_never_goes_back() {
 /// hook point of the loop the run's pick sketch has the Last run row's score.
 #[test]
 fn the_pick_sketch_is_the_pick_also_for_mid_cycle_states() {
-    let text = fixture_text(EPROM);
-    let m = BoardModel::from_json(&text).expect("fixture parses");
-    let o = Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 12, "runs": 1, "escape": "layering", "loop_p4": true}"#).expect("options parse");
-    let ctl = RunControl::new();
-    ctl.limit.init(o.wall_clock_s);
-    ctl.sketches.enable();
-    let seen: Arc<std::sync::Mutex<Vec<(Sketch, String, (usize, usize, f64))>>> = Arc::default();
-    let mut c2 = ctl.clone();
-    {
-        let (c3, s2) = (ctl.clone(), seen.clone());
-        c2.set_test_hook(move |_| {
-            if let Some(sk) = c3.sketches.get(true, 1) {
-                let p = c3.snapshot();
-                s2.lock().expect("seen").push(((*sk).clone(), p.runbest_kind.clone(), (p.runbest_errors, p.runbest_vias, p.runbest_length_mm)));
-            }
-            false
-        });
-    }
-    let _ = route_with(&m, &o, &c2);
-    let seen = seen.lock().expect("seen");
-    let plan: Vec<_> = seen.iter().filter(|(sk, kind, _)| sk.kind == "plan" && kind == "plan").collect();
-    assert!(!plan.is_empty(), "no plan pick sketch seen");
-    for (sk, _, row) in plan {
-        assert_eq!((sk.errors, sk.vias, sk.length_mm), *row, "pick sketch of cycle {} vs the Last run row", sk.cycle);
+    for fixture in [EPROM, "esp-rust-board-usb-crop.json"] {
+        let text = fixture_text(fixture);
+        let m = BoardModel::from_json(&text).expect("fixture parses");
+        let o = Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 12, "runs": 1, "refine_lanes": 1, "escape": "layering", "loop_p4": true}"#).expect("options parse");
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        ctl.sketches.enable();
+        let seen: Arc<std::sync::Mutex<Vec<(Sketch, String, (usize, usize, f64))>>> = Arc::default();
+        let mut c2 = ctl.clone();
+        {
+            let (c3, s2) = (ctl.clone(), seen.clone());
+            c2.set_test_hook(move |_| {
+                if let Some(sk) = c3.sketches.get(true, 1) {
+                    let p = c3.snapshot();
+                    s2.lock().expect("seen").push(((*sk).clone(), p.runbest_kind.clone(), (p.runbest_errors, p.runbest_vias, p.runbest_length_mm)));
+                }
+                false
+            });
+        }
+        let _ = route_with(&m, &o, &c2);
+        let seen = seen.lock().expect("seen");
+        let plan: Vec<_> = seen.iter().filter(|(sk, kind, _)| sk.kind == "plan" && kind == "plan").collect();
+        assert!(!plan.is_empty(), "{fixture}: no plan pick sketch seen");
+        for (sk, _, row) in plan {
+            assert_eq!((sk.errors, sk.vias, sk.length_mm), *row, "{fixture}: pick sketch of cycle {} vs the Last run row", sk.cycle);
+        }
     }
 }
 
