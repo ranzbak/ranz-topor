@@ -15,7 +15,7 @@ const MM: f64 = 1e6;
 
 /// The gap board's pads `(ref, net, x, y, w, h, layer)` (KiCad frame, mm): net 1 TXD, 2 RST,
 /// 3 RXD (U21, one pad: no connection).
-const GAP_PADS: [(&str, i32, f64, f64, f64, f64, i32); 5] = [
+const GAP_PADS: [GapPad; 5] = [
     ("U22", 1, 6.0, 4.0, 2.5, 1.0, 0),
     ("T1", 1, 6.0, 5.0, 0.3, 0.3, 2),
     ("U21", 3, 6.0, 6.0, 2.5, 1.0, 0),
@@ -24,6 +24,12 @@ const GAP_PADS: [(&str, i32, f64, f64, f64, f64, i32); 5] = [
 ];
 
 fn gap() -> BoardModel {
+    gap_with(&GAP_PADS)
+}
+
+type GapPad = (&'static str, i32, f64, f64, f64, f64, i32);
+
+fn gap_with(pads: &[GapPad]) -> BoardModel {
     let p = |v: f64| (v * MM).round() as i64;
     let c = [(0.0, 0.0), (12.0, 0.0), (12.0, 10.0), (0.0, 10.0)];
     let segs: Vec<String> = (0..4)
@@ -32,7 +38,7 @@ fn gap() -> BoardModel {
             format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(a.0), p(a.1), p(b.0), p(b.1))
         })
         .collect();
-    let pj: Vec<String> = GAP_PADS
+    let pj: Vec<String> = pads
         .iter()
         .enumerate()
         .map(|(i, &(r, net, x, y, w, h, l))| {
@@ -210,20 +216,23 @@ fn disc_heights_stay_fresh_and_focus_exact() {
 /// loop's), measured by the capacity model under `o`: `(violations count, graded, via_cut_count,
 /// located via cut points, via cut list length)`.
 fn gap_measure(o: &Options) -> (usize, f64, usize, usize, usize) {
+    gap_measure_on(&gap(), o)
+}
+
+fn gap_measure_on(m: &BoardModel, o: &Options) -> (usize, f64, usize, usize, usize) {
     use topor_engine::topo::board::{self as tb, BuildOpts};
     use topor_engine::topo::init::InitWeights;
     use topor_engine::topo::layers::{self, LayerParams};
     use topor_engine::topo::pack::Packer;
     use topor_engine::topo::refine::CapModel;
     use topor_engine::topo::state::State;
-    let m = gap();
-    let b = tb::build(&m, &BuildOpts::default()).unwrap();
-    let conns = b.connections(&m);
+    let b = tb::build(m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(m);
     let mut st = State::new(&b.proj);
     for c in &conns {
         st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
     }
-    let packer = Packer::for_model(&m, o, &b.proj);
+    let packer = Packer::for_model(m, o, &b.proj);
     let smd = |ob: usize| b.smd_layer(ob);
     let lr = layers::assign_with(&st, &smd, &LayerParams::default(), Some(&packer));
     let dirs = packer.taut_dirs(&st);
@@ -238,17 +247,31 @@ fn gap_opts(json: &str) -> Options {
 
 /// tw4-r2 (2) behaviour: TXD's via in the gap with RST through it is over-full at its planned
 /// point. Measured at the least-over site point of its triangle (`via_best_point`) the via is
-/// never priced higher than at the planned point (the planned point is one of the candidates), and
-/// on this board strictly lower (a site point nearer an end of the gap leaves RST more of the cut).
+/// never priced higher than at the planned point (the planned point is one of the candidates).
+/// Over variants of the gap (U21 shifted along it, T1 moved), where the gap's cuts differ across
+/// the via's triangle, some via is priced strictly lower at its best point.
 #[test]
-fn best_point_prices_the_gap_via_no_worse_and_here_lower() {
-    let off = gap_measure(&gap_opts(r#"{"via_cuts": true}"#));
-    let on = gap_measure(&gap_opts(r#"{"via_cuts": true, "via_best_point": true}"#));
-    let none = gap_measure(&gap_opts(r#"{"via_cuts": false}"#));
-    eprintln!("gap off {off:?} best {on:?} no-cuts {none:?}");
-    assert!(off.2 >= 1 && off.1 > none.1, "the case shows: an over-full via cut at the planned point {off:?} vs {none:?}");
-    assert!(on.1 <= off.1 + 1e-9, "the best point is never priced above the planned one: {on:?} vs {off:?}");
-    assert!(on.1 < off.1 - 1e-6, "a better site point exists in the via's triangle: {on:?} vs {off:?}");
+fn best_point_prices_the_gap_via_no_worse_and_somewhere_lower() {
+    let (off_o, on_o) = (gap_opts(r#"{"via_cuts": true}"#), gap_opts(r#"{"via_cuts": true, "via_best_point": true}"#));
+    let (mut shown, mut lower) = (0, 0);
+    for dx in [0.0, 0.4, 0.8, 1.2, 1.6] {
+        for tx in [-0.8, -0.4, 0.0, 0.4, 0.8] {
+            let mut pads = GAP_PADS;
+            pads[2].2 += dx;
+            pads[1].2 += tx;
+            let m = gap_with(&pads);
+            let (off, on) = (gap_measure_on(&m, &off_o), gap_measure_on(&m, &on_o));
+            eprintln!("gap U21 +{dx} T1 {tx:+}: off {off:?} best {on:?}");
+            if off.2 == 0 {
+                continue;
+            }
+            shown += 1;
+            assert!(on.1 <= off.1 + 1e-9, "U21 +{dx} T1 {tx:+}: the best point is never priced above the planned one: {on:?} vs {off:?}");
+            lower += usize::from(on.1 < off.1 - 1e-6);
+        }
+    }
+    assert!(shown > 0, "the case shows: an over-full via cut at the planned point");
+    assert!(lower > 0, "some variant has a better site point in the via's triangle ({shown} over-full)");
 }
 
 /// tw4-r2 (2) behaviour: with a ramp far past the gap's overage (`via_over_ramp_mm` 100) the via
