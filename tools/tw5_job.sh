@@ -191,6 +191,23 @@ case ${1:-} in
     u i 1 "$ln"
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  r11)
+    # Round 11 (main 5a105d3c merged: via_cuts on by default, so O = new main): A/B baselines again at 16 cycles,
+    # O / N / F on qmtech seeds 0-2, esp seeds 1-3, wiccon, eprom; inner_layer_room O / N seeds 0-9; O at 1 cycle on
+    # 4 boards (copper vs main tip, run separately); D8 F seeds 0-4; merge trial.
+    u q 12 "Or16s0:qmtech:2 Or16s1:qmtech:2" "Nr16s0:qmtech:2 Nr16s1:qmtech:2" "Fr16s0:qmtech:2 Fr16s1:qmtech:2" \
+      "Or16s2:qmtech:2" "Nr16s2:qmtech:2" "Fr16s2:qmtech:2"
+    e=""; for c in O N F; do for s_ in 1 2 3; do e+="${c}r16s$s_:esp "; done; e+="${c}r16:wiccon ${c}r16:eprom "; done
+    i=""; for s_ in 0 1 2 3 4 5 6 7 8 9; do i+="Or16s$s_:p-inner_layer_room Nr16s$s_:p-inner_layer_room "; done
+    gen
+    mkdir -p $R/d8; PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns $R/d8 --drc > $R/d8-gen.log 2>&1; note "d8 gen rc $?"
+    d=""; for n in layering_zero_vias oscillating_cross layering_escape_fig8; do for s_ in 0 1 2 3 4; do d+="Fr16s$s_:d-$n "; done; done
+    u e 3 "$e" "$i" "$d Or1:eprom Or1:wiccon Or1:esp"
+    u o 2 "Or1:qmtech"
+    ( bash $ROOT/tools/tw5_job.sh final > $R/final-mode.log 2>&1 ) & sleep 1
+    wait
+    PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns_png $R/d8 $R $R/d8out > $R/d8-png.log 2>&1; note "d8 png rc $? $(grep -v Debug $R/d8-png.log | tr '\n' ';')"
+    note "all done" ;;
   r10)
     # Round 10: merge trial on the tip (main 94b1c848 merged) + the free_wire_cross mutants.
     ( hzq run --pin --threads 2 --name fw-mut -- bash $ROOT/tools/tw5_job.sh mutfw > $R/mutfw.log 2>&1; note "mutfw rc $?" ) & sleep 1
