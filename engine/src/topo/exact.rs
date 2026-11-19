@@ -1494,8 +1494,9 @@ mod tests {
     /// runs of the routed wire with and without pad exits.
     #[test]
     fn octilinear_shape_cache_matches_the_reference_loop() {
-        use super::super::octi::{OCTI_HITS, OCTI_LANE_MIN, OCTI_NODES_LANED, OCTI_REF};
-        let l0 = OCTI_NODES_LANED.load(std::sync::atomic::Ordering::Relaxed);
+        use super::super::octi::{OCTI_HITS, OCTI_LANE_MIN, OCTI_NODE_SPLIT, OCTI_REF};
+        // per lane count: nodes done alone and on the crew (lanes 2, 4, 8 must do every node on the crew)
+        let mut split = [[0usize; 2]; 4];
         let (mut some, mut runs) = (0, 0);
         with_octi_fields(&mut |dr, g| {
             let wi = &dr.st.wires[0];
@@ -1515,16 +1516,24 @@ mod tests {
                 OCTI_REF.with(|f| f.set(false));
                 let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
                 // par-draw: every node's successors on 1/2/4/8 lanes (pair rule 1, the reverse
-                // hook: the first successors finish last)
-                OCTI_LANE_MIN.with(|f| f.set(1));
+                // hook: the first successors finish last). The test switch and the node counts are
+                // thread-locals of the thread that calls `octilinear`: the pool's worker.
                 let laned: Vec<_> = [1usize, 2, 4, 8]
                     .iter()
-                    .map(|&k| {
+                    .enumerate()
+                    .map(|(ki, &k)| {
                         let pool = rayon::ThreadPoolBuilder::new().num_threads(k).build().expect("pool");
-                        pool.install(|| super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax)))
+                        pool.install(|| {
+                            OCTI_LANE_MIN.with(|f| f.set(1));
+                            OCTI_NODE_SPLIT.with(|c| c.set([0, 0]));
+                            let r = super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax));
+                            let c = OCTI_NODE_SPLIT.with(|c| c.get());
+                            OCTI_LANE_MIN.with(|f| f.set(0));
+                            split[ki] = [split[ki][0] + c[0], split[ki][1] + c[1]];
+                            r
+                        })
                     })
                     .collect();
-                OCTI_LANE_MIN.with(|f| f.set(0));
                 OCTI_REF.with(|f| f.set(true));
                 let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
                 OCTI_REF.with(|f| f.set(false));
@@ -1539,6 +1548,10 @@ mod tests {
         });
         let hits = OCTI_HITS.with(|h| h.get());
         assert!(some > 10 && hits[0] > 20, "{some} of {runs}, hits {hits:?}");
-        assert!(OCTI_NODES_LANED.load(std::sync::atomic::Ordering::Relaxed) > l0, "no node ran on lanes");
+        // one lane: every node alone; 2, 4, 8 lanes: every node on the crew
+        assert!(split[0][0] > 0 && split[0][1] == 0, "1 lane: {:?}", split[0]);
+        for (ki, k) in [(1usize, 2usize), (2, 4), (3, 8)] {
+            assert!(split[ki][1] > 0 && split[ki][0] == 0, "{k} lanes: nodes alone / on the crew {:?}", split[ki]);
+        }
     }
 }

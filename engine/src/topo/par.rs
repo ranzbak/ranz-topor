@@ -18,6 +18,28 @@ thread_local! {
     static REVERSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Calls of [`map`] on this thread since the reverse hook was set (the hook acts on every 16th).
     static REV_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// This thread runs a crew's body or one of its lanes ([`crew`]): no rayon wait allowed.
+    static IN_CREW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The crew invariant ([`crew`]): a crew's body and units never wait on rayon. Called where a
+/// rayon wait starts ([`map_leased`], a nested [`crew`], the checker's parallel pass); panics
+/// inside a crew instead of the deadlock the wait would be. O(1).
+pub fn assert_no_crew(what: &str) {
+    assert!(!IN_CREW.with(|c| c.get()), "{what} waits on rayon inside a crew (par::crew: its body and units never wait on rayon, the wait would run the crew's own parked lane and deadlock)");
+}
+
+/// This thread is in a crew until the guard drops (the state before comes back). O(1).
+struct CrewMark(bool);
+impl CrewMark {
+    fn new() -> Self {
+        CrewMark(IN_CREW.with(|c| c.replace(true)))
+    }
+}
+impl Drop for CrewMark {
+    fn drop(&mut self) {
+        IN_CREW.with(|c| c.set(self.0));
+    }
 }
 
 /// Units started on lanes (more than one lane) and on one lane, process-wide (tests).
@@ -96,6 +118,7 @@ pub fn lease(n: usize) -> Option<lanes::Lease> {
 /// [`map`] on the lanes of `lease` (this thread one of them, each lane taking the next unit not
 /// yet taken), the results in index order. A panic in a unit comes back here.
 pub fn map_leased<T: Sync, R: Send>(lease: lanes::Lease, items: &[T], f: impl Fn(usize, &T) -> R + Sync) -> Vec<R> {
+    assert_no_crew("par::map");
     let n = items.len();
     let rev = reverse_on() && REV_N.with(|c| {
         let k = c.get();
@@ -162,6 +185,13 @@ fn reverse_round() -> bool {
 /// wait between rounds (a short spin, then a condvar), each round's units go to whichever lane
 /// takes them next, and [`Crew::round`] returns the results in unit order, so the caller's fold
 /// sees what a serial loop would. The lanes are the lease's (the drawing's lane source).
+///
+/// Invariant: the crew's body and its units never wait on rayon (no `par_iter`, `join`, `scope`,
+/// [`map_leased`] or nested [`crew`]). On a pool worker a rayon wait runs other jobs of the local
+/// queue, and one of them can be a lane of this very crew not yet started: it then waits for the
+/// next round on top of the body that would start it, a deadlock (verifier probe vpos-d5a43f9:
+/// a unit with a `par_iter` hung 3 of 3 times). [`assert_no_crew`] turns such a wait into a panic
+/// at the entry points named there. Serial work only: `relax` and its leg prices are.
 pub struct Crew<'a, J, U> {
     sh: &'a CrewShared<J, U>,
     unit: &'a (dyn Fn(&J, usize) -> U + Sync),
@@ -230,6 +260,7 @@ fn crew_work<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)
 }
 
 fn crew_lane<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)) {
+    let _in = CrewMark::new();
     let mut seen = 0u64;
     loop {
         let (mut spins, spin) = (0u32, crew_spin());
@@ -260,6 +291,7 @@ fn crew_lane<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)
 /// Runs `body` with a crew of the lease's lanes (this thread one of them) running `unit`. A
 /// panic in a unit or in `body` stops the crew and comes back here.
 pub fn crew<J: Send + Sync, U: Send, R>(lease: lanes::Lease, unit: impl Fn(&J, usize) -> U + Sync, body: impl FnOnce(&mut Crew<'_, J, U>) -> R) -> R {
+    assert_no_crew("par::crew");
     let k = lease.lanes().max(1);
     let sh = CrewShared {
         job: std::sync::RwLock::new(None),
@@ -291,6 +323,8 @@ pub fn crew<J: Send + Sync, U: Send, R>(lease: lanes::Lease, unit: impl Fn(&J, u
             }
         }
         let _stop = Stop(&sh);
+        // the body (this thread) is in the crew until it ends, before the scope joins the lanes
+        let _in = CrewMark::new();
         let mut c = Crew { sh: &sh, unit: unit_ref, k };
         body(&mut c)
     });
@@ -457,6 +491,25 @@ mod tests {
                 })
             });
         }
+    }
+
+    /// The crew invariant: a rayon wait in a crew's body or unit panics (instead of the
+    /// deadlock it would be, verifier probe vpos-d5a43f9); after the crew, also after the panic,
+    /// the thread is out of it again.
+    #[test]
+    fn a_rayon_wait_inside_a_crew_panics_instead_of_hanging() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().expect("pool");
+        let wait = || map_leased(lanes::lease_with(Mode::Fixed(2)), &[1u64, 2, 3], |_, x| x * 2);
+        // in the body (this thread): the guard's message
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.install(|| with_mode(Some(Mode::Fixed(4)), false, || crew(lease(2).expect("lanes"), |_: &(), i: usize| i, |_c| wait())))));
+        let msg = r.err().and_then(|e| e.downcast_ref::<String>().cloned()).unwrap_or_default();
+        assert!(msg.contains("inside a crew"), "body: {msg:?}");
+        // in a unit (a lane or this thread)
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.install(|| with_mode(Some(Mode::Fixed(4)), false, || crew(lease(2).expect("lanes"), |_: &(), _i: usize| wait(), |c| c.round((), 8).1)))));
+        assert!(r.is_err(), "unit: no panic");
+        // out of the crew again: a wait is fine
+        assert_eq!(pool.install(wait), vec![2, 4, 6]);
+        assert_eq!(wait(), vec![2, 4, 6]);
     }
 
     /// A panic in a crew's unit reaches the caller (the lanes stop).

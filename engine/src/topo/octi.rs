@@ -232,6 +232,9 @@ thread_local! {
     pub(super) static OCTI_HITS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
     /// Tests: the lane rule's pair count instead of [`OCTI_LANE_MIN_PAIRS`] (0 = the constant).
     pub(super) static OCTI_LANE_MIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Tests: nodes with successors done on this thread alone and on the crew (both read on the
+    /// thread that called `octilinear`, the pool worker inside a `pool.install`).
+    pub(super) static OCTI_NODE_SPLIT: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
 }
 
 /// Where the run ends at a pad: the pad's long axis (unit, pointing out of the pad towards the
@@ -1000,9 +1003,13 @@ impl Drawer<'_> {
                                 memo.merge(own);
                             }
                             OCTI_NODES_LANED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            #[cfg(test)]
+                            OCTI_NODE_SPLIT.with(|c| c.set([c.get()[0], c.get()[1] + 1]));
                             super::par::meter::time(super::par::meter::OCTI_LANED, t_node);
                         }
                         _ => {
+                            #[cfg(test)]
+                            OCTI_NODE_SPLIT.with(|c| c.set([c.get()[0] + usize::from(!js.is_empty()), c.get()[1]]));
                             for &j in &js {
                                 let mut own = std::mem::take(&mut memo);
                                 let up = relax(i, j, &fin, dist[j], None, &mut own);

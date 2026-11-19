@@ -1,7 +1,9 @@
 # PAR-DRAW: parallel drawing, copper identical for any thread count (design note, branch par-draw)
 
 Base main c41e1523. Rebase targets: tw2-metric (joint band commit, `realise = "erbs"` default) and tw3-f67 (F6/F7).
-Status: draft for the lead, no engine code yet. Evidence: throw-away branch `par-draw-exp` = main + tw2-metric c5393fe3
+Status: built (sections 11, 14-16 describe what is on the branch). Sections 1-10 and 12-13 are the plan and the
+measurements on the exp base before the build, kept as the record; where they differ, sections 11 and 14-16 hold.
+Original status: draft for the lead, no engine code yet. Evidence: throw-away branch `par-draw-exp` = main + tw2-metric c5393fe3
 + tw3-f67 ff1c6fce (both merge cleanly) + trace hooks (TOPO_TIMES sub-phases, `TOPO_PDTRACE`: per drawn wire its time,
 the cells its spatial queries read, the cells its copper writes, the wires whose drawn state it read). Runs: hz tags
 pdexp-5c809f2, pdexp2-5dcdf3c (1 thread, seed 0, rounds=1 runs=1, shared ccx43, so the seconds are indicative only).
@@ -231,6 +233,13 @@ take the node's runs (about three per lane, `Crew::round`), results by unit inde
 timing: a node goes to the crew from `OCTI_LANE_MIN_PAIRS` = 64 (finite state, successor) pairs; a call gets a crew
 from `OCTI_CREW_MIN_NODES` = 24 nodes; below either the calling thread does it alone.
 
+Invariant (verifier F1, vpos-d5a43f9): a crew's body and units never wait on rayon (`par_iter`, `join`, `scope`,
+`map_leased`, a nested crew). On a pool worker a rayon wait runs other jobs of the local queue, one of them possibly a
+lane of the same crew not yet started, which then waits for the next round on top of the body that would start it: a
+deadlock (the verifier's probe hung 3 of 3 times). `relax` and its leg prices are serial; `par::assert_no_crew` (a
+thread-local mark set by the crew's body and lanes) panics at the rayon entry points (`map_leased`, `crew`,
+`Checker::check_against`'s parallel pass) instead of hanging. The reference test sets `OCTI_LANE_MIN` on the pool
+worker (verifier F2) and checks that at 2, 4 and 8 lanes every node runs on the crew.
 Mutants: M1 the results in completion order (par::map and the crew's slots); M2 the overlays merged in another order
 (equivalent by design: pure values; survives); M3 the prune against the row as the node found it; M4 a node's results
 applied to its successors in reverse order.

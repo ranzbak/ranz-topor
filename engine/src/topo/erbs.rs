@@ -1504,17 +1504,11 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         Ok((r, t.elapsed().as_secs_f64()))
     });
     let mut out = LayerErbs::default();
-    for (&si, x) in ids.iter().zip(res) {
-        let (r, secs) = match x {
-            Ok(v) if out.stopped.is_none() => v,
-            other => {
-                out.timed_out += 1;
-                if let Err(why) = other {
-                    out.stopped.get_or_insert(why);
-                }
-                continue;
-            }
-        };
+    let (kept, cut, stopped) = cut_prefix(res);
+    out.timed_out += cut;
+    out.stopped = stopped;
+    for (k, (r, secs)) in kept {
+        let si = ids[k];
         let s = &sts[si];
         // Debug: `TOPO_ERBS_SLEEVE=bad` prints the sleeve of a failed stretch or one longer
         // than 1.3 x its band (run again with the print on).
@@ -1536,6 +1530,26 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         }
     }
     out
+}
+
+/// The prefix rule of the ERBS fold (par-draw phase A): the units' results in unit order; from
+/// the first cut unit (`Err`) on, every later unit counts as cut too, also one that a lane
+/// finished (the limit only moves forward: one after the other, they would not have started).
+/// The kept results with their unit index, the cut count and the first stop. O(n).
+fn cut_prefix<T, E>(res: Vec<Result<T, E>>) -> (Vec<(usize, T)>, usize, Option<E>) {
+    let (mut kept, mut cut, mut stopped) = (Vec::new(), 0usize, None);
+    for (k, x) in res.into_iter().enumerate() {
+        match x {
+            Ok(v) if stopped.is_none() => kept.push((k, v)),
+            other => {
+                cut += 1;
+                if let Err(why) = other {
+                    stopped.get_or_insert(why);
+                }
+            }
+        }
+    }
+    (kept, cut, stopped)
 }
 
 /// `pts` without repeated points and without points within `tol` of the line of their
@@ -2358,6 +2372,22 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ERBS fold's prefix rule (par-draw phase A): from the first cut stretch in stretch
+    /// order on, every later one counts as cut, also those a lane finished after the limit; the
+    /// first stop is kept, the order of the kept ones too.
+    #[test]
+    fn erbs_fold_cuts_every_stretch_after_the_first_cut_one() {
+        let res: Vec<Result<char, &str>> = vec![Ok('a'), Ok('b'), Err("limit"), Ok('c'), Err("cancel"), Ok('d')];
+        let (kept, cut, stopped) = cut_prefix(res);
+        assert_eq!(kept, vec![(0, 'a'), (1, 'b')]);
+        assert_eq!(cut, 4);
+        assert_eq!(stopped, Some("limit"));
+        let (kept, cut, stopped) = cut_prefix::<char, &str>(vec![Ok('a'), Ok('b')]);
+        assert_eq!((kept, cut, stopped), (vec![(0, 'a'), (1, 'b')], 0, None));
+        let (kept, cut, stopped) = cut_prefix::<char, &str>(vec![Err("limit"), Ok('a')]);
+        assert_eq!((kept, cut, stopped), (vec![], 2, Some("limit")));
+    }
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x: x * 1e6, y: y * 1e6 }
