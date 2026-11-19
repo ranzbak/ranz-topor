@@ -123,6 +123,19 @@ move pays its own cut. Cost to be measured first (one full check today ~50-100 m
 cycle that could double a cycle: if so, a per-window check in the local judge and the full one per cycle, said so).
 Option `[capacity] pour_cuts` (default off until the A/B).
 
+### (3) result and TW7 input (lead 2026-11-19: pour_cuts stays opt-in; the repair move belongs to TW7 MOVES)
+Equal time (rev c7e37175 vs defaults, 300 s, 4 threads, esp s0-4 + qmtech s0, ladder_diff): unconnected 69 -> 59,
+KiCad new 854 -> 801, det>1.5 98 -> 93 (15 new, 20 gone), vias 446 -> 451. Cost: 34-42 s of pour checks per run
+(about 2200-2600 local + 20-70 whole-board checks, 100 k cells). The gain comes from the judge refusing moves that cut
+a pour. Nothing repairs a cut: the probe `pour_ring` at rounds 40 predicts the ring (1 violation; 0 without the term),
+and the loop is stable after 8 cycles with the ring kept.
+**Cause:** a loop move re-lays a wire with the path search, which does not see the pour term, so it lays the same
+shortest path again. No move offers the open-side tree, which needs V3 to branch onto the V1-V2 trunk.
+**TW7 input (proposed move):** for each cut-off component the measure reports, re-lay the foreign wires that bound
+it (their copper borders its islands on that layer). The component's triangles on that layer are priced in the
+search (a social factor for the move only, graded by the cut pads), and the judge keeps the move on the total price
+as usual.
+
 ## (4) Doc lines on the test hooks
 `refine::viacheck::FOCUS_ON` and `optimise::neckcheck::LAST`: process-global atomics; tests that set or read them run
 in their own test binary (or serialised), never beside another test of the same binary that routes with via cuts.
