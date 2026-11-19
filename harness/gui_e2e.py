@@ -898,6 +898,15 @@ def run(a) -> int:
                     state["imgs"].append((round(dt, 1), hash(crop.tobytes())))
                     if len(state["imgs"]) <= 2 or len({h for _, h in state["imgs"]}) == 2:
                         e.shot(f"progress-image-{int(dt):04d}s", prog[1])
+            if (prog and a.resize_progress_at is not None and not state.get("resized")
+                    and dt >= a.resize_progress_at and not state["cancelled"]):
+                # wide progress dialog: shot of the first size, then resize the window and shot again
+                state["resized"] = True
+                e.shot("progress-before-resize", prog[1])
+                e.x("xdotool", "windowsize", prog[1], *a.resize_progress_to.split("x"))
+                time.sleep(1.5)
+                e.shot("progress-after-resize", prog[1])
+                e.log(f"progress dialog resized to {a.resize_progress_to} at {dt:.1f} s")
             if prog and a.ok_at_stable and not state["cancelled"] and "Routes stable" in prog[0]:
                 # M-B0: the dialog says "Routes stable" and its Cancel button reads OK; press it (Enter)
                 time.sleep(1.0)  # let the label repaint for the screenshot
@@ -1105,6 +1114,9 @@ def main(argv=None) -> int:
     ap.add_argument("--max-wait", type=float, default=1800, help="longest wait for the preview after Route (s)")
     ap.add_argument("--preview-check", action="store_true",
                     help="last-preview: check the progress dialog's board image (shown, changes between rounds; log)")
+    ap.add_argument("--resize-progress-at", type=float, default=None, metavar="S",
+                    help="resize the progress dialog this many seconds after Route (screenshots before / after)")
+    ap.add_argument("--resize-progress-to", default="1500x800", metavar="WxH")
     ap.add_argument("--harness", default=None, help="route_board metrics JSON of the same board to compare with")
     ap.add_argument("--from-hand", action="store_true",
                     help="open a copy of the hand-routed board and Rip up and re-route (default: the stripped copy)")

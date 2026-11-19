@@ -1145,9 +1145,12 @@ class ProgressDialog(_Base):
 
     def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None, stable_window: int = 4,
                  timeout_clock: str = "wall", limit_editable: bool = True, preview: str = "off"):
-        super().__init__(WORDING["progress"]["title"].format(board=board))
+        wide = preview in ("last", "run", "best")
+        # wide layout (board image on): resizable, the image fills the right column; off keeps the narrow layout
+        super().__init__(WORDING["progress"]["title"].format(board=board), resizable=wide)
+        self.wide = wide
         # last-preview: the board image ([run] progress_preview: last | run | best first; off = none)
-        self.preview_mode = preview if preview in ("last", "run", "best") else "off"
+        self.preview_mode = preview if wide else "off"
         self._total_seen = 0  # the round count shown: never goes back
         self._loop_key: tuple | None = None  # (run, cycle, cycles_total) of the loop round seen last
         self._loop_wall: float | None = None  # wall time when it was seen
@@ -1171,8 +1174,8 @@ class ProgressDialog(_Base):
         self.phase = wx.StaticText(self, label="", name="phase",
                                    style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
         self.phase.SetFont(self.phase.GetFont().Bold())
-        self.phase.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH), -1))
-        self.root.Add(self.phase, 0, wx.BOTTOM, self.group)
+        self.phase.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH if not self.wide else 120), -1))
+        self.root.Add(self.phase, 0, wx.EXPAND | wx.BOTTOM if self.wide else wx.BOTTOM, self.group)
         gr = wx.BoxSizer(wx.HORIZONTAL)
         self.gauge = wx.Gauge(self, range=1, name="gauge", style=wx.GA_HORIZONTAL)
         self.gauge.SetMinSize(self.FromDIP(wx.Size(260, 16)))
@@ -1180,6 +1183,15 @@ class ProgressDialog(_Base):
         gr.Add(self.gauge, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
         gr.Add(self.gauge_value, 0, wx.ALIGN_CENTER_VERTICAL)
         self.root.Add(gr, 0, wx.EXPAND | wx.BOTTOM, self.group)
+        # wide: left column = numbers, scores, verdict, limit; right column = the board image. Narrow: one column.
+        self._left = self._right = self.root
+        if self.wide:
+            mid = wx.BoxSizer(wx.HORIZONTAL)
+            self._left, self._right = wx.BoxSizer(wx.VERTICAL), wx.BoxSizer(wx.VERTICAL)
+            mid.Add(self._left, 0, wx.EXPAND)
+            mid.Add(wx.StaticLine(self, style=wx.LI_VERTICAL), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, self.group)
+            mid.Add(self._right, 1, wx.EXPAND)
+            self.root.Add(mid, 1, wx.EXPAND | wx.BOTTOM, self.group)
 
         # value widths from the widest text each can show (digits are tabular in the UI font): changing numbers
         # never move or widen anything (user 2026-11-11)
@@ -1198,7 +1210,7 @@ class ProgressDialog(_Base):
                          ("gain_label", self.gain_value)):
             grid.Add(self.text(self, "progress", lab), 0)
             grid.Add(val, 0, wx.ALIGN_RIGHT)
-        self.root.Add(grid, 0, wx.BOTTOM, self.group)
+        self._left.Add(grid, 0, wx.BOTTOM, self.group)
         # the score of the last round and of the best so far (what OK / Cancel keeps), over all runs
         self._build_score_rows()
         self.iteration_value.SetToolTip(W["round_total_tip"])
@@ -1213,15 +1225,25 @@ class ProgressDialog(_Base):
         self._build_limit_row()
         hint = self.text(self, "progress", "cancel_hint")  # one short line; the full text is its tooltip
         hint.SetToolTip(W["cancel_hint_tip"])
-        self.root.Add(hint, 0, wx.BOTTOM, self.group)
-        self.root.Add(self.button_row(("cancel", "cancel", "c"), ok_id=wx.ID_CANCEL), 0, wx.EXPAND)
+        if self.wide:  # full-width bar: the hint on the left, Cancel / OK on the right
+            bar = wx.BoxSizer(wx.HORIZONTAL)
+            bar.Add(hint, 0, wx.ALIGN_CENTER_VERTICAL)
+            self.root.Add(self.button_row(("cancel", "cancel", "c"), ok_id=wx.ID_CANCEL, middle=bar), 0, wx.EXPAND)
+        else:
+            self.root.Add(hint, 0, wx.BOTTOM, self.group)
+            self.root.Add(self.button_row(("cancel", "cancel", "c"), ok_id=wx.ID_CANCEL), 0, wx.EXPAND)
         self.cancel_button = self.buttons["cancel"]
         self.cancel_button.Bind(wx.EVT_BUTTON, self._on_cancel)
         self.Bind(wx.EVT_CLOSE, self._on_cancel)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.set_phase("")
         self.A11Y = {"limit": f"{W['limit_label']} ({W[self._unit_key]})"}
-        self.finish((460, 300))
+        if self.wide:
+            # about twice today's width at today's height (left column + the image's old 240 DIP + its 3 lines)
+            h = self.root.CalcMin().height + 2 * self.group + self.FromDIP(self.PREVIEW_DIP[1] + 60)
+            self.finish((760, 420), (2 * (self.TEXT_WIDTH + 24), self.ToDIP(h)))
+        else:
+            self.finish((460, 300))
         self._sync_limit_controls()
         self.cancel_button.SetFocus()
 
@@ -1261,13 +1283,13 @@ class ProgressDialog(_Base):
         self.score_box.Add(grid, 0)
         self.score_box.Add(self.score_waiting, 0, wx.TOP, self.row)
         self.score_box.SetMinSize(grid.CalcMin())  # the slot keeps the table's size either way
-        self.root.Add(self.score_box, 0, wx.BOTTOM, self.row)
+        self._left.Add(self.score_box, 0, wx.BOTTOM, self.row)
         self._show_scores(False)
         # the verdict: a fixed box of two lines (a wrapped verdict never resizes the dialog)
         self.score_verdict = wx.StaticText(self, label=" ", name="score_verdict", style=wx.ST_NO_AUTORESIZE)
         self.score_verdict.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH),
                                               2 * self.score_verdict.GetCharHeight() + self.FromDIP(2)))
-        self.root.Add(self.score_verdict, 0, wx.BOTTOM, self.row)
+        self._left.Add(self.score_verdict, 0, wx.BOTTOM, self.row)
         self._verdict = " "
         self._verdict_tone = ""
         # when and where the last loop round finished (one line, fixed width: a long round shows as long)
@@ -1275,7 +1297,7 @@ class ProgressDialog(_Base):
                                            style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
         self.round_context.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH), -1))
         self.round_context.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
-        self.root.Add(self.round_context, 0, wx.BOTTOM, self.group)
+        self._left.Add(self.round_context, 0, wx.BOTTOM, self.group)
 
     def _build_preview(self) -> None:
         """last-preview: "Show: (•) Last round ( ) Last run ( ) Best so far", the caption (which result, run, round,
@@ -1291,23 +1313,41 @@ class ProgressDialog(_Base):
             rb.Bind(wx.EVT_RADIOBUTTON, lambda _e, k=kind: self.show_kind(k))
             self.preview_radio[kind] = rb
             row.Add(rb, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
-        self.root.Add(row, 0, wx.BOTTOM, self.row)
+        self._right.Add(row, 0, wx.BOTTOM, self.row)
         self.preview_caption = wx.StaticText(self, label=W["preview_waiting"], name="preview_caption",
                                              style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
         self.preview_caption.SetFont(self.preview_caption.GetFont().Bold())
-        self.preview_caption.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH), -1))
-        self.root.Add(self.preview_caption, 0, wx.BOTTOM, self.row)
+        self.preview_caption.SetMinSize(wx.Size(self.FromDIP(120 if self.wide else self.TEXT_WIDTH), -1))
+        self._right.Add(self.preview_caption, 0, wx.EXPAND | wx.BOTTOM, self.row)
         self.preview_size = self.FromDIP(wx.Size(*self.PREVIEW_DIP))
         blank = wx.Bitmap(self.preview_size.width, self.preview_size.height)
         self.preview_image = wx.StaticBitmap(self, bitmap=blank, name="preview_image", size=self.preview_size)
-        self.preview_image.SetMinSize(self.preview_size)
-        self.root.Add(self.preview_image, 0, wx.BOTTOM, self.row)
+        if self.wide:
+            # fills the column's remaining height; the minimum is small, so a bitmap never forces the dialog to grow
+            self.preview_image.SetMinSize(self.FromDIP(wx.Size(240, 140)))
+            self.preview_image.Bind(wx.EVT_SIZE, self._on_image_size)
+            self._right.Add(self.preview_image, 1, wx.EXPAND | wx.BOTTOM, self.row)
+        else:
+            self.preview_image.SetMinSize(self.preview_size)
+            self._right.Add(self.preview_image, 0, wx.BOTTOM, self.row)
         self.preview_time = wx.StaticText(self, label=" ", name="preview_time",
                                           style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
-        self.preview_time.SetMinSize(wx.Size(self.FromDIP(self.TEXT_WIDTH), -1))
+        self.preview_time.SetMinSize(wx.Size(self.FromDIP(120 if self.wide else self.TEXT_WIDTH), -1))
         self.preview_time.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
-        self.root.Add(self.preview_time, 0, wx.BOTTOM, self.group)
+        self._right.Add(self.preview_time, 0, wx.EXPAND | wx.BOTTOM, self.group)
         self.rendered: tuple | None = None  # (kind, seq) of the image shown (tests, the GUI e2e)
+
+    def _on_image_size(self, evt) -> None:
+        """Wide layout: the image box follows the column; re-scale the picture to it (aspect kept)."""
+        evt.Skip()
+        sz = self.preview_image.GetClientSize()
+        if sz.width > 8 and sz.height > 8 and sz != self.preview_size:
+            self.preview_size = sz
+            wx.CallAfter(self._rescale_image)
+
+    def _rescale_image(self) -> None:
+        if self and self.preview_mode != "off":
+            self._render_preview()
 
     # -- the board image (last-preview)
     @property
@@ -1413,10 +1453,12 @@ class ProgressDialog(_Base):
         row.Add(self.text(self, "progress", self._unit_key), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.group)
         for b in (self.limit_set, self.limit_add5, self.limit_add15):
             row.Add(b, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
-        self.root.Add(row, 0, wx.BOTTOM, self.row)
+        if self.wide:
+            self._left.AddStretchSpacer(1)  # the limit row sits at the bottom of the left column
+        self._left.Add(row, 0, wx.BOTTOM, self.row)
         self.limit_hint = self.text(self, "progress", "limit_hint", wrap_dip=420)
         self.limit_hint.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
-        self.root.Add(self.limit_hint, 0, wx.BOTTOM, self.group)
+        self._left.Add(self.limit_hint, 0, wx.BOTTOM, 0 if self.wide else self.group)
 
     # -- the time limit during the run
     def limit_open(self) -> bool:
