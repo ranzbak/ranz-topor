@@ -20,6 +20,10 @@ import sys
 import time
 from pathlib import Path
 
+_PLUGIN = str(Path(__file__).resolve().parents[1] / "plugin")
+if _PLUGIN not in sys.path:  # topor (the plugin package), as harness.score_runs does
+    sys.path.insert(0, _PLUGIN)
+
 
 def board_model(board: str, out_dir: Path):
     from harness.model import export_model, load_board
