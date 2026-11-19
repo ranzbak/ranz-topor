@@ -29,6 +29,10 @@ M = [
 sel = sys.argv[1:] or [m[0].split()[0] for m in M]
 orig = {p: p.read_text() for p in (RUN, REP)}
 try:
+    r = subprocess.run([PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", T, R], capture_output=True, text=True)  # unmutated baseline
+    print("BASE (unmutated, must pass):", [l for l in r.stdout.splitlines() if l.strip()][-1:], "rc", r.returncode, flush=True)
+    if r.returncode not in (0,):
+        print(r.stdout[-3000:]); sys.exit(2)
     for name, f, old, new, tests in M:
         if name.split()[0] not in sel:
             continue

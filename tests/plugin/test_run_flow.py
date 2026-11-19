@@ -98,6 +98,11 @@ def _ok(out):
         pytest.fail("run failed:\n" + (out.report_dir / "log.txt").read_text()[-2500:])
 
 
+def _last(ui) -> str:
+    """The last UI call that is not ``set_context`` (the run flow sets the context right before every dialog)."""
+    return [n for n in ui.names() if n != "set_context"][-1]
+
+
 def do_run(eprom, tmp_path, *, ui=None, cfg=CFG, engine=topor_engine, board=None, strict=True):
     board = board or make_board(eprom)
     ui = ui or ScriptedUi()
@@ -297,7 +302,7 @@ def test_run_accept_single_commit(accepted, tmp_path):
     assert pcbfile.parse_zone_fills(board.text) == {**pcbfile.parse_zone_fills(board.text), **req.zone_fills}
     assert "same undo step" in (out.report_dir / "report.md").read_text()
     assert board.actions == ["pcbnew.GlobalEdit.cleanupTracksAndVias", "pcbnew.GlobalEdit.editTeardrops"]
-    assert "preview" in ui.names() and ui.names()[-1] == "preview"  # no finished window after Accept (2026-11-19)
+    assert "preview" in ui.names() and _last(ui) == "preview"  # no finished window after Accept (2026-11-19)
     # the second save_copy holds the commit; kicad-cli judges it (M4b gate numbers)
     copy, rep = _result(board, out, tmp, "after")
     spans = pcbfile.find_items(copy.read_text())
@@ -336,7 +341,7 @@ def test_run_reject_leaves_board_untouched(rejected, eprom):
     assert board.commits == [] and board.refills == 0 and board.actions == []
     assert board.text.count(MARKER) == 1 and eprom.text == eprom.pcb.read_text()
     assert not any(c[0] in ("commit", "refill_zones", "run_action") for c in board.calls)
-    assert ui.names()[-1] == "preview" and "error" not in ui.names()  # no finished window after Reject (user 2026-11-19)
+    assert _last(ui) == "preview" and "error" not in ui.names()  # no finished window after Reject (user 2026-11-19)
     assert "rejected" in (out.report_dir / "report.md").read_text()
 
 
@@ -419,7 +424,7 @@ def test_run_router_produced_no_copper_is_a_loud_error(app, eprom, tmp_path, rep
     assert out.total > 0 and out.routed == 0 and not out.cancelled
     assert out.status == "error" and out.error is not None and out.error.code == "NOTHING_ROUTED"
     assert board.commits == [] and "preview" not in ui.names()
-    assert [c[1][0].code for c in ui.calls if c[0] == "error"] == ["NOTHING_ROUTED"] and ui.names()[-1] == "error"
+    assert [c[1][0].code for c in ui.calls if c[0] == "error"] == ["NOTHING_ROUTED"] and _last(ui) == "error"
     res = json.loads((out.report_dir / "result.json").read_text())
     assert res["status"] == "error" and "NOTHING_ROUTED" in [f["code"] for f in res["findings"]]
 
@@ -638,7 +643,7 @@ def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, 
     assert not any(f.code == "INTERNAL" for f in out.findings) and out.error is None
     errs = [c[1][0] for c in ui.calls if c[0] == "error"]
     # the failed step is loud (one error dialog, the routes are on the board); no finished window
-    assert [e.code for e in errs] == ["POST_COMMIT_STEP_FAILED"] and ui.names()[-1] == "error"
+    assert [e.code for e in errs] == ["POST_COMMIT_STEP_FAILED"] and _last(ui) == "error"
     if step in ("refill", "action"):
         res = json.loads((out.report_dir / "result.json").read_text())
         assert res["status"] == "accepted" and "POST_COMMIT_STEP_FAILED" in (out.report_dir / "report.md").read_text()
@@ -706,7 +711,7 @@ def test_run_zone_fills_skip_is_shown_to_the_user(app, eprom, tmp_path, reports,
     assert out.status == "accepted" and out.report.facts["post_commit_failed"] == f
     # fail fast (no finished window any more): exactly one error dialog, ZONE_FILLS_SKIPPED, and nothing after it
     assert [c[1][0].code for c in ui.calls if c[0] == "error"] == ["ZONE_FILLS_SKIPPED"]
-    assert ui.names()[-1] == "error"
+    assert _last(ui) == "error"
     assert out.report.facts["zone_fills_skipped"] == why and out.report.facts["zone_fills_committed"] == 0
     md = (out.report_dir / "report.md").read_text()
     assert "ZONE_FILLS_SKIPPED" in md and "zone fills NOT written" in md and "press B" in md
@@ -722,7 +727,7 @@ def test_run_commit_fills_off_is_not_a_warning(app, eprom, tmp_path, reports):
     A clean Accept ends at the preview: no error and no finished window (live test; the single-commit test is xfail)."""
     cfg = CFG.with_values({("run", "commit_fills"): False})
     board, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=True), cfg=cfg)
-    assert out.status == "accepted" and ui.names()[-1] == "preview" and "error" not in ui.names()
+    assert out.status == "accepted" and _last(ui) == "preview" and "error" not in ui.names()
     assert not hasattr(ui, "done")  # the finished window is gone from the UI port
     assert out.report.facts["zone_fills_skipped"] == "off" and out.report.facts["zone_fills_committed"] == 0
     assert not [x for x in out.findings if x.code == "ZONE_FILLS_SKIPPED"]

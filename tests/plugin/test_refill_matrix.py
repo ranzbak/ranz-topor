@@ -83,4 +83,4 @@ def test_refill_matrix(app, eprom, tmp_path, reports, monkeypatch, commit, refil
     # fail fast, no finished window: one error dialog per step that failed after the commit, in order
     errs = [c[1][0].code for c in ui.calls if c[0] == "error"]
     assert errs == (["POST_COMMIT_STEP_FAILED"] if refill == "fails" else []) + (["ZONE_FILLS_SKIPPED"] if warn else []), errs
-    assert ui.names()[-1] == ("error" if errs else "preview")
+    assert [n for n in ui.names() if n != "set_context"][-1] == ("error" if errs else "preview")
