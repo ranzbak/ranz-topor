@@ -52,7 +52,7 @@ one() {
   env "${ENVS[@]}" python -m harness.score_runs $o "$(board_path $b)" --only $only --no-png --threads $th "${CLK[@]}" "${SETS[@]}" \
     > $R/$c-$bt.log 2>&1 9>&-
   note "run $c $bt th $th rc $? wall $(( $(date +%s) - t0 )) s"
-  rm -rf $o/*/s*/work 2>/dev/null
+  rm -rf $o/*/s$only/work 2>/dev/null  # only this run's work dir: sibling seeds share $o (drc-project-fix)
 }
 lane() { for x in "$@"; do one "$x"; done; }
 u() {  # name threads "lane1 runs" "lane2 runs" ...

@@ -446,17 +446,41 @@ def attach_diff_pairs(model: dict, rules: dict, pcb_copy: Path, pro: dict, cfg: 
     return {**model, "rules": {**mr, "diff_pairs": pairs}}, notes
 
 
-def _variant(src_pcb: Path, text: str, out_dir: Path) -> Path:
-    """`text` as `out_dir/<name>.kicad_pcb` next to copies of the project files (so kicad-cli DRC applies the
-    copied .kicad_pro / .kicad_dru)."""
+PROJECT_EXTS = (".kicad_pro", ".kicad_dru")
+
+
+def project_snapshot(pcb_copy: Path) -> dict:
+    """The save_as copy's project files (``.kicad_pro`` / ``.kicad_dru``) as bytes, read ONCE right after the copy
+    (drc-project-fix, 2026-11-19: a sibling job deleted the copy's dir mid-run and the DRC fell back to KiCad's
+    built-in defaults). A file the copy has not is absent from the dict. O(size of the files)."""
+    return {e: pcb_copy.with_suffix(e).read_bytes() for e in PROJECT_EXTS if pcb_copy.with_suffix(e).is_file()}
+
+
+def _variant(src_pcb: Path, text: str, out_dir: Path, project: dict) -> Path:
+    """`text` as `out_dir/<name>.kicad_pcb` next to the project files written from `project` (the in-memory
+    :func:`project_snapshot`, never from a file that may be gone), so kicad-cli DRC applies the board's own
+    .kicad_pro / .kicad_dru."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    for ext in (".kicad_pro", ".kicad_dru"):
-        s = src_pcb.with_suffix(ext)
-        if s.is_file():
-            (out_dir / s.name).write_bytes(s.read_bytes())
+    for ext, data in project.items():
+        (out_dir / src_pcb.with_suffix(ext).name).write_bytes(data)
     p = out_dir / src_pcb.name
     p.write_text(text)
     return p
+
+
+def project_missing(pcb: Path, project: dict) -> list:
+    """Names of the project files of `project` that the DRC copy `pcb` does not carry unchanged (missing or other
+    bytes). Empty = the DRC provably runs under the board's project. O(size)."""
+    bad = []
+    for ext, data in project.items():
+        f = pcb.with_suffix(ext)
+        try:
+            ok = f.read_bytes() == data
+        except OSError:
+            ok = False
+        if not ok:
+            bad.append(f.name)
+    return bad
 
 
 def _unique(path: Path) -> Path:
@@ -687,7 +711,7 @@ def post_commit_finding(step: str, e: BaseException) -> Finding:
 def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, board_name, ts, t0) -> RunOutcome:
     findings = out.findings
     report_dir = out.report_dir
-    state = {"cancel": False, "last": Progress(), "judged_key": None, "judged": None, "last_result": None,
+    state = {"no_project": None, "cancel": False, "last": Progress(), "judged_key": None, "judged": None, "last_result": None,
              "rounds": 0, "router_s": 0.0, "router_cpu_s": 0.0,  # router time / CPU time of the engine jobs (progress dialog)
              "limit_hit": None}  # "cpu": the CPU limit fired and the plugin cancelled the job
 
@@ -771,6 +795,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     pcb_copy = port.save_copy(work / "current")
     out.pcb_copy = pcb_copy
     copy_text = pcb_copy.read_text()
+    proj_snap = project_snapshot(pcb_copy)  # read once; every DRC copy gets these bytes (drc-project-fix)
     log.line(f"save_as copy: {pcb_copy} ({len(copy_text)} bytes)")
     rules = resolve_rules(port, pcb_copy, copy_text, cfg)
     report.facts["floors_applied"] = list(rules.get("floors_applied") or [])  # report.md Settings (F I-4)
@@ -844,7 +869,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # ruling C29: this DRC refills the zones (--refill-zones) and saves the refilled board into its own file
         # (the save_as copy stays as KiCad wrote it); the engine's pour fills / reach / dangling ends come from it,
         # never from the live board's possibly stale fills. No extra kicad-cli run.
-        orig_pcb = _variant(pcb_copy, copy_text, work / "orig")
+        orig_pcb = _variant(pcb_copy, copy_text, work / "orig", proj_snap)
         try:
             orig_drc = run_drc(orig_pcb, work / "drc-orig.json", save_board=True,
                                **cli_kw("preflight_drc", cancellable=True))
@@ -894,7 +919,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     ripped = rip.remove_uuids
     out.ripped = ripped
     ripped_text = pcbfile.remove_items(copy_text, ripped)
-    ripped_pcb = _variant(pcb_copy, ripped_text, work / "ripped")
+    ripped_pcb = _variant(pcb_copy, ripped_text, work / "ripped", proj_snap)
     out.ripped_pcb = ripped_pcb
     if ripped:
         emit("preflight_drc")
@@ -1160,10 +1185,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         text = pcbfile.remove_items(ripped_text, list(remove_uuids))
         with_ids = [{**it, "uuid": str(_uuid.uuid4())} for it in items]
         text = pcbfile.append_items(text, with_ids, layer_names=layer_names, net_names=net_names)
-        pcb = _variant(pcb_copy, text, routed_dir)
+        if project_missing(pcb_copy, proj_snap):  # the copy's own files vanished or changed: ours are in memory
+            log.line("warning: the save_as copy's project files changed or vanished during the run; the DRC copy "
+                     "gets the ones read right after the copy")
+        pcb = _variant(pcb_copy, text, routed_dir, proj_snap)
         out.routed_pcb = pcb
         rep = run_drc(pcb, routed_dir / "drc-routed.json", save_board=True,  # refilled zones for the preview
                       **cli_kw("drc", cancellable=False))
+        lost = project_missing(pcb, proj_snap)  # AFTER kicad-cli (not after the write): a deletion before it loaded the project
+        if lost and state.get("no_project") is None:
+            state["no_project"] = postrun.drc_without_project(lost)
         log.line(f"DRC round {state['rounds']}: {len(rep.violations)} violations, {len(rep.unconnected)} unconnected, "
                  f"{rep.seconds:.1f}s")
         j = DrcJudgement(rep, {w["uuid"]: orig for w, orig in zip(with_ids, items)})
@@ -1232,7 +1263,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             except OSError:
                 tracks = None
             post += postrun.drc_new_findings(new_v, tracks)
-            mismatch = postrun.rules_mismatch(new_v, eng_model)
+            # skipped only when the board HAD a project and the DRC copy provably lacked it (DRC_WITHOUT_PROJECT
+            # below); a board without a .kicad_pro keeps the check: KiCad's DRC and topor's fallbacks both use
+            # KiCad's defaults (lead 2026-11-19, drc-project-fix r2)
+            if not state.get("no_project"):
+                mismatch = postrun.rules_mismatch(new_v, eng_model)
     post_codes = {f.code for f in post}
     findings[:] = [f for f in findings if f.code not in post_codes] + post
     for f in post:
@@ -1261,6 +1296,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, rounds {loop.rounds}, "
              f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}, {time_limit_text(out.time_limit)}")
     drc_src = routed_dir / "drc-routed.json"
+    if state.get("no_project") is not None:
+        mismatch = state["no_project"]  # the DRC did not see the board's project: its numbers are void
     if mismatch is not None and out.items:
         # fail fast: the result was routed to rules KiCad does not agree with; nothing is applied, the error dialog
         # names the nets and both clearances (the report keeps the result and KiCad's DRC)
