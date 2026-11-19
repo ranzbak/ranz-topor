@@ -600,6 +600,11 @@ pub struct LayerParams {
     pub via_mm: f64,
     /// Via pad radius + clearance (nm), for the plausible-site count.
     pub via_site_r: f64,
+    /// TW6 part B (`[vias] site_price = "graded"`): the domain graph's via edges and the N-layer
+    /// transitions weigh `via_mm + cap_mm x amount` on a stretch whose best site room
+    /// ([`Packer::site_room`]) falls short, amount `1 + deficit / (d + s)` (Dayan & Dai 1993 p. 13
+    /// Table 1: the layering's shortest path has a via cost per point). Needs the packer.
+    pub site_price: bool,
     pub exact_max: usize,
     pub restarts: usize,
     pub seed: u64,
@@ -638,6 +643,7 @@ impl Default for LayerParams {
         LayerParams {
             via_mm: 25.0,
             via_site_r: 0.5e6,
+            site_price: false,
             exact_max: 16,
             restarts: 64,
             seed: 1,
@@ -700,6 +706,23 @@ fn cross_s(st: &State, polys: &[Vec<Vec2>], w: WireId, x: &super::state::Crossin
         Some(_) => 0.5 + 0.5 * s.max(0.002),
         None => s,
     }
+}
+
+/// TW6 part B: the site amount of a layer change of wire `w` between its events at traversals
+/// `ka` and `kb`: 0 when the best [`Packer::site_room`] over the traversals the via may take (with
+/// `between`, strictly between the two; the end traversals when there are none) holds the net's
+/// via, else `1 + deficit / (d + s)` ([`Packer::site_deficit`]). O(traversals), cached rooms.
+fn site_amount(st: &State, pk: &Packer, w: WireId, ka: usize, kb: usize, between: bool) -> f64 {
+    let wi = &st.wires[w];
+    let d = pk.via_d(wi.net);
+    let Some(tl) = wi.tris.len().checked_sub(1) else { return 0.0 };
+    if d <= 0.0 {
+        return 0.0;
+    }
+    let (lo, hi) = (ka.min(kb), ka.max(kb));
+    let (a, b) = if between && hi > lo + 1 { (lo + 1, hi - 1) } else { (lo, hi) };
+    let room = (a..=b).map(|k| pk.site_room(wi.tris[k.min(tl)], wi.net, wi.s)).fold(f64::NEG_INFINITY, f64::max);
+    Packer::site_amount(room, d, wi.s)
 }
 
 /// The stretches, vias and vias without a site of one wire ([`stretches_and_vias`]): the pieces
@@ -1378,9 +1401,11 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     }
     rep.domains = dom.len() + nt;
     let mut g = DomainGraph::new(dom.len() + 1 + nt);
-    for ev in &events {
+    let site_pk = packer.filter(|pk| p.site_price && pk.site_price);
+    for (w, ev) in events.iter().enumerate() {
         for x in ev.windows(2) {
-            g.add_edge(x[0].node, x[1].node, if x[0].pi == x[1].pi { p.via_mm } else { -p.via_mm });
+            let m = p.via_mm + site_pk.map_or(0.0, |pk| p.cap_mm * site_amount(st, pk, w, x[0].k, x[1].k, p.via_between));
+            g.add_edge(x[0].node, x[1].node, if x[0].pi == x[1].pi { m } else { -m });
         }
     }
     rep.before = g.size();
@@ -1532,6 +1557,9 @@ struct NEv {
 /// is the length of copper each event stands for) and half a `cut` per change into or out of a
 /// plane layer.
 struct Costs {
+    /// TW6 part B: per event, the site price (mm) of a layer change on the stretch to the next
+    /// event of its wire (empty: none).
+    site: Vec<f64>,
     via: f64,
     plane_from: usize,
     plane_mm: f64,
@@ -1552,6 +1580,16 @@ impl Costs {
         }
     }
 
+    /// [`Costs::trans`] on the stretch from event `e` to the next one of its wire.
+    fn trans_at(&self, e: usize, a: usize, b: usize) -> f64 {
+        let t = self.trans(a, b);
+        if a == b {
+            t
+        } else {
+            t + self.site.get(e).copied().unwrap_or(0.0)
+        }
+    }
+
     fn unary(&self, e: usize, l: usize) -> f64 {
         if self.plane(l) {
             self.plane_mm * self.share[e]
@@ -1567,7 +1605,7 @@ fn n_cost(wev: &[Vec<usize>], ev: &[NEv], lab: &[u8], c: &Costs) -> f64 {
     const CONFLICT: f64 = 1e6;
     let mut t = 0.0;
     for list in wev {
-        t += list.windows(2).map(|x| c.trans(lab[x[0]] as usize, lab[x[1]] as usize)).sum::<f64>();
+        t += list.windows(2).map(|x| c.trans_at(x[0], lab[x[0]] as usize, lab[x[1]] as usize)).sum::<f64>();
     }
     for (i, e) in ev.iter().enumerate() {
         t += c.unary(i, lab[i] as usize);
@@ -1703,7 +1741,16 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             share[e] = (hi - lo) / MM;
         }
     }
-    let costs = Costs { via: p.via_mm, plane_from: if p.n_signal == 0 { nl } else { p.n_signal }, plane_mm: p.plane_mm, cut: p.plane_cut, share };
+    let mut site = Vec::new();
+    if let Some(pk) = packer.filter(|pk| p.site_price && pk.site_price) {
+        site = vec![0.0; ev.len()];
+        for (w, list) in wev.iter().enumerate() {
+            for x in list.windows(2) {
+                site[x[0]] = p.cap_mm * site_amount(st, pk, w, ev[x[0]].k, ev[x[1]].k, p.via_between);
+            }
+        }
+    }
+    let costs = Costs { site, via: p.via_mm, plane_from: if p.n_signal == 0 { nl } else { p.n_signal }, plane_mm: p.plane_mm, cut: p.plane_cut, share };
     // 1. Greedy colouring in wire order.
     const NONE: u8 = u8::MAX;
     let mut lab = vec![NONE; ev.len()];
@@ -1728,7 +1775,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                     continue;
                 }
                 for l0 in 0..nl {
-                    let c = cost[i - 1][l0] + here + costs.trans(l0, l);
+                    let c = cost[i - 1][l0] + here + costs.trans_at(list[i - 1], l0, l);
                     if c < cost[i][l] - EPS {
                         cost[i][l] = c;
                         back[i][l] = l0;
@@ -1808,6 +1855,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
         for list in &wev {
             for x in list.windows(2) {
                 if let (Some((n0, p0)), Some((n1, p1))) = (np[x[0]], np[x[1]]) {
+                    let tv = tv + costs.site.get(x[0]).copied().unwrap_or(0.0);
                     g.add_edge(n0, n1, if p0 == p1 { tv } else { -tv });
                 }
             }

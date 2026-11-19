@@ -876,14 +876,18 @@ impl<'a> Frame<'a> {
 
     /// The drawing's preference of traversal `k` of `w` for a via: `(no site, other wires in
     /// the triangle, -inradius, k)`, smaller first.
-    fn rank<M: MemRead + ?Sized>(&self, m: &M, w: WireId, k: usize) -> (bool, usize, i64, usize) {
+    /// TW6 part A (`[vias] site_price = "graded"`): among traversals without a site, the one with
+    /// the least room deficit first (the second key, nm; 0 without the option or with a site).
+    fn rank<M: MemRead + ?Sized>(&self, m: &M, w: WireId, k: usize) -> (bool, i64, usize, i64, usize) {
         let (st, pr) = (self.st, self.st.proj);
         let t = st.wires[w].tris[k.min(st.wires[w].tris.len() - 1)];
         let wi = &st.wires[w];
         let d = self.packer.via_d(wi.net);
-        let site = d <= 0.0 || (self.packer.via_site(t, wi.net, 0.5 * d, wi.s) && !self.site_taken(m, w, t));
+        let room = if d > 0.0 { self.packer.site_room(t, wi.net, wi.s) } else { f64::INFINITY };
+        let site = d <= 0.0 || (room >= 0.5 * d && !self.site_taken(m, w, t));
+        let short = if self.packer.site_price && !site { Packer::site_deficit(room, d) as i64 } else { 0 };
         let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
-        (!site, others, -(pr.inradius(t) as i64), k)
+        (!site, short, others, -(pr.inradius(t) as i64), k)
     }
 
     /// Whether triangle `t` is taken for a via of `w` (M-C via room, Polubasov 2001 pp. 3-9: a via
@@ -959,6 +963,33 @@ impl<'a> Frame<'a> {
         ks
     }
 
+    /// TW6 part C: the lead's via end when via `i` of `w` (of `nv`) under events `ev` is the layer
+    /// change at a continued dangling end's lead end (the first via with its interval starting at
+    /// traversal 0, or the last reaching past the last pass; the drawing's `lead_via_site` rule),
+    /// with the tw4 T3 check that a wire starting short of the lead's end reaches the via end.
+    /// None without `site_price` or such a lead. O(lead ends).
+    fn lead_via(&self, w: WireId, i: usize, nv: usize, ev: &[LEv]) -> Option<Vec2> {
+        if self.packer.lead_ends.is_empty() {
+            return None;
+        }
+        let (st, wi) = (self.st, &self.st.wires[w]);
+        let (ka, kb) = ev.windows(2).filter(|x| x[0].2 != x[1].2).nth(i).map(|x| (x[0].0, x[1].0))?;
+        let n = wi.passes.len();
+        for (end, ob) in [(0usize, wi.pa), (1, wi.pb)] {
+            if (end == 0 && (i != 0 || ka != 0)) || (end == 1 && (i + 1 != nv || kb < n)) || ob == super::state::NO_OBS {
+                continue;
+            }
+            let Some(k) = self.packer.lead_ends.iter().find(|k| k.obs == ob) else { continue };
+            let Some(ve) = k.via_end else { continue };
+            let p = st.proj.pos[if end == 0 { wi.a } else { wi.b }];
+            if !k.choices.is_empty() && k.lead_point_t(st.proj, p).is_some_and(|t| (ve.0 - k.at).len() > t + 1.0) {
+                continue;
+            }
+            return Some(ve.0);
+        }
+        None
+    }
+
     /// Set the pass layers and via discs of `w` for via traversals `ks` (no pricing); appends the
     /// passes whose layer or disc changed, with their layer and disc before, to `changed`.
     /// O(passes of the wire).
@@ -976,6 +1007,9 @@ impl<'a> Frame<'a> {
                 .enumerate()
                 .map(|(i, &k)| {
                     let tl = wi.tris.len().checked_sub(1)?;
+                    if let Some(p) = self.lead_via(w, i, ks.len(), ev) {
+                        return Some((wi.tris[k.min(tl)], p));
+                    }
                     if between.get(i) == Some(&false) {
                         if let Some((ke, p)) = self.end_site_of(m, w, ev, i) {
                             return Some((wi.tris[ke.min(tl)], p));
@@ -1007,7 +1041,13 @@ impl<'a> Frame<'a> {
         let ns = if nr > 0.0 {
             let mut c = 0;
             for (i, &k) in ks.iter().enumerate() {
-                let no = if between.get(i) == Some(&false) { self.end_site_of(m, w, ev, i).is_none() } else { self.rank(&*m, w, k).0 };
+                let no = if self.lead_via(w, i, ks.len(), ev).is_some() {
+                    false
+                } else if between.get(i) == Some(&false) {
+                    self.end_site_of(m, w, ev, i).is_none()
+                } else {
+                    self.rank(&*m, w, k).0
+                };
                 c += no as usize;
             }
             c
@@ -1133,12 +1173,34 @@ impl<'a> Frame<'a> {
     /// The CM1 entry of wire `w`: its via terms ([`Frame::via_over`]) and, with `[capacity]
     /// pad_exits`, its pad exits' terms ([`Frame::exit_over`]). O(both).
     pub(crate) fn wire_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> viacut::Over {
-        let a = self.via_over(m, w);
+        let mut a = self.via_over(m, w);
+        if self.packer.site_price {
+            a.graded += self.site_over(m, w);
+        }
         if !self.packer.pad_exits {
             return a;
         }
         let b = self.exit_over(m, w);
         viacut::Over { count: a.count + b.count, graded: a.graded + b.graded }
+    }
+
+    /// TW6 part A (`[vias] site_price = "graded"`): the graded part of the site price of `w`'s
+    /// planned vias, `sum deficit / (d + s)` over its via points with a deficit
+    /// ([`Packer::site_deficit`] of [`super::cutflow::point_free`] there, the measure of
+    /// [`Packer::site_room`]); the count (1 per via without a site) is `nosite`'s, so a via short
+    /// of room pays `1 + deficit / (d + s)` at the violation weight. Zero outside the via focus,
+    /// as [`Frame::via_over`]. O(vias x obstacles) (cached per point by the caller's repricing).
+    pub(crate) fn site_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> f64 {
+        if self.vfocus.as_ref().is_some_and(|f| !f.get(w).copied().unwrap_or(false)) {
+            return 0.0;
+        }
+        let wi = &self.st.wires[w];
+        let d = self.wire_d[w];
+        if !wi.alive || d <= 0.0 {
+            return 0.0;
+        }
+        let pitch = (d + wi.s).max(1.0);
+        m.vpts(w).iter().flatten().map(|&(_, p)| Packer::site_deficit(super::cutflow::point_free(self.st.proj, self.packer, p, wi.net, wi.s), d) / pitch).sum()
     }
 
     /// tw4-r2 (1): the planned pad exits of wire `w` (empty without `[capacity] pad_exits`). Memo.
@@ -1228,9 +1290,10 @@ impl<'a> Frame<'a> {
                 }
             }
             add(&mut tot, best);
-            // (c), one self-contained term (TW6 part A redirects it to its site room).
+            // (c), one self-contained term. TW6 part A: with `[vias] site_price = "graded"` the
+            // site price ([`Frame::site_over`], the same room measure) prices it, counted once.
             let vias: Vec<Vec2> = m.vpts(w).iter().flatten().map(|&(_, p)| p).collect();
-            if terms[2] {
+            if terms[2] && !self.packer.site_price {
                 add(&mut tot, super::padexit::exit_via_room(st, g, &vias, r, wi.s, ramp));
             }
         }
@@ -1377,7 +1440,8 @@ impl<'a> Frame<'a> {
                 run += self.reprice(m, &ch, mv);
                 m.viapos(t0);
                 let r = self.rank(&*m, w, k);
-                let key = (r.0, (run * 1e3).round() as i64, r.1, r.2, r.3);
+                // TW6 A: the deficit (r.1) is in `run` already (the graded site price).
+                let key = (r.0, (run * 1e3).round() as i64, r.2, r.3, r.4);
                 if best.as_ref().is_none_or(|b| key < b.0) {
                     best = Some((key, k));
                 }
@@ -1587,7 +1651,7 @@ fn wire_discs_into(out: &mut Vec<Disc>, n: usize, ks: &[usize], d: f64) {
 /// on passes `ks[i] - 1` and `ks[i]`, [`wire_discs_into`]): the via point's signed height off each
 /// edge line ([`super::pack::signed_height`]); a pass next to two vias takes the one nearer its
 /// line (the larger blockage). A via without a point keeps height 0. O(passes + vias).
-fn wire_heights_into(out: &mut [Disc], pr: &super::state::Projection, edges: impl Fn(usize) -> usize, ks: &[usize], pts: &[ViaPt]) {
+pub(crate) fn wire_heights_into(out: &mut [Disc], pr: &super::state::Projection, edges: impl Fn(usize) -> usize, ks: &[usize], pts: &[ViaPt]) {
     let n = out.len();
     let mut best = vec![f64::INFINITY; n];
     for (&k, vp) in ks.iter().zip(pts) {
@@ -1760,7 +1824,7 @@ impl<'a> CapModel<'a> {
     }
 
     /// [`Frame::rank`] (debug output).
-    pub fn rank_of(&self, w: WireId, k: usize) -> (bool, usize, i64, usize) {
+    pub fn rank_of(&self, w: WireId, k: usize) -> (bool, i64, usize, i64, usize) {
         self.fx.rank(&self.a, w, k)
     }
 

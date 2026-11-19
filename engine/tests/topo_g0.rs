@@ -318,6 +318,7 @@ fn the_factor_reference_matches_the_schema_text() {
         ("shrinkage", 30.0),
         ("dangling_turn", 0.0),
         ("neck_depth", 0.0),
+        ("via_site_social", 0.0),
     ];
     assert_eq!(got, want);
 }

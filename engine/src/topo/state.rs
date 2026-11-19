@@ -635,6 +635,15 @@ pub struct State<'p> {
     pub free_now: Vec<bool>,
     /// TW5 (4): `[optimize] free_wire_cross` while the TopoR loop runs (1 = off).
     pub free_wire_a: f64,
+    /// TW6 part B search (`[factors] via_site_social` > 0): the packer's site rooms; `None`
+    /// (default) = the search term is off.
+    pub site_rooms: Option<super::pack::SiteRooms<'p>>,
+    /// TW6 part B search: per wire, per traversal, the graded site amount of the wire's via near
+    /// it under the loop's layering ([`State::mark_site_k`]); empty = each traversal's own room.
+    pub site_k: Vec<Vec<f64>>,
+    /// TW6 part B search: via intervals between the crossings (`[vias] between_crossings`,
+    /// [`super::refine::via_ranges`] strict).
+    pub site_strict: bool,
     /// exist-term: vertex pairs the board's existing copper already joins (the copper cluster of
     /// a terminal on existing copper: its kept-end terminals, pads and vias); the net trees
     /// ([`super::tree::components`]) start from them.
@@ -696,6 +705,9 @@ impl<'p> State<'p> {
             cross_k: Vec::new(),
             free_now: Vec::new(),
             free_wire_a: 1.0,
+            site_rooms: None,
+            site_k: Vec::new(),
+            site_strict: false,
             pre_join: Vec::new(),
             cont_dir: BTreeMap::new(),
         }
