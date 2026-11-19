@@ -9,7 +9,7 @@ M = {
         s = src_pcb.with_suffix(ext)
         if s.is_file():
             (out_dir / s.name).write_bytes(s.read_bytes())"""),
- "M2": (R, "        lost = project_missing(pcb, proj_snap)\n", "        lost = []\n"),
+ "M2": (R, "        lost = project_missing(pcb, proj_snap)  # AFTER", "        lost = []  # AFTER"),
  "M3": (P, "        no_net = [default] if any(not item_net(i) for i in items) else []\n", "        no_net = []\n"),
  "M4": (R, "            if not state.get(\"no_project\"):\n", "            if proj_snap.get(\".kicad_pro\") is not None and not state.get(\"no_project\"):\n"),
  "M5": (R, "        mismatch = state[\"no_project\"]  # the DRC", "        pass  # the DRC"),
@@ -18,9 +18,8 @@ M = {
  "M8": (P, "if req is None or not items or", "if req is None or not nets or"),
  "M9": (R, "    return {e: pcb_copy.with_suffix(e).read_bytes() for e in PROJECT_EXTS if pcb_copy.with_suffix(e).is_file()}",
           "    return {}"),
- "M10": (R, "        lost = project_missing(pcb, proj_snap)\n", "        lost = project_missing(pcb_copy, proj_snap)\n"),
+ "M10": (R, "        lost = project_missing(pcb, proj_snap)  # AFTER", "        lost = project_missing(pcb_copy, proj_snap)  # AFTER"),
  "M11": (R, "            if not state.get(\"no_project\"):\n", "            if proj_snap.get(\".kicad_pro\") is None and not state.get(\"no_project\"):\n"),
- "M13": (R, "        lost = project_missing(pcb, proj_snap)  # again AFTER kicad-cli", "        lost = []  # again AFTER kicad-cli"),
  "M14": (P, "key = nets + ((\"<no net>\",) if any(not item_net(i) for i in items) else ())", "key = nets"),
  "M12": (R, "        if lost and state.get(\"no_project\") is None:\n", "        if lost and state.get(\"no_project\") is not None:\n"),
 }

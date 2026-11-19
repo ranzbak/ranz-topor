@@ -1190,12 +1190,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                      "gets the ones read right after the copy")
         pcb = _variant(pcb_copy, text, routed_dir, proj_snap)
         out.routed_pcb = pcb
-        lost = project_missing(pcb, proj_snap)
-        if lost and state.get("no_project") is None:
-            state["no_project"] = postrun.drc_without_project(lost)
         rep = run_drc(pcb, routed_dir / "drc-routed.json", save_board=True,  # refilled zones for the preview
                       **cli_kw("drc", cancellable=False))
-        lost = project_missing(pcb, proj_snap)  # again AFTER kicad-cli: a deletion before it loaded the project
+        lost = project_missing(pcb, proj_snap)  # AFTER kicad-cli (not after the write): a deletion before it loaded the project
         if lost and state.get("no_project") is None:
             state["no_project"] = postrun.drc_without_project(lost)
         log.line(f"DRC round {state['rounds']}: {len(rep.violations)} violations, {len(rep.unconnected)} unconnected, "
