@@ -1776,6 +1776,133 @@ fn item_edges(st: &State, items: &[(WireId, usize)]) -> Vec<usize> {
     v
 }
 
+/// The victims of one negotiated P4 rip-up round (the pre-loop rounds and TW5 (f) `[optimize]
+/// loop_p4` inside the loop, one choice for both), read from the capacity model `cm` of the present
+/// layering: the wires with a via without a site, a bad via cut's wire and its crosser routed last,
+/// `pre` (the caller's own, e.g. the first pre-loop round's via-rose wires), then per over-full
+/// edge-layer (per-edge model) or cut (cut model) its wires routed last first until the rest fits.
+/// `None` when nothing is over-full (no over-full item at all, `pre` aside).
+/// Each victim carries a graded weight, the sum over the items that chose it of `(1 + d) / (2 + d)`
+/// with `d` the item's over-fullness in default pitches `ws0` (cuts: their missing room; edge-layers:
+/// their graded depth; a via without a site or a bad via cut: 0, so 1/2; `pre`: 1/2), so the
+/// in-loop round can keep the heaviest under its safety cap. `history` (the pre-loop rounds): +1 on
+/// the bad items' edges as before TW5 (f). O(items x wires on them).
+fn p4_victims(st: &State, cm: &CapModel, rank: &[usize], wire_conn: &[usize], pre: &BTreeSet<WireId>, ws0: f64, mut history: Option<&mut Vec<f64>>) -> Option<BTreeMap<WireId, f64>> {
+    let g = |d: f64| { let d = if d.is_finite() { d.max(0.0) } else { 0.0 }; (1.0 + d) / (2.0 + d) };
+    // Cut model: the over-full cuts (most over-full first) and the projection edges where
+    // their wires cross them; per-edge model: the over-full edge-layers.
+    let bad_cuts: Vec<(usize, usize, f64)> = cm.cut.as_ref().map(|c| c.overfull_list()).unwrap_or_default();
+    let bad = if cm.cut.is_some() { Vec::new() } else { cm.overfull_list() };
+    let nosite = cm.nosite_wires();
+    // CM1: vias whose gap / via-to-via cuts are over-full, with the wires crossing them.
+    let bad_vias = cm.via_cut_list();
+    if bad.is_empty() && bad_cuts.is_empty() && nosite.is_empty() && bad_vias.is_empty() {
+        return None;
+    }
+    if let Some(history) = history.as_deref_mut() {
+        let mut bad_edges: Vec<usize> = bad.iter().map(|x| x.0).collect();
+        if let Some(c) = cm.cut.as_ref() {
+            for &(l, ci, _) in &bad_cuts {
+                bad_edges.extend(item_edges(st, &c.items_at(l, ci)));
+            }
+            bad_edges.sort_unstable();
+        }
+        bad_edges.dedup();
+        for &e in &bad_edges {
+            history[e] += 1.0;
+        }
+    }
+    let mut wt: BTreeMap<WireId, f64> = BTreeMap::new();
+    let add = |wt: &mut BTreeMap<WireId, f64>, w: WireId, x: f64| *wt.entry(w).or_insert(0.0) += x;
+    // A via without a site in its interval: its wire is rerouted, with history on the edges
+    // that bound that interval only (M-B2; before: all edges of the wire).
+    for &w in &nosite {
+        add(&mut wt, w, g(0.0));
+        let Some(history) = history.as_deref_mut() else { continue };
+        let n = st.wires[w].passes.len();
+        for (i, &(ka, kb)) in cm.via_iv[w].iter().enumerate() {
+            let Some(&k) = cm.via_k[w].get(i) else { continue };
+            if !cm.rank_of(w, k).0 {
+                continue;
+            }
+            for kk in ka.saturating_sub(1)..(kb + 1).min(n) {
+                history[st.passes[st.wires[w].passes[kk]].edge] += 1.0;
+            }
+        }
+    }
+    // CM1: an over-full via cut rips the via's wire and, routed last first, one crosser
+    // (the cut's room is the via's neighbourhood; the next round prices the rest again),
+    // with history on the edges of the via's traversals.
+    for (w, xs) in &bad_vias {
+        add(&mut wt, *w, g(0.0));
+        if let Some(history) = history.as_deref_mut() {
+            for &k in &cm.via_k[*w] {
+                let ps = &st.wires[*w].passes;
+                for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < ps.len()) {
+                    history[st.passes[ps[j]].edge] += 1.0;
+                }
+            }
+        }
+        if let Some(&x) = xs.iter().filter(|&&x| st.wires[x].alive && wire_conn.get(x).is_some_and(|&c| c != usize::MAX)).max_by_key(|&&x| (rank[wire_conn[x]], x)) {
+            add(&mut wt, x, g(0.0));
+        }
+    }
+    for &w in pre {
+        add(&mut wt, w, g(0.0));
+    }
+    // Per over-full edge-layer, rip the wires routed last until the rest fits.
+    if !bad.is_empty() {
+        let depth: BTreeMap<usize, f64> = cm.overfull_depths().into_iter().fold(BTreeMap::new(), |mut m, (e, d)| {
+            let x = m.entry(e).or_insert(0.0f64);
+            *x = x.max(d);
+            m
+        });
+        for &(e, l) in &bad {
+            let mut on: Vec<usize> = st.edge_order[e].iter().copied().filter(|&p| cm.pass_layer[p] == l as i32).collect();
+            on.sort_by_key(|&p| std::cmp::Reverse(rank[wire_conn[st.passes[p].wire]]));
+            let mut gone: BTreeSet<WireId> = wt.keys().copied().collect();
+            let d = g(depth.get(&e).copied().unwrap_or(0.0));
+            for p in on {
+                if cm.fits_without(e, l, &gone) {
+                    break;
+                }
+                let w = st.passes[p].wire;
+                gone.insert(w);
+                add(&mut wt, w, d);
+            }
+        }
+    }
+    // Cut model: per over-full cut, its wires routed last first until the rest fits.
+    if let Some(c) = cm.cut.as_ref() {
+        for &(l, ci, slack) in &bad_cuts {
+            let mut on: Vec<WireId> = c.items_at(l, ci).into_iter().map(|x| x.0).filter(|&w| st.wires[w].alive && wire_conn.get(w).is_some_and(|&x| x != usize::MAX)).collect();
+            on.sort_unstable();
+            on.dedup();
+            on.sort_by_key(|&w| (std::cmp::Reverse(rank[wire_conn[w]]), w));
+            let mut gone: BTreeSet<WireId> = wt.keys().copied().collect();
+            let d = g(-slack / ws0.max(1.0));
+            for w in on {
+                if c.fits_without(l, ci, &gone) {
+                    break;
+                }
+                gone.insert(w);
+                add(&mut wt, w, d);
+            }
+        }
+    }
+    Some(wt)
+}
+
+/// TW5 (f): the in-loop P4 round's victims `(weight, rank, wire)` under its safety cap `cap`: the
+/// heaviest first (the graded over-fullness of the items that chose them, [`p4_victims`]), among
+/// equal weights the wire routed last first, then by id (deterministic). The cap only bounds a
+/// round's work; below it every victim is ripped. O(n log n).
+fn p4_keep_heaviest(mut v: Vec<(f64, usize, WireId)>, cap: usize) -> Vec<WireId> {
+    v.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    v.truncate(cap);
+    v.into_iter().map(|x| x.2).collect()
+}
+
 /// Distance from `p` to the segment `a`-`b`.
 fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     let ab = b - a;
@@ -3373,97 +3500,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         let dirs = dirs_of(&st);
         let cm = if cuts_on { CapModel::new_cut(&st, &packer, &dirs, &lr.events, bottom, 1.0) } else { CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0) };
-        // Cut model: the over-full cuts (most over-full first) and the projection edges where
-        // their wires cross them; per-edge model: the over-full edge-layers.
-        let bad_cuts: Vec<(usize, usize, f64)> = cm.cut.as_ref().map(|c| c.overfull_list()).unwrap_or_default();
-        let bad = if cm.cut.is_some() { Vec::new() } else { cm.overfull_list() };
-        let nosite = cm.nosite_wires();
-        // CM1: vias whose gap / via-to-via cuts are over-full, with the wires crossing them.
-        let bad_vias = cm.via_cut_list();
-        if bad.is_empty() && bad_cuts.is_empty() && nosite.is_empty() && bad_vias.is_empty() {
-            break;
-        }
-        let mut bad_edges: Vec<usize> = bad.iter().map(|x| x.0).collect();
-        if let Some(c) = cm.cut.as_ref() {
-            for &(l, ci, _) in &bad_cuts {
-                bad_edges.extend(item_edges(&st, &c.items_at(l, ci)));
-            }
-            bad_edges.sort_unstable();
-        }
-        bad_edges.dedup();
-        for &e in &bad_edges {
-            history[e] += 1.0;
-        }
-        // Per over-full edge-layer, rip the wires routed last until the rest fits.
-        // A via without a site in its interval: its wire is rerouted, with history on the edges
-        // that bound that interval only (M-B2; before: all edges of the wire).
-        let mut victims: BTreeSet<WireId> = nosite.iter().copied().collect();
-        for &w in &nosite {
-            let n = st.wires[w].passes.len();
-            for (i, &(ka, kb)) in cm.via_iv[w].iter().enumerate() {
-                let Some(&k) = cm.via_k[w].get(i) else { continue };
-                if !cm.rank_of(w, k).0 {
-                    continue;
-                }
-                for kk in ka.saturating_sub(1)..(kb + 1).min(n) {
-                    history[st.passes[st.wires[w].passes[kk]].edge] += 1.0;
-                }
-            }
-        }
-        // CM1: an over-full via cut rips the via's wire and, routed last first, one crosser
-        // (the cut's room is the via's neighbourhood; the next round prices the rest again),
-        // with history on the edges of the via's traversals.
-        for (w, xs) in &bad_vias {
-            victims.insert(*w);
-            for &k in &cm.via_k[*w] {
-                let ps = &st.wires[*w].passes;
-                for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < ps.len()) {
-                    history[st.passes[ps[j]].edge] += 1.0;
-                }
-            }
-            if let Some(&x) = xs.iter().filter(|&&x| st.wires[x].alive && wire_conn.get(x).is_some_and(|&c| c != usize::MAX)).max_by_key(|&&x| (rank[wire_conn[x]], x)) {
-                victims.insert(x);
-            }
-        }
         // First P4 round: the wires whose planned via count rose against the cycle before are
         // rerouted first (Polubasov 2010, «Оптимизация расслоения»), once per cycle.
+        let mut pre: BTreeSet<WireId> = BTreeSet::new();
         if p4_rounds == 0 {
             for (w, ci) in via_rose.iter().copied() {
                 if st.wires[w].alive && reroutes[ci] == 0 {
-                    victims.insert(w);
+                    pre.insert(w);
                 }
             }
         }
-        for &(e, l) in &bad {
-            let mut on: Vec<usize> = st.edge_order[e].iter().copied().filter(|&p| cm.pass_layer[p] == l as i32).collect();
-            on.sort_by_key(|&p| std::cmp::Reverse(rank[wire_conn[st.passes[p].wire]]));
-            let mut gone: BTreeSet<WireId> = victims.clone();
-            for p in on {
-                if cm.fits_without(e, l, &gone) {
-                    break;
-                }
-                let w = st.passes[p].wire;
-                gone.insert(w);
-                victims.insert(w);
-            }
-        }
-        // Cut model: per over-full cut, its wires routed last first until the rest fits.
-        if let Some(c) = cm.cut.as_ref() {
-            for &(l, ci, _) in &bad_cuts {
-                let mut on: Vec<WireId> = c.items_at(l, ci).into_iter().map(|x| x.0).filter(|&w| st.wires[w].alive && wire_conn.get(w).is_some_and(|&x| x != usize::MAX)).collect();
-                on.sort_unstable();
-                on.dedup();
-                on.sort_by_key(|&w| (std::cmp::Reverse(rank[wire_conn[w]]), w));
-                let mut gone: BTreeSet<WireId> = victims.clone();
-                for w in on {
-                    if c.fits_without(l, ci, &gone) {
-                        break;
-                    }
-                    gone.insert(w);
-                    victims.insert(w);
-                }
-            }
-        }
+        let Some(victims) = p4_victims(&st, &cm, &rank, &wire_conn, &pre, ws0, Some(&mut history)) else { break };
+        let victims: BTreeSet<WireId> = victims.into_keys().collect();
         let alive = st.wires.iter().filter(|w| w.alive).count();
         let max_rip = (alive / 4).max(10);
         let mut vic: Vec<WireId> = victims.into_iter().collect();
@@ -4135,6 +4183,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             hist_base: Vec<f64>,
             /// (d) floating up per wire.
             float_wire: bool,
+            /// (f) one P4 rip-up round per cycle inside the loop (`[optimize] loop_p4`).
+            loop_p4: bool,
             /// Escapes so far in this run (their seeds).
             n_esc: u64,
         }
@@ -4537,6 +4587,104 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 h.apply(&self.tw5.hist_base, &mut self.st.history);
                 cs.hist_updates += 1;
             }
+            /// TW5 (f) `[optimize] loop_p4`: one negotiated P4 rip-up round inside the loop
+            /// (docs/dev/design/tw5-escape.md (f)). The single-wire sweep keeps a move only when its
+            /// price drops, so a full cut is a local minimum for each of its wires (Polubasov 2010
+            /// «Оптимизация расслоения», fig. 7 point 1); ripped together, the first wire placed again
+            /// may take a detour or two vias for the others (fig. 6a-c). The loop history (c) is
+            /// updated first (the round's searches price it, McMurchie & Ebeling 1995 eq. 1); the
+            /// victims are the pre-loop round's ([`p4_victims`]), the heaviest kept under the safety
+            /// cap `(alive / 4).max(10)` (weight = the graded over-fullness of the items that chose
+            /// them, then routed last first); placed again in rank order at the cycle's coefficients
+            /// (seed of the cycle: deterministic, the same for any thread count); then uncross and one
+            /// whole-board layering. Taken as it comes (the archive keeps the bests, Appendix F 2);
+            /// when a wire finds no path the state before comes back (costly, not failed: no wire is
+            /// dropped). Runs only when the escapes' work budget allows ([`super::escape::Throttle`]),
+            /// and draws on it. Whether a round ran.
+            fn loop_p4(&mut self, c: &CycleCtx, cs: &mut CycleStats) -> bool {
+                if !self.tw5.loop_p4 {
+                    return false;
+                }
+                if !self.tw5.throttle.due() {
+                    cs.p4_throttled += 1;
+                    return false;
+                }
+                let _pg = super::prof::g(super::prof::K::LoopP4);
+                self.resync();
+                let k0 = self.work_mark();
+                self.history_step(cs);
+                let wt = {
+                    let dirs = self.packer.taut_dirs(self.st);
+                    let cm = if self.cuts_on { CapModel::new_cut(self.st, self.packer, &dirs, &self.lr.events, self.bottom, 1.0) } else { CapModel::new(self.st, self.packer, &dirs, &self.lr.events, self.bottom, 1.0) };
+                    p4_victims(self.st, &cm, self.rank, self.wire_conn, &BTreeSet::new(), self.ws0, None)
+                };
+                let Some(wt) = wt else { return false };
+                let alive = self.st.wires.iter().filter(|w| w.alive).count();
+                let (wc, rk) = (&*self.wire_conn, self.rank);
+                let rank_of = |w: WireId| wc.get(w).filter(|&&ci| ci != usize::MAX).map_or(0, |&ci| rk[ci]);
+                let vic: Vec<(f64, usize, WireId)> = wt.into_iter().filter(|&(w, _)| self.st.wires[w].alive && wc.get(w).is_some_and(|&ci| ci != usize::MAX)).map(|(w, x)| (x, rank_of(w), w)).collect();
+                // The safety cap only (the pre-loop round's bound): the heaviest victims first.
+                let mut set: BTreeSet<WireId> = p4_keep_heaviest(vic, (alive / 4).max(10).min(self.max_ripped)).into_iter().collect();
+                let deps = tree::dependents(self.st, &set);
+                set.extend(deps);
+                let mut vw: Vec<WireId> = set.into_iter().collect();
+                vw.sort_by_key(|&w| (rank_of(w), w));
+                if vw.is_empty() {
+                    return false;
+                }
+                let mut cis: Vec<usize> = vw.iter().map(|&w| self.wire_conn[w]).collect();
+                cis.dedup();
+                let before = self.snapshot();
+                let e0 = self.eval_now();
+                for &w in &vw {
+                    tree::remove_wire(self.st, w);
+                }
+                let seed = super::optimise::mix_seed(c.seed, 0x4C50_3400_0000 | c.cycle as u64);
+                let via_w = c.emphasis.via_at(1.0);
+                let mut lost = false;
+                for &ci in &cis {
+                    self.forced.borrow_mut().remove(&self.conn_of[ci]);
+                    let (reg_w, _) = self.conn_reg(ci, seed, c.amp, via_w);
+                    if !(self.place)(self.st, ci, self.cap, self.wire_conn, &reg_w) {
+                        lost = true;
+                        break;
+                    }
+                }
+                cs.p4_ripped += vw.len();
+                if lost {
+                    self.restore(&before);
+                    cs.p4_undone += 1;
+                } else {
+                    self.st.uncross_all(50);
+                    let lr = (self.assign_t)(self.st, self.ties);
+                    self.set_lr(lr, None);
+                }
+                // Taken as the loop's other whole-board moves are (`escape_take`): "always" as it
+                // comes (the archive keeps the bests), "not_worse" undone when the evaluation rises.
+                let worse = !lost && !self.tw5.take_always && self.eval_now() > e0 + 1e-6;
+                if worse {
+                    self.restore(&before);
+                    cs.p4_worse += 1;
+                } else if !lost {
+                    for &ci in &cis {
+                        self.reroutes[ci] += 1;
+                        if let Some(x) = self.tw5.relay_w.as_mut().and_then(|(rw, _)| rw.get_mut(ci)) {
+                            *x += 1.0;
+                        }
+                    }
+                    cs.p4_rounds += 1;
+                }
+                // Its work: the counted layering and measuring, plus each placing at the mean
+                // re-lay's work so far (a placing is a re-lay's search without its local judge).
+                let relays = self.relays.max(1) as f64;
+                let w = self.work_since(k0) + vw.len() as f64 * self.tw5.throttle.relay_work / relays;
+                self.tw5.throttle.ran_work(w);
+                if self.dbg {
+                    let t = self.dbg_crit();
+                    eprintln!("LOOPDBG[{}] cycle {} loop P4: {} wires ripped, {}: {t}", self.dbg_tag, c.cycle, vw.len(), if lost { "undone (a wire found no path)" } else if worse { "undone (worse)" } else { "taken" });
+                }
+                true
+            }
             /// TW5 (b): one layering escape (Polubasov 2010 «Оптимизация расслоения»): a random
             /// via-optimal layering of the whole board (the plateau walk,
             /// [`layers::DomainGraph::plateau_walk`]), taken as it comes (`escape_take`); the wires
@@ -4925,6 +5073,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} after sweep ({}/{} kept): {t}", self.dbg_tag, c.cycle, cs.kept, cs.tried);
                 }
+                // TW5 (f): one P4 rip-up round on what stays over-full after the sweep.
+                if ripped < self.max_ripped && !stop() {
+                    self.loop_p4(c, &mut cs);
+                }
                 // limit_grace_s: the cycle's later steps are not begun once the loop is to stop (the
                 // caller drops a cycle cut short, so the state it leaves is never offered).
                 super::prof::lap(&mut plap, super::prof::K::StSweep);
@@ -5245,9 +5397,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 throttle: super::escape::Throttle::new(opts.escape_share, opts.escape_kappa, st_alive),
                 take_always: opts.escape_take == "always",
                 relay_w: (opts.relay_count_fade < 1.0).then(|| (reroutes0.iter().map(|&r| f64::from(r)).collect(), opts.relay_count_fade.max(0.0))),
-                hist: opts.loop_history.then(|| super::escape::History::new(proj.edges.len(), opts.loop_history_fade)),
+                // TW5 (f): the in-loop P4 rounds price with the loop history, so it is on with them.
+                hist: (opts.loop_history || opts.loop_p4).then(|| super::escape::History::new(proj.edges.len(), opts.loop_history_fade)),
                 hist_base: hist_base0,
                 float_wire: opts.float_wire && judge_local,
+                loop_p4: opts.loop_p4,
                 n_esc: 0,
             },
         };
@@ -5446,7 +5600,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let st_ = &rep.stats;
             let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
             warnings.push(format!(
-                "TopoR loop escapes (TW5): oscillation \"{}\" (amplitude {:.2}-{:.2}); layering escape \"{}\": {} escapes ({} archived variants over {} layerings), {:.1} % of the free positions changed layer per escape, vias {} -> {} over them, {} with more predicted violations (taken: {}); work share of the escapes {:.1} % (target {:.0} %); floating up per wire {} of {} kept; loop history {} updates; pre-loop P4 rounds {}",
+                "TopoR loop escapes (TW5): oscillation \"{}\" (amplitude {:.2}-{:.2}); layering escape \"{}\": {} escapes ({} archived variants over {} layerings), {:.1} % of the free positions changed layer per escape, vias {} -> {} over them, {} with more predicted violations (taken: {}); work share of the escapes {:.1} % (target {:.0} %); floating up per wire {} of {} kept; loop history {} updates; pre-loop P4 rounds {}; in-loop P4 rounds {}",
                 opts.oscillation,
                 opts.osc_amp_min,
                 opts.osc_amp_max,
@@ -5464,7 +5618,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 st_.float_w_kept,
                 st_.float_w_tried,
                 st_.hist_updates,
-                if opts.preloop_p4 { "on" } else { "folded into the loop" }
+                if opts.preloop_p4 { "on" } else { "folded into the loop" },
+                if opts.loop_p4 {
+                    format!("{} taken ({} wires ripped), {} undone (a wire found no path), {} undone (worse, escape_take \"not_worse\"), {} waited for the work budget", st_.p4_rounds, st_.p4_ripped, st_.p4_undone, st_.p4_worse, st_.p4_throttled)
+                } else {
+                    "off".to_string()
+                }
             ));
         }
         if time_hit {
@@ -5491,6 +5650,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "float_wire": [rep.stats.float_w_kept, rep.stats.float_w_tried],
                 "history_updates": rep.stats.hist_updates,
                 "preloop_p4": opts.preloop_p4,
+                "loop_p4": {"on": opts.loop_p4, "rounds": rep.stats.p4_rounds, "ripped": rep.stats.p4_ripped, "undone": rep.stats.p4_undone, "worse": rep.stats.p4_worse, "throttled": rep.stats.p4_throttled},
             },
             "cycles": rep.cycles,
             "stop": rep.stop,
@@ -8274,6 +8434,16 @@ fn out_vias(out: &[Outcome], reqs: &[planes::Req], _conns: &[Connection]) -> Vec
 
 #[cfg(test)]
 mod tests {
+    /// TW5 (f): the in-loop P4 cap keeps the heaviest victims, then the routed-last ones, then by id;
+    /// below the cap it keeps them all.
+    #[test]
+    fn p4_keep_heaviest_orders_by_weight_then_rank() {
+        let v = vec![(0.5, 3, 10), (0.9, 1, 11), (0.5, 7, 12), (0.5, 7, 9), (0.2, 9, 13)];
+        assert_eq!(super::p4_keep_heaviest(v.clone(), 3), vec![11, 9, 12]);
+        assert_eq!(super::p4_keep_heaviest(v.clone(), 10), vec![11, 9, 12, 10, 13]);
+        assert!(super::p4_keep_heaviest(v, 0).is_empty());
+    }
+
     #[test]
     fn the_wait_line_is_true_for_every_case() {
         let loop_ = WaitFacts { step: "TopoR loop on the topology".into(), grace_s: Some(30.0), draw_grace_s: Some(60.0), wait_s: 2.0, ..WaitFacts::default() };

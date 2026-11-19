@@ -92,6 +92,15 @@ impl Throttle {
         self.since = 0.0;
         self.need = w * (1.0 / self.share - 1.0);
     }
+    /// A whole-board step of measured work `w` (TW5 (f): an in-loop P4 round) ran: it draws on the
+    /// same budget as an escape (the next escape or round is due after `w x (1/s - 1)` re-lay work).
+    pub fn ran_work(&mut self, w: f64) {
+        let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
+        self.runs += 1;
+        self.esc_work += w;
+        self.since = 0.0;
+        self.need = w * (1.0 / self.share - 1.0);
+    }
     /// The escapes' share of all work so far (0 without work).
     pub fn measured_share(&self) -> f64 {
         let t = self.esc_work + self.relay_work;

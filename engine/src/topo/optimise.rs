@@ -195,6 +195,14 @@ pub struct CycleStats {
     pub float_w_kept: usize,
     /// TW5 (c) loop history updates.
     pub hist_updates: usize,
+    /// TW5 (f) in-loop P4 rounds: run (taken), wires ripped in them, rounds undone (a wire found
+    /// no path), rounds not run because the work budget was spent.
+    pub p4_rounds: usize,
+    pub p4_ripped: usize,
+    pub p4_undone: usize,
+    pub p4_throttled: usize,
+    /// TW5 (f): rounds undone because the evaluation rose (`escape_take = "not_worse"`).
+    pub p4_worse: usize,
 }
 
 impl CycleStats {
@@ -238,6 +246,11 @@ impl CycleStats {
         self.float_w_tried += o.float_w_tried;
         self.float_w_kept += o.float_w_kept;
         self.hist_updates += o.hist_updates;
+        self.p4_rounds += o.p4_rounds;
+        self.p4_ripped += o.p4_ripped;
+        self.p4_undone += o.p4_undone;
+        self.p4_throttled += o.p4_throttled;
+        self.p4_worse += o.p4_worse;
     }
 }
 

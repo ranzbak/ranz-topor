@@ -46,3 +46,58 @@ fn preloop_p4_rounds_run_only_when_asked() {
     assert!(p4(&off).is_none(), "preloop_p4 = false: no P4 rounds before the loop: {:?}", p4(&off));
     assert!(p4(&on).is_some(), "default (preloop_p4 = true): the P4 rounds run on an over-full board: {:?}", on.warnings);
 }
+
+
+/// TW5 (f) `[optimize] loop_p4`, the in-loop text of the escapes' warning.
+fn loop_p4_text(r: &RouteResult) -> String {
+    r.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).and_then(|w| w.split("in-loop P4 rounds ").nth(1)).unwrap_or("").to_string()
+}
+
+fn vias_of(r: &RouteResult) -> usize {
+    r.connections.iter().map(|c| c.vias).sum()
+}
+
+/// TW5 (f) `[optimize] loop_p4` (docs/dev/design/tw5-escape.md (f)): with the pre-loop P4 rounds
+/// off (D9) the loop's single-wire moves keep every wire of inner_layer_room on the full F.Cu
+/// (room for 2 of 5) or 2 on In1: no single wire gains by taking two vias while the others hold
+/// the room (Polubasov 2010 fig. 7, a local minimum). One negotiated round per cycle inside the
+/// loop rips the over-full cut's wires together, and the board reaches the answer (three wires on
+/// In1, two vias each; Polubasov 2010 fig. 6a-c: a wire first takes two vias for the others).
+/// Seeds 2 and 3 (16 cycles): the loop without the rounds ends below 6 vias, with them at 6.
+#[test]
+fn loop_p4_rounds_fold_the_preloop_rounds_into_the_loop() {
+    let m = model("inner_layer_room");
+    for seed in [2u64, 3] {
+        let base = format!(r#""topo_rounds": 16, "stable_patience": 16, "seed": {seed}, "preloop_p4": false"#);
+        let e = route(&m, &opts(&base));
+        let f = route(&m, &opts(&format!(r#"{base}, "loop_p4": true"#)));
+        eprintln!("seed {seed}\n  off: vias {} {}\n  on:  vias {} {} | {}", vias_of(&e), layers_of(&e), vias_of(&f), layers_of(&f), loop_p4_text(&f));
+        assert_eq!(loop_p4_text(&e), "off", "loop_p4 off: the warning says so");
+        let t = loop_p4_text(&f);
+        let taken: usize = t.split(' ').next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        assert!(taken >= 1 && t.contains(" taken (") && t.contains("undone (a wire found no path)") && t.contains("undone (worse, escape_take \"not_worse\")") && t.contains("waited for the work budget"), "loop_p4 on: at least one round taken, every count named: {t}");
+        assert!(vias_of(&e) < 6, "seed {seed}: without the in-loop rounds the loop stays below the answer: {}", layers_of(&e));
+        assert_eq!(vias_of(&f), 6, "seed {seed}: with them three wires reach In1 (6 vias): {}", layers_of(&f));
+    }
+}
+
+/// TW5 (f): a round is kept like the loop's other whole-board moves: `escape_take = "always"`
+/// takes every round (none undone as worse), `"not_worse"` (default) undoes the ones that make the
+/// board worse (on inner_layer_room with the pre-loop rounds on, every round is worse than the
+/// state they left: all undone). Deterministic: the same options give the same copper.
+#[test]
+fn loop_p4_rounds_are_taken_as_escape_take_says() {
+    let m = model("inner_layer_room");
+    let base = r#""topo_rounds": 6, "stable_patience": 6, "seed": 0, "loop_p4": true"#;
+    let nw = route(&m, &opts(base));
+    let al = route(&m, &opts(&format!(r#"{base}, "escape_take": "always""#)));
+    let count = |t: &str, key: &str| -> usize { t.split(", ").find(|x| x.contains(key)).and_then(|x| x.trim_start_matches(|c: char| !c.is_ascii_digit()).split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(usize::MAX) };
+    let (tn, ta) = (loop_p4_text(&nw), loop_p4_text(&al));
+    eprintln!("not_worse: {tn}\nalways: {ta}");
+    assert_eq!(count(&ta, "worse"), 0, "always: no round undone as worse: {ta}");
+    assert!(count(&ta, "taken") >= 1, "always: rounds taken: {ta}");
+    assert!(count(&tn, "worse") >= 1, "not_worse: the worse rounds undone: {tn}");
+    let again = route(&m, &opts(base));
+    assert_eq!(layers_of(&again), layers_of(&nw), "deterministic per seed");
+    assert_eq!(loop_p4_text(&again), tn);
+}

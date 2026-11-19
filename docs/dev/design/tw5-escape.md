@@ -123,3 +123,37 @@ D8 patterns (Polubasov figs. 6, 8-9, 10, 11) proposed as PNG + text to the lead,
 - **D8 proposals**: harness/tw5_patterns.py (figs. 10, 11, 8-9, read from the paper's PDF pp. 107-108), not in the
   suite. Fig. 8 at the paper's scale has a shorter 0-via answer than the paper's end state 9c (W2 on F.Cu between U2
   and W4 instead of the left loop): the expected end state needs a decision.
+
+## (f) P4 rip-up inside the loop (round 3, 2026-11-19; waits for the lead's reply)
+**What.** `[optimize] loop_p4 = false` (opt-in until the A/B). Once per cycle, after the sweep (and its
+escapes) and before stage 2 (uncross, layer re-opt, via-rose relay, floating up, crossing rules): when the
+present layering has over-full cuts (cut model; per-edge model: over-full edge-layers), vias without a site
+or over-full via cuts, one negotiated round exactly as a pre-loop P4 round: the same victim choice (factored
+out of the pre-loop loop into one function, no second copy): per over-full cut its wires routed last first
+until the rest fits, the no-site wires, a bad via cut's wire + one crosser; at most `(alive/4).max(10)`;
+the tree dependents with them. All victims are ripped together and placed again in rank order with the
+cycle's fluctuated coefficients (a per-cycle seed), then uncross and one whole-board layering (the loop's
+tie seed). Taken as it comes (Appendix F 2, the user's keep-best rule: the archive keeps the bests; the
+stages after it clean up); undone only when a victim finds no path (counted, the state before stays).
+The pre-loop round's `via_rose` part is not carried over: the loop has its own via-rose relay.
+**History.** `loop_p4 = true` uses the (c) loop history (fading, bounded by 1/(1-f), graded by depth), on
+when (c) is off too (one `History`, updated by `history_step` before the round's victims are chosen). The
+pre-loop rounds' unbounded +1 per round is not repeated per cycle (16+ cycles would grow it without bound).
+**Why.** The sweep re-lays one wire at a time and keeps a move only when its price drops: a full cut is a
+local minimum for every single wire (the other wires still hold the room; Polubasov 2010 «Оптимизация
+расслоения», fig. 7 point 1, «застревание»). The pre-loop P4 rounds rip a cut's wires together (qmtech: over-full
+278 -> 99 in 5 rounds, tw5r11 O) and (e) without them loses (tw5r9: DRC 363 -> 610 before via_cuts). The
+joint rip lets the first re-placed wire take a detour or two vias for the others (Polubasov 2010 fig. 6a-c:
+wire 2 first takes two vias, then wire 1 moves and the vias go) - the inner_layer_room answer (3 wires on
+In1, 6 vias) needs exactly that step. Negotiated congestion: McMurchie & Ebeling 1995 (PathFinder, eq. 1
+c_n = (b_n + h_n) p_n, history grows on overused resources; NOT in docs/literature, INDEX "still to fetch":
+cited from the known paper, page to be checked); Dayan & Dai 1993 p. 5 (iterative reassignment of the
+worst-gain items, docs/literature/dayan-dai1993-ucsc-crl-93-04-layer-assignment.pdf).
+**Invariants.** Off = tip copper (copper hash, 4 boards, 1 cycle). Deterministic per seed and thread count.
+At most one round per cycle; victims <= the cap; no wire lost (a failed placement restores the state).
+**Tests.** Unit: the shared victim function on a small fixture (over-full cut -> the routed-last wires until
+the rest fits; the same set the pre-loop round chose before the refactor: pre-loop copper = tip). Loop
+integration (loop_local, smallest fixture): a cut that stays full under single-wire moves is emptied by one
+in-loop round, and a mutant (round skipped / victims empty) fails it. Board A/B on the VM, 16 cycles:
+O+f and Ne+f (pre-loop off, loop_p4 on) vs O on qmtech s0-2 and esp s1-3, inner_layer_room 10 seeds (KiCad
+types, In1 routed), per connection; a default flips only where it wins at equal time with no new detour.
