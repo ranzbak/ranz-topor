@@ -73,6 +73,11 @@ case ${1:-} in
     ( hzq run --threads 4 --name t4r2-suite -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast" > $R/suite.log 2>&1 9>&-; note "unit suite rc $?" ) &
     ( hzq run --threads 4 --name t4r2-pytest -- bash -c "cd $ROOT && CI=1 python -m pytest -q -p no:cacheprovider" > $R/pytest.log 2>&1 9>&-; note "unit pytest rc $?" ) &
     wait; note "all done" ;;
+  merge)
+    ( hzq run --threads 4 --name t4r2-off -- bash -c "for b in eprom wiccon esp qmtech; do bash $ROOT/tools/tw4r2_job.sh one K:\$b & done; wait" > $R/u-off.log 2>&1; note "unit off rc $?" ) &
+    ( hzq run --threads 4 --name t4r2-suite -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast" > $R/suite.log 2>&1 9>&-; note "unit suite rc $?" ) &
+    ( hzq run --threads 4 --name t4r2-pytest -- bash -c "cd $ROOT && CI=1 python -m pytest -q -p no:cacheprovider" > $R/pytest.log 2>&1 9>&-; note "unit pytest rc $?" ) &
+    wait; note "all done" ;;
   dh)
     python -m harness.tw4r2_patterns $R/pat > $R/gen.log 2>&1; note "gen rc $?"
     ( hzq run --threads 4 --name t4r2-tests -- bash $ROOT/tools/tw4r2_job.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
