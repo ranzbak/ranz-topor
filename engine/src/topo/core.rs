@@ -4110,12 +4110,27 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // tw4 T1 (`[factors] neck_depth`): the neck-depth part of the measure, as a share of the
         // violation weight (graded only: price = viol_mm x graded).
         let neck_k = if viol_mm > 0.0 { reg.weight("neck_depth").unwrap_or(0.0).max(0.0) / viol_mm } else { 0.0 };
+        // tw4-r2 (3) (`[capacity] pour_cuts`): the pour terminals the plan's copper cuts off
+        // ([`super::pourplan`]), against the board's own cut-off pads before routing.
+        let pour_base = opts.pour_cuts.then(|| super::pourplan::PourBase::new(model, opts.pour_cut_cells));
+        let pour_of = |st: &State, evl: &[Vec<(usize, f64, i32)>]| -> (usize, f64) {
+            match pour_base.as_ref() {
+                Some(pb) if pb.any => super::pourplan::pour_cuts(model, &super::pourplan::plan_items(st, &packer, b, evl, bottom), pb),
+                _ => (0, 0.0),
+            }
+        };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
             let _pg = super::prof::g(super::prof::K::Measure);
+            let pour = if pour_base.is_some() {
+                super::pourplan::meter::GLOBAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                pour_of(st, &lr.events)
+            } else {
+                (0, 0.0)
+            };
             let neck = if neck_k > 0.0 { neck_k * st.neck_depth(None) } else { 0.0 };
             // tw4 fix round 2 (verifier F2, test hook): the neck-depth part of the last whole-board measure.
             super::optimise::neckcheck::LAST.store(neck.to_bits(), std::sync::atomic::Ordering::Relaxed);
-            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).with_neck(neck).shorts_ranked(opts.pick_shorts, opts.short_weight);
+            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).with_neck(neck).with_pour(pour).shorts_ranked(opts.pick_shorts, opts.short_weight);
             if let Some(v) = reused(st, lr) {
                 return pred(v);
             }
@@ -4262,7 +4277,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let or = |a: &mut Vec<bool>, b: Vec<bool>| a.iter_mut().zip(b).for_each(|(x, y)| *x |= y);
             let mut vfocus: Vec<bool> = Vec::new();
             if opts.via_cuts {
-                let (m, f) = layers::via_neighbourhood(st, &free, &lr.events);
+                let (m, f) = layers::via_neighbourhood_x(st, &free, &lr.events, opts.pad_exits);
                 or(&mut w_after, m);
                 vfocus = f;
             }
@@ -4272,7 +4287,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let free_b: Vec<bool> = (0..nb).map(|w| free.get(w).copied().unwrap_or(false) || gone.contains(&w)).collect();
             let mut w_before = layers::neighbourhood(st, &free_b);
             if opts.via_cuts {
-                let (m, f) = layers::via_neighbourhood(st, &free_b, &prev.events);
+                let (m, f) = layers::via_neighbourhood_x(st, &free_b, &prev.events, opts.pad_exits);
                 or(&mut w_before, m);
                 // One focus for both states (the union), so a term is priced on both sides or on none.
                 vfocus.resize(vfocus.len().max(f.len()), false);
@@ -4326,6 +4341,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 forced: forced.borrow().len(),
                 foreign: (du(pp.foreign.0, fc_a.0, fc_b.0), (pp.foreign.1 + fc_a.1 - fc_b.1).max(0.0), du(pp.foreign.2, fc_a.2, fc_b.2)),
                 neck: if neck_k > 0.0 { (pp.neck + neck_k * (nd_a - nd_b)).max(0.0) } else { 0.0 },
+                // tw4-r2 (3): the pour term of the state after the move, whole (a ring is no local
+                // thing: the cut-off component is decided by the whole board's copper).
+                pour: if pour_base.is_some() {
+                    super::pourplan::meter::LOCAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    pour_of(st, &lr.events)
+                } else {
+                    (0, 0.0)
+                },
             };
             let p = Predicted::from_parts(parts, opts.pick_shorts, opts.short_weight);
             if local_check {
@@ -6477,6 +6500,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         m["move_cost"] = serde_json::json!({"moves": mv_n, "us_per_move": (mv_us * 10.0).round() / 10.0, "via_positions": vp_n, "us_per_via_position": (vp_us * 10.0).round() / 10.0});
         let (vc_n, vc_ms, bd_n, bd_ms) = super::refine::meter::read_cm1();
         m["move_cost"]["via_cut"] = serde_json::json!({"calls": vc_n, "ms_in": vc_ms.round(), "builds": bd_n, "ms_builds": bd_ms.round()});
+        let (pg_n, pl_n, pl_skip, p_ms) = super::pourplan::meter::read();
+        m["move_cost"]["pour_cut"] = serde_json::json!({"global": pg_n, "local": pl_n, "local_kept": pl_skip, "ms_in": p_ms.round()});
         // par-refine: the lane executor's epochs, lane-epochs, candidates evaluated past a kept one
         // (wasted) and again for an end-site fill (redone); the build memo's hits and misses.
         {
@@ -6500,7 +6525,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             // drawing (end of this round), outside the time limit.
             // `pad_exits`: with 5.10's stubs on, the planned stubs and the needed exits no legal stub
             // realises (compass::exit_stub_items); off: no pad-exit plan object (not predicted).
-            let px = opts.pad_exit_stubs.then(|| super::compass::exit_stub_items(b, &st, &wc, &lname));
+            let mut px = opts.pad_exit_stubs.then(|| super::compass::exit_stub_items(b, &st, &wc, &lname));
+            // tw4-r2 (1) `[capacity] pad_exits`: the plan's own exits with an over-full term.
+            if packer.pad_exits {
+                px.get_or_insert_with(Vec::new).extend(super::compass::plan_exit_items(&cm_plan.exit_items(), &wc, &lname));
+            }
             let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: px.as_deref() };
             let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
@@ -6801,7 +6830,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     // Pass layers, via discs and intervals from the placed vias.
     dr.pass_layer = vec![-1; st.passes.len()];
-    dr.pass_disc = vec![[0.0; 2]; st.passes.len()];
+    dr.pass_disc = vec![[0.0; 3]; st.passes.len()];
     for &w in &live {
         let (pl, vs) = (&plans[&w], &placed[&w]);
         let ks: Vec<usize> = vs.iter().map(|v| v.0).collect();

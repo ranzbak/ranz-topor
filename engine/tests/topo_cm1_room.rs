@@ -13,7 +13,23 @@ use topor_engine::route::route_with;
 
 const MM: f64 = 1e6;
 
+/// The gap board's pads `(ref, net, x, y, w, h, layer)` (KiCad frame, mm): net 1 TXD, 2 RST,
+/// 3 RXD (U21, one pad: no connection).
+const GAP_PADS: [GapPad; 5] = [
+    ("U22", 1, 6.0, 4.0, 2.5, 1.0, 0),
+    ("T1", 1, 6.0, 5.0, 0.3, 0.3, 2),
+    ("U21", 3, 6.0, 6.0, 2.5, 1.0, 0),
+    ("R1", 2, 1.0, 5.0, 1.0, 1.0, 0),
+    ("R2", 2, 11.0, 5.0, 1.0, 1.0, 0),
+];
+
 fn gap() -> BoardModel {
+    gap_with(&GAP_PADS)
+}
+
+type GapPad = (&'static str, i32, f64, f64, f64, f64, i32);
+
+fn gap_with(pads: &[GapPad]) -> BoardModel {
     let p = |v: f64| (v * MM).round() as i64;
     let c = [(0.0, 0.0), (12.0, 0.0), (12.0, 10.0), (0.0, 10.0)];
     let segs: Vec<String> = (0..4)
@@ -22,14 +38,6 @@ fn gap() -> BoardModel {
             format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(a.0), p(a.1), p(b.0), p(b.1))
         })
         .collect();
-    // (ref, net, x, y, w, h, layer): net 1 TXD, 2 RST, 3 RXD (U21, one pad: no connection).
-    let pads = [
-        ("U22", 1, 6.0, 4.0, 2.5, 1.0, 0),
-        ("T1", 1, 6.0, 5.0, 0.3, 0.3, 2),
-        ("U21", 3, 6.0, 6.0, 2.5, 1.0, 0),
-        ("R1", 2, 1.0, 5.0, 1.0, 1.0, 0),
-        ("R2", 2, 11.0, 5.0, 1.0, 1.0, 0),
-    ];
     let pj: Vec<String> = pads
         .iter()
         .enumerate()
@@ -134,4 +142,188 @@ fn the_via_focus_of_the_local_judge_equals_every_wire_in_focus() {
     eprintln!("via focus: {n} local judgements checked, {bad} differ");
     assert!(n > 0, "no local judgement was checked: the case does not show");
     assert_eq!(bad, 0, "{bad} of {n} local judgements differ from the judge with every wire in focus");
+}
+
+/// tw4-r2 (2): `[capacity] via_best_point` and `[capacity] via_over_ramp` are opt-in (default =
+/// the model before them, bit-identical), and a JSON options object sets them.
+#[test]
+fn via_best_point_and_ramp_are_opt_in() {
+    let d = Options::default();
+    assert!(!d.via_best_point);
+    assert_eq!(d.via_over_ramp_mm, 0.0);
+    let o = Options::from_json(r#"{"via_best_point": true, "via_over_ramp_mm": 0.05}"#).expect("options parse");
+    assert!(o.via_best_point);
+    assert!((o.via_over_ramp_mm - 0.05).abs() < 1e-12);
+}
+
+/// tw4-r2 (2): with the via measured at its best point and the graded ramp, every refinement still
+/// ends with stored via prices equal to a fresh pricing, and the local judge's via focus stays exact
+/// (the best point lies in the via's own triangle, so its neighbourhood, crossers and partners are
+/// the ones the repricing already covers). The qmtech USB corner, as the two tests above.
+#[test]
+fn best_point_and_ramp_prices_stay_fresh_and_focus_exact() {
+    use std::sync::atomic::Ordering;
+    use topor_engine::topo::refine::viacheck;
+    let path = format!("{}/tests/fixtures/qmtech-usb-crop.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses");
+    let o = Options::from_json(
+        r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "via_cuts": true, "via_best_point": true, "via_over_ramp_mm": 0.05}"#,
+    )
+    .expect("options parse");
+    viacheck::ON.store(true, Ordering::Relaxed);
+    viacheck::FOCUS_ON.store(true, Ordering::Relaxed);
+    let (b0, f0) = (viacheck::BAD.load(Ordering::Relaxed), viacheck::FOCUS_BAD.load(Ordering::Relaxed));
+    let (n0, g0) = (viacheck::CHECKED.load(Ordering::Relaxed), viacheck::FOCUS_CHECKED.load(Ordering::Relaxed));
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let _ = route_with(&m, &o, &ctl);
+    let (bad, n) = (viacheck::BAD.load(Ordering::Relaxed) - b0, viacheck::CHECKED.load(Ordering::Relaxed) - n0);
+    let (fbad, fn_) = (viacheck::FOCUS_BAD.load(Ordering::Relaxed) - f0, viacheck::FOCUS_CHECKED.load(Ordering::Relaxed) - g0);
+    assert!(n > 0 && fn_ > 0, "the case does not show: {n} via entries, {fn_} judgements checked");
+    assert_eq!(bad, 0, "{bad} stale via prices of {n}");
+    assert_eq!(fbad, 0, "{fbad} of {fn_} local judgements differ from the judge with every wire in focus");
+}
+
+/// tw4-r2 (2b): with the via discs packed at their heights (`[capacity] via_disc_height`), every
+/// refinement still ends with the stored discs (heights), leans and edge prices equal to fresh ones
+/// (`viacheck` covers them with the option on), and the local judge's via focus stays exact. The
+/// qmtech USB corner, as above; with the best point too (the combination the A/B measures).
+#[test]
+fn disc_heights_stay_fresh_and_focus_exact() {
+    use std::sync::atomic::Ordering;
+    use topor_engine::topo::refine::viacheck;
+    let path = format!("{}/tests/fixtures/qmtech-usb-crop.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses");
+    let o = Options::from_json(
+        r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "via_cuts": true, "via_best_point": true, "via_disc_height": true}"#,
+    )
+    .expect("options parse");
+    viacheck::ON.store(true, Ordering::Relaxed);
+    viacheck::FOCUS_ON.store(true, Ordering::Relaxed);
+    let (b0, f0) = (viacheck::BAD.load(Ordering::Relaxed), viacheck::FOCUS_BAD.load(Ordering::Relaxed));
+    let (n0, g0) = (viacheck::CHECKED.load(Ordering::Relaxed), viacheck::FOCUS_CHECKED.load(Ordering::Relaxed));
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let _ = route_with(&m, &o, &ctl);
+    let (bad, n) = (viacheck::BAD.load(Ordering::Relaxed) - b0, viacheck::CHECKED.load(Ordering::Relaxed) - n0);
+    let (fbad, fn_) = (viacheck::FOCUS_BAD.load(Ordering::Relaxed) - f0, viacheck::FOCUS_CHECKED.load(Ordering::Relaxed) - g0);
+    assert!(n > 0 && fn_ > 0, "the case does not show: {n} entries, {fn_} judgements checked");
+    assert_eq!(bad, 0, "{bad} stale discs, leans or prices of {n}");
+    assert_eq!(fbad, 0, "{fbad} of {fn_} local judgements differ from the judge with every wire in focus");
+}
+
+/// The gap board planned by hand (each connection its shortest path, the layer assignment as the
+/// loop's), measured by the capacity model under `o`: `(violations count, graded, via_cut_count,
+/// located via cut points, via cut list length)`.
+fn gap_measure(o: &Options) -> (usize, f64, usize, usize, usize) {
+    gap_measure_on(&gap(), o)
+}
+
+fn gap_measure_on(m: &BoardModel, o: &Options) -> (usize, f64, usize, usize, usize) {
+    use topor_engine::topo::board::{self as tb, BuildOpts};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::layers::{self, LayerParams};
+    use topor_engine::topo::pack::Packer;
+    use topor_engine::topo::refine::CapModel;
+    use topor_engine::topo::state::State;
+    let b = tb::build(m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(m);
+    let mut st = State::new(&b.proj);
+    for c in &conns {
+        st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+    }
+    let packer = Packer::for_model(m, o, &b.proj);
+    let smd = |ob: usize| b.smd_layer(ob);
+    let lr = layers::assign_with(&st, &smd, &LayerParams::default(), Some(&packer));
+    let dirs = packer.taut_dirs(&st);
+    let cm = CapModel::new(&st, &packer, &dirs, &lr.events, 1, 1.0);
+    let (n, g) = cm.violations();
+    (n, g, cm.via_cut_count(), cm.via_cut_points().len(), cm.via_cut_list().len())
+}
+
+fn gap_opts(json: &str) -> Options {
+    Options::from_json(json).expect("options parse")
+}
+
+/// tw4-r2 (2) behaviour: TXD's via in the gap with RST through it is over-full at its planned
+/// point. Measured at the least-over site point of its triangle (`via_best_point`) the via is
+/// never priced higher than at the planned point (the planned point is one of the candidates).
+/// Over variants of the gap (U21 shifted along it, T1 moved), where the gap's cuts differ across
+/// the via's triangle, some via is priced strictly lower at its best point.
+#[test]
+fn best_point_prices_the_gap_via_no_worse_and_somewhere_lower() {
+    let (off_o, on_o) = (gap_opts(r#"{"via_cuts": true}"#), gap_opts(r#"{"via_cuts": true, "via_best_point": true}"#));
+    let (mut shown, mut lower) = (0, 0);
+    for dx in [0.0, 0.4, 0.8, 1.2, 1.6] {
+        for tx in [-0.8, -0.4, 0.0, 0.4, 0.8] {
+            let mut pads = GAP_PADS;
+            pads[2].2 += dx;
+            pads[1].2 += tx;
+            let m = gap_with(&pads);
+            let (off, on) = (gap_measure_on(&m, &off_o), gap_measure_on(&m, &on_o));
+            eprintln!("gap U21 +{dx} T1 {tx:+}: off {off:?} best {on:?}");
+            if off.2 == 0 {
+                continue;
+            }
+            shown += 1;
+            assert!(on.1 <= off.1 + 1e-9, "U21 +{dx} T1 {tx:+}: the best point is never priced above the planned one: {on:?} vs {off:?}");
+            lower += usize::from(on.1 < off.1 - 1e-6);
+        }
+    }
+    assert!(shown > 0, "the case shows: an over-full via cut at the planned point");
+    assert!(lower > 0, "some variant has a better site point in the via's triangle ({shown} over-full)");
+}
+
+/// tw4-r2 (2) behaviour: with a ramp far past the gap's overage (`via_over_ramp_mm` 100) the via
+/// entry stays priced (graded above the board without via cuts, below the step) but is no
+/// predicted violation: the compass locates no via cut and the P4 list holds none.
+#[test]
+fn the_ramp_keeps_a_small_overage_priced_but_out_of_the_compass() {
+    let full = gap_measure(&gap_opts(r#"{"via_cuts": true}"#));
+    let soft = gap_measure(&gap_opts(r#"{"via_cuts": true, "via_over_ramp_mm": 100.0}"#));
+    let none = gap_measure(&gap_opts(r#"{"via_cuts": false}"#));
+    eprintln!("gap full {full:?} ramp {soft:?} no-cuts {none:?}");
+    assert!(full.3 >= 1 && full.4 >= 1, "the step: located and listed {full:?}");
+    assert_eq!((soft.2, soft.3, soft.4), (0, 0, 0), "under the ramp: not counted, not located, not listed {soft:?}");
+    assert!(soft.1 > none.1 + 1e-9 && soft.1 < full.1 - 1e-6, "graded between: {none:?} < {soft:?} < {full:?}");
+}
+
+/// tw4-r2 (2) behaviour: the best point's candidates are site points of the triangle where a via
+/// keeps its clearance to every other net's pad (static room); on the gap board some triangles
+/// lose some of their 9 site points that way.
+#[test]
+fn best_point_candidates_keep_the_via_clear_of_other_pads() {
+    use topor_engine::topo::board::{self as tb, BuildOpts};
+    use topor_engine::topo::pack::{tri_site_points, Packer};
+    let m = gap();
+    let b = tb::build(&m, &BuildOpts::default()).unwrap();
+    let packer = Packer::for_model(&m, &gap_opts(r#"{"via_cuts": true, "via_best_point": true}"#), &b.proj);
+    let (r, s) = (0.3 * MM, 0.2 * MM);
+    // Distance from a point (math frame, y up) to a pad rectangle of another net.
+    let clear = |q: topor_engine::geom::Vec2| {
+        GAP_PADS
+            .iter()
+            .filter(|p| p.1 != 1)
+            .map(|&(_, _, x, y, w, h, _)| {
+                let dx = ((q.x - x * MM).abs() - 0.5 * w * MM).max(0.0);
+                let dy = ((q.y + y * MM).abs() - 0.5 * h * MM).max(0.0);
+                (dx * dx + dy * dy).sqrt()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut fewer = 0;
+    for t in 0..b.proj.tris.len() {
+        let [a, bb, c] = b.proj.tris[t].map(|v| b.proj.pos[v]);
+        let all = tri_site_points(a, bb, c);
+        let cands = packer.via_cands(t, 1, 2.0 * r, s);
+        for q in cands.iter() {
+            assert!(all.contains(q), "triangle {t}: a candidate is a site point");
+            assert!(clear(*q) >= r + s - 1e3, "triangle {t}: candidate {q:?} only {:.3} mm from another net's pad", clear(*q) / MM);
+        }
+        if all.iter().any(|&q| clear(q) < r + s - 1e3) {
+            assert!(cands.len() < 9, "triangle {t}: a site point too near another pad is no candidate");
+            fewer += 1;
+        }
+    }
+    assert!(fewer > 0, "the case shows: some site points lack room");
 }

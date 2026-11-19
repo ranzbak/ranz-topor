@@ -1102,7 +1102,16 @@ pub fn neighbourhood(st: &State, free: &[bool]) -> Vec<bool> {
 /// x traversals + layer changes there x their intervals' stars). Returns `(model wires, focus)`:
 /// focus = the free wires and the traversers of S (the only wires that can own a via term a free
 /// wire enters; [`super::refine::CapModel::new_only_focus`]).
+///
+/// tw4-r2 (1) (`exits`, `[capacity] pad_exits`): a planned pad exit's terms read the traversers
+/// of its outside triangle's vertex star ([`super::padexit`]); so for every wire of S also the
+/// traversers of the vertex star of its pad-end triangles ([`super::padexit::end_tris`]).
 pub fn via_neighbourhood(st: &State, free: &[bool], events: &[Vec<(usize, f64, i32)>]) -> (Vec<bool>, Vec<bool>) {
+    via_neighbourhood_x(st, free, events, false)
+}
+
+/// [`via_neighbourhood`], with the pad exits' crossers when `exits`.
+pub fn via_neighbourhood_x(st: &State, free: &[bool], events: &[Vec<(usize, f64, i32)>], exits: bool) -> (Vec<bool>, Vec<bool>) {
     let pr = st.proj;
     let mut out = vec![false; st.wires.len()];
     let star = |ts: &mut dyn Iterator<Item = usize>| -> Vec<usize> {
@@ -1124,6 +1133,11 @@ pub fn via_neighbourhood(st: &State, free: &[bool], events: &[Vec<(usize, f64, i
         for p in ev.windows(2).filter(|p| p[0].2 != p[1].2) {
             let (a, b) = (p[0].0.min(p[1].0).min(tl), p[0].0.max(p[1].0).min(tl));
             iv.extend_from_slice(&tris[a..=b]);
+        }
+    }
+    if exits {
+        for &w in &l1 {
+            iv.extend(super::padexit::end_tris(st, w));
         }
     }
     iv.sort_unstable();

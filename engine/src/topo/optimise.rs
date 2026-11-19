@@ -700,6 +700,11 @@ pub struct Predicted {
 
 /// tw4 fix round 2 (verifier F2, test hook): the neck-depth part (`[factors] neck_depth` / violation
 /// weight x Σ d²) of the last whole-board measure of the TopoR loop, as f64 bits.
+///
+/// Process-global and last-writer-wins: every routing run in the process stores into it, so a test reads it
+/// right after its own `route_with` and is exact only while no other test of the same binary routes at the
+/// same time (`tests/topo_neck_depth.rs` relies on its routing tests not overlapping the read; run it with
+/// `--test-threads=1` when a new routing test joins that binary, or give the hook a per-run slot).
 pub mod neckcheck {
     use std::sync::atomic::AtomicU64;
     pub static LAST: AtomicU64 = AtomicU64::new(0);
@@ -715,6 +720,9 @@ pub struct MeasureParts {
     /// tw4 T1: the neck-depth part of `graded` (`[factors] neck_depth` / violation weight x the
     /// state's Σ d², [`super::state::State::neck_depth`]); no count.
     pub neck: f64,
+    /// tw4-r2 (3) (`[capacity] pour_cuts`): the pour terminals the plan's copper cuts off
+    /// `(count, graded)` ([`super::pourplan::pour_cuts`]).
+    pub pour: (usize, f64),
 }
 
 /// Equal predictions: the same numbers; how they were made ([`Predicted::parts`]) is not
@@ -730,14 +738,14 @@ impl Predicted {
     /// connections. O(1).
     pub fn of(cap: (usize, f64), unlayerable: usize, forced: usize) -> Predicted {
         let n = unlayerable + forced;
-        let parts = MeasureParts { cap, unlayerable, forced, foreign: (0, 0.0, 0), neck: 0.0 };
+        let parts = MeasureParts { cap, unlayerable, forced, foreign: (0, 0.0, 0), neck: 0.0, pour: (0, 0.0) };
         Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0, shorts: unlayerable, short_extra: 0.0, parts }
     }
     /// loop-local: the prediction of `parts` (the per-edge model; no shrinkages), shorts ranked
     /// as [`Predicted::shorts_ranked`]. Equal to the measure's own prediction of the same parts.
     /// O(1).
     pub fn from_parts(parts: MeasureParts, pick_shorts: bool, short_weight: f64) -> Predicted {
-        Predicted::of(parts.cap, parts.unlayerable, parts.forced).with_foreign(parts.foreign).with_neck(parts.neck).shorts_ranked(pick_shorts, short_weight)
+        Predicted::of(parts.cap, parts.unlayerable, parts.forced).with_foreign(parts.foreign).with_neck(parts.neck).with_pour(parts.pour).shorts_ranked(pick_shorts, short_weight)
     }
     /// Plus the traversals through foreign copper `(count, graded, shorts)` ([`foreign_copper`]:
     /// the ones through a no-tracks rule area are violations but no shorts). O(1).
@@ -752,6 +760,15 @@ impl Predicted {
         }
         let parts = MeasureParts { neck: self.parts.neck + x, ..self.parts };
         Predicted { graded: self.graded + x, parts, ..self }
+    }
+    /// tw4-r2 (3): plus the pour terminals the plan cuts off `(count, graded)` (both 0 leaves it
+    /// as it was). O(1).
+    pub fn with_pour(self, x: (usize, f64)) -> Predicted {
+        if x.0 == 0 && x.1 == 0.0 {
+            return self;
+        }
+        let parts = MeasureParts { pour: (self.parts.pour.0 + x.0, self.parts.pour.1 + x.1), ..self.parts };
+        Predicted { count: self.count + x.0, graded: self.graded + x.1, parts, ..self }
     }
     /// The same prediction with the shorts ranked at weight `k` (`[optimize] short_weight`, at
     /// least 1) when `on` (`[optimize] pick_shorts`); off: not ranked (they stay in `count` and
@@ -982,6 +999,18 @@ pub fn reroute_set<'p>(st: &mut State<'p>, set: &[WireId], r: &mut dyn Rerouter<
 
 #[cfg(test)]
 mod tests {
+
+    /// tw4-r2 (3): the pour part is a predicted violation per cut-off component (count) with its
+    /// graded amount, kept in the parts so the local judge rebuilds the same prediction.
+    #[test]
+    fn the_pour_part_counts_and_grades() {
+        let p = Predicted::of((2, 2.5), 1, 0).with_pour((1, 1.25));
+        assert_eq!((p.count, p.graded), (4, 4.75));
+        assert_eq!(p.parts.pour, (1, 1.25));
+        // The loop-local prediction of the same parts (shorts ranked at weight 1 keep `of`'s shorts).
+        assert_eq!(Predicted::from_parts(p.parts, true, 1.0), p);
+        assert_eq!(Predicted::of((2, 2.5), 1, 0).with_pour((0, 0.0)), Predicted::of((2, 2.5), 1, 0));
+    }
     use super::*;
 
     /// A toy topology: per "wire" a length; a wire with an odd length has a via. A cycle shortens

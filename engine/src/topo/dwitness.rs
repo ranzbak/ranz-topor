@@ -436,7 +436,7 @@ pub fn audit(dr: &Drawer, drawn: &BTreeMap<WireId, WireOut>) -> Vec<PairAudit> {
                     let w = st.passes[pid].wire;
                     let wi = &st.wires[w];
                     let pw = dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
-                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]), disc: [0.0; 2] }
+                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]), disc: [0.0; 3], lean: 0.0 }
                 })
                 .collect();
             let bnd = dr.packer.bounds(e, l, &pitems);
@@ -521,7 +521,7 @@ fn over_debug(dr: &Drawer, walked: &[Walked], chain_of: &[usize]) {
                     let w = st.passes[pid].wire;
                     let wi = &st.wires[w];
                     let pw = dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]);
-                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]), disc: [0.0; 2] }
+                    PackItem { net: wi.net, w: pw, s: wi.s, infl: infl_dir(pr, e, dr.dirs[w][kpos[pid]]), disc: [0.0; 3], lean: 0.0 }
                 })
                 .collect();
             let bnd = dr.packer.bounds(e, l, &pitems);
@@ -585,7 +585,7 @@ fn infl_stats(dr: &Drawer, walked: &[Walked], chain_of: &[usize]) -> (Vec<(f64, 
             }
             let item = |pid: usize, infl: f64| {
                 let wi = &st.wires[st.passes[pid].wire];
-                PackItem { net: wi.net, w: dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]), s: wi.s, infl, disc: [0.0; 2] }
+                PackItem { net: wi.net, w: dr.widths.as_ref().map_or(wi.w, |x| x.pass_w[pid]), s: wi.s, infl, disc: [0.0; 3], lean: 0.0 }
             };
             let planned: Vec<f64> = items.iter().map(|&pid| infl_dir(pr, e, dr.dirs[st.passes[pid].wire][kpos[pid]])).collect();
             let hand: Vec<f64> = items.iter().map(|&pid| hand_infl(pid)).collect();

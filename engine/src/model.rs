@@ -1560,6 +1560,51 @@ pub struct Options {
     /// two edges its own wire crosses / on static cuts within reach). Default true since the tw4
     /// equal-time A/B (2026-11-19: esp 5 seeds + qmtech at wall 300 s, KiCad DRC -23 % / -28 %).
     pub via_cuts: bool,
+    /// tw4-r2 (`[capacity] via_best_point`, docs/dev/design/tw4-r2.md (2)): with via_cuts, a
+    /// planned via's gap and via-to-via cuts are priced at the least-over of its triangle's site
+    /// points with static room (`topo::pack::tri_site_points`), not at the first one: Maley 1987
+    /// pp. 32-33 (routable iff no critical cut is over-full) holds for the via at *some*
+    /// position, and the drawing relocates vias. Ties keep the first point, so a via with no
+    /// over-full cut prices as before. false (default) = the first site point only.
+    pub via_best_point: bool,
+    /// tw4-r2 (`[capacity] via_over_ramp`, mm): with via_cuts, a via cut over-full by `over`
+    /// costs `min(1, over / ramp) x (1 + over / pitch)` instead of `1 + over / pitch` (graded from
+    /// 0 at zero overage, no step there) and counts as a predicted violation only from `over >=
+    /// ramp`. 0 (default) = the step at zero (every over-full cut a full violation).
+    pub via_over_ramp_mm: f64,
+    /// tw4-r2 (2b) (`[capacity] via_disc_height`, docs/dev/design/tw4-r2.md (2b)): with via_cuts,
+    /// a planned via's disc packs on the two edges its wire crosses round it at the via point's
+    /// height off each edge line, not on the line: against a track crossing at sin θ and leaning
+    /// c towards it, `max(0, (R + h c) / sin θ)`; against another disc, `sqrt(max(0, R^2 - Δh^2))`
+    /// with signed heights; the end margins at the offset centre (Maley 1987 pp. 32-33, 40: a cut
+    /// holds what lies on it). The drawing's packing keeps the disc on the line. false (default) =
+    /// the disc on the edge line (as before).
+    pub via_disc_height: bool,
+    /// tw4-r2 (1) (`[capacity] pad_exits`, docs/dev/design/tw4-r2.md (1)): with via_cuts, every
+    /// wire end at a fine-pitch pad (another net's copper beside it closer than the wire could
+    /// pass) holds its planned exit, read from the plan (the leaving pass, the pad side it leaves
+    /// by, the widest stub width that keeps the clearance, at worst the neck floor), and the
+    /// capacity model prices it: the stub too near a neighbour pin, other nets' wires between the
+    /// stub and a neighbour pin (CM1's gap cuts with the stub as the feature), and a planned via of
+    /// the wire in the exit zone too near a neighbour pin; each over-full term one graded predicted
+    /// violation (TopoR 6.3 manual p. 71, p. 56; Maley 1987 pp. 32-33, 40). false (default) = no
+    /// planned exit (the drawing finds it, as before).
+    pub pad_exits: bool,
+    /// tw4-r2 (1) (`[capacity] pad_exit_static`): with pad_exits, also price term (a), the planned
+    /// stub at its width nearer than its clearance to a neighbour pin. Measured 2026-11-19 (rounds=1,
+    /// terms split): (a) alone took KiCad DRC 397 -> 821 on esp + qmtech, (b) 400, (c) 504; the
+    /// side read from the leaving pass also calls a wire that is pulled taut past a pad corner a
+    /// long-side exit, and a real pass through the pin gap is the per-edge model's already. false
+    /// (default) = (b) and (c) only.
+    pub pad_exit_static: bool,
+    /// tw4-r2 (3) (`[capacity] pour_cuts`): the TopoR loop's measure counts a pour terminal (a
+    /// pad that reaches its net only through a pour) that the plan's copper cuts off its pour as
+    /// a predicted violation, graded by the pads cut off (`topo::pourplan`). false (default) =
+    /// not priced in the plan (the stitching after the drawing repairs what it can).
+    pub pour_cuts: bool,
+    /// tw4-r2 (3) (`[capacity] pour_cut_cells`): raster cells per pour layer of the plan's pour
+    /// check (coarser = faster; the check of the drawn copper uses 4 M).
+    pub pour_cut_cells: f64,
     /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
     /// after the plan of its first cycle (later cycles need the drawing's feedback), before the
     /// drawing; the result has no copper and its warnings carry the plan metrics line. `""`
@@ -1780,6 +1825,13 @@ impl Default for Options {
             overflow_softness: 0.1,
             cut_vias: true,
             via_cuts: true,
+            via_best_point: false,
+            via_over_ramp_mm: 0.0,
+            via_disc_height: false,
+            pad_exits: false,
+            pad_exit_static: false,
+            pour_cuts: false,
+            pour_cut_cells: 1.0e5,
             stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,
