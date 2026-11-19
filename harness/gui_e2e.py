@@ -111,7 +111,11 @@ class E2E:
                  XDG_CACHE_HOME=f"{h}/.cache", XDG_STATE_HOME=f"{h}/.local/state", TMPDIR=str(self.tmpdir()),
                  XDG_RUNTIME_DIR=f"{h}/run", KICAD_CONFIG_HOME=f"{h}/.config/kicad", DISPLAY=self.display,
                  GDK_BACKEND="x11", NO_AT_BRIDGE="1", RAYON_NUM_THREADS=e.get("RAYON_NUM_THREADS", "4"))
-        for k in ("DBUS_SESSION_BUS_ADDRESS", "KICAD_API_SOCKET", "KICAD_API_TOKEN", "TOPOR_REPORT_ROOT"):
+        # KiCad's location variables an `import harness` process carries (harness/kicad_env.PROCESS_VARS) point at
+        # the shared scratch home: KiCad must use THIS session home (KICAD_DOCUMENTS_HOME moves the scripting
+        # plugin folder: the GUI helper / plugin never loaded, verify r3 V1)
+        for k in ("DBUS_SESSION_BUS_ADDRESS", "KICAD_API_SOCKET", "KICAD_API_TOKEN", "TOPOR_REPORT_ROOT",
+                  "KICAD_CACHE_HOME", "KICAD_DOCUMENTS_HOME"):
             e.pop(k, None)
         return e
 

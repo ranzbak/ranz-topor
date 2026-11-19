@@ -142,6 +142,9 @@ def test_no_kicad_subprocess_bypasses_the_helper():
     assert not bad, "KiCad started without harness.kicad_env:\n" + "\n".join(bad)
 
 
+FP_LIB = Path("/usr/share/kicad/footprints/Resistor_SMD.pretty")  # host KiCad libraries: optional (CI has none)
+
+
 def _clean_env(fake_home: Path, kicad_home: Path) -> dict:
     import os
     e = {k: v for k, v in os.environ.items() if not k.startswith(("XDG_", "KICAD_"))}
@@ -168,7 +171,7 @@ def test_in_process_pcbnew_through_harness_stays_off_the_user_home(tmp_path):
     pcb.write_text('(kicad_pcb (version 20241229) (generator "pcbnew") (generator_version "9.0"))\n')
     prog = ("import harness, pcbnew\n"
             f"b = pcbnew.LoadBoard({str(pcb)!r}); pcbnew.SaveBoard({str(tmp_path / 'o.kicad_pcb')!r}, b)\n"
-            "pcbnew.FootprintLoad('/usr/share/kicad/footprints/Resistor_SMD.pretty', 'R_0603_1608Metric')\n")
+            + ("pcbnew.FootprintLoad(%r, 'R_0603_1608Metric')\n" % str(FP_LIB) if FP_LIB.is_dir() else ""))
     r = subprocess.run([sys.executable, "-c", prog], env=_clean_env(fake, iso), capture_output=True, text=True,
                        timeout=120, cwd=tmp_path)
     assert r.returncode == 0, r.stderr[-2000:]
@@ -185,10 +188,42 @@ def test_route_board_script_isolates_before_anything_else(tmp_path):
     r = subprocess.run([sys.executable, "-P", str(ROOT / "harness/route_board.py"), "--help"],
                        env=_clean_env(fake, iso), capture_output=True, text=True, timeout=120, cwd=tmp_path)
     assert r.returncode == 0, r.stderr[-1500:]
-    assert (iso / ".config/kicad/10.0/fp-lib-table").is_file() and _files(fake) == []
+    assert (iso / ".config/kicad/10.0").is_dir() and _files(fake) == []
+    assert (iso / ".config/kicad/10.0/fp-lib-table").is_file() == (K.TEMPLATE / "fp-lib-table").is_file()
 
 
 def test_harness_import_sets_the_kicad_location_variables():
     import os
     for k in K.PROCESS_VARS:
         assert not Path(os.environ[k]).resolve().is_relative_to(Path.home().resolve() / ".config"), k
+
+
+def test_the_pytest_session_itself_is_isolated_by_conftest(request):
+    """tests/conftest.py imports harness (whole session: toporlib kicad-cli + in-process pcbnew isolated)."""
+    top = [m for m in request.config.pluginmanager.get_plugins()
+           if Path(getattr(m, "__file__", "") or "").resolve() == ROOT / "tests" / "conftest.py"]
+    assert len(top) == 1 and getattr(top[0], "harness", None) is __import__("harness")
+
+
+@pytest.mark.skipif(__import__("importlib").util.find_spec("pcbnew") is None, reason="needs KiCad's pcbnew module")
+def test_pcbnew_imported_before_harness_is_a_loud_warning(tmp_path):
+    import sys
+    fake, iso = tmp_path / "user-home", tmp_path / "kicad-home"
+    fake.mkdir()
+    r = subprocess.run([sys.executable, "-c", "import pcbnew, harness"], env=_clean_env(fake, iso),
+                       capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert r.returncode == 0 and "WARNING pcbnew was imported before harness" in r.stderr, r.stderr[-1000:]
+
+
+def test_e2e_session_env_uses_its_own_home_not_the_shared_one(tmp_path):
+    """gui_e2e.E2E.env(): KiCad's location variables of an `import harness` process must not leak into the GUI
+    session (KICAD_DOCUMENTS_HOME moved the scripting plugin folder: helper never loaded, verify r3 V1)."""
+    import os
+    from harness.gui_e2e import E2E
+    assert all(k in os.environ for k in K.PROCESS_VARS)  # set by conftest's import harness
+    e = E2E(tmp_path / "s", ":29", None).env()
+    assert e["KICAD_CONFIG_HOME"].startswith(str(tmp_path / "s"))
+    assert not {"KICAD_CACHE_HOME", "KICAD_DOCUMENTS_HOME"} & set(e)
+    assert K.is_isolated(e)
+    iso = K.isolated_env(tmp_path / "h")
+    assert all(iso.get(k, str(tmp_path / "h")).startswith(str(tmp_path / "h")) for k in K.PROCESS_VARS)

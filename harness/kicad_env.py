@@ -40,7 +40,8 @@ def isolated_env(home: Path | None = None, *, keep_display: bool = False, base: 
         if not (cfg / n).exists() and (TEMPLATE / n).is_file():
             shutil.copy(TEMPLATE / n, cfg / n)
     h = str(home)
-    e = {k: v for k, v in (os.environ if base is None else base).items() if not k.startswith(("KICAD_API", "XDG_"))}
+    e = {k: v for k, v in (os.environ if base is None else base).items()
+         if not k.startswith(("KICAD_API", "XDG_")) and k not in ("KICAD_CACHE_HOME", "KICAD_DOCUMENTS_HOME")}
     e.update(HOME=h, XDG_CONFIG_HOME=f"{h}/.config", XDG_DATA_HOME=f"{h}/.local/share", XDG_CACHE_HOME=f"{h}/.cache",
              XDG_STATE_HOME=f"{h}/.local/state", KICAD_CONFIG_HOME=f"{h}/.config/kicad")
     if not keep_display:
