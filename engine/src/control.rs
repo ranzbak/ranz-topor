@@ -157,6 +157,12 @@ pub struct Progress {
     /// TopoR loop cycle that finished last (any run): run (1-based; 0 = none yet), cycle (0 = the
     /// initial plan), when it finished (seconds since the job started) and its own state's
     /// *predicted* criteria (the plan's measure, nothing drawn; not the archive's pick).
+    /// TopoR loop cycles finished so far over all runs (never goes back: the dialog's count).
+    #[serde(default)]
+    pub cycles_total: u64,
+    /// Restarts of `loop_run`'s loop so far (TW3 table / stall restarts) at its last cycle.
+    #[serde(default)]
+    pub loop_restarts: u32,
     #[serde(default)]
     pub loop_run: u32,
     #[serde(default)]
@@ -180,6 +186,13 @@ pub struct Progress {
     /// loop, as judged once drawn): run (1-based; 0 = none yet), the cycle its pick came from, when
     /// it changed (seconds since the job started), `"plan"` (predicted) or `"copper"` (drawn) and
     /// the pick's criteria.
+    /// Per run (index = run - 1) the loop cycle (TopoR loop) or round (drawn) its pick came from.
+    #[serde(default)]
+    pub pick_cycles: Vec<u32>,
+    /// `best_*` is `"plan"` (a TopoR loop's predicted pick: no run has drawn yet) or `"copper"`
+    /// (a drawn pick); `""` before the first.
+    #[serde(default)]
+    pub best_kind: String,
     #[serde(default)]
     pub runbest_run: u32,
     #[serde(default)]

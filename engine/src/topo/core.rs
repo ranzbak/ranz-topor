@@ -1319,6 +1319,8 @@ impl<'a> Coord<'a> {
                 p.best_open = b.crit.open;
                 p.best_shrinkages = b.crit.shrinkages;
                 p.best_round = b.cycle as u32;
+                // last-preview: drawn (a run's drawn pick) or predicted (a TopoR loop's pick)
+                p.best_kind = if self.best_of(&s).is_some() { "copper" } else { "plan" }.into();
             }
             if let Some((cycle, judged, line)) = round {
                 if let Some((j, vs, dec)) = judged {
@@ -1358,7 +1360,11 @@ fn sketch_of(run: u32, cycle: usize, kind: &str, crit: &Criteria, items: Vec<Ite
 
 /// last-preview: loop cycle `cycle` of run `run` (1-based) ended at `at` s with its own state's
 /// predicted criteria `c` (the Last round row while the loop runs). O(1).
-fn note_loop_cycle(p: &mut crate::control::Progress, run: u32, cycle: usize, at: f64, c: &Criteria) {
+fn note_loop_cycle(p: &mut crate::control::Progress, run: u32, cycle: usize, restarts: usize, at: f64, c: &Criteria) {
+    if cycle > 0 {
+        p.cycles_total += 1;
+    }
+    p.loop_restarts = restarts as u32;
     p.loop_run = run;
     p.loop_cycle = cycle as u32;
     p.loop_at_s = at;
@@ -1373,6 +1379,11 @@ fn note_loop_cycle(p: &mut crate::control::Progress, run: u32, cycle: usize, at:
 /// last-preview: run `run`'s own pick changed (the Last run row): it came from cycle `cycle`,
 /// `kind` "plan" (predicted) or "copper" (drawn). O(1).
 fn note_run_pick(p: &mut crate::control::Progress, run: u32, cycle: usize, at: f64, kind: &str, c: &Criteria) {
+    let k = (run as usize).saturating_sub(1);
+    if p.pick_cycles.len() <= k {
+        p.pick_cycles.resize(k + 1, 0);
+    }
+    p.pick_cycles[k] = cycle as u32;
     p.runbest_run = run;
     p.runbest_cycle = cycle as u32;
     p.runbest_at_s = at;
@@ -5483,14 +5494,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn take_offers(&mut self) -> Vec<(String, Criteria, LoopVar, u64)> {
                 std::mem::take(&mut self.tw5.offers)
             }
-            fn after_cycle(&mut self, cycle: usize, pick: &Criteria, own: &Criteria) {
+            fn after_cycle(&mut self, cycle: usize, pick: &Criteria, own: &Criteria, restarts: usize) {
                 // last-preview: the cycle's own state goes to the progress (the Last round row, the
                 // cycle counter); a changed pick is the run's new best (the Last run row). Sketches
                 // only while the caller shows them: the run's pick when it changed (its own end
                 // state, or a mid state taken in `offer_mid`), the end state when one is asked for.
                 let run = self.ctl.run.max(1);
                 let at = self.ctl.since_start_s();
-                self.ctl.with_progress(|p| note_loop_cycle(p, run, cycle, at, own));
+                self.ctl.with_progress(|p| note_loop_cycle(p, run, cycle, restarts, at, own));
                 let mid = std::mem::take(&mut self.sk.mid);
                 let changed = self.sk.pick.as_ref() != Some(pick);
                 if changed {

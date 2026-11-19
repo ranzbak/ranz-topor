@@ -286,10 +286,10 @@ pub trait Space {
         Vec::new()
     }
     /// last-preview: after the initial plan (cycle 0) and after every finished cycle, with the
-    /// archive's pick now and the criteria of the cycle's own end state (the state the space is
-    /// in). The core's space reports the cycle to the progress and builds the progress dialog's
-    /// sketches there when the caller asked for them; it never changes the state.
-    fn after_cycle(&mut self, _cycle: usize, _pick: &Criteria, _own: &Criteria) {}
+    /// archive's pick now, the criteria of the cycle's own end state (the state the space is in)
+    /// and the restarts so far. The core's space reports the cycle to the progress and builds the
+    /// progress dialog's sketches there when the caller asked for them; it never changes the state.
+    fn after_cycle(&mut self, _cycle: usize, _pick: &Criteria, _own: &Criteria, _restarts: usize) {}
 }
 
 /// TW3: how a run takes part in the call's one variant table ([`super::table::SharedTable`]).
@@ -501,8 +501,9 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
     super::prof::mark("offer0");
     let mut my_fp = share(sp, &format!("run {} initial plan (gen 0)", p.run + 1), 0, 0, super::table::CHECK_NONE);
     let Some((s0, v0)) = score(arch) else { return rep };
+    // last-preview: before `on_pick` (its report to the progress then sees this cycle's pick cycle)
+    sp.after_cycle(0, &arch.items[arch.pick(&obj).expect("scored")].crit, &own0, 0);
     on_pick(0, &arch.items[arch.pick(&obj).expect("scored")].crit, false);
-    sp.after_cycle(0, &arch.items[arch.pick(&obj).expect("scored")].crit, &own0);
     meter.push(s0);
     rep.pick_values.push(v0);
     let mut gen = 0usize;
@@ -641,8 +642,8 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         if !periodic && meter.stable() && rep.stable_at.is_none() {
             rep.stable_at = Some(cycle);
         }
+        sp.after_cycle(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, &own, rep.restarts.len());
         on_pick(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, rep.stable_at.is_some());
-        sp.after_cycle(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, &own);
         super::prof::cycle(cycle, cs.tried, cs.kept, cs.relaid, cs.pair_moved, cs.pair_relaid, kept);
         rep.lines.push(format!(
             "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, judge {}g/{}m/{}l, {}{}, best {:.1}{}",

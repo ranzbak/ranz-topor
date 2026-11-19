@@ -165,3 +165,33 @@ fn plan_sketches_are_in_the_kicad_frame_and_follow_the_loop() {
     let p = ctl.snapshot();
     assert!(sk.cycle >= 1 && sk.cycle <= p.loop_cycle.max(6), "plan sketch cycle {} (loop cycle {})", sk.cycle, p.loop_cycle);
 }
+
+/// User 2026-11-19 ("the run/round displayed goes back to 1 / 1 after a while"): with the TopoR
+/// loop the whole-route round is 1 for every run and the best's run flips between runs, so the
+/// dialog needs a count that never goes back: `cycles_total` grows by one per finished loop cycle
+/// of any run, the per-run pick cycles and the best's kind are reported.
+#[test]
+fn the_cycle_count_never_goes_back() {
+    let text = fixture_text(EPROM);
+    let m = BoardModel::from_json(&text).expect("fixture parses");
+    let o = opts();
+    let seen: Arc<std::sync::Mutex<Vec<u64>>> = Arc::default();
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let mut c2 = ctl.clone();
+    {
+        let (c3, s2) = (ctl.clone(), seen.clone());
+        c2.set_test_hook(move |_| {
+            s2.lock().expect("seen").push(c3.snapshot().cycles_total);
+            false
+        });
+    }
+    let _ = route_with(&m, &o, &c2);
+    let seen = seen.lock().expect("seen");
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "cycles_total went back");
+    let p = ctl.snapshot();
+    // two runs of six loop cycles each (headless: the cap), no cycle cut
+    assert!(p.cycles_total >= 2 && p.cycles_total <= 12, "cycles_total {}", p.cycles_total);
+    assert_eq!(p.pick_cycles.len(), 2, "pick cycles per run: {:?}", p.pick_cycles);
+    assert_eq!(p.best_kind, "copper", "after the drawing the best is drawn");
+}
