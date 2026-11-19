@@ -144,6 +144,13 @@ pub struct CycleStats {
     pub pat_found: usize,
     pub pat_moved: usize,
     pub pat_kept: usize,
+    /// Per kind ([`super::xrules::Kind::idx`]): patterns found, moves tried, moves kept.
+    pub pat_kinds: [[usize; 3]; 5],
+    /// `[optimize] pattern_share`: found patterns left for a later cycle (the work budget was
+    /// spent), the moves' measured work and the loop's other work (work units).
+    pub pat_waited: usize,
+    pub pat_work: f64,
+    pub pat_base: f64,
     /// Whole-board moves (floating up, crossing passes) undone because the board's evaluation
     /// rose ([`evaluation`]).
     pub undone: usize,
@@ -226,6 +233,14 @@ impl CycleStats {
         self.pat_found += o.pat_found;
         self.pat_moved += o.pat_moved;
         self.pat_kept += o.pat_kept;
+        for (a, b) in self.pat_kinds.iter_mut().zip(&o.pat_kinds) {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x += y;
+            }
+        }
+        self.pat_waited += o.pat_waited;
+        self.pat_work += o.pat_work;
+        self.pat_base += o.pat_base;
         self.undone += o.undone;
         self.busy_s += o.busy_s;
         self.pair_lifts += o.pair_lifts;

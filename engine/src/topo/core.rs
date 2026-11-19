@@ -4523,12 +4523,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         /// TW7 (docs/dev/design/tw7-moves.md): part B's pattern kinds that become targeted moves
         /// (empty = the batch crossing pass), whether net trees are free (their wires are not
         /// moved by the patterns), and part D's detour coefficient with its per-connection amounts
-        /// (refreshed at each cycle's start).
+        /// (refreshed at each cycle's start), and `[optimize] pattern_share`'s work budget with the
+        /// work counters' mark after the last pattern stage (None = before the first one).
         struct Tw7 {
             kinds: Vec<super::xrules::Kind>,
             tree_free: bool,
             detour_k: f64,
             detour_amt: Vec<f64>,
+            share: super::escape::Share,
+            mark: Option<(usize, usize, usize)>,
         }
         struct Tw5<'a, 'p> {
             /// (a) `[optimize] oscillation = "bounded"` and its amplitude bounds.
@@ -5579,6 +5582,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn cycle_body(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool, t0: Instant) -> CycleStats {
                 let mut plap = Instant::now();
                 let mut cs = CycleStats::default();
+                let k_cycle = self.work_mark();
                 if self.tw7.detour_k > 0.0 {
                     self.tw7.detour_amt = self.detour_amounts();
                 }
@@ -5817,26 +5821,50 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     // TW7 B (`[optimize] pattern_moves`): each found pattern is one targeted move,
                     // judged alone by the board's evaluation (Luzin 2015 p. 7; Luzin, Popov &
                     // Popov 2012 p. 118 «Устранение клинчей»), instead of the batch pass below.
+                    // `[optimize] pattern_share`: the loop's other work since the last pattern stage
+                    // earns the moves their budget; each move spends its measured work; the
+                    // candidates come most excess length first, the rest wait for a later cycle.
+                    let other = self.work_since(self.tw7.mark.unwrap_or(k_cycle));
+                    self.tw7.share.earn(other);
+                    cs.pat_base += other;
                     let found = self.pattern_cands();
                     cs.pat_found += found.len();
-                    for p in found {
+                    for p in &found {
+                        cs.pat_kinds[p.kind.idx()][0] += 1;
+                    }
+                    for (i, p) in found.iter().enumerate() {
                         if ripped >= self.max_ripped || stop() {
+                            break;
+                        }
+                        if !self.tw7.share.allows() {
+                            cs.pat_waited += found.len() - i;
                             break;
                         }
                         let live = |x: WireId| self.st.wires.get(x).is_some_and(|wi| wi.alive) && self.wire_conn.get(x).is_some_and(|&ci| ci != usize::MAX);
                         if !live(p.first) || !live(p.second) {
                             continue;
                         }
+                        let k0 = self.work_mark();
+                        let mut tries = 1usize;
                         cs.pat_moved += 1;
                         ripped += 2;
                         let mut kept = self.pattern_move(&[p.first, p.second], c.seed ^ 0x7E7E, c.amp, c.emphasis.via_at(1.0));
                         if !kept && p.kind == super::xrules::Kind::MutualEvasion && ripped < self.max_ripped && !stop() {
+                            tries += 1;
                             cs.pat_moved += 1;
                             ripped += 2;
                             kept = self.pattern_move(&[p.second, p.first], c.seed ^ 0x7E7F, c.amp, c.emphasis.via_at(1.0));
                         }
+                        // Its work: the counted layering and measuring, at least one unit per try
+                        // (a try whose placing failed still searched).
+                        let w = self.work_since(k0).max(tries as f64);
+                        self.tw7.share.spend(w);
+                        cs.pat_work += w;
+                        cs.pat_kinds[p.kind.idx()][1] += tries;
+                        cs.pat_kinds[p.kind.idx()][2] += usize::from(kept);
                         cs.pat_kept += usize::from(kept);
                     }
+                    self.tw7.mark = Some(self.work_mark());
                 } else {
                 let x0 = (self.xkept)();
                 self.resync();
@@ -6049,6 +6077,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 tree_free,
                 detour_k: opts.detour_k.max(0.0),
                 detour_amt: Vec::new(),
+                share: super::escape::Share::new(opts.pattern_share),
+                mark: None,
             },
             pre: pre_loop.clone(),
         };
@@ -6397,6 +6427,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "via_rose": [rep.stats.relaid_kept, rep.stats.relaid],
             "floating_up": rep.stats.float_kept,
             "pattern_moves": [rep.stats.pat_kept, rep.stats.pat_moved, rep.stats.pat_found],
+            "pattern_kinds": super::xrules::Kind::ALL.iter().map(|k| (k.name().to_string(), serde_json::json!(rep.stats.pat_kinds[k.idx()]))).collect::<serde_json::Map<_, _>>(),
+            "pattern_share": {
+                "share": opts.pattern_share,
+                "waited": rep.stats.pat_waited,
+                "work": (rep.stats.pat_work * 1e3).round() / 1e3,
+                "other_work": (rep.stats.pat_base * 1e3).round() / 1e3,
+                "measured": if rep.stats.pat_work + rep.stats.pat_base > 0.0 { (1e4 * rep.stats.pat_work / (rep.stats.pat_work + rep.stats.pat_base)).round() / 1e4 } else { 0.0 },
+            },
             "crossing_passes": rep.stats.cross_kept,
             "undone": rep.stats.undone,
             "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
@@ -6415,7 +6453,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             },
         }));
         if !opts.pattern_moves.is_empty() {
-            warnings.push(pattern_moves_line(&opts.pattern_moves, &rep.stats));
+            warnings.push(pattern_moves_line(&opts.pattern_moves, super::escape::Share::new(opts.pattern_share).share, &rep.stats));
         }
         if opts.via_pair_min {
             warnings.push(format!(
@@ -9200,15 +9238,35 @@ fn patdbg(model: &BoardModel, st: &State, unlayerable: &[(WireId, WireId)], seed
 }
 
 /// TW7 B: the run report line of `[optimize] pattern_moves` (and its entries no kind matches).
-fn pattern_moves_line(kinds: &[String], st: &super::optimise::CycleStats) -> String {
-    let bad: Vec<&str> = kinds.iter().map(String::as_str).filter(|k| super::xrules::Kind::parse(k).is_none()).collect();
+fn pattern_moves_line(kinds: &[String], share: f64, st: &super::optimise::CycleStats) -> String {
+    use super::xrules::Kind;
+    let bad: Vec<&str> = kinds.iter().map(String::as_str).filter(|k| Kind::parse(k).is_none()).collect();
+    let per: Vec<String> = Kind::ALL
+        .iter()
+        .filter(|k| kinds.iter().any(|x| x == k.name()))
+        .map(|k| {
+            let c = st.pat_kinds[k.idx()];
+            format!("{} {}/{} kept, {} found", k.name(), c[2], c[1], c[0])
+        })
+        .collect();
     let mut s = format!(
-        "TopoR loop, pattern moves ([optimize] pattern_moves = {}; Luzin 2015 p. 7, Luzin, Popov & Popov 2012 p. 118): {} of {} moves kept ({} patterns found; each pattern's wires laid again in the rule's order, kept when the board's evaluation dropped; the batch crossing pass is off in the loop)",
+        "TopoR loop, pattern moves ([optimize] pattern_moves = {}; Luzin 2015 p. 7, Luzin, Popov & Popov 2012 p. 118): {} of {} moves kept ({} patterns found; {}; each pattern's wires laid again in the rule's order, kept when the board's evaluation dropped; the batch crossing pass is off in the loop)",
         kinds.join(", "),
         st.pat_kept,
         st.pat_moved,
-        st.pat_found
+        st.pat_found,
+        if per.is_empty() { "no known kind".to_string() } else { per.join("; ") }
     );
+    let tot = st.pat_work + st.pat_base;
+    let measured = if tot > 0.0 { 100.0 * st.pat_work / tot } else { 0.0 };
+    if share < 1.0 {
+        s.push_str(&format!(
+            "; work budget [optimize] pattern_share = {share}: the moves took {measured:.1} % of the loop's work, {} found pattern(s) waited for a later cycle",
+            st.pat_waited
+        ));
+    } else {
+        s.push_str(&format!("; no work budget ([optimize] pattern_share = 1): the moves took {measured:.1} % of the loop's work"));
+    }
     if !bad.is_empty() {
         s.push_str(&format!("; unknown entries ignored: {} (known: clinch, double, unlayerable, u_clinch, evasion)", bad.join(", ")));
     }
@@ -9217,6 +9275,26 @@ fn pattern_moves_line(kinds: &[String], st: &super::optimise::CycleStats) -> Str
 
 #[cfg(test)]
 mod tests {
+    /// TW7 B: the pattern moves' report line, per kind, with and without the work budget, with
+    /// unknown entries and with no known kind.
+    #[test]
+    fn the_pattern_moves_line_is_true_for_every_case() {
+        let mut st = super::super::optimise::CycleStats { pat_found: 9, pat_moved: 5, pat_kept: 2, pat_waited: 4, pat_work: 25.0, pat_base: 75.0, ..Default::default() };
+        st.pat_kinds[super::super::xrules::Kind::UClinch.idx()] = [6, 3, 1];
+        st.pat_kinds[super::super::xrules::Kind::MutualEvasion.idx()] = [3, 2, 1];
+        let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let a = super::pattern_moves_line(&k(&["u_clinch", "evasion"]), 0.25, &st);
+        assert!(a.contains("2 of 5 moves kept (9 patterns found; u_clinch 1/3 kept, 6 found; evasion 1/2 kept, 3 found;"), "{a}");
+        assert!(a.contains("pattern_share = 0.25: the moves took 25.0 % of the loop's work, 4 found pattern(s) waited"), "{a}");
+        assert!(!a.contains("unknown") && !a.contains("no work budget"), "{a}");
+        let b = super::pattern_moves_line(&k(&["u_clinch", "bogus"]), 1.0, &st);
+        assert!(b.contains("u_clinch 1/3 kept, 6 found;") && !b.contains("evasion 1/2"), "{b}");
+        assert!(b.contains("no work budget ([optimize] pattern_share = 1): the moves took 25.0 %"), "{b}");
+        assert!(b.ends_with("unknown entries ignored: bogus (known: clinch, double, unlayerable, u_clinch, evasion)"), "{b}");
+        let c = super::pattern_moves_line(&k(&["bogus"]), 1.0, &super::super::optimise::CycleStats::default());
+        assert!(c.contains("0 of 0 moves kept (0 patterns found; no known kind;") && c.contains("took 0.0 %"), "{c}");
+    }
+
     /// TW5 (f): the in-loop P4 cap keeps the heaviest victims, then the routed-last ones, then by id;
     /// below the cap it keeps them all.
     #[test]

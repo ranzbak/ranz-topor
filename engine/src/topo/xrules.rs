@@ -63,9 +63,15 @@ impl Kind {
             Kind::MutualEvasion => "evasion",
         }
     }
+    /// Every kind, in [`Kind::idx`] order.
+    pub const ALL: [Kind; 5] = [Kind::TerminalClinch, Kind::DoubleCrossing, Kind::Unlayerable, Kind::UClinch, Kind::MutualEvasion];
     /// The kind of a `[optimize] pattern_moves` entry.
     pub fn parse(s: &str) -> Option<Kind> {
-        [Kind::TerminalClinch, Kind::DoubleCrossing, Kind::Unlayerable, Kind::UClinch, Kind::MutualEvasion].into_iter().find(|k| k.name() == s)
+        Kind::ALL.into_iter().find(|k| k.name() == s)
+    }
+    /// The kind's index in [`Kind::ALL`] (the per-kind counters).
+    pub fn idx(self) -> usize {
+        self as usize
     }
 }
 

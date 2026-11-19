@@ -188,3 +188,24 @@ Results (tw7ab-b8c8b4e6, shared ccx43 at about 100 % load, so equal-time numbers
   | ux (pre-loop passes off) | 651/51/279/75 | worse (825) | | |
 
   ud is the best of the four. Not judged per connection yet. Defaults stay off.
+
+## 11. Work round 3: the pattern moves' work share (lead brief 2026-11-19)
+What: `[optimize] pattern_share` (float, (0.01, 1], default 1 = no budget, as round 1) bounds the work of the
+loop's pattern moves (part B) like TW5's escape throttle (`escape::Throttle`), as a graded budget, not a cutoff:
+`escape::Share`. At each stage 4 the loop's other work since the last stage 4 (the work units of `work_since`:
+locally layered and measured wires, `kappa` per wire of a global layering; never the clock) earns the moves a
+credit of `O x s / (1 - s)`; each move spends its measured work (at least one unit per try: a try whose placing
+failed still searched). The candidates run in the graded order of `pattern_cands` (most excess length first)
+while the credit is positive; the rest wait for a later cycle (counted, `waited`). A move that overdraws is paid
+back from the next cycles' work, so over a run the moves take about the share `s` (unit test
+`the_pattern_share_keeps_its_share_and_is_graded`: within 2 %), a cycle with little other work runs fewer.
+Why: round 1's moves kept 3-5 % of their tries but halved the cycles in equal time (esp 17-22 -> 8-9).
+Literature: Luzin 2015 p. 7 (patterns are cheap to find, so the moves should go where they gain); the share
+mirrors the escape share of TW5 (Polubasov 2010: escapes as a bounded part of the loop).
+Counters: per kind found / tried / kept (`CycleStats::pat_kinds`, JSON `loop.pattern_kinds`, the report line),
+`loop.pattern_share` = {share, waited, work, other_work, measured}. Invariants: share 1 = round-1 copper (the
+budget is never read); off (`pattern_moves = []`) = main copper (stage 4 branch not entered). Tests:
+topo_tw7_patterns `pattern_share_bounds_the_moves_graded` (y 12.4, every move undone: low share runs fewer,
+waits, graded, overdraw at most one move, copper unchanged), `pattern_share_still_takes_the_best_move`;
+lib `the_pattern_moves_line_is_true_for_every_case`. Default: after the equal-time A/B (u / ud / ud + share on
+ccx33 timing slots, esp s0-7 + qmtech s0).

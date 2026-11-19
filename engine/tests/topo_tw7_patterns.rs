@@ -289,3 +289,63 @@ fn u_clinch_moves_that_do_not_gain_are_undone() {
     assert!(pm[1].as_u64().unwrap() > 0 && pm[0].as_u64().unwrap() == 0, "tried, none kept: {pm}");
     assert_eq!(format!("{:?}", r.items), format!("{:?}", r0.items), "undone moves leave the copper as without them");
 }
+
+/// The loop's `plan metrics` block "loop".
+fn loop_json(m: &BoardModel, o: &Options) -> serde_json::Value {
+    let r = route_with(m, o, &RunControl::new());
+    let line = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics");
+    let v: serde_json::Value = serde_json::from_str(line.trim_start_matches("plan metrics:").trim()).expect("JSON");
+    v["loop"].clone()
+}
+
+/// Part B, `[optimize] pattern_share` (docs/dev/design/tw7-moves.md §11): a graded work budget.
+/// At y 12.4 every U-clinch move is tried and undone, so the budget alone decides how many run:
+/// without a budget one per cycle and none waits; a small share runs fewer, the found rest waits;
+/// a larger share runs at least as many as a smaller one (graded, no cutoff); the measured share
+/// stays near the asked one (one move of overdraw at most). The per-kind counters add up to the
+/// totals, and the copper stays as without moves (every move undone exactly).
+#[test]
+fn pattern_share_bounds_the_moves_graded() {
+    let m = u_clinch_at(12.4);
+    let r0 = route_with(&m, &opts(&[], 0), &RunControl::new());
+    let run = |share: f64| {
+        let o = Options { pattern_share: share, ..opts(&["u_clinch"], 0) };
+        let r = route_with(&m, &o, &RunControl::new());
+        assert_eq!(format!("{:?}", r.items), format!("{:?}", r0.items), "share {share}: undone moves leave the copper");
+        loop_json(&m, &o)
+    };
+    let all = run(1.0);
+    let pm = |j: &serde_json::Value, i: usize| j["pattern_moves"][i].as_u64().unwrap();
+    let uc = |j: &serde_json::Value, i: usize| j["pattern_kinds"]["u_clinch"][i].as_u64().unwrap();
+    assert!(pm(&all, 1) >= 3, "one move per cycle: {}", all["pattern_moves"]);
+    assert_eq!(all["pattern_share"]["waited"], 0, "no budget: nothing waits");
+    for j in [&all] {
+        assert_eq!((uc(j, 2), uc(j, 1), uc(j, 0)), (pm(j, 0), pm(j, 1), pm(j, 2)), "per kind = totals (one kind on)");
+        assert_eq!(j["pattern_kinds"]["clinch"], serde_json::json!([0, 0, 0]));
+    }
+    let low = run(0.02);
+    let mid = run(0.3);
+    assert!(pm(&low, 1) >= 1, "the first move runs on the first cycle's other work");
+    assert!(pm(&low, 1) < pm(&all, 1), "a small share runs fewer moves: {} vs {}", low["pattern_moves"], all["pattern_moves"]);
+    assert!(low["pattern_share"]["waited"].as_u64().unwrap() > 0, "the found rest waits: {}", low["pattern_share"]);
+    assert!(pm(&mid, 1) >= pm(&low, 1) && pm(&mid, 1) <= pm(&all, 1), "graded: {} {} {}", low["pattern_moves"], mid["pattern_moves"], all["pattern_moves"]);
+    let meas = |j: &serde_json::Value| j["pattern_share"]["measured"].as_f64().unwrap();
+    assert!(meas(&low) < meas(&all), "{} vs {}", low["pattern_share"], all["pattern_share"]);
+    let w = |j: &serde_json::Value, k: &str| j["pattern_share"][k].as_f64().unwrap();
+    let per_move = w(&low, "work") / pm(&low, 1) as f64;
+    assert!(w(&low, "work") <= 0.02 / 0.98 * w(&low, "other_work") + per_move + 1e-6, "at most one move of overdraw: {}", low["pattern_share"]);
+    assert_eq!(low["pattern_share"]["share"], 0.02);
+}
+
+/// Part B with a budget: the first found pattern still runs, so the careless U-clinch is left
+/// at a small share too (N straight, no via); the report line names the budget.
+#[test]
+fn pattern_share_still_takes_the_best_move() {
+    let m = u_clinch_board();
+    let o = Options { pattern_share: 0.05, ..opts(&["u_clinch", "evasion"], 0) };
+    let r = route_with(&m, &o, &RunControl::new());
+    assert_eq!(r.failed, 0, "{:?}", r.warnings);
+    assert_eq!(vias(&r.items), 0);
+    assert!(net_len(&r.items, 1) < 4.5, "N {}", net_len(&r.items, 1));
+    assert!(r.warnings.iter().any(|w| w.contains("pattern_share = 0.05: the moves took")), "{:?}", r.warnings);
+}

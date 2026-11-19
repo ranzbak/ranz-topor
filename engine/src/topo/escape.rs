@@ -112,6 +112,65 @@ impl Throttle {
     }
 }
 
+/// TW7 B (`[optimize] pattern_share`, docs/dev/design/tw7-moves.md §11): the graded work budget of
+/// the loop's pattern moves, in the work units of [`Throttle`] (deterministic: never the clock).
+/// The loop's other work `O` earns the moves a credit of `O x s / (1 - s)`; each move spends its
+/// measured work. Moves run while the credit is positive, the most excess length first, so a
+/// move that overdraws is paid back from the next cycles' work (no cutoff: over a run the moves
+/// take about the share `s` of the work, a cycle with little other work runs fewer of them).
+/// `s >= 1` = no budget (every candidate, up to the loop's rip-up limit). O(1) per call.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Share {
+    pub share: f64,
+    pub credit: f64,
+    /// The moves' work and the loop's other work so far (the measured share).
+    pub spent: f64,
+    pub base: f64,
+    pub moves: usize,
+}
+
+impl Share {
+    /// A budget at share `share` (clamped to [0.01, 1]; not finite = 1).
+    pub fn new(share: f64) -> Share {
+        let share = if share.is_finite() { share.clamp(0.01, 1.0) } else { 1.0 };
+        Share { share, credit: 0.0, spent: 0.0, base: 0.0, moves: 0 }
+    }
+    /// Whether the budget is off (`share >= 1`).
+    pub fn unbounded(&self) -> bool {
+        self.share >= 1.0
+    }
+    /// The loop's other work of `units` since the last call.
+    pub fn earn(&mut self, units: f64) {
+        let u = if units.is_finite() { units.max(0.0) } else { 0.0 };
+        self.base += u;
+        if !self.unbounded() {
+            self.credit += u * self.share / (1.0 - self.share);
+        }
+    }
+    /// Whether the next move may run.
+    pub fn allows(&self) -> bool {
+        self.unbounded() || self.credit > 0.0
+    }
+    /// A move of measured work `w` ran.
+    pub fn spend(&mut self, w: f64) {
+        let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
+        self.moves += 1;
+        self.spent += w;
+        if !self.unbounded() {
+            self.credit -= w;
+        }
+    }
+    /// The moves' share of all work so far (0 without work).
+    pub fn measured_share(&self) -> f64 {
+        let t = self.spent + self.base;
+        if t > 0.0 {
+            self.spent / t
+        } else {
+            0.0
+        }
+    }
+}
+
 /// The loop's history of over-full edges (TW5 c): per edge `h <- fade x h + (1 + d) / (2 + d)`
 /// in every update in which the edge is over-full by the graded depth `d >= 0` (a just over-full
 /// edge adds 1/2, a deeply over-full one almost 1), `h <- fade x h` otherwise. With `fade < 1` it
@@ -238,6 +297,55 @@ mod tests {
         assert_eq!(t.share, 0.5, "never above half (not sooner than its own last duration)");
         t.add(10.0);
         assert!(t.due(), "at 0.5 one escape's work of re-lays makes the next due");
+    }
+
+    #[test]
+    fn the_pattern_share_keeps_its_share_and_is_graded() {
+        // Moves of random work against random other work: over a run the moves take about the
+        // share, never much more (an overdraw is paid back), and a larger share runs more moves.
+        let mut last_moves = 0usize;
+        for &share in &[0.05, 0.15, 0.3, 0.6] {
+            let mut b = Share::new(share);
+            let mut s = 7u64;
+            let mut rnd = |m: u64| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((s >> 33) % m) as f64
+            };
+            for _ in 0..5_000 {
+                b.earn(rnd(40));
+                for _ in 0..8 {
+                    if !b.allows() {
+                        break;
+                    }
+                    let w = 1.0 + rnd(30);
+                    b.spend(w);
+                }
+            }
+            let m = b.measured_share();
+            assert!(m <= share * 1.02 + 1e-3, "{share}: measured {m}");
+            assert!(m >= 0.9 * share.min(8.0 * 15.5 / (8.0 * 15.5 + 19.5)), "{share}: measured {m} (moves run while allowed)");
+            assert!(b.moves > last_moves, "graded: share {share} runs more moves ({} after {last_moves})", b.moves);
+            last_moves = b.moves;
+        }
+        // No credit before any other work; one unit of work at share 0.5 allows one move.
+        let mut b = Share::new(0.5);
+        assert!(!b.allows());
+        b.earn(1.0);
+        assert!(b.allows());
+        b.spend(3.0);
+        assert!(!b.allows(), "an overdraw waits for the next work");
+        b.earn(1.9);
+        assert!(!b.allows());
+        b.earn(0.2);
+        assert!(b.allows(), "paid back: the moves may run again");
+        // share >= 1 (and not finite) = no budget.
+        for x in [1.0, 3.0, f64::NAN] {
+            let mut u = Share::new(x);
+            assert!(u.unbounded() && u.allows());
+            u.spend(1e9);
+            assert!(u.allows());
+        }
+        assert_eq!(Share::new(0.0).share, 0.01);
     }
 
     #[test]
