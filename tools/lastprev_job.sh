@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lastprev_job.sh (branch last-preview, docs/dev/design/last-preview.md): VM runs of the branch.
 #   lastprev_job.sh merge   off copper K on eprom/wiccon/esp/qmtech (the config of tw4r2_job.sh one K incl. TOPOR_UNRELEASED_SETTINGS=1, compared with
-#                           copper_hash --cmp-run against main's run), preview_cost on esp (3 reps on/off, 8 threads),
+#                           copper_hash --cmp-run against main's run), preview_cost on esp (3 reps on/off, 4 threads),
 #                           clippy --release --all-targets, the whole release suite, pytest (CI=1)
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
@@ -19,7 +19,7 @@ case ${1:-} in
   one) one "$2" ;;
   merge)
     ( hzq run --threads 4 --name lp-off -- bash -c "for b in qmtech esp wiccon eprom; do bash $ROOT/tools/lastprev_job.sh one \$b & done; wait" > $R/u-off.log 2>&1; note "unit off rc $?" ) &
-    ( hzq run --threads 8 --name lp-cost -- python -m harness.preview_cost $E $R/cost --reps 3 > $R/cost.log 2>&1 9>&-; note "unit cost rc $?" ) &
+    ( hzq run --threads 4 --name lp-cost -- python -m harness.preview_cost $E $R/cost --reps 3 > $R/cost.log 2>&1 9>&-; note "unit cost rc $?" ) &
     ( hzq run --threads 4 --name lp-suite -- bash -c "cargo clippy --release --all-targets > $R/clippy.log 2>&1; echo clippy rc \$? >> $R/rc.txt; cd $ROOT/engine && cargo test --release --no-fail-fast" > $R/suite.log 2>&1 9>&-; note "unit suite rc $?" ) &
     ( hzq run --threads 4 --name lp-pytest -- bash -c "cd $ROOT && CI=1 python -m pytest -q -p no:cacheprovider" > $R/pytest.log 2>&1 9>&-; note "unit pytest rc $?" ) &
     wait; note "all done" ;;
