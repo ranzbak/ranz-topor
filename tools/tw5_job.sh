@@ -207,9 +207,9 @@ case ${1:-} in
     note "all done" ;;
   mutfw)
     I=$ROOT/engine/src/topo/init.rs
-    sub 'cross += wt.cross_mm * f' 'cross += wt.cross_mm' | mut f1_share $I --test loop_local a_wire_that_crosses_nothing
-    sub 'if self.free_now.get(w).copied().unwrap_or(false) {' 'if false {' | mut f2_free_held $I --test loop_local a_wire_that_crosses_nothing
-    sub 'self.cross_k = (0..self.wires.len()).map(|w| a + (1.0 - a) * k(w) as f64 / (1.0 + k(w) as f64)).collect();' 'self.cross_k = (0..self.wires.len()).map(|_| a).collect();' | mut f3_graded $I --test loop_local a_wire_that_crosses_nothing ;;
+    sub 'cross += wt.cross_mm * f' 'cross += wt.cross_mm' | mut f1_share $I --test loop_local -- free_wire_cross_reaches a_wire_that_crosses_nothing
+    sub 'if self.free_now.get(w).copied().unwrap_or(false) {' 'if false {' | mut f2_free_held $I --test loop_local -- free_wire_cross_reaches a_wire_that_crosses_nothing
+    sub 'self.cross_k = (0..self.wires.len()).map(|w| a + (1.0 - a) * k(w) as f64 / (1.0 + k(w) as f64)).collect();' 'self.cross_k = (0..self.wires.len()).map(|_| a).collect();' | mut f3_graded $I --test loop_local -- free_wire_cross_reaches a_wire_that_crosses_nothing ;;
   r7)
     # Round 7 (TW5 default off, main 1503c13b merged, inner_layer_room declares In2.Cu power): the fit fixtures
     # regenerated (In1 routed) into the tree, then the merge trial; qmtech 16 cycles single-part ablations for the

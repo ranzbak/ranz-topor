@@ -712,36 +712,74 @@ fn the_layering_walk_moves_to_other_layerings_per_seed() {
 
 /// TW5 (4), Polubasov 2010 fig. 10 (p. 108): W1 (THT, horizontal) crosses W2 (THT, vertical) and
 /// W3 (SMD pads on F.Cu, vertical). The optimum is all three straight with 0 vias: W3 on F.Cu,
-/// W1 on B.Cu, W2 on F.Cu (25 mm). A wire that crosses nothing is drawn on the bottom layer and,
-/// with `free_wire_cross` = 1 (default), a crossing with it is priced as if it were held there, so
-/// a re-lay detours round it instead of crossing it (the paper's local minimum, fig. 10a). With
-/// `free_wire_cross` < 1 the crossing is priced by its freedom (no via; a share of the crossing
-/// price), and the loop reaches the optimum. Each seed of 0..4 at 0, the default reported.
-#[test]
-fn a_wire_that_crosses_nothing_is_crossed_at_its_freedom() {
+/// W1 on B.Cu, W2 on F.Cu (25 mm).
+fn fig10() -> (BoardModel, &'static Board) {
     let pads = [
         ("J1", 1, 2.0, 5.5, 1.2, 1.2, 99), ("J2", 1, 12.0, 5.5, 1.2, 1.2, 99),
         ("J3", 2, 5.0, 2.0, 1.2, 1.2, 99), ("J4", 2, 5.0, 9.0, 1.2, 1.2, 99),
         ("U1", 3, 8.5, 1.5, 0.8, 0.8, 0), ("U2", 3, 8.5, 9.5, 0.8, 0.8, 0),
     ];
     let m = board_layers(14.0, 11.0, 3, &pads, 2);
+    let b = board::build(&m, &BuildOpts { existing_vias: true, keepouts: true, copper_shapes: true, ..BuildOpts::default() }).unwrap();
+    (m, Box::leak(Box::new(b)))
+}
+
+/// TW5 (4) at the search: W2 and W3 laid, neither crosses anything, so the loop's layering draws
+/// both on the bottom layer (W3 held to F.Cu by its pads). W1 must cross W3 on B.Cu. With
+/// `free_wire_cross` = 1 (default) W2 counts as held to B.Cu, so crossing it implies a via pair and
+/// W1 goes round W2's end; with a = 0 W2 counts on every layer its own stretch allows (THT ends:
+/// both), crossing it is free of vias and of the crossing price (k = 0), and W1 crosses it straight.
+/// The crossing price at the loop's level (crossing factor x loop share 0.25 = 5 mm).
+#[test]
+fn a_wire_that_crosses_nothing_is_crossed_at_its_freedom() {
+    let (m, b) = fig10();
+    let mut wt = InitWeights::default();
+    wt.cross_mm = 5.0;
+    let lay = |a: f64| {
+        let mut st = State::new(&b.proj);
+        let (w2, _) = st.route_conn(&conn(&m, b, 2, "J3", "J4"), &wt, 1.0).expect("W2");
+        st.route_conn(&conn(&m, b, 3, "U1", "U2"), &wt, 1.0).expect("W3");
+        st.cross_vias = true;
+        let none: Vec<Vec<(usize, f64, i32)>> = vec![Vec::new(); st.wires.len()];
+        st.layers_now = topor_engine::topo::optimise::layers_now(&st, &none, 1);
+        st.free_wire_a = a;
+        st.mark_free_wires(&none);
+        let (w1, _) = st.route_conn(&conn(&m, b, 1, "J1", "J2"), &wt, 1.0).expect("W1");
+        let over_w2 = st.crossings(w1).iter().filter(|x| x.other == w2).count();
+        let len: f64 = st.taut_points(w1).windows(2).map(|p| (p[1] - p[0]).len()).sum::<f64>() / MM;
+        (over_w2, len)
+    };
+    let (d, f, h) = (lay(1.0), lay(0.0), lay(0.5));
+    eprintln!("free_wire_cross 1: W1 crosses W2 {} times, {:.2} mm; 0: {} times, {:.2} mm; 0.5: {} times, {:.2} mm", d.0, d.1, f.0, f.1, h.0, h.1);
+    assert_eq!(d.0, 0, "default: the crossing-free W2 counts as held to B.Cu, W1 goes round it ({:.2} mm)", d.1);
+    assert_eq!(f.0, 1, "a = 0: W1 crosses the free W2 ({:.2} mm)", f.1);
+    assert!(f.1 < d.1 - 1.0 && f.1 <= 10.0 * 1.05, "a = 0: W1 straight ({:.2} mm) vs round ({:.2} mm)", f.1, d.1);
+}
+
+/// TW5 (4) routed, the fig. 10 board: with `free_wire_cross` = 0 some seed of 0..8 reaches the
+/// optimum (0 vias, all straight); the default's seeds are reported (the D8 proposal of the
+/// paper's board measures both: 7 of 10 seeds with a = 0, 0 of 11 with a = 1).
+#[test]
+fn free_wire_cross_reaches_the_fig10_optimum_for_some_seed() {
+    let (m, _) = fig10();
     let run = |extra: &str| {
-        let o = loop_opts(&format!(r#""topo_rounds": 8, {extra}"#));
+        let o = loop_opts(&format!(r#""topo_rounds": 16, {extra}"#));
         let ctl = RunControl::new();
         ctl.limit.init(o.wall_clock_s);
         let r = route_with(&m, &o, &ctl);
         let len: f64 = r.connections.iter().map(|c| c.length_nm as f64 / 1e6).sum();
         let vias: usize = r.connections.iter().map(|c| c.vias).sum();
         let routed = r.connections.iter().filter(|c| c.status == "routed").count();
-        let lay: Vec<String> = r.connections.iter().map(|c| format!("{} {}", c.name, c.layers.join("/"))).collect();
-        (len, vias, routed, lay.join("; "))
+        (len, vias, routed)
     };
-    let d = run(r#""seed": 3"#);
-    eprintln!("default: {:.2} mm, {} vias, {} routed: {}", d.0, d.1, d.2, d.3);
-    for seed in 0..4 {
-        let f = run(&format!(r#""seed": {seed}, "free_wire_cross": 0.0"#));
-        eprintln!("free_wire_cross 0, seed {seed}: {:.2} mm, {} vias, {} routed: {}", f.0, f.1, f.2, f.3);
-        assert_eq!((f.1, f.2), (0, 3), "seed {seed}: 0 vias, 3 routed: {}", f.3);
-        assert!(f.0 <= 25.0 * 1.05, "seed {seed}: {:.2} mm > 1.05 x 25 mm (all straight): {}", f.0, f.3);
+    let (mut hit_f, mut hit_d) = (0, 0);
+    for seed in 0..8 {
+        let (d, f) = (run(&format!(r#""seed": {seed}"#)), run(&format!(r#""seed": {seed}, "free_wire_cross": 0.0"#)));
+        eprintln!("seed {seed}: default {:.2} mm {} vias {} routed; a = 0 {:.2} mm {} vias {} routed", d.0, d.1, d.2, f.0, f.1, f.2);
+        let opt = |x: (f64, usize, usize)| x.1 == 0 && x.2 == 3 && x.0 <= 25.0 * 1.05;
+        hit_d += usize::from(opt(d));
+        hit_f += usize::from(opt(f));
     }
+    eprintln!("optimum reached: default {hit_d} of 8, free_wire_cross 0 {hit_f} of 8");
+    assert!(hit_f > 0, "free_wire_cross 0: no seed of 8 reaches the optimum (default {hit_d})");
 }
