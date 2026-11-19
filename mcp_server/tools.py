@@ -420,23 +420,57 @@ def _drc_full(run_id: str, timeout_s: float = 600.0) -> dict:
                         "routed_copy_differs": differ}}
 
 
+SEVERITIES = ("error", "warning")  # kicad-cli DRC JSON severities (exclusions are not reported)
+
+
+def _severities(severities) -> tuple:
+    """The severities a spot list keeps: default errors only (fewer rows to go through); ["error", "warning"] (or
+    "errors" / "warnings") brings warnings back."""
+    if severities is None:
+        return ("error",)
+    vals = [severities] if isinstance(severities, str) else list(severities)
+    out = tuple(sorted({str(v).strip().lower().removesuffix("s") for v in vals}))
+    bad = [v for v in out if v not in SEVERITIES]
+    if bad or not out:
+        raise ToolError(f"severities must be a non-empty subset of {list(SEVERITIES)}, not {severities!r}")
+    return out
+
+
+def _sev_counts(rows: list, key: str = "sev") -> dict:
+    c = defaultdict(int)
+    for r in rows:
+        c[str(r.get(key) or "")] += 1
+    return {k: c.get(k, 0) for k in SEVERITIES} | {k: v for k, v in c.items() if k not in SEVERITIES}
+
+
+def _sev_line(counts: dict, sev: tuple) -> str:
+    shown = " + ".join(f"{v}s" for v in sev)
+    return (f"ours: {counts.get('error', 0)} errors, {counts.get('warning', 0)} warnings; listed: {shown}"
+            + ("" if "warning" in sev else " (severities=['error', 'warning'] lists warnings too)"))
+
+
 def _write(path: Path, obj) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=1, default=str))
     return str(path)
 
 
-def drc(run_id: str, limit: int = ROWS_MAX, timeout_s: float = 600.0) -> dict:
-    """kicad-cli DRC of the run's routed copy as a DELTA vs its unrouted input, with the project provably used."""
+def drc(run_id: str, limit: int = ROWS_MAX, timeout_s: float = 600.0, severities=None) -> dict:
+    """kicad-cli DRC of the run's routed copy as a DELTA vs its unrouted input, with the project provably used.
+    `rows` (the spot list) holds the `severities` rows only (default errors); counts cover both severities."""
+    sev = _severities(severities)
     full = _drc_full(run_id, timeout_s)
     idx = full["index"]
     path = _write(Path(full["info"]["out_dir"]) / "mcp" / "drc-index.json",
                   {k: v for k, v in full.items() if k not in ("info", "result", "input", "routed")}
                   | {"input_json": full["input"]["json"], "routed_json": full["routed"]["json"]})
-    rows = idx["rows"]
+    counts = _sev_counts(idx["rows"])
+    rows = [r for r in idx["rows"] if r["sev"] in sev]
     return {"run_id": run_id, "rules": full["project"]["proof_routed"]["rules"]["verdict"],
             "project_used": full["project"]["proof_routed"]["project_used"], "project": full["project"],
-            "by_class": idx["by_class"], "ours_total": len(rows), "other_new": idx["other_new"],
+            "summary": _sev_line(counts, sev), "severities": list(sev), "ours_by_severity": counts,
+            "by_class": idx["by_class"], "ours_total": len(idx["rows"]), "rows_listed": len(rows),
+            "other_new": idx["other_new"],
             "ours_items": idx["ours_items"], "unconnected_totals": idx["unconnected_totals"],
             "unconnected": {n: v for n, v in idx["unconnected"].items() if v["routed"] != v["input"]},
             "rows": rows[:max(0, int(limit))], "rows_truncated": max(0, len(rows) - max(0, int(limit))),
@@ -505,19 +539,25 @@ def _gui_for_run(info: dict, idle_s: float | None = None):
 
 
 def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: float = 20.0,
-              keep_session: bool = True, drc_timeout_s: float = 600.0) -> dict:
+              keep_session: bool = True, drc_timeout_s: float = 600.0, severities=None) -> dict:
     """KiCad's own DRC dialog in the run's ONE Xephyr session: DRC run once (per board state), then every wanted
     index row (all, or class `cls`; `per_class` > 0 caps each class, shorts/crossings always kept) is selected as a
     user does, in list order, and the dialog + the board view at the marker are kept. A failed row is reported in
     its record and the walk goes on in the same session. match = the GUI row has the same text and items and the
     selection landed on it; focus_mm = the board point KiCad centred (its marker), focus_d_mm = its distance from the
-    row's nearest track / via (else the items' mean position); match also needs focus_d_mm <= FOCUS_TOL_MM."""
+    row's nearest track / via (else the items' mean position); match also needs focus_d_mm <= FOCUS_TOL_MM.
+    `severities` (default errors only): the dialog's severity filter is set to these before the walk (Warnings
+    unticked by default) and only rows of these severities are wanted; the summary counts both."""
     from . import drc as D
     from . import kicad_gui as G
+    sev = _severities(severities)
     full = _drc_full(run_id)
-    rows = full["index"]["rows"]
+    counts = _sev_counts(full["index"]["rows"])
+    rows = [r for r in full["index"]["rows"] if r["sev"] in sev]
     if not rows:
-        return {"run_id": run_id, "records": [], "note": "no violation of ours: nothing to show"}
+        return {"run_id": run_id, "records": [], "summary": _sev_line(counts, sev), "severities": list(sev),
+                "ours_by_severity": counts,
+                "note": f"no {' / '.join(sev)} violation of ours: nothing to show"}
     want = _wanted_rows(rows, cls, per_class)
     geom = D.board_items(_boards(full["info"])[1].read_text())  # the routed copy's tracks / vias, for focus_d_mm
     out = Path(full["info"]["out_dir"]) / "mcp"
@@ -541,6 +581,8 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
             else:
                 tabs = None
                 s.step("drc reused", f"{len(s.drc_rows)} rows of board state {s.board_state!r}")
+            if s.drc_severities != sev:
+                s.drc_filter(sev)  # Warnings unticked by default: the dialog lists (and the walk visits) fewer rows
             gui = s.drc_rows
             free = defaultdict(list)
             for g in gui:
@@ -589,8 +631,11 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
                         break
                 recs.append(rec)
                 s.step("spot", f"{r['id']} row {k} match {rec.get('match')}")
-            cli_n = len(full["routed"]["doc"].get("violations") or [])
+            cli_all = full["routed"]["doc"].get("violations") or []
+            cli_n = sum(1 for v in cli_all if v.get("severity") in sev)
             summary = {"run_id": run_id, "class": cls, "board_state": s.board_state, "gui_tabs": tabs,
+                       "summary": _sev_line(counts, sev), "severities": list(sev), "ours_by_severity": counts,
+                       "cli_by_severity": _sev_counts(cli_all, "severity"),
                        "gui_violations": len(gui), "cli_violations": cli_n, "gui_equals_cli": len(gui) == cli_n,
                        "wanted": len(want), "records": sorted(recs, key=lambda x: x["id"]),
                        "matched": sum(1 for x in recs if x.get("match")), "errors": errors,

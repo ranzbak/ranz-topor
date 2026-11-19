@@ -31,6 +31,9 @@ HELPER_SRC = ROOT / "harness" / "gui_helper" / "topor_gui_helper.py"
 DISPLAYS = range(20, 30)
 IDLE_S = 600.0
 DRC_TITLE = "Design Rules Checker"
+# the DRC dialog's severity filter boxes (its "Show:" row) per kicad-cli JSON severity; the list shows only the
+# ticked severities, so drc_spots unticks Warnings by default (fewer rows to walk)
+DRC_SEVERITY_BOXES = {"error": "Errors", "warning": "Warnings"}
 CLEANUP_TITLE = "Cleanup Tracks and Vias"
 #: the Cleanup dialog's action boxes exactly as KiCad 10 labels them (dialog_cleanup_tracks_and_vias_base.cpp);
 #: short names are accepted as aliases (harness.cleanup_check.OPTIONS / gui_e2e.CLEANUP_BOXES)
@@ -105,6 +108,7 @@ class GuiSession:
         self.board_state = "as opened"  # changes when a tool edits the open board (cleanup)
         self.drc_state_of = None  # board state the last DRC run belongs to
         self.drc_rows: list = []
+        self.drc_severities: tuple | None = None  # severity filter drc_rows was read under (None: not set by us)
         self.kicad_starts = 0
 
     # ---------------------------------------------------------------- lifecycle
@@ -299,8 +303,23 @@ class GuiSession:
                            every=0.5, on_poll=self.answer_confirmation)
         self.drc_rows = self.must("drc_rows", "drc rows", tab="violations")
         self.drc_state_of = self.board_state
+        self.drc_severities = None
         self.step("drc ran", f"{', '.join(st['tabs'][:2])}; {st['status']}")
         return st
+
+    def drc_filter(self, severities) -> list:
+        """Tick exactly the severity boxes of `severities` (DRC_SEVERITY_BOXES keys) in the dialog's "Show:" row, as a
+        user does (KiCad refilters the list), read the boxes back, then re-read the list into `self.drc_rows`."""
+        want = {lab: sev in severities for sev, lab in DRC_SEVERITY_BOXES.items()}
+        got = {b["label"]: b["value"] for b in self.must("set_checkboxes", "drc severity filter", title=DRC_TITLE,
+                                                          values=want)}
+        bad = {lab: got.get(lab) for lab, v in want.items() if got.get(lab) != v}
+        if bad:
+            self.fail(f"drc severity filter: boxes {bad} after setting {want}")
+        self.drc_rows = self.must("drc_rows", "drc rows", tab="violations")
+        self.drc_severities = tuple(severities)
+        self.step("drc severity filter", f"{want}: {len(self.drc_rows)} rows listed")
+        return self.drc_rows
 
     def activate(self, title: str) -> None:
         w = self.xid(title)
@@ -530,4 +549,5 @@ def cli_key(v: dict) -> tuple:
 
 
 __all__ = ["GuiSession", "GuiError", "session_for", "stop_session", "session_status", "crop", "norm_text",
-           "gui_key", "cli_key", "find_row", "copy_board", "CLEANUP_LABELS", "CLEANUP_FILTERS", "CLEANUP_TITLE", "DRC_TITLE"]
+           "gui_key", "cli_key", "find_row", "copy_board", "CLEANUP_LABELS", "CLEANUP_FILTERS", "CLEANUP_TITLE", "DRC_TITLE",
+           "DRC_SEVERITY_BOXES"]

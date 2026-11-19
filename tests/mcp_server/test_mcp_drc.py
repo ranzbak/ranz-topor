@@ -287,6 +287,7 @@ class _FakeSession:
     def __init__(self, board, rows):
         self.board, self.rows, self.board_state, self.drc_state_of = board, rows, "as opened", None
         self.drc_rows, self.main, self.steps, self.display = [], "0x1", [], ":29"
+        self.drc_severities, self.filters = None, []
         self.e = type("E", (), {"shot": staticmethod(lambda tag, win=None: FIX / "shot.png")})()
 
     def alive(self):
@@ -305,13 +306,20 @@ class _FakeSession:
         return {}
 
     def drc_run(self, t):
-        self.drc_rows, self.drc_state_of = self.rows, self.board_state
+        self.drc_rows, self.drc_state_of, self.drc_severities = self.rows, self.board_state, None
         return {"tabs": ["Violations (2)", "Unconnected Items (0)"]}
+
+    def drc_filter(self, sev):  # KiCad lists only the ticked severities (row k stays the list position here)
+        self.filters.append(tuple(sev))
+        self.drc_rows = [r for r in self.rows if r["text"].split(":")[0].lower() in sev]
+        self.drc_severities = tuple(sev)
+        return self.drc_rows
 
     def xid(self, t):
         return "0x2"
 
     def drc_walk(self, ks):
+        self.walked = list(ks)
         for n, k in enumerate(ks):
             self.cur = n
             yield k, self.rows[k]["text"], None
@@ -323,8 +331,9 @@ class _FakeSession:
         pass
 
 
-def _spots(tmp_path, monkeypatch, off_mm=0.0):
-    """tools.drc_spots over the 2 recorded rows with a fake session; KiCad 'centres' off_mm away from the track."""
+def _spots(tmp_path, monkeypatch, off_mm=0.0, warn_second=False, **kw):
+    """tools.drc_spots over the 2 recorded rows with a fake session; KiCad 'centres' off_mm away from the track.
+    warn_second: the second row is a warning (index row + its dialog line)."""
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     from PIL import Image
     Image.new("RGB", (20, 20)).save(tmp_path / "shot.png")
@@ -333,6 +342,9 @@ def _spots(tmp_path, monkeypatch, off_mm=0.0):
             for k, v in enumerate(x for x in routed["violations"] if x["type"] == "solder_mask_bridge")]
     starts = []
     idx = _idx()
+    if warn_second:
+        idx["rows"][1]["sev"] = "warning"
+        rows[1]["text"] = rows[1]["text"].replace("Error: ", "Warning: ", 1)
 
     def fake_session_for(board, out, **kw):
         starts.append(board)
@@ -340,7 +352,7 @@ def _spots(tmp_path, monkeypatch, off_mm=0.0):
         geom = D.board_items((FIX / "wiccon-routed-mini.kicad_pcb").read_text())  # a point on each row's track
         s.marks = [(lambda p: (p[0], p[1] + off_mm))(geom[r["ours"][0]["uuid"]]["pts"]["start"]) for r in idx["rows"]]
         s.e.shot = lambda tag, win=None: tmp_path / "shot.png"
-        G._SESSION = s
+        G._SESSION = _FakeSession.last = s
         return s
     monkeypatch.setattr(G, "session_for", fake_session_for)
     monkeypatch.setattr(G, "stop_session", lambda: {"stopped": True})
@@ -352,7 +364,7 @@ def _spots(tmp_path, monkeypatch, off_mm=0.0):
     monkeypatch.setattr(G, "copy_board", lambda src, dst, stem=None: dst / src.name)
     G._SESSION = None
     try:
-        return tools.drc_spots("r"), starts, idx
+        return tools.drc_spots("r", **kw), starts, idx
     finally:
         G._SESSION = None
 
@@ -362,6 +374,63 @@ def test_one_drc_spots_call_over_n_rows_starts_one_kicad(tmp_path, monkeypatch):
     assert len(starts) == 1 and r["wanted"] == len(idx["rows"]) == 2
     assert [x["match"] for x in r["records"]] == [True, True] and r["complete"]
     assert all(Path(x["board_png"]).is_file() for x in r["records"])
+
+
+def test_drc_spots_walks_errors_only_by_default_with_warnings_unticked(tmp_path, monkeypatch):
+    r, _, idx = _spots(tmp_path, monkeypatch, warn_second=True)
+    s = _FakeSession.last
+    assert s.filters == [("error",)] and s.walked == [0]  # Warnings unticked before the walk; row 1 never visited
+    assert r["severities"] == ["error"] and r["wanted"] == 1 and [x["id"] for x in r["records"]] == ["V001"]
+    assert r["records"][0]["match"] and r["ours_by_severity"] == {"error": 1, "warning": 1}
+    assert r["summary"].startswith("ours: 1 errors, 1 warnings; listed: errors")
+    assert r["gui_violations"] == 1  # the dialog list was re-read under the filter
+
+
+def test_drc_spots_severities_parameter_brings_warnings_back(tmp_path, monkeypatch):
+    r, _, _ = _spots(tmp_path, monkeypatch, warn_second=True, severities=["error", "warning"])
+    assert _FakeSession.last.filters == [("error", "warning")] and _FakeSession.last.walked == [0, 1]
+    assert r["severities"] == ["error", "warning"] and r["wanted"] == 2
+    assert [x["match"] for x in r["records"]] == [True, True]
+    assert "(severities=" not in r["summary"]
+    with pytest.raises(tools.ToolError, match="severities"):
+        tools._severities(["fatal"])
+    with pytest.raises(tools.ToolError, match="severities"):
+        tools._severities([])
+    assert tools._severities("warnings") == ("warning",) and tools._severities(None) == ("error",)
+
+
+def test_drc_rows_are_errors_only_by_default_counts_keep_both(tmp_path, monkeypatch):
+    idx = _idx()
+    idx["rows"][1]["sev"] = "warning"
+    proof = {"rules": {"verdict": "ok"}, "project_used": True}
+    full = {"info": {"out_dir": str(tmp_path / "run"), "run_id": "r"}, "index": idx, "result": None,
+            "input": {"json": "i.json"}, "routed": {"json": "r.json"},
+            "project": {"proof_routed": proof, "proof_input": proof, "files": [], "routed_copy_differs": []}}
+    monkeypatch.setattr(tools, "_drc_full", lambda run_id, timeout_s=600.0: full)
+    r = tools.drc("r")
+    assert [x["id"] for x in r["rows"]] == ["V001"] and r["ours_total"] == 2 and r["rows_listed"] == 1
+    assert r["ours_by_severity"] == {"error": 1, "warning": 1} and "1 warnings" in r["summary"]
+    r = tools.drc("r", severities=["error", "warning"])
+    assert len(r["rows"]) == 2 and r["severities"] == ["error", "warning"]
+
+
+def test_gui_drc_filter_unticks_warnings_and_rereads_the_list(tmp_path):
+    s = G.GuiSession(tmp_path / "b.kicad_pcb", tmp_path / "s", display=":29")
+    calls = []
+
+    def must(cmd, step, **a):
+        calls.append((cmd, a))
+        if cmd == "set_checkboxes":
+            return [{"label": k, "value": v, "enabled": True} for k, v in a["values"].items()]
+        return [{"k": 0, "text": "Error: x", "items": []}]
+    s.must = must
+    assert s.drc_filter(("error",)) == [{"k": 0, "text": "Error: x", "items": []}]
+    assert calls[0] == ("set_checkboxes", {"title": G.DRC_TITLE, "values": {"Errors": True, "Warnings": False}})
+    assert calls[1][0] == "drc_rows" and s.drc_severities == ("error",)
+    s.must = lambda cmd, step, **a: ([{"label": "Errors", "value": True}, {"label": "Warnings", "value": True}]
+                                     if cmd == "set_checkboxes" else [])
+    with pytest.raises(G.GuiError, match="severity filter"):
+        s.drc_filter(("error",))
 
 
 def test_spot_match_needs_kicads_focus_on_the_marker(tmp_path, monkeypatch):

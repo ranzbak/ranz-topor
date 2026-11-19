@@ -56,6 +56,25 @@ def add_short(pcb: Path, skip: set = frozenset()) -> tuple[str, str]:
     return a[4], seg
 
 
+def add_dangling(pcb: Path, length: float = 0.2) -> str:
+    """Append a `length` mm F.Cu stub at right angles from the middle of the longest non-GND F.Cu track: one end on
+    that track, the other free (KiCad: track_dangling, a warning in wiccon's project). Returns its uuid."""
+    text = pcb.read_text()
+    segs = [((float(m[1]), float(m[2])), (float(m[3]), float(m[4])), m[5], m[7] or m[8])
+            for m in SEG.finditer(text) if m[6] == "F.Cu" and "GND" not in (m[7] or "")]
+    a, b, w, net = max(segs, key=lambda t: math.dist(t[0], t[1]))
+    d = math.dist(a, b)
+    mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+    nx, ny = -(b[1] - a[1]) / d, (b[0] - a[0]) / d
+    u = str(uuid.uuid4())
+    seg = (f'\t(segment (start {mx:.4f} {my:.4f}) (end {mx + nx * length:.4f} {my + ny * length:.4f}) (width {w}) '
+           f'(layer "F.Cu") (net {net if net.isdigit() else f"{chr(34)}{net}{chr(34)}"}) '
+           f'({"tstamp" if "(tstamp " in text else "uuid"} "{u}"))\n')
+    i = text.rstrip().rindex(")")
+    pcb.write_text(text[:i] + seg + text[i:])
+    return u
+
+
 @pytest.mark.skipif(not all(shutil.which(t) for t in ("Xephyr", "xdotool", "wmctrl", "xwd", "pcbnew", "metacity",
                                                       "kicad-cli")),
                     reason="needs Xephyr, xdotool, wmctrl, xwd, metacity and KiCad 10")
@@ -64,9 +83,14 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     hand, inp, _ = strip.prepare("wiccon-2023", tmp_path / "boards", name="w")
     add_short(hand.pcb)
+    add_dangling(hand.pcb)  # one warning row of ours: the default (errors only) walk must skip it
     rid = tools.register_run(str(hand.pcb), str(inp.pcb), name="w")["run_id"]
     d = tools.drc(rid)
     assert d["rules"] == "rules = .kicad_pro" and d["project_used"]
+    assert d["ours_by_severity"]["warning"] >= 1 and d["ours_by_severity"]["error"] >= 2, d["ours_by_severity"]
+    assert d["rows"] and all(r["sev"] == "error" for r in d["rows"]) and "warnings" in d["summary"]
+    warn_ids = {r["id"] for r in tools.drc(rid, severities=["error", "warning"])["rows"] if r["sev"] == "warning"}
+    assert warn_ids
     short = sorted(c for c in d["by_class"] if c.split()[0] in ("shorting_items", "tracks_crossing") and d["by_class"][c]["ours"])
     assert short, d["by_class"]
     starts0 = G.GuiSession.starts_total
@@ -76,6 +100,14 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
         recs = s["records"]
         assert len(recs) == s["wanted"] and all(r["match"] for r in recs), [r.get("error") for r in recs]
         assert all(Path(r["board_png"]).is_file() and Path(r["dlg_png"]).is_file() for r in recs)
+        # errors only: Warnings unticked in the live dialog before the walk, the list = kicad-cli's error rows,
+        # no warning row visited; both severities counted
+        assert s["severities"] == ["error"] and not {r["id"] for r in recs} & warn_ids
+        assert s["ours_by_severity"] == d["ours_by_severity"] and s["cli_by_severity"]["warning"] >= 1
+        assert s["gui_equals_cli"], (s["gui_violations"], s["cli_violations"])
+        assert any(st["step"] == "drc severity filter" for st in G._SESSION.steps)
+        boxes = G._SESSION.call("drc_state")["boxes"]
+        assert boxes.get("Warnings") is False and boxes.get("Errors") is True, boxes
         pid = s["session"]["pcbnew_pid"]
         c = tools.cleanup(rid)
         assert G.GuiSession.starts_total == starts0 + 1  # the cleanup ran in the drc_spots session

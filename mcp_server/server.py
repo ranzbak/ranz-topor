@@ -51,23 +51,26 @@ def build_server():
         return tools.register_run(routed_copy, input_copy, result, name)
 
     @srv.tool()
-    def drc(run_id: str, limit: int = 200) -> dict:
+    def drc(run_id: str, limit: int = 200, severities: list[str] | None = None) -> dict:
         """kicad-cli DRC of the run's routed copy with the board's .kicad_pro provably used (sha before/after +
         quoted clearances), as a DELTA vs the unrouted input: one row per new violation touching our copper (type,
         class, nets, layers, position mm, item uuids, our track/via uuids with their engine connection ids, nearest
         engine violation), counts per class, unconnected per net. Fails (RULES_MISMATCH / DRC_WITHOUT_PROJECT)
-        instead of returning numbers under the wrong rules."""
-        return tools.drc(run_id, limit)
+        instead of returning numbers under the wrong rules. rows = errors only by default (severities=["error",
+        "warning"] lists warnings too); summary / ours_by_severity count both."""
+        return tools.drc(run_id, limit, severities=severities)
 
     @srv.tool()
     def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: float = 20.0,
-                  keep_session: bool = True) -> dict:
+                  keep_session: bool = True, severities: list[str] | None = None) -> dict:
         """Real KiCad (Xephyr, isolated home): DRC dialog -> Run DRC -> per drc row (cls = one class, e.g.
         "clearance track-track"; per_class > 0 caps a class; default all rows) select the dialog row with the same
         text in ONE KiCad session (DRC run once), screenshot the dialog and the board view at the marker (yellow
         ring). Records: PNG paths, GUI vs kicad-cli text, match (row found + selected), KiCad's focus point; a failed
-        row is reported and the walk goes on. The session stays open for cleanup (idle timeout 600 s)."""
-        return tools.drc_spots(run_id, cls, per_class, zoom, keep_session)
+        row is reported and the walk goes on. The session stays open for cleanup (idle timeout 600 s). Errors only
+        by default: the dialog's Warnings box is unticked before the walk (severities=["error", "warning"] walks
+        warnings too); summary / ours_by_severity count both."""
+        return tools.drc_spots(run_id, cls, per_class, zoom, keep_session, severities=severities)
 
     @srv.tool()
     def cleanup(run_id: str, options: list | dict | None = None, replay: bool = False,
