@@ -51,6 +51,14 @@ mut() {  # NAME FILE(rel. to engine/) cargo-test-args... ; the python snippet on
   mv $f.orig $f; touch $f
   if [ $rc -ne 0 ]; then note "mutant $n: killed (rc $rc)"; else note "mutant $n: SURVIVED"; fi
 }
+pmut() {  # NAME FILE pytest-args... ; the python snippet on stdin edits FILE in place
+  local n=$1 f=$ROOT/$2; shift 2
+  cp $f $f.orig; python3 - $f; local pr=$?
+  if [ $pr -ne 0 ] || cmp -s $f $f.orig; then note "mutant $n: patch did not apply"; mv $f.orig $f; return; fi
+  ( cd $ROOT && CI=1 timeout 1800 python -m pytest -q -p no:cacheprovider "$@" 9>&- ) > $R/mut-$n.log 2>&1; local rc=$?
+  mv $f.orig $f
+  if [ $rc -ne 0 ]; then note "mutant $n: killed (rc $rc)"; else note "mutant $n: SURVIVED"; fi
+}
 LIB=(--lib -- topo::archive topo::table topo::optimise)
 INT=(--test topo_tw3_table --test topo_tw3_drawonly --test topo_m2_draw_once --test topo_stop_reason --test loop_local --test cancel_latency --test time_limit)
 tests() {
@@ -87,6 +95,24 @@ tests() {
 case ${1:-} in
   lad) shift; lad "$@" ;;
   tests-in) tests ;;
+  r10)  # verify r2 fix round 3: the failing tests + topo_prof + topo_tw3_table (+ the binaries of r9 that grep for
+        # stop reasons), the changed pytest files with --timeout 900, mutants d2 v1 v7
+    cd $ROOT/engine; export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2
+    python -c "import pytest_timeout" 2>/dev/null || pip install -q pytest-timeout > $R/pip.log 2>&1
+    { timeout 3000 cargo test --release --no-fail-fast --lib -- topo::optimise topo::prof topo::core::tests 2>&1; echo "lib rc $?"
+      timeout 3000 cargo test --release --no-fail-fast --test topo_prof --test topo_tw3_table --test topo_mb0 --test topo_stop_reason --test time_limit 2>&1; echo "int rc $?"
+    } > $R/tests.log 9>&-
+    grep -E "^test result|rc [0-9]|FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
+    cd $ROOT
+    CI=1 timeout 5400 python -m pytest -q -p no:cacheprovider --timeout 900 tests/plugin/test_report.py tests/plugin/test_run_flow.py tests/plugin/test_run_cpu_limit.py tests/test_prof_table.py tests/plugin/test_prof_run_json.py > $R/pytest-targeted.log 2>&1 9>&-
+    note "pytest targeted rc $?: $(tail -1 $R/pytest-targeted.log)"
+    grep -E "^(FAILED|ERROR)|Timeout" $R/pytest-targeted.log | head -20 | while read -r l; do note "pytest-t: $l"; done
+    D=/root/tw3-mut-$(basename $ROOT); rm -rf $D; mkdir -p $D; cp -a $ROOT/engine $D/; rm -rf $D/engine/target
+    export CARGO_TARGET_DIR=/root/tw3-mut-target-$(basename $ROOT)
+    sub '    } else if relay_stop_any {' '    } else if false {' | mut d2_relay_is_round_cap src/topo/core.rs --test topo_tw3_table
+    sub 'if p.stop_at_stable && rep.stable_at.is_some_and(|s| cycle > s + p.stable_patience) {' 'if p.stop_at_stable && rep.stable_at.is_some() {' | mut v1_sync_ignores_patience src/topo/optimise.rs --test topo_mb0
+    sub '    return d.get("stop_when_stable", True) is False and d.get("restart", "hybrid") not in ("stall", "off")' '    return False' | pmut v7_double_never_oks tests/plugin/test_run_flow.py --timeout 300 tests/plugin/test_run_cpu_limit.py -k "gui_has_no_overrun_cap"
+    note "r10 done" ;;
   r9)  # verify r1 fix round: targeted release tests (every binary that greps for cycle cap / stable / patience /
        # stop_reason / prof), both latch tests 20x under a 6-job build, targeted + full pytest with a per-test
        # timeout (pytest-timeout 900), the new mutants
@@ -120,14 +146,6 @@ case ${1:-} in
     export CARGO_TARGET_DIR=/root/tw3-mut-target-$(basename $ROOT)
     sub 'if p.stop_at_stable && rep.stable_at.is_some_and(|s| cycle > s + p.stable_patience) {' 'if p.stop_at_stable && rep.stable_at.is_some() {' | mut v1_sync_ignores_patience src/topo/optimise.rs --test topo_mb0
     sub '    } else if relay_stop_any {' '    } else if false {' | mut d2_relay_is_round_cap src/topo/core.rs --test topo_tw3_table
-    pmut() {  # NAME FILE pytest-args... ; the python snippet on stdin edits FILE in place
-      local n=$1 f=$ROOT/$2; shift 2
-      cp $f $f.orig; python3 - $f; local pr=$?
-      if [ $pr -ne 0 ] || cmp -s $f $f.orig; then note "mutant $n: patch did not apply"; mv $f.orig $f; return; fi
-      ( cd $ROOT && CI=1 timeout 1800 python -m pytest -q -p no:cacheprovider "$@" 9>&- ) > $R/mut-$n.log 2>&1; local rc=$?
-      mv $f.orig $f
-      if [ $rc -ne 0 ]; then note "mutant $n: killed (rc $rc)"; else note "mutant $n: SURVIVED"; fi
-    }
     sub '        parts.append(("*" if b.get("applied") else "") + f"{roles}: {_crit_text(b.get(' '        parts.append(("" if b.get("applied") else "") + f"{roles}: {_crit_text(b.get(' | pmut v3_no_applied_mark plugin/topor/report.py tests/plugin/test_report.py -k bests
     sub "{_na(d.get('open'))} | {" "{_na(d.get('shorts'))} | {" | pmut v3_table_open_is_shorts plugin/topor/report.py tests/plugin/test_report.py -k bests
     sub '    return d.get("stop_when_stable", True) is False and d.get("restart", "hybrid") not in ("stall", "off")' '    return False' | pmut v7_double_never_cancels tests/plugin/test_run_flow.py --timeout 300 tests/plugin/test_run_cpu_limit.py -k "gui_has_no_overrun_cap"
