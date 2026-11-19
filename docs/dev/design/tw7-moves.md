@@ -264,7 +264,13 @@ points, not the taut path), so E needs the plan check on the taut path or the pr
 Not done this round: SameNetLoop (needs a re-branch at the crossing that the plain placer has no form for),
 `loop = "cycles"` removal (touches ~10 test files and the drawing feedback path: own round), R6-R10 (wait for the
 pattern_moves flip / C's A/B).
-**detour_trade** stays PROPOSED: the sketch's rails (x 10-50) are no local minimum for the loop (it reaches 21c
-without moves); with rails x 22-38 it is (A 25.1 mm round the rails, the U-clinch move cannot leave it, the via
-trade lays A straight, rails +4.6 mm each, less length in all). Ignored test
-`proposed_detour_trade_via_trade_reaches_fig_21c` until the user approves a redrawn sketch.
+**detour_trade** approved by the user 2026-11-19 (sketch `hz-runs/tw7s2-17228bd/sketch/detour_trade.png`, panel
+(c): A straight, B1/B2 dip 45 deg round A2 at a constant 1.5 mm pitch, B1 at 0.20 mm from A2). Fixed regression
+test `detour_trade_pattern_reaches_fig_21c`, **expected to fail** (`should_panic`) on the pitch only: with
+`pattern_moves` = ["via_trade"] (alone and with the other kinds), seeds 0 and 1, C reaches the topology of (c)
+(A 14.000 mm straight, B1 43.08 / B2 44.27 mm, B1-A2 0.200 mm, no vias, DRC clean), but the drawing packs B2 against
+B1 at the V (copper gap 0.200 mm, expected 1.0 mm). That is the drawing's bundle packing (tight-packed bundles,
+the pitch of a rail pair round a bend is not kept), not C; the expected answer is not loosened. With the moves off,
+seed 1 ends careless (A round the rails, 49.07 mm; seed 0 reaches (c) without moves), the test asserts that as
+the reason for C. The shorter-rail variant (x 22-38, A 25.1 mm careless, only the via trade leaves it) stays as
+the ignored `proposed_detour_trade_short_rails_needs_the_via_trade`.

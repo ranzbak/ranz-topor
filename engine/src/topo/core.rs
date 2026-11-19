@@ -9732,7 +9732,7 @@ mod tests {
         let h = super::pattern_moves_line(&k(&["u_clinch"]), 0.25, 0.5, false, &st);
         assert!(h.contains("(1 + 0.5 x the pattern's fruitless tries) ([optimize] pattern_stuck = 0.5)"), "{h}");
         assert!(!a.contains("pour") && !h.contains("pour"), "{a}");
-        let mut sp = st.clone();
+        let mut sp = st;
         sp.pat_kinds[super::super::xrules::Kind::PourCut.idx()] = [2, 2, 1];
         sp.pat_kinds[super::super::xrules::Kind::ViaTrade.idx()] = [4, 3, 0];
         let p_off = super::pattern_moves_line(&k(&["via_trade", "pour"]), 0.25, 1.0, false, &sp);
