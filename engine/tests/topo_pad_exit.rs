@@ -11,7 +11,8 @@
 //!   necking through the 0.84 mm one between J1.1 and J1.2.
 
 use topor_engine::check::Checker;
-use topor_engine::model::{BoardModel, Options};
+use topor_engine::geom::quant::TrackPrim;
+use topor_engine::model::{BoardModel, Item, Options};
 use topor_engine::route::route;
 use topor_engine::topo::board::{self, BuildOpts};
 use topor_engine::topo::init::InitWeights;
@@ -103,6 +104,24 @@ fn neck_or_detour_takes_the_wide_gap() {
         assert!(rep.violations.is_empty(), "pad_exits {on}: {:?}", rep.violations);
         let got = r.total_length_nm as f64 / 1e6;
         assert!(got <= 1.1 * want, "pad_exits {on}: {got:.3} mm vs expected {want:.3} mm");
+        // The pattern's answer, not only a short clean route: no necking anywhere (every
+        // stretch at the wire's 0.8 mm) and the crossing of the cut line y = 7.5 mm lies inside
+        // the wide gap E1 (x 4.84..6.14 mm, the whole 0.8 mm track), not in the 0.84 mm gap N1
+        // (x 2.30..3.14 mm), where a 0.4 mm neck would pass.
+        let mut crossings = 0;
+        for it in &r.items {
+            let Item::Track(t) = it else { continue };
+            assert!(t.width >= 800_000, "pad_exits {on}: necked to {} nm: {t:?}", t.width);
+            let TrackPrim::Seg { a, b } = t.prim else { panic!("pad_exits {on}: unexpected arc in {t:?}") };
+            let (y0, y1) = (a.y as f64, b.y as f64);
+            if (y0 - 7.5e6) * (y1 - 7.5e6) < 0.0 {
+                crossings += 1;
+                let x = a.x as f64 + (b.x - a.x) as f64 * (7.5e6 - y0) / (y1 - y0);
+                let half = 0.5 * t.width as f64;
+                assert!(x - half >= 4.84e6 - 1.0 && x + half <= 6.14e6 + 1.0, "pad_exits {on}: crosses y = 7.5 mm at x = {:.3} mm, not through E1: {t:?}", x / 1e6);
+            }
+        }
+        assert!(crossings >= 1, "pad_exits {on}: the route does not cross the cut line");
     }
 }
 
@@ -161,4 +180,16 @@ fn the_exit_terms_measure_the_row() {
     let cm = topor_engine::topo::refine::CapModel::new(&st, &packer, &dirs, &evl, 1, 50.0);
     assert_eq!(cm.via_check().0, 0);
     assert!(!cm.exits_of(0).is_empty());
+}
+
+/// `[capacity] pour_cuts` (tw4-r2 (3)) is opt-in: off by default (default copper = main), the
+/// option parses, and its cell budget has its documented default.
+#[test]
+fn pour_cuts_are_opt_in() {
+    let d = Options::default();
+    assert!(!d.pour_cuts);
+    assert_eq!(d.pour_cut_cells, 1.0e5);
+    let o = Options::from_json(r#"{"pour_cuts": true, "pour_cut_cells": 250000.0}"#).expect("options parse");
+    assert!(o.pour_cuts && o.pour_cut_cells == 250000.0);
+    assert!(!Options::from_json("{}").expect("options parse").pour_cuts);
 }
