@@ -124,3 +124,17 @@ KiCad DRC rises 692 -> 936 (distinct net pairs 180 -> 223). Per connection the r
 on both sides on different seeds (drawing next to different neighbours) and in two connections: esp s3
 IO21_TX (the plan drops a via for +6.4 mm through the crowded U3/U4 area) and qmtech FPGA_SD_DATA1 (same
 plan, drawing only). Every restart was a stall restart; the 800 re-lay period never fired.
+
+## Verify r1 fix round (2026-11-19)
+- **Patience under the shared table (V1).** At a sync point the table's stable only records
+  `stable_at` (its last committed cycle). The run ends `stable_patience` (headless) or `finish_patience`
+  (dialog with finish_when_stable) cycles later, by the same end-of-cycle check as the run's own meter,
+  which needs no sync. Patience 0 still ends at the sync point.
+- **Dialog cycle cap (D1, D6).** Hybrid and periodic dialog runs have no cycle cap; stall and off keep
+  `rounds` as the dialog's cap. Tests do not rely on a hidden engine cap: a dialog test double passes
+  Cancel / OK on to the real job (tests/plugin/test_run_flow.py `ProxyJob end_real`), and the cap tests
+  use `restart = "stall"`.
+- **Re-lay budget stop (D2).** A run whose loop ended at `loop_relays` gives the call stop reason
+  "re-lay budget" (a work cap like rounds, which gives "round cap").
+- **Profiling (V8).** TW0 prof keys `table_sync` (a run's sync with the table: wait, commit, view) and
+  `fingerprint`.
