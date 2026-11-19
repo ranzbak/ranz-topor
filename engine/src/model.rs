@@ -1221,10 +1221,16 @@ pub struct Options {
     /// TW5 (f) `[optimize] loop_p4` (`loop = "topor"`): one negotiated P4 rip-up round per cycle
     /// inside the loop, after the sweep (docs/dev/design/tw5-escape.md (f)): the wires of the
     /// over-full cuts, vias without a site and over-full via cuts ripped together and placed again
-    /// at the cycle's coefficients, taken as it comes (the archive keeps the bests), undone only
-    /// when a wire finds no path; throttled by the escapes' work budget (`escape_share`); turns the
-    /// loop history (c) on. Default false (before TW5 (f)).
+    /// at the cycle's coefficients, taken as `escape_take` says ("not_worse": undone when the
+    /// evaluation rises), undone when a wire finds no path; throttled by the escapes' work budget
+    /// (`escape_share`); turns the loop history (c) on. Default false (before TW5 (f)).
     pub loop_p4: bool,
+    /// TW5 `[optimize] escape_offer` (`loop = "topor"`): the state after a taken layering escape
+    /// (b) or in-loop P4 round (f) is offered to the run's archive and the shared variant table
+    /// (before the cycle's own state), so a best reached there is kept even when the cycle's
+    /// sweep leaves it. Acts only with those parts on. Default true; false = before (offers at the
+    /// cycle's end only).
+    pub escape_offer: bool,
     /// TW5 (4) `[optimize] free_wire_cross` (`loop = "topor"`): the crossing price of the loop's
     /// reroutes for crossing a wire with no crossing of its own, graded by the crossed wire's
     /// crossings k: share a + (1 - a) k/(1 + k) of the crossing factor's loop share (k = 0: a;
@@ -1709,6 +1715,7 @@ impl Default for Options {
             float_wire: false,
             preloop_p4: true,
             loop_p4: false,
+            escape_offer: true,
             free_wire_cross: 1.0,
             refine_test_window: 0,
             loop_p4_test_fail: false,

@@ -74,6 +74,8 @@ one() {
     N[a-e]) mapfile -t x < <(part ${o#N}); SETS+=("${x[@]}") ;;
     Of) SETS+=("${OLD[@]}" --set optimize.loop_p4=true) ;;  # TW5 (f): O + one in-loop P4 round per cycle
     Nef) x=("${OLD[@]}"); x[13]='optimize.preloop_p4=false'; SETS+=("${x[@]}" --set optimize.loop_p4=true) ;;  # (e) + (f): the pre-loop rounds folded into the loop
+    Nefo) x=("${OLD[@]}"); x[13]='optimize.preloop_p4=false'; SETS+=("${x[@]}" --set optimize.loop_p4=true --set optimize.escape_offer=false) ;;  # Nef without the offer hook
+    Nbo) mapfile -t x < <(part b); SETS+=("${x[@]}" --set optimize.escape_offer=false) ;;  # Nb without the offer hook
     Nce) x=("${OLD[@]}"); x[9]='optimize.loop_history=true'; x[13]='optimize.preloop_p4=false'; SETS+=("${x[@]}") ;;  # (e) with (c), its intended stand-in
     F) SETS+=(--set optimize.free_wire_cross=0.0) ;;  # the defaults (TW5 off) with crossing-free wires crossed at their freedom
     NF) SETS+=("${NEW[@]}" --set optimize.free_wire_cross=0.0) ;;
@@ -137,8 +139,8 @@ mutants() {  # the TW5 changed lines; each mutant against the tests that guard i
 }
 tests() {
   cd $ROOT/engine
-  cargo test --release --lib -- escape:: layers::tests topo::core::tests::p4 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $? $(grep 'test result' $R/cargo-lib.log | tail -1)"
-  cargo test --release --no-fail-fast --test topo_p5_loop --test loop_local --test topo_g0 --test tw5_escape -- --nocapture 9>&- > $R/cargo-int.log 2>&1; note "cargo int rc $? $(grep -c 'test result: ok' $R/cargo-int.log) ok binaries"
+  cargo test --release --lib -- escape:: layers::tests topo::core::tests::p4 topo::table::tests 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $? $(grep 'test result' $R/cargo-lib.log | tail -1)"
+  cargo test --release --no-fail-fast --test topo_p5_loop --test loop_local --test topo_g0 --test tw5_escape --test topo_tw3_table --test topo_tw3_drawonly -- --nocapture 9>&- > $R/cargo-int.log 2>&1; note "cargo int rc $? $(grep -c 'test result: ok' $R/cargo-int.log) ok binaries"
   cd $ROOT
 }
 case ${1:-} in
@@ -220,6 +222,18 @@ case ${1:-} in
     u q 12 "Ofr16s0:qmtech:2" "Nefr16s0:qmtech:2" "Ofr16s1:qmtech:2" "Nefr16s1:qmtech:2" "Ofr16s2:qmtech:2" "Nefr16s2:qmtech:2"
     i=""; for s_ in 0 1 2 3 4 5 6 7 8 9; do i+="Ofr16s$s_:p-inner_layer_room Nefr16s$s_:p-inner_layer_room "; done
     u e 4 "Ofr16s1:esp Ofr16s2:esp Ofr16s3:esp" "Nefr16s1:esp Nefr16s2:esp Nefr16s3:esp" "$i" "Or1:eprom Or1:wiccon Or1:esp Or1:qmtech"
+    wait; note "all done" ;;
+  r14)
+    # Round 14 (main de9e3977 TW3 merged + the escape/loop_p4 offer-to-the-table hook): targeted tests, the hook's
+    # mutants (own tree), O at 1 cycle on 4 boards (copper vs main de9e3977, job tw5m3), new A/B baselines at 16
+    # cycles: O, Nef / Nefo (loop_p4 with / without the hook), Nb / Nbo (layering escape with / without) on qmtech
+    # s0-2 (2 threads) and esp s1-3; the merge trial.
+    ( hzq run --pin --threads 2 --name tw5-tests -- bash -c "bash $ROOT/tools/tw5_job.sh tests; ONLY='o1 o2 o3 o4 o5 o6' bash $ROOT/tools/tw5_mut_f.sh $R/mutf" > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
+    for s_ in 0 1 2; do u q$s_ 10 "Or16s$s_:qmtech:2" "Nefr16s$s_:qmtech:2" "Nefor16s$s_:qmtech:2" "Nbr16s$s_:qmtech:2" "Nbor16s$s_:qmtech:2"; done
+    e=(); for c in O Nef Nefo Nb Nbo; do e+=("${c}r16s1:esp ${c}r16s2:esp ${c}r16s3:esp"); done
+    u e 5 "${e[@]}"
+    u o 4 "Or1:eprom Or1:wiccon" "Or1:esp" "Or1:qmtech"
+    ( bash $ROOT/tools/tw5_job.sh final > $R/final-mode.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
   py)
     # The pytest files a schema change touches (after the merge trial's one new failure, test_config_docs).

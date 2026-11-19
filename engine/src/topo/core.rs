@@ -760,6 +760,10 @@ impl super::optimise::Shared<LoopVar> for Port<'_> {
         let row = super::table::Row { var: std::sync::Arc::new(var), run: self.k, cycle, gen, fp, compat: self.compat };
         self.table.offer(self.k, cycle, label, crit, row, check);
     }
+    fn offer_mid(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: LoopVar, fp: u64) {
+        let row = super::table::Row { var: std::sync::Arc::new(var), run: self.k, cycle, gen, fp, compat: self.compat };
+        self.table.offer_mid(self.k, cycle, label, crit, row);
+    }
     fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::table::View<LoopVar>> {
         self.table.sync(self.k, cycle, stop, &|| self.slots.release(), &|| self.slots.acquire())
     }
@@ -4511,6 +4515,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             p4_test_fail: bool,
             /// Escapes so far in this run (their seeds).
             n_esc: u64,
+            /// TW5 `[optimize] escape_offer`: the state after an escape / a taken in-loop P4
+            /// round is offered to the archive and the table ([`Space::take_offers`]); the
+            /// criteria the archive held at the cycle's start plus those offered since (a state
+            /// they cover is not copied); the offers of the running cycle.
+            offer_on: bool,
+            floor: Vec<Criteria>,
+            offers: Vec<(String, Criteria, LoopVar, u64)>,
         }
         /// The real topology of this route as the loop's [`Space`].
         struct Sp<'a, 'p> {
@@ -5001,6 +5012,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         }
                     }
                     cs.p4_rounds += 1;
+                    self.offer_mid("in-loop P4 round".into(), cs);
                 }
                 // Its work: the counted layering and measuring, plus each placing at the mean
                 // re-lay's work so far (a placing is a re-lay's search without its local judge).
@@ -5012,6 +5024,26 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     eprintln!("LOOPDBG[{}] cycle {} loop P4: {} wires ripped, {}: {t}", self.dbg_tag, c.cycle, vw.len(), if lost { "undone (a wire found no path)" } else if worse { "undone (worse)" } else { "taken" });
                 }
                 true
+            }
+            /// TW5: offer the current state (after an escape, a taken in-loop P4 round) to the
+            /// archive and the table at the cycle's end ([`Space::take_offers`]; lead 2026-11-19:
+            /// "escapes offer their result to the table; the table keeps the bests"), unless the
+            /// criteria already held cover it (Polubasov 2010 «Многовариантная оптимизация»: the
+            /// table keeps the variants optimal for some criterion). O(state) when offered, O(rows)
+            /// when covered.
+            fn offer_mid(&mut self, label: String, cs: &mut CycleStats) {
+                if !self.tw5.offer_on {
+                    return;
+                }
+                let crit = self.criteria();
+                if self.tw5.floor.iter().any(|f| f.covers(&crit)) {
+                    cs.mid_covered += 1;
+                    return;
+                }
+                let fp = self.fingerprint();
+                let var = self.snapshot();
+                self.tw5.floor.push(crit);
+                self.tw5.offers.push((label, crit, var, fp));
             }
             /// TW5 (b): one layering escape (Polubasov 2010 «Оптимизация расслоения»): a random
             /// via-optimal layering of the whole board (the plateau walk,
@@ -5027,7 +5059,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let tl = Instant::now();
                 let lr = (self.tw5.assign_e)(self.st, seed);
                 cs.esc_walked += lr.walked;
-                cs.layer_kept += usize::from(self.take_layers(lr, seed));
+                let taken = self.take_layers(lr, seed);
+                cs.layer_kept += usize::from(taken);
                 cs.layer_runs += 1;
                 cs.escapes += 1;
                 let pr = self.st.proj;
@@ -5044,6 +5077,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 cs.esc_vias_after += self.lr.vias;
                 cs.esc_viol_up += usize::from(self.pred.count > p0);
                 self.history_step(cs);
+                if taken {
+                    self.offer_mid(format!("escape {}", self.tw5.n_esc), cs);
+                }
                 cs.layer_s += tl.elapsed().as_secs_f64();
                 let vias1 = self.via_counts();
                 for w in 0..self.st.wires.len() {
@@ -5305,6 +5341,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
                 h
+            }
+            fn offer_floor(&mut self, crits: Vec<Criteria>) {
+                self.tw5.floor = crits;
+                self.tw5.offers.clear();
+            }
+            fn take_offers(&mut self) -> Vec<(String, Criteria, LoopVar, u64)> {
+                std::mem::take(&mut self.tw5.offers)
             }
             fn restore(&mut self, v: &LoopVar) {
                 let _pg = super::prof::g(super::prof::K::SpRestore);
@@ -5773,6 +5816,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 loop_p4: opts.loop_p4,
                 p4_test_fail: opts.loop_p4_test_fail,
                 n_esc: 0,
+                offer_on: opts.escape_offer,
+                floor: Vec::new(),
+                offers: Vec::new(),
             },
             pre: pre_loop.clone(),
         };
@@ -6042,7 +6088,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let st_ = &rep.stats;
             let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
             warnings.push(format!(
-                "TopoR loop escapes (TW5): oscillation \"{}\" (amplitude {:.2}-{:.2}); layering escape \"{}\": {} escapes ({} archived variants over {} layerings), {:.1} % of the free positions changed layer per escape, vias {} -> {} over them, {} with more predicted violations (taken: {}); work share of the escapes {:.1} % (target {:.0} %); floating up per wire {} of {} kept; loop history {} updates; pre-loop P4 rounds {}; in-loop P4 rounds {}",
+                "TopoR loop escapes (TW5): oscillation \"{}\" (amplitude {:.2}-{:.2}); layering escape \"{}\": {} escapes ({} archived variants over {} layerings), {:.1} % of the free positions changed layer per escape, vias {} -> {} over them, {} with more predicted violations (taken: {}); work share of the escapes {:.1} % (target {:.0} %); floating up per wire {} of {} kept; loop history {} updates; pre-loop P4 rounds {}; in-loop P4 rounds {}; states after escapes / in-loop P4 rounds offered to the variant table {}",
                 opts.oscillation,
                 opts.osc_amp_min,
                 opts.osc_amp_max,
@@ -6063,6 +6109,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 if opts.preloop_p4 { "on" } else { "folded into the loop" },
                 if opts.loop_p4 {
                     format!("{} taken ({} wires ripped), {} undone (a wire found no path), {} undone (worse, escape_take \"not_worse\"), {} waited for the work budget", st_.p4_rounds, st_.p4_ripped, st_.p4_undone, st_.p4_worse, st_.p4_throttled)
+                } else {
+                    "off".to_string()
+                },
+                if opts.escape_offer {
+                    format!("{} ({} taken into this run's archive, {} not offered: covered by its rows)", rep.mid_offered, rep.mid_archived, st_.mid_covered)
                 } else {
                     "off".to_string()
                 }
@@ -6093,6 +6144,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "history_updates": rep.stats.hist_updates,
                 "preloop_p4": opts.preloop_p4,
                 "loop_p4": {"on": opts.loop_p4, "rounds": rep.stats.p4_rounds, "ripped": rep.stats.p4_ripped, "undone": rep.stats.p4_undone, "worse": rep.stats.p4_worse, "throttled": rep.stats.p4_throttled},
+                "escape_offer": {"on": opts.escape_offer, "offered": rep.mid_offered, "archived": rep.mid_archived, "covered": rep.stats.mid_covered},
             },
             "cycles": rep.cycles,
             "stop": rep.stop,

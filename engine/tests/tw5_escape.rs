@@ -50,7 +50,13 @@ fn preloop_p4_rounds_run_only_when_asked() {
 
 /// TW5 (f) `[optimize] loop_p4`, the in-loop text of the escapes' warning.
 fn loop_p4_text(r: &RouteResult) -> String {
-    r.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).and_then(|w| w.split("in-loop P4 rounds ").nth(1)).unwrap_or("").to_string()
+    let t = r.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).and_then(|w| w.split("in-loop P4 rounds ").nth(1)).unwrap_or("");
+    t.split("; states after").next().unwrap_or("").to_string()
+}
+
+/// TW5 `[optimize] escape_offer`: the offers' text of the escapes' warning.
+fn offer_text(r: &RouteResult) -> String {
+    r.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).and_then(|w| w.split("rounds offered to the variant table ").nth(1)).unwrap_or("").to_string()
 }
 
 fn vias_of(r: &RouteResult) -> usize {
@@ -138,4 +144,30 @@ fn loop_p4_rounds_are_taken_as_escape_take_says() {
     let again = route(&m, &opts(base));
     assert_eq!(layers_of(&again), layers_of(&nw), "deterministic per seed");
     assert_eq!(loop_p4_text(&again), tn);
+}
+
+/// TW5 `[optimize] escape_offer` (lead 2026-11-19: "escapes offer their result to the table; the
+/// table keeps the bests"): the state after a taken in-loop P4 round goes to the run's archive
+/// and the shared table before the cycle's own state (Polubasov 2010 «Многовариантная
+/// оптимизация»: the table keeps the variants optimal for some criterion). Two runs share the
+/// table: on, states are offered and one of them is a row of the final table; off, none is
+/// offered and no row comes from one. Deterministic: the same options give the same copper.
+#[test]
+fn escape_offer_puts_the_in_loop_round_states_into_the_table() {
+    let m = model("inner_layer_room");
+    let base = r#""topo_rounds": 16, "stable_patience": 16, "seed": 2, "runs": 2, "preloop_p4": false, "loop_p4": true"#;
+    let on = route(&m, &opts(base));
+    let off = route(&m, &opts(&format!(r#"{base}, "escape_offer": false"#)));
+    let labels = |r: &RouteResult| r.variants.iter().map(|v| v.label.clone()).collect::<Vec<_>>();
+    let (t_on, t_off) = (offer_text(&on), offer_text(&off));
+    eprintln!("on: {t_on}\n  rows {:?}\n  {}\noff: {t_off}\n  rows {:?}\n  {}", labels(&on), layers_of(&on), labels(&off), layers_of(&off));
+    let offered: usize = t_on.split(' ').next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let archived: usize = t_on.split("(").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(0);
+    assert!(archived >= 1, "on: a round's state is taken into the run's own archive: {t_on}");
+    assert!(offered >= 1 && t_on.contains("taken into this run's archive") && t_on.contains("not offered: covered by its rows"), "on: states offered, every count named: {t_on}");
+    assert_eq!(t_off, "off", "off: the warning says so");
+    assert!(labels(&on).iter().any(|l| l.contains("in-loop P4 round")), "on: a row of the table comes from a round's state: {:?}", labels(&on));
+    assert!(!labels(&off).iter().any(|l| l.contains("in-loop P4 round")), "off: no row from a round: {:?}", labels(&off));
+    let again = route(&m, &opts(base));
+    assert_eq!((layers_of(&again), offer_text(&again)), (layers_of(&on), t_on), "deterministic per seed");
 }

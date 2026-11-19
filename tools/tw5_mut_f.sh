@@ -44,4 +44,14 @@ sub '                if lost {
                     cs.p4_undone += 1;' | mut p8_restore $C "${T[@]}"
 sub 'let g = |d: f64| { let d = if d.is_finite() { d.max(0.0) } else { 0.0 }; (1.0 + d) / (2.0 + d) };' 'let g = |_d: f64| 0.5;' | mut p9_weight $C "${T[@]}"
 sub 'hist: (opts.loop_history || opts.loop_p4).then(' 'hist: opts.loop_history.then(' | mut p10_hist_on $C "${T[@]}"
+# escape_offer (the offer-to-the-table hook)
+TO=(--test tw5_escape -- escape_offer)
+sub '                if !self.tw5.offer_on {
+                    return;' '                if true {
+                    return;' | mut o1_off $C "${TO[@]}"
+sub '            } else if arch.offer(Variant { label, crit, payload: Gen { var, gen, cycle, at_s: clock() } }, &obj) {' '            } else if false {' | mut o2_noarch src/topo/optimise.rs "${TO[@]}"
+sub '                sh.offer_mid(cycle, format!("run {} {label}", p.run + 1), gen, crit, var.clone(), fp);' '                let _ = (sh, fp);' | mut o3_notable src/topo/optimise.rs "${TO[@]}"
+sub '                if k.2 != usize::MAX && !g.pending.contains_key(&(c, k.1, usize::MAX)) {' '                if false {' | mut o4_drop src/topo/table.rs --lib -- mid_cycle_offers
+sub '                    self.offer_mid("in-loop P4 round".into(), cs);' '' | mut o5_p4site $C "${TO[@]}"
+sub '        sp.offer_floor(arch.items.iter().map(|o| o.crit).collect());' '' | mut o6_floor src/topo/optimise.rs "${TO[@]}"
 note "mutants done"
