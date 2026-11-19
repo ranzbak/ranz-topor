@@ -55,3 +55,42 @@ result JSON equal with sketches on/off (fixture, rounds=1). Mutants on the new l
 off, progress handling (timestamps, seq changes, caption per kind, toggle), sketch-to-draw-list pure functions.
 GUI e2e (Xephyr harness): esp-rust-board, two screenshots of the progress dialog in different loop cycles, the image
 differs and the caption names the cycle; default copper = main (copper hash). Hetzner: one small job (<= EUR 1).
+
+## Addendum 2026-11-19: OK writes the highlighted one of the four bests (user decision; NOT implemented, lead's reply first)
+User: the score panel lists the 4 kept bests (overall, fewest errors, shortest + fewest errors, fewest vias + fewest
+errors) as clickable rows; a click highlights the row and shows that variant in the image; default highlight = overall;
+OK writes the highlighted variant. Last round / Last run stay (image toggle), not offered for OK unless one of the 4.
+
+What exists (checked in the code, main 12699012):
+- The 4 bests are the roles of the ONE variant table all runs share (`archive::Role::ALL`, `table.rs`); during the loop
+  they are **plans** (predicted), nothing is drawn (draw once).
+- At the end `Coord`/`DrawGate::assign` draws the rows holding the roles (`[drawing] candidates` = 4, default), then
+  `core.rs four_bests` ranks the drawn rows by the same roles and `[optimize] pick` chooses which goes to KiCad.
+- **After Cancel / OK only the overall best is drawn** (`DrawGate::why_not`: "after Cancel / OK only the overall best of
+  the variant table is drawn"). With the dialog the run only ends by OK / Cancel / cap / time (no stop on stable), so in
+  the plugin the other 3 bests are normally **never drawn**.
+- The result carries the 4 bests' scores (`RouteResult.bests`, JSON: roles, run, predicted + drawn criteria) but the copper
+  of the applied one only; the other drawn rows' `RouteResult`s are dropped in `four_bests`.
+- `Progress` has no per-role rows; the plugin sees only the overall best (and since this branch Last round / Last run).
+So: the 4 bests do **not** all reach the plugin, and only the overall one can be written on OK today.
+
+Proposal (engine + plugin; no routing change, the search is the same):
+E1. Progress `bests: [{role, run, cycle, errors, open, violations, vias, length_mm, kind}]` = the shared table's 4 role
+    rows (updated where the table changes; O(4)). A row holding several roles is one entry with several roles.
+E2. Role sketches: when a role's row changes and it is the publishing run's own end state or a stashed mid state (the
+    same rule as the run-pick sketch here), publish it to a role slot; `RouteJob.sketch("best:errors")` etc. Rows offered
+    by another run's table copy come with that run's sketch (each run publishes its own rows). Only while enabled.
+E3. OK carries the choice: `RouteJob.cancel(ok, role="best"|"errors"|"shortest"|"vias")` (default "best" = today).
+    After OK the engine draws the row holding that role (one drawing, as today for the overall best) and applies it
+    (as `[optimize] pick = role` does). Cost after OK = one drawing, unchanged.
+E4. Without OK (cap / time limit / headless) all candidates are drawn as today; the result additionally carries the other
+    drawn roles' items (`alternatives: [{roles, items}]`, plugin-only, skipped in result.json) so the post-run Preview
+    can switch between them and Accept writes the chosen one.
+P1. Score panel: rows Overall / Fewest errors / Shortest / Fewest vias (+ Last round, Last run below, not selectable for
+    OK unless they are one of the four); click / keyboard highlights; the image follows the highlight; caption names
+    role, run, round, predicted vs drawn; the OK button's tip names what it writes ("OK writes: Shortest, run 3 round 41").
+P2. Post-run Preview: the drawn copper of the chosen role (the drawn result may differ from the prediction: shown as
+    predicted -> drawn); switching there (E4) only where several were drawn.
+Open questions for the lead/user: (a) after OK, draw only the highlighted row (fast, E3) or all four (+3 drawings
+of waiting) so the Preview can still switch? (b) If the highlighted plan draws worse than predicted (e.g. errors appear),
+write it anyway (user's choice) with a warning, or fall back to the overall best? Proposal: write it + loud warning.
