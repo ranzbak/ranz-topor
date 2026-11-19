@@ -52,9 +52,17 @@ def site_or_stay() -> Pattern:
     strips = [Keepout(["B.Cu"], [(2.6, 0.0), (3.4, 0.0), (3.4, H), (2.6, H)]),
               Keepout(["B.Cu"], [(12.6, 0.0), (13.4, 0.0), (13.4, H), (12.6, H)])]
     top = y1 - QFN_L / 2  # 4.8
-    yd = _r(top - CLEAR - W_SIG / 2 - EPS)  # the detour's line above U1
-    a, b = _r(p1[0] + (Yc - yd)), _r(p2[0] - (Yc - yd))  # 45 deg in and out
-    sig = [p1, (a, yd), (b, yd), p2]
+    half = W_SIG / 2 + CLEAR + EPS  # wire centre to foreign copper
+    yd = _r(top - half)  # the detour's line above U1
+    # 45 deg legs tangent to the clearance round the rows' outer top corners (xs[0] - QFN_W/2, top) and its mirror,
+    # leaving / entering the SMD pads where those lines cross y 6 (inside the pads: copper there is the pad's own)
+    cl, cr = xs[0] - QFN_W / 2, xs[-1] + QFN_W / 2
+    s_l = cl + top - half * math.sqrt(2)  # x + y on the left leg
+    s_r = cr - top + half * math.sqrt(2)  # x - y on the right leg
+    e1, e2 = (_r(s_l - Yc), Yc), (_r(s_r + Yc), Yc)
+    assert p1[0] <= e1[0] <= p1[0] + SMD[0] / 2 and p2[0] - SMD[0] / 2 <= e2[0] <= p2[0]
+    a, b = _r(s_l - yd), _r(s_r + yd)
+    sig = [e1, (a, yd), (b, yd), e2]
     blk = [(xb, y1), (xb, y2)]
     straight = _len([p1, p2])
     # the via room in the channel: centre to pad edge gap/2, a via needs VIA_D/2 + CLEAR
@@ -71,9 +79,10 @@ def site_or_stay() -> Pattern:
                 "in the channel (no room). B.Cu outside x 3.4 .. 12.6 is a rule area (other B.Cu copper), so no via fits at "
                 "the rows' ends either (the left window would be x 3.7 .. 2.85, empty). The class of the failure: qmtech "
                 "via-site-forced connections (ADV_SCL, ADV_DDCSCL: a crossing next to a fine-pitch row).",
-        answer=f"SIG on F.Cu round U1: 45 deg up to y {yd}, along it, 45 deg down to J2 ({_len(sig):.2f} mm, +{_len(sig) - straight:.2f} "
-               f"mm over the straight {straight:.1f}). BLK straight across the channel (1.6 mm). 0 vias, DRC 0. Mirror (round U2, "
-               "below) is equally optimal.",
+        answer=f"SIG on F.Cu round U1, octilinear and tight: from J1.1 at x {e1[0]} 45 deg up to y {yd} (the legs touch the "
+               f"clearance round the rows' outer top corners), along it, 45 deg down into J2.1 at x {e2[0]} ({_len(sig):.3f} mm; the "
+               f"straight line, {straight:.1f} mm centre to centre, would cross BLK). BLK straight across the channel (1.6 mm). "
+               "0 vias, DRC 0. Mirror (round U2, below) is equally optimal.",
         why="Every B.Cu dive of SIG needs its vias outside the channel and between the strips: above U1 or below U2, i.e. SIG "
             "first leaves the channel on F.Cu, which is already the detour; the dive then adds 2 vias to the same length. "
             "Straight through the channel crosses BLK on F.Cu. So the shortest legal answer has 0 vias and is the detour. "
@@ -83,6 +92,7 @@ def site_or_stay() -> Pattern:
         classes=[dict(DEFAULT_CLASS)], ref_tracks=[Track("SIG", "F.Cu", W_SIG, sig), Track("BLK", "F.Cu", W_SIG, blk)], ref_vias=[],
         witness={"SIG": ("F.Cu", sig), "BLK": ("F.Cu", blk)},
         extra={"tw6": {"ref_len": _r(_len(sig) + _len(blk)), "vias": 0, "straight_len": straight, "room": room,
+                       "style": "octilinear (the engine's drawing); the track ends inside the pads where the legs cross y 6",
                        "no_site_marks": [[xb - 0.6, Yc], [xb + 0.6, Yc]],
                        "also_optimal": "SIG round U2 (mirror, below)",
                        "literature": "Luzin-Popov 2013 p. 133 (S = sum k_i x_i: the via and its site are terms of S); "
@@ -100,7 +110,7 @@ def lead_via_end() -> Pattern:
     ob = Fp("Q1", [Pad("1", None, (xo, o_y[0]), (2 * half, 2 * half)), Pad("2", None, (xo, o_y[1]), (2 * half, 2 * half))], "obstacle")
     hand = Track("SIG", "F.Cu", W_SIG, [(3.0, Y), end])
     # the via room on y = Y: the pads' near corners are (xo - half, Y -+ 0.45); a via needs VIA_D/2 + CLEAR from them
-    need = VIA_D / 2 + CLEAR + EPS
+    need = VIA_D / 2 + CLEAR + 1e-5  # the engine's 10 nm margin: the via end sits on the room limit
     dy = (o_y[1] - half) - Y  # 0.45
     xv = _r(xo - half - math.sqrt(need * need - dy * dy))  # the lead's via end (last point with room)
     xv2 = _r(xo + half + math.sqrt(need * need - dy * dy))  # first point with room past the pads
