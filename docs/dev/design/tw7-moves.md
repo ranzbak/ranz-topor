@@ -168,3 +168,23 @@ equal or better per connection. Implemented opt-in: A (detectors `u_clinches`, `
 B (`Sp::pattern_cands`, `Sp::pattern_move` = TW6's `relay_kept` with an explicit order; fold the two in part F),
 D (`Sp::detour_amounts`, length coefficient in `conn_reg_w`), E-detect (`pourplan::cut_components`). The
 incremental detection cache (F8a) waits for the `xr_*` profile: only if `xr_detect` is a real share.
+
+Results (tw7ab-b8c8b4e6, shared ccx43 at about 100 % load, so equal-time numbers are noisy):
+- Off = main copper on eprom, wiccon, esp and qmtech (copper_hash, rounds=1).
+- Crossing-pass profile (K, pre-loop): detection takes 0.1 % of it (esp 8 ms of 6.5 s), re-plans 89 %, judging 11 %. So
+  F8a (incremental detection) is dropped: the cost is in the re-plans and the judge, which part B does per candidate.
+- `TOPO_PATDBG`: every plan wire with taut ratio > 1.5 has at least one detected pattern (esp 10/10, qmtech 24/24).
+  Mostly u_clinch and clinch, some same-net loops. Attribution is in reports/tw7-moves-data/patdbg-K-*.txt.
+- Moves keep 3-5 % of their tries (esp 33/576, qmtech 52/1311 at 300 s). But they cost cycles: esp 17-22 -> 8-9 cycles,
+  qmtech 8 -> 5. So the moves need a work share and a cheaper order before any default flip. Next round: per-cycle
+  pattern work share and per-kind counters.
+- Equal time sums (esp s0-4, qmtech s0), each as drc_new / unconnected / vias / detour>1.5:
+
+  | cfg | esp base | esp | qmtech base | qmtech |
+  |---|---|---|---|---|
+  | u | 651/51/279/75 | 595/53/270/73 | 253/20/163/23 | 348/20/149/21 |
+  | ud (with detour = 1) | 651/51/279/75 | 640/47/281/69 | 253/20/163/23 | 164/20/147/22 |
+  | d alone | 651/51/279/75 | worse drc_new (838) | | |
+  | ux (pre-loop passes off) | 651/51/279/75 | worse (825) | | |
+
+  ud is the best of the four. Not judged per connection yet. Defaults stay off.
