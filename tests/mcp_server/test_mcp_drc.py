@@ -337,7 +337,8 @@ def test_one_drc_spots_call_over_n_rows_starts_one_kicad(tmp_path, monkeypatch):
     def fake_session_for(board, out, **kw):
         starts.append(board)
         s = _FakeSession(board, rows)
-        s.marks = [(r["x"], r["y"]) for r in idx["rows"]]
+        geom = D.board_items((FIX / "wiccon-routed-mini.kicad_pcb").read_text())  # a point on each row's track
+        s.marks = [geom[r["ours"][0]["uuid"]]["pts"]["start"] for r in idx["rows"]]
         s.e.shot = lambda tag, win=None: tmp_path / "shot.png"
         G._SESSION = s
         return s

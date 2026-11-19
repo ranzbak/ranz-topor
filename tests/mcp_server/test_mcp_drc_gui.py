@@ -1,7 +1,7 @@
 """mcp-drc live gate: drc -> drc_spots -> cleanup in ONE real KiCad 10 session (Xephyr, isolated home) on a copy of
 the public wiccon-2023 board. Deselected by default (marker ``gui``):
 
-    PYTHONPATH=.:plugin .venv/bin/pytest tests/mcp_server/test_drc_gui.py -m gui -s
+    PYTHONPATH=.:plugin .venv/bin/pytest tests/mcp_server/test_mcp_drc_gui.py -m gui -s
 
 "Routed" = the hand-routed copy plus one synthetic short (a track of net A from an A track end to the nearest B
 track end on the same layer), "input" = the stripped copy (harness.strip). Needs Xephyr, metacity, xdotool, wmctrl,

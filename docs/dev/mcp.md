@@ -110,8 +110,8 @@ end. Design note: [design/mcp-drc.md](design/mcp-drc.md).
   toggles live in pcbnew.json `"DRC"`: `report_all_track_errors` (= `--all-track-errors`), `crossprobe`,
   `scroll_on_crossprobe`. "Delete tracks connecting different nets" deletes the copper of BOTH nets around a short
   (wiccon e2e: one synthetic MOSI-SCLK short -> 4 "Remove track shorting two nets", SCLK newly unconnected).
-- **Tests.** `tests/mcp_server/test_drc.py` (recorded public wiccon fixtures in `fixtures/drc/`; no KiCad), and
-  `tests/mcp_server/test_drc_gui.py` (marker `gui`: wiccon hand copy + one synthetic short; drc_spots over all
+- **Tests.** `tests/mcp_server/test_mcp_drc.py` (recorded public wiccon fixtures in `fixtures/drc/`; no KiCad), and
+  `tests/mcp_server/test_mcp_drc_gui.py` (marker `gui`: wiccon hand copy + one synthetic short; drc_spots over all
   classes and cleanup in one pcbnew).
 
 ### Borrowed code (provenance)
