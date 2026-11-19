@@ -733,8 +733,7 @@ fn fig10() -> (BoardModel, &'static Board) {
 #[test]
 fn a_wire_that_crosses_nothing_is_crossed_at_its_freedom() {
     let (m, b) = fig10();
-    let mut wt = InitWeights::default();
-    wt.cross_mm = 5.0;
+    let wt = InitWeights { cross_mm: 5.0, ..InitWeights::default() };
     let lay = |a: f64| {
         let mut st = State::new(&b.proj);
         let (w2, _) = st.route_conn(&conn(&m, b, 2, "J3", "J4"), &wt, 1.0).expect("W2");
