@@ -146,6 +146,31 @@ each over-full term 1 + over/pitch (counted in `violations()`, the measure, the 
 top as the round-1 decision asks). Compass: located `pad_exit` items (predicted) at the stub, `pad_exit_items` filled.
 Option `[capacity] pad_exits` (default off until the equal-time A/B). 5.10 (`pad_exit_stubs`) unchanged.
 
+### (1) as implemented (2026-11-19)
+- `topo::padexit`: `Packer::exits_of` (leaving pass, side, stub `a -> b`, `w_e`, neighbours, outside triangle),
+  `Packer::exit_static` (cached per pad, side, net, width, clearance, floor), `end_tris`, `exit_via_room` ((c) as one
+  self-contained function: TW6 part A redirects it to its site room and counts it once).
+- The terms go into the wire's CM1 entry (`Frame::wire_over` = via terms + exit terms), so the undo log, the lane
+  overlays, `viacheck` and the local judge cover them. The judge's model wires also take the traversers of every S
+  wire's pad-end triangles' vertex star (`layers::via_neighbourhood_x`). The repricing owners take the wires whose exit
+  triangle lies in a changed wire's star.
+- (b) is CM1's gap cuts at the stub's middle and tip on the pad's layer with the stub as the feature item (the worse of
+  the two points).
+- Compass: `pad_exit` items (segment = the stub) from `CapModel::exit_items`.
+- The exit neck's `pass_d` is **not** done. It is priced only with `[factors] neck_depth`, default 0.
+- **Terms split** (rounds = 1, esp + qmtech s0, KiCad new; base 397; `TOPO_PX_TERMS` diagnosis mask): a alone 821,
+  b alone 400, c alone 504 (unconnected 34 -> 21, det > 1.5 44 -> 38).
+  - (a) over-predicts on fine-pitch rows. The side read from the leaving pass calls a wire pulled taut past a pad corner
+    a long-side exit.
+  - A real pass through the pin gap is already the per-edge model's.
+  - Not a clear model error that a fix would remove, so (a) is behind `[capacity] pad_exit_static` (default off), and
+    `pad_exits` = (b) + (c).
+- Tests: `tests/topo_pad_exit.rs`.
+  - The plan-object test: the exit side follows the leaving pass, not the straight line.
+  - The two approved T1 patterns as regressions: clean, at most 1.1 x the expected length, option off and on.
+  - The row measurements: the tip stub fits at full width, the long-side stub stands on U1.4, via room beside and
+    clear of the row, stored = fresh.
+
 ## (3) Graded pour-cut term
 `MeasureParts.pour = (count, graded)`: the plan's copper (per wire its layer stretches at their pass widths, planned
 vias, plane stubs; `draw::track_item` / `via_item`) through `pourcheck::check_pour_reach` at a plan resolution
