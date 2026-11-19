@@ -385,15 +385,20 @@ def rules_mismatch(new_violations, model: dict) -> "Finding | None":
         if req is None or not items or (len(nets) == 2 and frozenset(nets) in pairs):
             continue
         # an item without a net (an unconnected pad, a graphic) is in the Default net class, and KiCad takes the
-        # larger of the two items' clearances (pcbnew manual, "Working with zones -> Zone properties -> Clearances &
-        # pad connections": "if two clearance values are in conflict, the larger clearance value will be used")
+        # larger of the two items' clearances. Sources: pcbnew manual, "Design Rules Checker -> DRC violations ->
+        # Clearance violation": "The allowed clearance between two items can come from the board-level minimum
+        # clearance, the net class settings for each net, or from custom rules"; "Working with zones -> Zone
+        # properties -> Clearances & pad connections": "if two clearance values are in conflict, the larger
+        # clearance value will be used"; and KiCad's own DRC text for a no-net pad: "Pad 15 [<no net>] ... netclass
+        # 'Default' clearance 0.1500 mm" (test_postrun _no_net_drc)
         no_net = [default] if any(not item_net(i) for i in items) else []
         given = max([by_name.get(n, default) for n in nets] + no_net
                     + [local[i["uuid"]] for i in items if i.get("uuid") in local])
         if req[0] > given + MISMATCH_TOLERANCE_NM:
-            prev = worst.get(nets)
+            key = nets + (("<no net>",) if any(not item_net(i) for i in items) else ())
+            prev = worst.get(key)
             if prev is None or req[0] - given > prev[0] - prev[1]:
-                worst[nets] = (req[0], given, req[1])
+                worst[key] = (req[0], given, req[1])
     if not worst:
         return None
     rows = [f"{' – '.join(n)}: KiCad requires {r / 1e6:.4f} mm, topor routed with {g / 1e6:.4f} mm "

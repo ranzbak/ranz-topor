@@ -1195,6 +1195,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             state["no_project"] = postrun.drc_without_project(lost)
         rep = run_drc(pcb, routed_dir / "drc-routed.json", save_board=True,  # refilled zones for the preview
                       **cli_kw("drc", cancellable=False))
+        lost = project_missing(pcb, proj_snap)  # again AFTER kicad-cli: a deletion before it loaded the project
+        if lost and state.get("no_project") is None:
+            state["no_project"] = postrun.drc_without_project(lost)
         log.line(f"DRC round {state['rounds']}: {len(rep.violations)} violations, {len(rep.unconnected)} unconnected, "
                  f"{rep.seconds:.1f}s")
         j = DrcJudgement(rep, {w["uuid"]: orig for w, orig in zip(with_ids, items)})
@@ -1263,9 +1266,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             except OSError:
                 tracks = None
             post += postrun.drc_new_findings(new_v, tracks)
-            # only when KiCad's DRC provably ran under the board's project: a board without a .kicad_pro was judged
-            # on KiCad's defaults, which are not the rules the engine read (drc-project-fix)
-            if proj_snap.get(".kicad_pro") is not None and not state.get("no_project"):
+            # skipped only when the board HAD a project and the DRC copy provably lacked it (DRC_WITHOUT_PROJECT
+            # below); a board without a .kicad_pro keeps the check: KiCad's DRC and topor's fallbacks both use
+            # KiCad's defaults (lead 2026-11-19, drc-project-fix r2)
+            if not state.get("no_project"):
                 mismatch = postrun.rules_mismatch(new_v, eng_model)
     post_codes = {f.code for f in post}
     findings[:] = [f for f in findings if f.code not in post_codes] + post

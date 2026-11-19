@@ -224,3 +224,42 @@ def test_drc_copy_without_project_is_its_own_error_never_rules_mismatch(app, epr
     assert "preview" not in ui.names() and "done" not in ui.names()
     res = json.loads((out.report_dir / "result.json").read_text())
     assert not any(f["code"] == "RULES_MISMATCH" for f in res["findings"])
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_project_deleted_between_the_copy_and_kicad_cli_is_drc_without_project(app, eprom, tmp_path, reports,
+                                                                              monkeypatch, bad):
+    """drc-project-fix r2 F1: the routed copy's .kicad_pro vanishes after the copy was written but before kicad-cli
+    loaded it (the sibling rm -rf race at DRC time): DRC_WITHOUT_PROJECT, never RULES_MISMATCH (wrong engine rules)
+    and never a silent accept on KiCad's defaults (right engine rules)."""
+    real = run_mod.run_drc
+
+    def spy(pcb, *a, **k):
+        if pcb.parent.name == "routed":
+            for ext in (".kicad_pro", ".kicad_dru"):
+                pcb.with_suffix(ext).unlink(missing_ok=True)
+        return real(pcb, *a, **k)
+
+    monkeypatch.setattr(run_mod, "run_drc", spy)
+    board, ui, out = do_run(eprom, tmp_path, board=_bad_rules_board(eprom) if bad else None, strict=False)
+    errs = [c[1][0].code for c in ui.calls if c[0] == "error"]
+    assert errs == ["DRC_WITHOUT_PROJECT"] and out.status == "error" and board.commits == [], (errs, out.status)
+
+
+def test_board_without_kicad_pro_keeps_the_rules_mismatch_check(app, eprom, tmp_path, reports):
+    """drc-project-fix r2 F2 (lead 2026-11-19): a board that never had a .kicad_pro keeps RULES_MISMATCH (KiCad's DRC
+    and topor's fallbacks both use KiCad's defaults): engine given 0.1 mm must be reported, not accepted. Kills the
+    mutant that skips the check when the snapshot has no .kicad_pro."""
+    import shutil
+
+    from test_run_flow import FakeBoard
+
+    d = tmp_path / "noproj"
+    d.mkdir()
+    pcb = d / eprom.pcb.name
+    shutil.copy2(eprom.pcb, pcb)
+    b0 = _bad_rules_board(eprom)
+    board = FakeBoard(pcb, b0.model, live_text=b0.live_text if hasattr(b0, "live_text") else None, project_dir=d)
+    board, ui, out = do_run(eprom, tmp_path, board=board, strict=False)
+    errs = [c[1][0].code for c in ui.calls if c[0] == "error"]
+    assert errs == ["RULES_MISMATCH"], errs

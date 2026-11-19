@@ -355,4 +355,10 @@ def test_rules_mismatch_item_without_net_uses_the_default_netclass_clearance():
     both = _no_net_drc()
     both[0]["items"][1]["description"] = "Pad 3 [<no net>] of U4"
     assert postrun.rules_mismatch(both, _hdmi_model(150_000)) is None
-    assert postrun.rules_mismatch(both, _hdmi_model(127_000)) is not None
+    f = postrun.rules_mismatch(both, _hdmi_model(127_000))
+    assert f is not None
+    # F3 (verify r1): a readable item name, never an empty net; a mixed pair names the no-net side too
+    assert ": KiCad requires" in f.message and "<no net>: KiCad requires 0.1500 mm" in f.message
+
+    g = postrun.rules_mismatch(_no_net_drc(), _hdmi_model(127_000))
+    assert "<no net> – TX0_N: KiCad requires" in g.message or "TX0_N – <no net>: KiCad requires" in g.message, g.message
