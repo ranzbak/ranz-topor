@@ -1283,8 +1283,12 @@ impl<'a> Drawer<'a> {
     }
 
     /// Set the pass layers and via discs of wire `w` for its `plan` with vias at the traversals
-    /// `ks` of diameters `ds`. O(passes of the wire).
-    pub fn set_wire_layers(&mut self, w: WireId, plan: &Plan, ks: &[usize], ds: &[f64]) {
+    /// `ks` of diameters `ds`, at the points `pts` (one per via, `None`: not known). TW6 part A
+    /// (lead 2026-11-19): with `[capacity] via_disc_height` the discs get the height of their via
+    /// point off the edge line, as the plan packs them ([`super::refine::wire_heights_into`]), so
+    /// the drawing reads the room the plan read (tw4-r2 (2b) packed the drawing at height 0: plan
+    /// errors fell, drawn losses rose). O(passes of the wire).
+    pub fn set_wire_layers(&mut self, w: WireId, plan: &Plan, ks: &[usize], ds: &[f64], pts: &[super::refine::ViaPt]) {
         let n = self.st.wires[w].passes.len();
         for r in 0..plan.layers.len() {
             let k0 = if r == 0 { 0 } else { ks[r - 1] };
@@ -1293,7 +1297,11 @@ impl<'a> Drawer<'a> {
                 self.pass_layer[self.st.wires[w].passes[k]] = plan.layers[r] as i32;
             }
         }
-        let disc = wire_discs(self.st, w, ks, ds);
+        let mut disc = wire_discs(self.st, w, ks, ds);
+        if self.packer.via_disc_h && pts.len() == ks.len() {
+            let (st, ps) = (self.st, &self.st.wires[w].passes);
+            super::refine::wire_heights_into(&mut disc, &self.b.proj, |j| st.passes[ps[j]].edge, ks, pts);
+        }
         for (k, &p) in self.st.wires[w].passes.iter().enumerate() {
             self.pass_disc[p] = disc[k];
         }
@@ -3042,7 +3050,13 @@ impl<'a> Drawer<'a> {
             }
         }
         let dmax = old.1.iter().map(|d| d[0].max(d[1])).fold(0.0, f64::max);
-        let disc = wire_discs(st, w, cuts, &vec![dmax; cuts.len()]);
+        let mut disc = wire_discs(st, w, cuts, &vec![dmax; cuts.len()]);
+        // TW6 part A: a kept via keeps the height its disc had (`[capacity] via_disc_height`).
+        for (k, d) in disc.iter_mut().enumerate() {
+            if d[0].max(d[1]) > 0.0 && old.1[k][0].max(old.1[k][1]) > 0.0 {
+                d[2] = old.1[k][2];
+            }
+        }
         for (k, &p) in ps.iter().enumerate() {
             self.pass_disc[p] = disc[k];
         }

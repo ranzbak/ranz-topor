@@ -37,6 +37,7 @@ mod shrinkage;
 mod squeeze;
 mod style;
 mod via;
+mod via_site_social;
 mod via_squeeze;
 mod violation;
 
@@ -122,6 +123,9 @@ pub enum Event {
     DpViaUnpaired { count: u32 },
     /// D7: P and N of a pair connection swap sides between the ends (they cross near `at`).
     DpPolarityCross { at: Vec2 },
+    /// TW6 part B: wires `a` and `b` cross in `tri` where neither has a via site; `amount` the
+    /// smaller of their graded site amounts (`1 + deficit / (d + s)`, 0 with a site).
+    ViaSite { a: WireId, b: WireId, tri: TriId, amount: f64 },
 }
 
 /// How a factor's events appear in the report.
@@ -279,6 +283,8 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(branch::DanglingTurn),
         // tw4 T1: after the last, so the draws of every factor before it stay as they were.
         Box::new(neck_depth::NeckDepth),
+        // TW6 part B: after the last, so the draws of every factor before it stay as they were.
+        Box::new(via_site_social::ViaSiteSocial),
     ]
 }
 
@@ -572,9 +578,10 @@ mod tests {
         assert_eq!(w(&[("necking", 12.0)]), Some(12.0), "follows the necking setting");
         assert_eq!(w(&[("necking", 12.0), ("shrinkage", 4.0)]), Some(4.0), "its own setting wins");
         // It prices no P2 event (the cut model reads the weight); factors after it are appended
-        // (exist-term: dangling_turn), so the earlier factors' fluctuation draws stay the same.
+        // (exist-term: dangling_turn; tw4: neck_depth; TW6: via_site_social), so the earlier factors'
+        // fluctuation draws stay the same.
         assert_eq!(Registry::standard().price(&ev_cross(), &WireCtx::default()), 20.0);
         let names: Vec<&str> = standard_factors().iter().map(|f| f.name()).collect();
-        assert_eq!(&names[names.len() - 3..], ["shrinkage", "dangling_turn", "neck_depth"]);
+        assert_eq!(&names[names.len() - 4..], ["shrinkage", "dangling_turn", "neck_depth", "via_site_social"]);
     }
 }

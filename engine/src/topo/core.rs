@@ -2109,6 +2109,59 @@ fn item_edges(st: &State, items: &[(WireId, usize)]) -> Vec<usize> {
     v
 }
 
+/// TW6 r4 (`[optimize] site_move_detour`): the graded detour price (in violations) of the
+/// connections `cis`: per connection the length of its alive wires ([`State::wire_len`]) over its
+/// straight pad-to-pad distance, the run report's detour ratio
+/// ([`super::escape::detour_price`] on the excess-ratio scale `scale`; 0 = no price). O(wires).
+pub fn conn_detour_price(st: &State, wire_conn: &[usize], conns: &[Conn], cis: &BTreeSet<usize>, scale: f64) -> f64 {
+    if scale <= 0.0 || cis.is_empty() {
+        return 0.0;
+    }
+    let mut len: BTreeMap<usize, f64> = cis.iter().filter(|&&c| c < conns.len()).map(|&c| (c, 0.0)).collect();
+    for (w, _) in st.wires.iter().enumerate().filter(|(_, wi)| wi.alive) {
+        if let Some(l) = wire_conn.get(w).and_then(|c| len.get_mut(c)) {
+            *l += st.wire_len(w);
+        }
+    }
+    let pos = &st.proj.pos;
+    len.iter().map(|(&c, &l)| super::escape::detour_price(l, (pos[conns[c].b] - pos[conns[c].a]).len(), scale)).sum()
+}
+
+/// TW6 r4: the keep judgement of a site or branch relay ([`conn_detour_price`]): the board's
+/// evaluation `e0` -> `e1` plus the relaid connections' detour price `det_old` -> `det_new` (mm)
+/// must drop. Returns (kept, refused for the detour: the evaluation alone would have kept it). A
+/// price, not a gate: a move that shortens a detour gains by as much. O(1).
+pub fn site_keep(e0: f64, e1: f64, det_old: f64, det_new: f64) -> (bool, bool) {
+    let kept = e1 + det_new < e0 + det_old - 1e-6;
+    (kept, !kept && e1 < e0 - 1e-6)
+}
+
+/// TW6 r4: whether a reroute not kept by its judgement (`old` / `new` prices with the detour
+/// prices `det_old` / `det_new` in them, `extra` the re-lay counter's price; `new` infinite = not
+/// placed) would have been kept without the detour price. O(1).
+pub fn reroute_detour_refused(kept: bool, old: f64, new: f64, det_old: f64, det_new: f64, extra: f64) -> bool {
+    !kept && new.is_finite() && (new - det_new) + extra < (old - det_old) - 1e-6
+}
+
+/// TW6 part E: the run report's line for `[optimize] site_move` / `branch_move` (`site`, `branch`:
+/// which is on; `detour`: `[optimize] site_move_detour`, 0 = no detour price) with the loop's
+/// counts `st`. O(1).
+pub fn site_move_line(site: bool, branch: bool, detour: f64, st: &super::optimise::CycleStats) -> String {
+    let mut parts = Vec::new();
+    if site {
+        parts.push(format!("{} of {} site moves kept (a trace with a via without room laid again, else the traces closing its stretch in; [optimize] site_move)", st.site_kept, st.site_moved));
+    }
+    if branch {
+        parts.push(format!("{} of {} branch moves kept (the branch of a junction at such a stretch laid again; [optimize] branch_move)", st.branch_kept, st.branch_moved));
+    }
+    if detour > 0.0 {
+        parts.push(format!("{} refused for their detour ([optimize] site_move_detour = {detour})", st.site_detour_refused));
+    } else {
+        parts.push("no detour price ([optimize] site_move_detour = 0)".to_string());
+    }
+    format!("TopoR loop, vias without room (TopoR Shift Vias with rerouting): {}", parts.join("; "))
+}
+
 /// The victims of one negotiated P4 rip-up round (the pre-loop rounds and TW5 (f) `[optimize]
 /// loop_p4` inside the loop, one choice for both), read from the capacity model `cm` of the present
 /// layering: the wires with a via without a site, a bad via cut's wire and its crosser routed last,
@@ -3566,6 +3619,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
         via_site_r: crate::vias::plan_via_need(&model.rules, opts),
+        site_price: opts.via_site_price == "graded",
         n_signal: b.n_signal,
         plane_mm: reg.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
         plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),
@@ -3579,6 +3633,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let sub = super::capacity::subset_check(&st);
     let mut packer = Packer::for_model(model, opts, proj);
     packer.via_squeeze = reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: 0.0, via_nm: 1.0 }, &WireCtx::default());
+    if packer.site_price {
+        packer.lead_ends = b.kept_ends.iter().filter(|k| k.lead.is_some() && k.via_end.is_some()).cloned().collect();
+    }
     let packer = packer;
     // P3 with the junctions' tee rule: the trunk keeps one layer through a junction and the
     // branch ends on it. Two layers: inside P3, a tee is one layer domain (D6b); more layers: a
@@ -4425,8 +4482,30 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pred_old: Predicted,
             shadow: bool,
             shadow_out: Option<Shadow>,
+            /// TW6 r4 (`[optimize] site_move_detour`): the excess-ratio scale of the judge's graded
+            /// detour price (0 = none, every reroute but E's), the connections it is read on, and
+            /// its value before and after the try (violations x `viol_mm`, mm).
+            det_scale: f64,
+            conns: &'a [Conn],
+            det_cis: BTreeSet<usize>,
+            det: (f64, f64),
         }
         impl<'p> Rerouter<'p> for Rr<'_, 'p> {
+            fn judge_extra(&mut self, st: &mut State<'p>, ws: &[WireId], after: bool) -> f64 {
+                if self.det_scale <= 0.0 {
+                    return 0.0;
+                }
+                if !after {
+                    self.det_cis = ws.iter().filter_map(|&w| self.wire_conn.get(w).copied()).filter(|&c| c != usize::MAX).collect();
+                }
+                let d = self.viol_mm * conn_detour_price(st, self.wire_conn, self.conns, &self.det_cis, self.det_scale);
+                if after {
+                    self.det.1 = d;
+                } else {
+                    self.det.0 = d;
+                }
+                d
+            }
             fn price(&mut self, st: &mut State<'p>, w: WireId) -> f64 {
                 let _pg = super::prof::g(super::prof::K::RrPrice);
                 let ci = self.wire_conn[w];
@@ -4595,6 +4674,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// 5.8 `[vias] pair_move`: the length scale (nm, `[vias] pair_max_mm`) of the graded
             /// stretch price ([`super::viaopt::pair_len_price`]); `None` = off.
             pair_move: Option<f64>,
+            /// TW6 part E: `[optimize] site_move` / `branch_move`.
+            site_move: bool,
+            branch_move: bool,
+            /// TW6 r4 `[optimize] site_move_detour`: the excess-ratio scale of the graded detour
+            /// price in E's keep judgements (0 = none), and the moves it refused so far.
+            move_detour: f64,
+            site_refused: usize,
             /// The objective's price of a via (mm, `mm_per_via`), the unit of that stretch price.
             via_mm: f64,
             /// loop-local Step A: the per-wire stretch cache of the layerings (exact).
@@ -4638,8 +4724,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// reroute ([`State::layers_now`]) and its predicted violations (`p`, or measured).
             fn set_lr(&mut self, lr: layers::LayerReport, p: Option<Predicted>) {
                 *self.lr = lr;
-                self.st.layers_now = layers_now(self.st, &self.lr.events, self.bottom);
-                self.st.mark_free_wires(&self.lr.events);
+                // The search's view of the layering, all of it at once (TW6 r4: the via intervals
+                // of the B search term cannot be left behind, [`State::apply_layering`]).
+                self.st.apply_layering(&self.lr.events, self.bottom);
                 if p.is_none() {
                     self.pred_local = false;
                 }
@@ -4756,6 +4843,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// One single-wire rip-up and reroute of `w` (and the branches on its junctions) with the
             /// wire's oscillating coefficients and the via weight `via_w`; whether it was kept.
             fn reroute(&mut self, topo: &mut Topo, w: WireId, seed: u64, amp: f64, via_w: f64) -> bool {
+                self.reroute_d(topo, w, seed, amp, via_w, 0.0)
+            }
+            /// [`Sp::reroute`] with TW6 r4's graded detour price on the excess-ratio scale `det`
+            /// in its keep judgement (`[optimize] site_move_detour`, E's own wire; 0 = none: the
+            /// plain reroute, bit-equal). A move the judgement without that price would have kept
+            /// counts in `site_refused`.
+            fn reroute_d(&mut self, topo: &mut Topo, w: WireId, seed: u64, amp: f64, via_w: f64, det: f64) -> bool {
                 let _pg = super::prof::g(super::prof::K::Reroute);
                 let ci = self.wire_conn[w];
                 let (reg_w, amp_i) = self.try_reg(w, seed, amp, via_w);
@@ -4825,13 +4919,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     pred_old: self.pred,
                     shadow: self.local.is_some() && self.shadow_k > 0 && self.relays.is_multiple_of(self.shadow_k),
                     shadow_out: None,
+                    det_scale: det,
+                    conns: self.conns,
+                    det_cis: BTreeSet::new(),
+                    det: (0.0, 0.0),
                 };
                 self.relays += 1;
                 let lf0 = self.lctr.local_free.get();
                 let out = reroute_set(self.st, &set, &mut rr, extra);
                 let pending = rr.pending.take();
                 let shadow = rr.shadow_out.take();
+                let (det_old, det_new) = rr.det;
                 drop(rr);
+                if det > 0.0 && reroute_detour_refused(out.kept, out.old, out.new, det_old, det_new, extra) {
+                    self.site_refused += 1;
+                }
                 if let Some(sh) = shadow {
                     // The keep test (`reroute_set`) with the whole board's change of the move
                     // (after - before, both layered whole) on the same base as the local one.
@@ -4889,7 +4991,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 if self.dbg {
                     let pn = pending.as_ref().map(|p| format!("pred {} graded {:.3} vias {}", p.1.count, p.1.graded, p.0.vias)).unwrap_or_default();
-                    eprintln!("LOOPDBG[{}] reroute wire {w} conn {ci} set {set:?} via_w {via_w:.3} amp {amp_i:.3} old {:.3} (viol {:.3}) new {:.3} (viol {:.3}) extra {:.3} kept {} {pn}", self.dbg_tag, out.old, out.viol_old, out.new, out.viol_new, extra, out.kept);
+                    let dt = if det > 0.0 { format!(" detour price {det_old:.3} -> {det_new:.3}") } else { String::new() };
+                    eprintln!("LOOPDBG[{}] reroute wire {w} conn {ci} set {set:?} via_w {via_w:.3} amp {amp_i:.3} old {:.3} (viol {:.3}) new {:.3} (viol {:.3}) extra {:.3} kept {}{dt} {pn}", self.dbg_tag, out.old, out.viol_old, out.new, out.viol_new, extra, out.kept);
                 }
                 self.tries[ci] += 1;
                 if out.kept {
@@ -5329,6 +5432,92 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 kept
             }
+            /// TW6 part E: [`super::viaopt::siteless_intervals`] of wire `w` in the current layering.
+            fn siteless(&self, w: WireId) -> Vec<(usize, usize, usize, f64)> {
+                self.lr.events.get(w).map_or_else(Vec::new, |ev| super::viaopt::siteless_intervals(self.st, self.packer, w, ev))
+            }
+            fn has_conn(&self, x: WireId) -> bool {
+                self.wire_conn.get(x).is_some_and(|&c| c != usize::MAX)
+            }
+            /// TW6 part E: [`super::viaopt::bounding_wires`] of events `i`, `i + 1` of wire `w`.
+            fn bounding(&self, w: WireId, i: usize) -> Vec<WireId> {
+                let p = self.lr.partner.get(w).map_or(&[][..], |p| &p[..]);
+                super::viaopt::bounding_wires(self.st, w, p, i, &|x| self.has_conn(x))
+            }
+            /// TW6 part E: [`super::viaopt::tee_arms`] of the via interval after event `i` of wire
+            /// `w` in the current layering. O(wires).
+            fn tee_arms(&self, w: WireId, i: usize) -> Vec<WireId> {
+                let ev = self.lr.events.get(w).map_or(&[][..], |e| &e[..]);
+                super::viaopt::tee_arms(self.st, &tree::junctions(self.st), w, ev, i, &|x| self.has_conn(x))
+            }
+            /// TW6 part E: the wires `obs` (and the branches on their junctions) taken out together
+            /// and laid again in route order, each with its own try coefficients at the via weight
+            /// `via_w` (as [`Sp::pair_move`] lays its obstructing wires); the board is layered again
+            /// and the change kept when the archive's evaluation of the whole board ([`evaluation`]:
+            /// violations first, a via without a site among them, with `[vias] site_price` its
+            /// graded deficit too) plus the relaid connections' graded detour price (TW6 r4,
+            /// `[optimize] site_move_detour` = `self.move_detour`, [`conn_detour_price`] at the
+            /// violation weight; after minus before) drops, else everything comes back exactly.
+            /// Each connection counts the try. A priced move, no gate. Whether it was kept.
+            fn relay_kept(&mut self, obs: &[WireId], seed: u64, amp: f64, via_w: f64) -> bool {
+                let e0 = self.eval_now();
+                let before = self.snapshot();
+                let obs_cis: BTreeSet<usize> = obs.iter().map(|&x| self.wire_conn[x]).collect();
+                let gone: BTreeSet<WireId> = obs.iter().copied().collect();
+                let set: Vec<WireId> = gone.iter().copied().chain(tree::dependents(self.st, &gone)).collect();
+                let mut cis: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).collect();
+                cis.sort_by_key(|&ci| (self.rank[ci], ci));
+                cis.dedup();
+                let det_cis: BTreeSet<usize> = cis.iter().copied().filter(|&c| c != usize::MAX).collect();
+                let det_old = self.viol_mm * conn_detour_price(self.st, self.wire_conn, self.conns, &det_cis, self.move_detour);
+                for &x in &set {
+                    tree::remove_wire(self.st, x);
+                }
+                for &ci in &cis {
+                    self.forced.borrow_mut().remove(&self.conn_of[ci]);
+                }
+                let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
+                let n0 = self.st.wires.len();
+                self.st.took_part.clear();
+                let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
+                let mut kept = false;
+                if placed {
+                    if let Some(local) = self.local {
+                        let new: Vec<WireId> = (n0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive).collect();
+                        let (lr, p) = local(self.st, &before.topo, &set, &new, &before.lr, &before.pred, self.ties);
+                        self.set_lr(lr, Some(p));
+                        self.pred_local = true;
+                    } else {
+                        let lr = (self.assign_t)(self.st, self.ties);
+                        self.set_lr(lr, None);
+                    }
+                    let e1 = self.eval_now();
+                    let det_new = self.viol_mm * conn_detour_price(self.st, self.wire_conn, self.conns, &det_cis, self.move_detour);
+                    if self.dbg {
+                        eprintln!("LOOPDBG[{}] site/branch move: wires {obs:?} laid again, eval {e0:.3} -> {e1:.3}, detour price {det_old:.3} -> {det_new:.3}", self.dbg_tag);
+                    }
+                    let (keep, refused) = site_keep(e0, e1, det_old, det_new);
+                    if keep {
+                        for &ci in &cis {
+                            self.reroutes[ci] += 1;
+                        }
+                        kept = true;
+                    }
+                    self.site_refused += usize::from(refused);
+                }
+                if !kept {
+                    self.restore(&before);
+                }
+                for ci in obs_cis {
+                    self.tries[ci] += 1;
+                    if kept {
+                        self.stuck[ci] = 0;
+                    } else {
+                        self.stuck[ci] += 1;
+                    }
+                }
+                kept
+            }
         }
         impl<'p> Space for Sp<'_, 'p> {
             type Var = LoopVar;
@@ -5734,6 +5923,64 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
                 super::prof::lap(&mut plap, super::prof::K::StPairmove);
+                // TW6 part E (`[optimize] site_move` / `branch_move`; TopoR 6.3 manual p. 179, Shift
+                // Vias submode 2: "wires can be rerouted as well"; Luzin, Popov & Popov 2013 p. 134
+                // step 8.1): per wire (id order, the wires present at the start) its via interval
+                // without a site with the largest amount: (i) the wire laid again (the single
+                // reroute, its own judge); not kept: (ii) the wires whose crossings close the
+                // interval in laid again together, so it can grow to a site; then the branch arms
+                // of the junctions that bound it (their tee events). Each kept by the board's
+                // evaluation plus, TW6 r4, the graded detour price of the relaid connections
+                // (`[optimize] site_move_detour`).
+                if self.site_move || self.branch_move {
+                    let refused0 = self.site_refused;
+                    let det = self.move_detour;
+                    let n_w = self.st.wires.len();
+                    for w in 0..n_w {
+                        if ripped >= self.max_ripped || stop() {
+                            break;
+                        }
+                        if !self.st.wires[w].alive || self.wire_conn.get(w).is_none_or(|&ci| ci == usize::MAX) {
+                            continue;
+                        }
+                        let Some(&(i0, ..)) = self.siteless(w).first() else { continue };
+                        let mut tee = i0;
+                        if self.site_move {
+                            cs.site_moved += 1;
+                            ripped += 1;
+                            if self.reroute_d(&mut topo, w, c.seed ^ 0x5173, c.amp, c.emphasis.via_at(1.0), det) {
+                                cs.site_kept += 1;
+                                continue;
+                            }
+                            let Some(&(i, ..)) = self.siteless(w).first() else { continue };
+                            tee = i;
+                            let obs = self.bounding(w, i);
+                            if !obs.is_empty() && ripped < self.max_ripped && !stop() {
+                                cs.site_moved += 1;
+                                ripped += obs.len();
+                                if self.relay_kept(&obs, c.seed ^ 0x5174, c.amp, c.emphasis.via_at(1.0)) {
+                                    cs.site_kept += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        if self.branch_move {
+                            let arms: Vec<WireId> = self.tee_arms(w, tee).into_iter().filter(|&b| !(self.site_move && b == w)).collect();
+                            for b in arms {
+                                if ripped >= self.max_ripped || stop() || !self.st.wires[b].alive {
+                                    break;
+                                }
+                                cs.branch_moved += 1;
+                                ripped += 1;
+                                if self.relay_kept(&[b], c.seed ^ 0xB7A9, c.amp, c.emphasis.via_at(1.0)) {
+                                    cs.branch_kept += 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    cs.site_detour_refused += self.site_refused - refused0;
+                }
                 // loop-local: the variant this cycle offers carries the board's measure.
                 self.resync();
                 cs.busy_s = t0.elapsed().as_secs_f64();
@@ -5759,6 +6006,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // TW5 (4): crossing a wire that crosses nothing is priced by its freedom (free_wire_cross).
         st.free_wire_a = opts.free_wire_cross;
         st.mark_free_wires(&lr.events);
+        // TW6 part B search (`[factors] via_site_social` > 0): a crossing where neither wire has a
+        // via site is priced by the smaller of their site amounts (the packer's one measure).
+        if opts.factors.weight.get("via_site_social").is_some_and(|&w| w > 0.0) {
+            st.site_rooms = Some(packer.site_rooms());
+            st.site_strict = packer.via_between;
+            st.mark_site_k(&lr.events);
+        }
         // TW3: the pre-loop decisions of this run (a draw-only round takes its row's).
         let pre_loop: std::sync::Arc<PreLoop> = match draw_row {
             Some(d) => {
@@ -5824,6 +6078,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pred: pred0,
             pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             pair_move: opts.via_pair_move.then(|| opts.via_pair_max_mm.max(0.0) * MM),
+            site_move: opts.opt_site_move,
+            branch_move: opts.opt_branch_move,
+            move_detour: opts.opt_site_move_detour.max(0.0),
+            site_refused: 0,
             via_mm: opts.mm_per_via,
             scache: scache_ref,
             local: judge_local.then_some(local_ref),
@@ -6040,6 +6298,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.layers_now.clear();
         st.free_wire_a = 1.0;
         st.mark_free_wires(&[]);
+        st.site_rooms = None;
+        st.site_k.clear();
         let loop_s = t_loop.elapsed().as_secs_f64();
         let time_hit = rep.stop == "time limit" || rep.stop == "loop_time_share";
         loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit, relay_stop: rep.stop == "re-lay budget" });
@@ -6206,6 +6466,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
             "crossing_share": opts.loop_crossing,
             "pair_move": [rep.stats.pair_moved_kept, rep.stats.pair_moved, rep.stats.pair_moved_wires, rep.stats.pair_moved_long],
+            "site_move": [rep.stats.site_kept, rep.stats.site_moved],
+            "branch_move": [rep.stats.branch_kept, rep.stats.branch_moved],
+            "site_move_detour_refused": rep.stats.site_detour_refused,
             "variants_table": arch.items.iter().map(|v| serde_json::json!({"label": v.label, "gen": v.payload.gen, "cycle": v.payload.cycle, "errors": v.crit.errors, "penalty": (v.crit.penalty * 1e3).round() / 1e3, "vias": v.crit.vias, "length_mm": (v.crit.length_mm * 1e3).round() / 1e3, "shrinkages": v.crit.shrinkages})).collect::<Vec<_>>(),
             "layer_share_pct": (1000.0 * rep.stats.layer_s / loop_s.max(1e-9)).round() / 10.0,
             "judge": {
@@ -6235,6 +6498,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     rep.stats.pair_moved_long, opts.via_pair_max_mm
                 ));
             }
+        }
+        if opts.opt_site_move || opts.opt_branch_move {
+            warnings.push(site_move_line(opts.opt_site_move, opts.opt_branch_move, opts.opt_site_move_detour.max(0.0), &rep.stats));
         }
         if let Some(r) = crep.as_mut() {
             r.stage("after the TopoR loop", &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));
@@ -6609,7 +6875,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             (Some(sa), Some(sb)) => crate::vias::via_via_need(&model.rules, a, sa, b, sb, margin),
             _ => 0.0,
         };
-        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via };
+        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via, pair_room: opts.via_pair_room };
         let (sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
         dr.via_site = sites;
         dr.via_site_tight = rr.tight.iter().copied().collect();
@@ -6758,7 +7024,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // where the packing left them room: on their wire's nominal chord.
     for (&w, pl) in &plans {
         let d = packer.via_d(st.wires[w].net);
-        dr.set_wire_layers(w, pl, &pl.at, &vec![d; pl.at.len()]);
+        let pts: Vec<super::refine::ViaPt> = (0..pl.at.len()).map(|i| dr.via_site.get(&(w, i)).copied()).collect();
+        dr.set_wire_layers(w, pl, &pl.at, &vec![d; pl.at.len()], &pts);
     }
     dr.compute_intervals();
     // 5.4 task 2: the vias the plan hands to the drawing (the plan vs drawn summary below).
@@ -6836,7 +7103,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let ks: Vec<usize> = vs.iter().map(|v| v.0).collect();
         // The disc as its reach (5.4 task 1: the drill's hole clearance where it reaches further).
         let ds: Vec<f64> = vs.iter().map(|v| 2.0 * crate::vias::via_reach(&model.rules, st.wires[w].net, v.2)).collect();
-        dr.set_wire_layers(w, pl, &ks, &ds);
+        let pts: Vec<super::refine::ViaPt> = vs.iter().map(|v| Some((v.0, v.1))).collect();
+        dr.set_wire_layers(w, pl, &ks, &ds, &pts);
     }
     dr.compute_intervals();
     // edge-clear: a pad end whose centre breaks a static clearance (a track wider than its pad

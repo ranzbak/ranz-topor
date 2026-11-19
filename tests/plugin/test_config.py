@@ -218,6 +218,39 @@ def test_via_auto_settings_follow_the_taut_length(tmp_path):
     assert pick(cfg) == (True, False)
     assert not [f for f in findings if f.code == "CFG_VALUE"]
 
+def test_via_disc_height_follows_the_graded_site_price(tmp_path, monkeypatch):
+    """TW6 r4 (lead 2026-11-19): [capacity] via_disc_height = "auto" (default) is on with [vias] site_price = "graded"
+    (plan and drawing then measure a via's room at its real point), off with "off"; a value set by the user wins
+    ("on" / "off" / true / false, toml and --set)."""
+    monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")  # since 0.5.0
+    h = lambda c: c.engine_options()["via_disc_height"]
+    d = Config.defaults()
+    assert d.get("capacity", "via_disc_height") == "auto"
+    assert h(d) is False
+    g = d.with_values({("vias", "site_price"): "graded"})
+    assert h(g) is True
+    assert h(g.with_values({("capacity", "via_disc_height"): "off"})) is False
+    assert h(g.with_values({("capacity", "via_disc_height"): False})) is False
+    assert h(d.with_values({("capacity", "via_disc_height"): "on"})) is True
+    assert h(d.with_values({("capacity", "via_disc_height"): True})) is True
+    assert h(d.with_values({("capacity", "via_disc_height"): "auto"})) is False
+    (tmp_path / "topor.toml").write_text("version = 1\n[vias]\nsite_price = \"graded\"\n[capacity]\nvia_disc_height = false\n")
+    cfg, findings = load_config(tmp_path)
+    assert h(cfg) is False and not [f for f in findings if f.code == "CFG_VALUE"]
+    (tmp_path / "topor.toml").write_text("version = 1\n[vias]\nsite_price = \"graded\"\n")
+    cfg, findings = load_config(tmp_path)
+    assert h(cfg) is True and not [f for f in findings if f.code == "CFG_VALUE"]
+
+
+def test_site_move_detour_reaches_the_engine(monkeypatch):
+    """TW6 r4: [optimize] site_move_detour (excess-ratio scale of E's detour price, default 0.5, 0 = none) goes to the
+    engine as opt_site_move_detour, a float."""
+    monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")
+    d = Config.defaults()
+    assert d.engine_options()["opt_site_move_detour"] == 0.5
+    assert d.with_values({("optimize", "site_move_detour"): 0}).engine_options()["opt_site_move_detour"] == 0.0
+
+
 def test_m0_defaults_are_the_topor_method(tmp_path):
     """M0 (user 2026-11-12, "change the options to match TopoR"): the defaults are TopoR's method (Polubasov 2010):
     the TopoR loop on the topology, the initial routing once, taut lengths, the per-edge capacity model priced (user

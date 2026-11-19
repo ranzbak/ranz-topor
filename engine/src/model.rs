@@ -1580,6 +1580,36 @@ pub struct Options {
     /// holds what lies on it). The drawing's packing keeps the disc on the line. false (default) =
     /// the disc on the edge line (as before).
     pub via_disc_height: bool,
+    /// TW6 part A (`[vias] site_price`, docs/dev/design/tw6-via-sites.md A): "graded" = a planned
+    /// via without a site pays, besides its count, the graded deficit of its room at its point
+    /// (`(r - room) / (d + s)` at the violation weight, `topo::pack::Packer::site_room`, one
+    /// measure for the plan, the drawing and the pad exits' via term, which it then replaces), and
+    /// among site-less traversals the plan takes the one with the least deficit. "off" (default)
+    /// = the count alone (as before).
+    pub via_site_price: String,
+    /// TW6 part D (`[vias] pair_room`, docs/dev/design/tw6-via-sites.md D): the via relocation
+    /// keeps two consecutive vias of a wire far enough apart for the other nets' wires that cross
+    /// between them, and moves a via whose site predicts a violation only for a larger smallest
+    /// gap. false (default) = as before.
+    pub via_pair_room: bool,
+    /// TW6 part E (`[optimize] site_move`, docs/dev/design/tw6-via-sites.md E): in every cycle of
+    /// the TopoR loop, after the via-pair moves, a wire with a via whose interval has no site
+    /// (`topo::pack::Packer::site_room`) is laid again, and when that is not kept the wires whose
+    /// crossings bound the interval are laid again together (TopoR 6.3 manual p. 179, Shift Vias
+    /// submode 2; Luzin, Popov & Popov 2013 p. 134 step 8.1); kept by the board's evaluation.
+    /// false (default) = as before.
+    pub opt_site_move: bool,
+    /// TW6 part E (`[optimize] branch_move`): likewise, the branch arm of a junction inside such an
+    /// interval (its tee via has no site) is laid again (`tree::dependents`, the tree search), so
+    /// the junction moves. false (default) = as before.
+    pub opt_branch_move: bool,
+    /// TW6 r4 (`[optimize] site_move_detour`, docs/dev/design/tw6-via-sites.md E): the keep
+    /// judgement of the site and branch moves adds, per relaid connection, the graded detour price
+    /// `violation x ((len / straight - 1) / scale)^2` after minus before (`len` = its wires'
+    /// length, `straight` = pad to pad; `topo::escape::detour_price`, the shape of the via-pair
+    /// stretch price): a connection whose excess ratio grows to `scale` costs one violation more.
+    /// No cutoff. 0 = no detour price (round 3). Default 0.5 (excess 0.5 = the report's detour 1.5).
+    pub opt_site_move_detour: f64,
     /// tw4-r2 (1) (`[capacity] pad_exits`, docs/dev/design/tw4-r2.md (1)): with via_cuts, every
     /// wire end at a fine-pitch pad (another net's copper beside it closer than the wire could
     /// pass) holds its planned exit, read from the plan (the leaving pass, the pad side it leaves
@@ -1828,6 +1858,11 @@ impl Default for Options {
             via_best_point: false,
             via_over_ramp_mm: 0.0,
             via_disc_height: false,
+            via_site_price: "off".into(),
+            via_pair_room: false,
+            opt_site_move: false,
+            opt_branch_move: false,
+            opt_site_move_detour: 0.5,
             pad_exits: false,
             pad_exit_static: false,
             pour_cuts: false,
