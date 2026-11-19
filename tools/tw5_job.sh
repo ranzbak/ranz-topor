@@ -168,6 +168,15 @@ case ${1:-} in
     u i 1 "$ln"
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  r5)
+    # Round 5 (escape refinement adds priced vias): N 16 cycles ladder (esp 5 seeds), inner_layer_room N seeds 0-9, D8.
+    gen
+    u q 2 "Nr16:qmtech:2"
+    u e 5 "Nr16:esp Nr16:wiccon Nr16:eprom" "Nr16s1:esp" "Nr16s2:esp" "Nr16s3:esp" "Nr16s4:esp"
+    ln=""; for s_ in 0 1 2 3 4 5 6 7 8 9; do ln+="Nr16s$s_:q-inner_layer_room "; done
+    u i 1 "$ln"
+    ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
+    wait; note "all done" ;;
   r2)
     # Round 2: O vs N at 16 cycles on the ladder (esp 5 seeds), the patterns O vs N at 16 cycles, targeted tests.
     gen
