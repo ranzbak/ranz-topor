@@ -72,6 +72,7 @@ one() {
     O) SETS+=("${OLD[@]}") ;;
     N) SETS+=("${NEW[@]}") ;;
     N[a-e]) mapfile -t x < <(part ${o#N}); SETS+=("${x[@]}") ;;
+    Nce) x=("${OLD[@]}"); x[9]='optimize.loop_history=true'; x[13]='optimize.preloop_p4=false'; SETS+=("${x[@]}") ;;  # (e) with (c), its intended stand-in
     F) SETS+=(--set optimize.free_wire_cross=0.0) ;;  # the defaults (TW5 off) with crossing-free wires crossed at their freedom
     NF) SETS+=("${NEW[@]}" --set optimize.free_wire_cross=0.0) ;;
     Nt) x=("${NEW[@]}"); x[5]='optimize.escape_take="not_worse"'; SETS+=("${x[@]}") ;;  # N with whole-board moves undone when worse
@@ -208,6 +209,13 @@ case ${1:-} in
     wait
     PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns_png $R/d8 $R $R/d8out > $R/d8-png.log 2>&1; note "d8 png rc $? $(grep -v Debug $R/d8-png.log | tr '\n' ';')"
     note "all done" ;;
+  r12)
+    # Round 12 (main 5a105d3c, via_cuts on): the single-part ablations again (TW5 r2's were before via_cuts), 16 cycles,
+    # qmtech s0-2 (2 threads, as tw5r11's O/F) and esp s1-3; parts a-e and c+e. O and F come from tw5r11 (same engine).
+    for s_ in 0 1 2; do u q$s_ 12 "Nar16s$s_:qmtech:2" "Nbr16s$s_:qmtech:2" "Ncr16s$s_:qmtech:2" "Ndr16s$s_:qmtech:2" "Ner16s$s_:qmtech:2" "Ncer16s$s_:qmtech:2"; done
+    e=(); for c in Na Nb Nc Nd Ne Nce; do e+=("${c}r16s1:esp ${c}r16s2:esp ${c}r16s3:esp"); done
+    u e 6 "${e[@]}"
+    wait; note "all done" ;;
   r10)
     # Round 10: merge trial on the tip (main 94b1c848 merged) + the free_wire_cross mutants.
     ( hzq run --pin --threads 2 --name fw-mut -- bash $ROOT/tools/tw5_job.sh mutfw > $R/mutfw.log 2>&1; note "mutfw rc $?" ) & sleep 1
