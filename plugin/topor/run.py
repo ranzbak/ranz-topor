@@ -1297,7 +1297,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # fail fast: connections to route and the router produced no copper = a whole-run failure, a loud error dialog
         # (never a quiet notice). Zero connections is covered by the pre-flight SCOPE_EMPTY warning.
         msg = messages.MESSAGES["NOTHING_ROUTED"]
-        nr = Finding("NOTHING_ROUTED", msg.severity, msg.message, msg.fix)
+        nr = Finding("NOTHING_ROUTED", msg.severity, msg.cause, msg.fix)
         log.line(f"error: {nr.message}")
         out.error = nr
         findings.append(nr)
