@@ -1,4 +1,21 @@
-# TW6 VIA-SITES handoff (2026-11-19, updated round 3, tip after ba566bae)
+# TW6 VIA-SITES handoff (2026-11-19, updated round 4)
+
+## Round 4 state (read first)
+- Lead decisions on the r3 questions, implemented in 2659db8a (main 524465c2 merged in 8dc3fac3):
+  1. E keep judgement: graded detour price `[optimize] site_move_detour` (excess-ratio scale, default 0.5, 0 = none),
+     per relaid connection `viol x ((len/straight - 1)/scale)^2` after minus before (`core::conn_detour_price`,
+     `core::site_keep`, `Rerouter::judge_extra` in `reroute_set` for (i), `Sp::reroute_d`). Symmetric: shortening a
+     detour gains. Refusals counted (`loop.site_move_detour_refused`, report line).
+  2. `[capacity] via_disc_height` is now "auto"/"on"/"off" (default auto = on with `[vias] site_price = "graded"`;
+     config.py `_site_graded`); the tw6_ab cfg `s` therefore = r3's `sh`.
+  3. planned_crossing_window -> CROSS-DRAW (F2/F3). Not worked on here.
+  4. B search term (via_site_social) parked as is (opt-in, weight 0), no retry.
+- Low findings: M13 -> `State::apply_layering` (layers_now + free wires + site_k in one call; no loop fixture showed a
+  copper change: crop x 6 option sets, keepout board x 8). branch_move never tried -> `viaopt::tee_arms` now takes the
+  interval's events: a junction's tee event (trunk k, fraction 0.5) bounds the strict interval, it is never inside it.
+- tw6_ab.sh: suffixes z (site_move_detour 0), d (= $DET, default 0.25); mode r4 (tests + lint + off + pytest + eq).
+- A/B tw6r4-8dc3fac done (report scratch/agent-wt/reports/tw6-via-sites-r4-20261119-1330.md): no flips; mj best qmtech (253->138), esp flat; s = sh. Next lever: detour price in the regular sweep keep (changes default copper, needs lead). Mutant D4 (relay_kept plumbing) survives, no fixture. Nothing in flight.
+
 
 ## Round 3 state (read first; older notes below)
 - A/B re-run done (tw6acd2-0967792) and B search + E A/B done (tw6be-094cee3), both on topor-rsc-c0c953ad. Report:
