@@ -1538,6 +1538,15 @@ struct Run {
     rows_drawn: Vec<(Assigned, Criteria, RouteResult)>,
     /// last-preview: the run's drawn pick after its last judged round (a change = its new best).
     drawn_pick: Option<Criteria>,
+    /// TW3-R5: the loop's own counters lines of this run's first round ("TopoR loop judge", "TopoR
+    /// loop escapes (TW5)"). A draw-only round runs no loop, so its result would carry empty counts;
+    /// its drawn rows take these lines (the counts of this run's loop) instead.
+    loop_lines: Vec<String>,
+}
+
+/// TW3-R5: the warnings that hold a loop's work counters.
+fn is_loop_counts(w: &str) -> bool {
+    w.starts_with("TopoR loop judge (") || w.starts_with("TopoR loop escapes (TW5)")
 }
 
 impl Run {
@@ -1564,6 +1573,7 @@ impl Run {
             queue: Vec::new(),
             rows_drawn: Vec::new(),
             drawn_pick: None,
+            loop_lines: Vec::new(),
         }
     }
 
@@ -1637,6 +1647,10 @@ impl Run {
         let fresh = Memory::default();
         let (mut ro, h2, mem2) = route_round(model, &o2, ctl, &hv, if draw_row.is_some() { &fresh } else { &self.mem }, cycle, stubs, fx, opts.fluctuation, (self.k, &coord.gate, &obj, &live), draw_row.as_ref());
         let drew = ro.drew.take();
+        if cycle == 1 {
+            // TW3-R5: the counters of this run's loop (taken before any early return below).
+            self.loop_lines = ro.result.warnings.iter().filter(|w| is_loop_counts(w)).cloned().collect();
+        }
         self.queue.extend(std::mem::take(&mut ro.extra));
         self.cycles = cycle;
         self.mem = mem2;
@@ -1789,6 +1803,15 @@ impl Run {
             // variants and KiCad found the GND pieces open).
             let empty = self.arch.items.is_empty();
             let RoundOut { result, crit, pre, .. } = ro;
+            // TW3-R5: a draw-only round ran no loop: its rows carry the counts of this run's loop.
+            let lines = self.loop_lines.clone();
+            let with_counts = |mut r: RouteResult| -> RouteResult {
+                if cycle > 1 && !lines.is_empty() {
+                    r.warnings.retain(|w| !is_loop_counts(w));
+                    r.warnings.extend(lines.iter().cloned());
+                }
+                r
+            };
             // TW3: the row's drawn value = the better of its drawn variants (each pour-stitched),
             // by the objective; TW2's further drawn variants are more sources of the same row.
             let mut row_best: Option<(Criteria, RouteResult)> = None;
@@ -1802,7 +1825,7 @@ impl Run {
                 if std::env::var_os("TOPO_FUSEDBG").is_some() {
                     eprintln!("STITCH variant: round {cycle} as drawn");
                 }
-                let (r, c) = stitched(r, c);
+                let (r, c) = stitched(with_counts(r), c);
                 if !past() || empty {
                     note_judged(c, r.routed, true);
                     keep_items(&c, &r);
@@ -1813,7 +1836,7 @@ impl Run {
             if std::env::var_os("TOPO_FUSEDBG").is_some() {
                 eprintln!("STITCH variant: round {cycle} (reduced + fused)");
             }
-            let (r, c) = stitched(result, crit);
+            let (r, c) = stitched(with_counts(result), crit);
             (cyc_err, cyc_viol) = (c.errors, c.violations);
             if !past() || self.arch.items.is_empty() {
                 note_judged(c, r.routed, false);
@@ -5329,8 +5352,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// (seed of the cycle: deterministic, the same for any thread count); then uncross and one
             /// whole-board layering. Taken as it comes (the archive keeps the bests, Appendix F 2);
             /// when a wire finds no path the state before comes back (costly, not failed: no wire is
-            /// dropped). Runs only when the escapes' work budget allows ([`super::escape::Throttle`]),
-            /// and draws on it. Whether a round ran.
+            /// dropped). Runs only when its own work budget allows ([`super::escape::Throttle`]: with the
+            /// layering escapes on too, half of `escape_share` each, else all of it). Whether a round ran.
             fn loop_p4(&mut self, c: &CycleCtx, cs: &mut CycleStats, stop: &mut dyn FnMut() -> bool) -> bool {
                 if !self.tw5.loop_p4 {
                     return false;
@@ -7177,7 +7200,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // The one drawing of the loop's pick runs to its end (soft limit: nothing cuts it; hard:
         // the time limit); a run whose pick another run draws stops here, before any copper.
         if let Some(why) = skip_draw {
-            return (RoundOut { extra: extra_rows, ..RoundOut::not_drawn(model, opts, Some(why), None, loop_end) }, Vec::new(), Memory::default());
+            // TW3-R5: the loop ran, only its pick is drawn elsewhere: its counters go on to the rows this run draws.
+            let mut ro = RoundOut { extra: extra_rows, ..RoundOut::not_drawn(model, opts, Some(why), None, loop_end) };
+            ro.result.warnings.extend(warnings.iter().filter(|w| is_loop_counts(w)).cloned());
+            return (ro, Vec::new(), Memory::default());
         }
         draw_through.set(true);
     }

@@ -153,9 +153,9 @@ def p_detour_trade():
     s_b = {"wires": rails + [wire("A", SIG, [(30, 5), tr, br, (30, 19)])], "vias": []}
     # (c) expected: both rails dip round A2 at 45 deg, A straight (fig. 21c; Luzin-Popov 2013 step 8.1). B1 hugs A2's
     # pad at exactly the clearance (chamfered hull: the 45 deg legs tangent to the clearance circle at the pad's lower
-    # corners); B2 is B1's true parallel offset at the rails' own pitch (1.5 mm, the pad pitch), so the pair keeps its
-    # spacing through the bends instead of narrowing to the clearance at the V (round-1 sketch: 1.5 -> 0.7, 17 deg legs).
-    s_c = {"wires": [wire("B1", PWR, dip_rail(P["A2"], 14.0, 0.0)), wire("B2", PWR, dip_rail(P["A2"], 15.5, 1.5)),
+    # corners); B2 is B1's true parallel offset at clearance (user 2026-11-19, rule "bundles tight-packed": width + 0.2 =
+    # 0.7 mm centre pitch, 0.2 mm copper gap at the V; was the rails' 1.5 mm pitch, a 1.0 mm gap).
+    s_c = {"wires": [wire("B1", PWR, dip_rail(P["A2"], 14.0, 0.0)), wire("B2", PWR, dip_rail(P["A2"], 15.5, 0.5 + CLEAR)),
                      wire("A", SIG, [(30, 5), (30, 19)])], "vias": []}
     return {
         "name": "detour_trade", "fig": "Luzin 2015 p. 9-10 fig. 21a-c; Luzin 2013 p. 104 fig. 21; Luzin-Popov 2013 p. 134 step 8.1",
@@ -163,8 +163,8 @@ def p_detour_trade():
         "text": ("Two 0.5 mm rails B1, B2 (PWR, laid first: wider) cross the line of a 0.25 mm wire A. A's single re-lay "
                  "prefers the way round the rails' ends (b) to two vias (a): a via-for-length detour, ratio > 1.5. No single "
                  "re-lay of B1 or B2 helps (each would cross A's way round). Expected (c): A straight, B1 and B2 dip round A2 "
-                 "together at 45 deg, B1 at the clearance from A2, B2 parallel at the rails' 1.5 mm pitch (no narrowing at the "
-                 "V), 0 vias, +4.9 mm each. Today's pair_move does not fire: A has no via pair in state (b)."),
+                 "together at 45 deg, B1 at the clearance from A2, B2 packed against B1 at the clearance (0.2 mm "
+                 "copper gap at the V), 0 vias, +4.9 mm (B1) / +4.3 mm (B2). Today's pair_move does not fire: A has no via pair in state (b)."),
         "states": [("(a) via pair, fig. 21a", s_a), ("(b) careless: via-for-length detour, fig. 21b", s_b),
                    ("(c) expected: rails round A2, fig. 21c", s_c)],
     }

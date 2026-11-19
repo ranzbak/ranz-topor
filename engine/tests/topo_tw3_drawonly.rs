@@ -50,3 +50,24 @@ fn a_row_drawn_in_a_draw_only_round_is_the_same_copper() {
     assert_eq!(own.bests[0]["drawn"], only.bests[0]["drawn"]);
 }
 
+
+/// TW3-R5 (tw5 r3 finding 4): the applied variant drawn in a draw-only round carries the loop's
+/// real counters in result.json's warnings (the loop judge and the TW5 escapes lines), not the
+/// zeros of a round that ran no loop. The same run drawn in its own round has the same lines.
+#[test]
+fn a_draw_only_row_keeps_the_loops_counter_warnings() {
+    let m = eprom();
+    let o = topor(r#", "runs": 1, "draw_candidates": 1, "escape": "layering", "topo_rounds": 3"#);
+    let own = run(&m, &o, 2);
+    std::env::set_var("TOPO_TW3_DRAWONLY", "1");
+    let only = run(&m, &o, 2);
+    std::env::remove_var("TOPO_TW3_DRAWONLY");
+    let lines = |r: &RouteResult, p: &str| r.warnings.iter().filter(|w| w.starts_with(p)).cloned().collect::<Vec<_>>();
+    for p in ["TopoR loop judge (", "TopoR loop escapes (TW5)"] {
+        let (a, b) = (lines(&own, p), lines(&only, p));
+        assert_eq!(a.len(), 1, "{p}: one line in the own round: {a:?}");
+        assert_eq!(b, a, "{p}: the draw-only round carries the loop's counts");
+    }
+    let judge = &lines(&only, "TopoR loop judge (")[0];
+    assert!(!judge.contains("per cycle 0.0 whole-board layerings, 0.0 whole-board measures"), "real counts, not zeros: {judge}");
+}

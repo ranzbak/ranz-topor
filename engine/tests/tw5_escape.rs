@@ -161,6 +161,25 @@ fn loop_p4_rounds_run_beside_the_layering_escapes() {
     assert!(share <= 35.0 + 1.0, "escapes and rounds together stay near escape_share: {share} %: {w}");
 }
 
+/// TW5-F2 (verify tw5-fix l2): the escapes beside the rounds get HALF of `escape_share`, not the
+/// full share. At `escape_share` 0.05 on inner_layer_room the layering escapes number fewer with
+/// `loop_p4` on than with the escapes alone (verify: 33 vs 59; the mutant "escapes keep the full
+/// share" gives the escapes-alone count, which the bound at 0.35 cannot see).
+#[test]
+fn loop_p4_takes_half_of_the_escape_share_from_the_layering_escapes() {
+    let m = model("inner_layer_room");
+    let base = r#""topo_rounds": 16, "stable_patience": 16, "seed": 2, "preloop_p4": false, "escape": "layering", "escape_share": 0.05"#;
+    let count = |r: &RouteResult| -> usize {
+        let w = r.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).cloned().unwrap_or_default();
+        w.split("layering escape \"layering\": ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(0)
+    };
+    let alone = count(&route(&m, &opts(base)));
+    let beside = count(&route(&m, &opts(&format!(r#"{base}, "loop_p4": true"#))));
+    eprintln!("escapes alone {alone}, beside the rounds {beside}");
+    assert!(alone >= 1, "the escapes run alone at share 0.05: {alone}");
+    assert!(beside < alone, "beside the rounds the escapes get half the share: {beside} vs {alone} alone");
+}
+
 /// TW5 (f): a round is kept like the loop's other whole-board moves: `escape_take = "always"`
 /// takes every round (none undone as worse), `"not_worse"` (default) undoes the ones that make the
 /// board worse (on inner_layer_room with the pre-loop rounds on, every round is worse than the
