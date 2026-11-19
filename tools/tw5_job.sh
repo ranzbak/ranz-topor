@@ -6,7 +6,8 @@
 #   tw5_job.sh tests           targeted release tests (lib escape/layers, loop integration binaries)
 # Every board run: tools/route_board.sh (as the main baseline nd2b2-dcf4c0e), cpu clock 2400 s, optimize.runs=1, --no-png.
 # <board> = eprom|wiccon|esp|qmtech|bornhack, p-<pattern> (generated into $HZ_RUN_DIR/pat), q-<pattern> = p- with --declared-layers (In1.Cu routed),
-#           d-<pattern> = a PROPOSED D8 pattern (harness/tw5_patterns.py, generated into $HZ_RUN_DIR/d8).
+#           d-<pattern> = a PROPOSED D8 pattern (harness/tw5_patterns.py, generated into $HZ_RUN_DIR/d8),
+#           e-<X> = esp with min_copper_edge_clearance X mm (edge_boards).
 # cfg = <opts><rounds>[s<seed>]:
 #   opts  O = every TW5 option at its old value (must give main's copper), N = the TW5 defaults,
 #         Na/Nb/Nc/Nd/Ne = O with only that part on (a oscillation, b escape+take, c loop history, d float_wire, e no pre-loop P4)
@@ -20,7 +21,15 @@ W=scratch/boards/wiccon-2023/2d3063e70ed5/2023.kicad_pcb
 E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
 B=scratch/boards/bornhack2026/21c5f478f1af/bornhack2026-hardware.kicad_pcb
-board_path() { case $1 in eprom) echo $P;; wiccon) echo $W;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; p-*|q-*) echo $R/pat/${1#?-}/problem/${1#?-}.kicad_pcb;; d-*) echo $R/d8/${1#d-}/problem/${1#d-}.kicad_pcb;; esac; }
+board_path() { case $1 in eprom) echo $P;; wiccon) echo $W;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; p-*|q-*) echo $R/pat/${1#?-}/problem/${1#?-}.kicad_pcb;; d-*) echo $R/d8/${1#d-}/problem/${1#d-}.kicad_pcb;; e-*) echo $R/edge/e${1#e-}/esp-rust-board.kicad_pcb;; esac; }
+edge_boards() {  # esp copies with min_copper_edge_clearance X (reports/edge-clear-20261117-1800.md: predicted over-full 10 -> 131)
+  local S=$ROOT/$(dirname $E) x
+  for x in "$@"; do
+    mkdir -p $R/edge/e$x; cp $S/esp-rust-board.kicad_pcb $S/esp-rust-board.kicad_prl $R/edge/e$x/ 2>/dev/null
+    sed "s/\"min_copper_edge_clearance\": [0-9.]*/\"min_copper_edge_clearance\": $x/" $S/esp-rust-board.kicad_pro > $R/edge/e$x/esp-rust-board.kicad_pro
+    grep -q "\"min_copper_edge_clearance\": $x" $R/edge/e$x/esp-rust-board.kicad_pro || note "edge board $x: sed failed"
+  done
+}
 VIA="via_pair_redundant via_pair_slide via_force_relocate branch_point_relocate branch_point_into_pad via_size_rule"
 gen() {  # the synthetic patterns (fit all, via approved 6, radii all) into $R/pat, as looplocal_job.sh
   [ -d $R/pat ] && return
@@ -177,14 +186,20 @@ case ${1:-} in
     u i 1 "$ln"
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  r6)
+    # Round 6: the esp copper-to-edge sweep (O and N, 1 cycle and N 16 cycles) and the merge trial (final).
+    edge_boards 0.02 0.025 0.03 0.04 0.05
+    lo=""; l1=""; l2=""; for x in 0.02 0.025 0.03 0.04 0.05; do lo+="Or1:e-$x "; l1+="Nr1:e-$x "; l2+="Nr16:e-$x "; done
+    u x 3 "$lo" "$l1" "$l2"
+    ( bash $ROOT/tools/tw5_job.sh final > $R/final-mode.log 2>&1 ) & sleep 1
+    wait; note "all done" ;;
   final)
     # Merge trial on the tip (main merged in): every engine test, clippy, the full pytest (CI=1).
     ( hzq run --threads 6 --name tw5-final -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast > $R/cargo-all.log 2>&1; echo rc \$? >> $R/cargo-all.log; cargo clippy --release --all-targets > $R/clippy.log 2>&1; echo rc \$? >> $R/clippy.log; cd $ROOT && CI=1 python -m pytest -q > $R/pytest.log 2>&1; echo rc \$? >> $R/pytest.log" > $R/final.log 2>&1; note "final unit rc $?" ) & sleep 1
     wait
     note "cargo: $(grep -E '^test result' $R/cargo-all.log | awk '{p+=$4; f+=$6} END {print p" passed "f" failed"}'), $(tail -1 $R/cargo-all.log); FAILED: $(grep -E '^test .* FAILED$' $R/cargo-all.log | awk '{print $2}' | tr '\n' ' ')"
     note "clippy: $(grep -cE '^(warning|error)' $R/clippy.log) warnings/errors, $(tail -1 $R/clippy.log)"
-    note "pytest: $(tail -2 $R/pytest.log | tr '\n' ' ')"
-    note "all done" ;;
+    note "pytest: $(tail -2 $R/pytest.log | tr '\n' ' ')" ;;
   r2)
     # Round 2: O vs N at 16 cycles on the ladder (esp 5 seeds), the patterns O vs N at 16 cycles, targeted tests.
     gen
