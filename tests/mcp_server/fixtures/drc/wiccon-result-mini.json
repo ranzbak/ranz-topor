@@ -1,0 +1,105 @@
+{
+ "route": {
+  "connections": [
+   {
+    "id": 13,
+    "net": 2,
+    "name": "Net-(D3-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D3.2",
+     "at": [
+      147780000,
+      155164054
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D4.4",
+     "at": [
+      99262089,
+      102950000
+     ]
+    },
+    "length_nm": 76622746,
+    "length_outside_pads_nm": 76622746,
+    "pattern": "topo",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 71276189,
+    "ref_len_nm": null,
+    "ref_kind": "none",
+    "stub_nm": 0,
+    "neck_nm": 0,
+    "neck_width_nm": null,
+    "junction": false,
+    "junction_angle_deg": null,
+    "violations": 0
+   },
+   {
+    "id": 18,
+    "net": 5,
+    "name": "Net-(D1-Pad2)",
+    "layer": 0,
+    "width": 250000,
+    "status": "routed",
+    "reason": "",
+    "vias": 0,
+    "layers": [
+     "F.Cu"
+    ],
+    "via_sites": [],
+    "from": {
+     "kind": "pad",
+     "label": "D2.4",
+     "at": [
+      201490000,
+      98030000
+     ]
+    },
+    "to": {
+     "kind": "pad",
+     "label": "D1.2",
+     "at": [
+      152760000,
+      45590000
+     ]
+    },
+    "length_nm": 72624627,
+    "length_outside_pads_nm": 72624627,
+    "pattern": "topo",
+    "anchors": 0,
+    "crossings": 0,
+    "blocking": null,
+    "g1_angle_deg": null,
+    "iteration": 0,
+    "zero_slack": false,
+    "probe_steps": null,
+    "ghost_len_nm": 71586078,
+    "ref_len_nm": null,
+    "ref_kind": "none",
+    "stub_nm": 0,
+    "neck_nm": 0,
+    "neck_width_nm": null,
+    "junction": false,
+    "junction_angle_deg": null,
+    "violations": 0
+   }
+  ],
+  "violations": []
+ }
+}

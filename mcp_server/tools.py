@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -348,6 +349,7 @@ def review(run_id: str, spot: str, verdict: str, note: str = "") -> dict:
 # session of mcp_server.kicad_gui (isolated home, helper by widget label). docs/dev/mcp.md "DRC feedback".
 
 ROWS_MAX = 200
+FOCUS_TOL_MM = 1.0  # drc_spots: KiCad's view centre vs the kicad-cli marker position (centring is px-exact at zoom 20)
 DEFAULT_CLEANUP = ("Delete tracks connecting different nets", "Delete redundant vias", "Merge co-linear tracks",
                    "Delete tracks unconnected at one end")
 
@@ -477,75 +479,122 @@ def _wanted_rows(rows: list, cls: str | None, per_class: int) -> list:
         return sel[:per_class] if per_class > 0 else sel
     out, n = [], defaultdict(int)
     for r in rows:
-        if r["type"] in ("shorting_items", "tracks_crossing") or n[r["class"]] < per_class:
+        if per_class <= 0 or r["type"] in ("shorting_items", "tracks_crossing") or n[r["class"]] < per_class:
             out.append(r)
             n[r["class"]] += 1
     return out
 
 
-def drc_spots(run_id: str, cls: str | None = None, per_class: int = 3, zoom: float = 35.0,
-              keep_session: bool = False, drc_timeout_s: float = 600.0) -> dict:
-    """KiCad's own DRC dialog in the Xephyr session on a copy of the routed board: Run DRC, then per wanted index
-    row select the dialog row with the SAME text and items (KiCad pans to the marker) and keep the dialog and the
-    board view at the marker. match = the row exists in the GUI, the selection landed on it, the spot is in view."""
+def _gui_for_run(info: dict, idle_s: float | None = None):
+    """The ONE real-KiCad session of a run: a copy of its routed board under <out_dir>/mcp/gui/board/, opened once
+    and reused by drc_spots and cleanup until stopped (gui_session stop, idle timeout, error, or cleanup's end).
+    The copy is (re)made only when no live session has it open. Caller holds kicad_gui._LOCK."""
+    from . import kicad_gui as G
+    _, rout = _boards(info)
+    gdir = Path(info["out_dir"]) / "mcp" / "gui"
+    live = gdir / "board" / rout.name
+    s = G._SESSION
+    if s is not None and s.board == live and s.alive():
+        return G.session_for(live, gdir / "session", **({"idle_s": idle_s} if idle_s else {}))
+    G.stop_session()
+    G.copy_board(rout, live.parent)
+    return G.session_for(live, gdir / f"session-{time.strftime('%Y%m%d-%H%M%S')}",
+                         **({"idle_s": idle_s} if idle_s else {}))
+
+
+def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: float = 20.0,
+              keep_session: bool = True, drc_timeout_s: float = 600.0) -> dict:
+    """KiCad's own DRC dialog in the run's ONE Xephyr session: DRC run once (per board state), then every wanted
+    index row (all, or class `cls`; `per_class` > 0 caps each class, shorts/crossings always kept) is selected as a
+    user does, in list order, and the dialog + the board view at the marker are kept. A failed row is reported in
+    its record and the walk goes on in the same session. match = the GUI row has the same text and items and the
+    selection landed on it; focus_mm = the board point KiCad centred (its marker), focus_d_mm = its distance from the
+    row's nearest track / via (else the items' mean position); match also needs focus_d_mm <= FOCUS_TOL_MM."""
+    from . import drc as D
     from . import kicad_gui as G
     full = _drc_full(run_id)
     rows = full["index"]["rows"]
     if not rows:
         return {"run_id": run_id, "records": [], "note": "no violation of ours: nothing to show"}
     want = _wanted_rows(rows, cls, per_class)
+    geom = D.board_items(_boards(full["info"])[1].read_text())  # the routed copy's tracks / vias, for focus_d_mm
     out = Path(full["info"]["out_dir"]) / "mcp"
-    _, rout = _boards(full["info"])
-    live = G.copy_board(rout, out / "gui" / "spots-board")
     shots = out / "spots"
     shots.mkdir(parents=True, exist_ok=True)
     recs: list = []
+    errors: list = []
     with G._LOCK:
-        s = None
         try:
-            s = G.session_for(live, out / "gui" / "session-spots")
+            starts0 = G.GuiSession.starts_total
+            s = _gui_for_run(full["info"])
+            if s.board_state != "as opened":
+                s.fail(f"drc_spots: the open board is {s.board_state!r}, not the routed board the index describes; "
+                       f"stop the session (gui_session stop) first")
             s.drc_open()
-            s.step("zoom", str(s.must("zoom", "zoom", value=float(zoom))))
-            s.step("grid", str(s.must("finest_grid", "grid")))
-            st = s.drc_run(drc_timeout_s)
-            gui = s.must("drc_rows", "drc rows", tab="violations")
-            cli_n = len(full["routed"]["doc"].get("violations") or [])
+            if s.drc_state_of != s.board_state:
+                s.step("zoom", str(s.must("zoom", "zoom", value=float(zoom))))
+                s.step("grid", str(s.must("finest_grid", "grid")))  # focus_mm snaps to the grid
+                st = s.drc_run(drc_timeout_s)
+                tabs = st["tabs"][:2]
+            else:
+                tabs = None
+                s.step("drc reused", f"{len(s.drc_rows)} rows of board state {s.board_state!r}")
+            gui = s.drc_rows
             free = defaultdict(list)
             for g in gui:
                 free[G.gui_key(g)].append(g)
-            main_x, dlg_x = s.main, s.xid(G.DRC_TITLE)
+            plan = []
             for r in want:
-                rec = {"id": r["id"], "class": r["class"], "nets": r["nets"], "x": r["x"], "y": r["y"],
-                       "cli_text": r["text"], "cli_items": [i["desc"] for i in r["items"]]}
                 g = G.find_row(free, G.cli_key(r))
                 if g is None:
-                    rec.update(match=False, why="no row with this text and these items in KiCad's DRC dialog")
-                    recs.append(rec)
-                    continue
-                sel = s.must("drc_select", "select row", tab="violations", k=g["k"])
-                ok_sel = sel.get("selected") == g["text"]
-                time.sleep(1.2)
-                v = s.view()
-                cx, cy, cw, ch = v["canvas"]
-                mx, my = G.GuiSession.to_screen(v, r["x"], r["y"]) if r["x"] is not None else (None, None)
-                in_view = mx is not None and cx <= mx < cx + cw and cy <= my < cy + ch
-                board_png = s.e.shot(f"{r['id']}-board", main_x)
-                dlg_png = s.e.shot(f"{r['id']}-dlg", dlg_x) if dlg_x else None
-                half = 350
-                ctr = (mx, my) if in_view else (cx + cw // 2, cy + ch // 2)
-                rec.update(row=g["k"], gui_text=g["text"], gui_items=g["items"], selected_ok=ok_sel,
-                           in_view=in_view, marker_px=[mx, my], mm_per_px=v["mm_per_px"][0],
-                           board_png=G.crop(board_png, shots / f"{r['id']}-board.png",
-                                            (ctr[0] - half, ctr[1] - half, 2 * half, 2 * half),
-                                            mark=(mx, my) if in_view else None),
-                           dlg_png=str(shutil.copy(dlg_png, shots / f"{r['id']}-dlg.png")) if dlg_png else None,
-                           match=bool(ok_sel and in_view))
+                    recs.append({"id": r["id"], "class": r["class"], "nets": r["nets"], "x": r["x"], "y": r["y"],
+                                 "cli_text": r["text"], "cli_items": [i["desc"] for i in r["items"]], "match": False,
+                                 "why": "no row with this text and these items in KiCad's DRC dialog"})
+                else:
+                    plan.append((g["k"], r, g))
+            plan.sort(key=lambda t: t[0])
+            by_k = {k: (r, g) for k, r, g in plan}
+            main_x, dlg_x = s.main, s.xid(G.DRC_TITLE)
+            for k, selected, err in s.drc_walk([k for k, _, _ in plan]):
+                r, g = by_k[k]
+                rec = {"id": r["id"], "class": r["class"], "nets": r["nets"], "x": r["x"], "y": r["y"], "row": k,
+                       "cli_text": r["text"], "cli_items": [i["desc"] for i in r["items"]],
+                       "gui_text": g["text"], "gui_items": g["items"]}
+                try:
+                    if err:
+                        raise G.GuiError(err)
+                    ok_sel = selected == g["text"]
+                    f = s.focus()
+                    d_mm = D.marker_dist(f["focus_mm"], r, geom)
+                    board_png = s.e.shot(f"{r['id']}-board", main_x)
+                    dlg_png = s.e.shot(f"{r['id']}-dlg", dlg_x) if dlg_x else None
+                    half = 350
+                    sx, sy = f["spot_px"]
+                    rec.update(selected_ok=ok_sel, focus_mm=f["focus_mm"], focus_d_mm=d_mm,
+                               board_png=G.crop(board_png, shots / f"{r['id']}-board.png",
+                                                (sx - half, sy - half, 2 * half, 2 * half), mark=(sx, sy)),
+                               dlg_png=str(shutil.copy(dlg_png, shots / f"{r['id']}-dlg.png")) if dlg_png else None,
+                               match=bool(ok_sel) and (d_mm is None or d_mm <= FOCUS_TOL_MM))
+                    if not rec["match"]:
+                        rec["why"] = ("the dialog selection is not this row" if not ok_sel else
+                                      f"KiCad focused {d_mm} mm from the marker (> {FOCUS_TOL_MM} mm)")
+                except G.GuiError as ex:  # this row failed: say so, go on with the next row in the same session
+                    rec.update(match=False, error=str(ex))
+                    errors.append(f"{r['id']} (row {k}): {ex}")
+                    if not s.alive():
+                        errors.append("KiCad exited: the remaining rows were not visited")
+                        recs.append(rec)
+                        break
                 recs.append(rec)
-                s.step("spot", f"{r['id']} row {g['k']} match {rec['match']}")
-            summary = {"run_id": run_id, "class": cls, "gui_tabs": st["tabs"][:2], "gui_violations": len(gui),
-                       "cli_violations": cli_n, "gui_equals_cli": len(gui) == cli_n,
-                       "records": recs, "matched": sum(1 for x in recs if x.get("match")),
-                       "session_steps": s.steps[-40:], "shots_dir": str(shots)}
+                s.step("spot", f"{r['id']} row {k} match {rec.get('match')}")
+            cli_n = len(full["routed"]["doc"].get("violations") or [])
+            summary = {"run_id": run_id, "class": cls, "board_state": s.board_state, "gui_tabs": tabs,
+                       "gui_violations": len(gui), "cli_violations": cli_n, "gui_equals_cli": len(gui) == cli_n,
+                       "wanted": len(want), "records": sorted(recs, key=lambda x: x["id"]),
+                       "matched": sum(1 for x in recs if x.get("match")), "errors": errors,
+                       "complete": not errors, "kicad_starts_this_call": G.GuiSession.starts_total - starts0,
+                       "session": {"display": s.display, "pcbnew_pid": s.pid(), "board": str(s.board)},
+                       "session_steps": s.steps[-60:], "shots_dir": str(shots)}
         except G.GuiError as ex:
             G.stop_session()
             raise ToolError(f"drc_spots: {ex}") from None
@@ -577,9 +626,10 @@ def cleanup_labels(options) -> dict:
 
 def cleanup(run_id: str, options=None, replay: bool = False, keep_session: bool = False,
             timeout_s: float = 900.0) -> dict:
-    """KiCad's own Tools -> Cleanup Tracks & Vias on a copy of the routed board, then kicad-cli DRC: what was
-    removed, the newly unconnected connections per net (with the engine connection ids) and the DRC delta per
-    class (after vs before)."""
+    """KiCad's own Tools -> Cleanup Tracks & Vias in the run's ONE session (the board drc_spots opened, when still
+    open), then kicad-cli DRC: what was removed, the newly unconnected connections per net (with the engine
+    connection ids) and the DRC delta per class (after vs before). The session ends afterwards unless
+    keep_session (the open board is then the cleaned one; drc_spots refuses it)."""
     from . import drc as D
     from . import kicad_gui as G
     boxes = cleanup_labels(options)
@@ -588,11 +638,17 @@ def cleanup(run_id: str, options=None, replay: bool = False, keep_session: bool 
     inp, rout = _boards(info)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = Path(info["out_dir"]) / "mcp"
-    live = G.copy_board(rout, out / "gui" / f"cleanup-{stamp}")
     res: dict = {"run_id": run_id, "options": boxes}
     with G._LOCK:
         try:
-            s = G.session_for(live, out / "gui" / f"session-cleanup-{stamp}", reuse=False)
+            starts0 = G.GuiSession.starts_total
+            s = _gui_for_run(info)  # the run's one session (drc_spots' when it is still open)
+            live = s.board
+            if s.board_state != "as opened":
+                s.fail(f"cleanup: the open board is already {s.board_state!r}; stop the session (gui_session stop) "
+                       f"to clean the routed board again")
+            res["session"] = {"display": s.display, "pcbnew_pid": s.pid(),
+                              "reused": G.GuiSession.starts_total == starts0}
             snap0 = s.e.snapshot()
             s.must("menu", "cleanup open", path=["Tools", "Cleanup Tracks & Vias"])
             s.wait_for("cleanup open: dialog shown", 30, lambda: s.window(G.CLEANUP_TITLE))
@@ -628,6 +684,8 @@ def cleanup(run_id: str, options=None, replay: bool = False, keep_session: bool 
             s.wait_for("save: board file written", 60, lambda: D.sha256(live.read_bytes()) != sha0 or
                        snap1 == snap0)
             s.step("saved", str(live))
+            s.board_state = f"after cleanup {stamp}"
+            res["shot_board"] = str(s.e.shot("board-after-cleanup", s.main))
         except G.GuiError as ex:
             G.stop_session()
             raise ToolError(f"cleanup: {ex}") from None

@@ -239,7 +239,9 @@ def cmd_drc_state() -> dict:
     book = [w for w in ws if type(w).__name__ == "BookCtrlBase" or (isinstance(w, wx.BookCtrlBase) and w not in nbs)]
     page = book[0].GetSelection() if book else -1
     boxes = {plain_label(c.GetLabel()): bool(c.GetValue()) for c in ws if isinstance(c, wx.CheckBox) and c.IsShown()}
-    return {"tabs": tabs, "results_page": page, "run_enabled": bool(run and run[0].IsEnabled()), "boxes": boxes}
+    status = [sb.GetStatusText(i) for sb in ws if isinstance(sb, wx.StatusBar) for i in range(sb.GetFieldsCount())]
+    return {"tabs": tabs, "results_page": page, "run_enabled": bool(run and run[0].IsEnabled()), "boxes": boxes,
+            "status": " ".join(t for t in status if t)}
 
 
 def _drc_dvc(tab: str):
@@ -254,57 +256,16 @@ def cmd_drc_rows(tab: str = "violations") -> list:
     return _rows(_drc_dvc(tab)[1])
 
 
-def cmd_drc_select(tab: str, k: int) -> dict:
-    """Show tab `tab`, select its top-level row `k` and send the selection event (KiCad cross-probes: pans to the
-    marker, brightens the items). Returns the selected row's text, read back from the control."""
+def cmd_drc_list_rect(tab: str = "violations") -> dict:
+    """Screen rect of the tab's list (the control, never a row: on KiCad 10.0.8 / wxGTK, Select / EnsureVisible /
+    GetItemRect on some rows crashed pcbnew, reproduced 3x on a solder-mask-bridge row, while a real click there
+    did not). Rows are reached by a click on the first line and Down keys, each step read back (drc_selected)."""
     wx = _wx()
-    import wx.dataview as dv  # noqa: PLC0415
     d, v = _drc_dvc(tab)
     nb = [w for w in _all(d) if isinstance(w, wx.Notebook) and w.GetPageCount() >= 2][0]
     if nb.GetSelection() != DRC_TABS[tab]:
         nb.SetSelection(DRC_TABS[tab])
-    m = v.GetModel()
-    kids = dv.DataViewItemArray()
-    m.GetChildren(dv.NullDataViewItem, kids)
-    kids = list(kids)
-    if not 0 <= int(k) < len(kids):
-        raise LookupError(f"DRC {tab} row {k} of {len(kids)}")
-    it = kids[int(k)]
-    v.UnselectAll()
-    v.Select(it)
-    v.EnsureVisible(it)
-    ev = dv.DataViewEvent(dv.wxEVT_DATAVIEW_SELECTION_CHANGED, v, it)
-    v.GetEventHandler().ProcessEvent(ev)
-    sel = v.GetSelection()
-    return {"k": int(k), "selected": str(m.GetValue(sel, 0)) if sel.IsOk() else None}
-
-
-def _drc_item(tab: str, k: int, *, show: bool = True):
-    wx = _wx()
-    import wx.dataview as dv  # noqa: PLC0415
-    d, v = _drc_dvc(tab)
-    if show:
-        nb = [w for w in _all(d) if isinstance(w, wx.Notebook) and w.GetPageCount() >= 2][0]
-        if nb.GetSelection() != DRC_TABS[tab]:
-            nb.SetSelection(DRC_TABS[tab])
-    m = v.GetModel()
-    kids = dv.DataViewItemArray()
-    m.GetChildren(dv.NullDataViewItem, kids)
-    kids = list(kids)
-    if not 0 <= int(k) < len(kids):
-        raise LookupError(f"DRC {tab} row {k} of {len(kids)}")
-    return v, m, kids[int(k)]
-
-
-def cmd_drc_row_rect(tab: str, k: int) -> dict:
-    """Screen rect of the DRC row's text (scrolled into view): where a user clicks to select it."""
-    v, m, it = _drc_item(tab, k)
-    v.EnsureVisible(it)
-    r = v.GetItemRect(it)
-    if r.width <= 0 or r.height <= 0:
-        raise LookupError(f"DRC {tab} row {k}: not visible after scrolling")
-    p = v.GetMainWindow().ClientToScreen(r.GetPosition()) if hasattr(v, "GetMainWindow") else v.ClientToScreen(r.GetPosition())
-    return {"rect": [p.x, p.y, r.width, r.height], "text": str(m.GetValue(it, 0))}
+    return {"rect": list(v.GetScreenRect())}
 
 
 def cmd_drc_selected(tab: str = "violations") -> dict:
@@ -383,9 +344,9 @@ def cmd_finest_grid() -> dict:
 
 COMMANDS = {"windows": cmd_windows, "menu": cmd_menu, "place": cmd_place, "buttons": cmd_buttons,
             "button": cmd_button, "checkboxes": cmd_checkboxes, "set_checkboxes": cmd_set_checkboxes,
-            "list": cmd_list, "drc_state": cmd_drc_state, "drc_rows": cmd_drc_rows, "drc_select": cmd_drc_select,
-            "status": cmd_status, "drc_row_rect": cmd_drc_row_rect, "drc_selected": cmd_drc_selected,
-            "dialog_status": cmd_dialog_status, "canvas_rect": cmd_canvas_rect, "zoom": cmd_zoom, "finest_grid": cmd_finest_grid,
+            "list": cmd_list, "drc_state": cmd_drc_state, "drc_rows": cmd_drc_rows, "drc_list_rect": cmd_drc_list_rect,
+            "drc_selected": cmd_drc_selected, "dialog_status": cmd_dialog_status, "status": cmd_status,
+            "canvas_rect": cmd_canvas_rect, "zoom": cmd_zoom, "finest_grid": cmd_finest_grid,
             "ping": lambda: {"pid": os.getpid()}}
 
 

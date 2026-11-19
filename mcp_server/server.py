@@ -60,12 +60,13 @@ def build_server():
         return tools.drc(run_id, limit)
 
     @srv.tool()
-    def drc_spots(run_id: str, cls: str | None = None, per_class: int = 3, zoom: float = 35.0,
-                  keep_session: bool = False) -> dict:
+    def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: float = 20.0,
+                  keep_session: bool = True) -> dict:
         """Real KiCad (Xephyr, isolated home): DRC dialog -> Run DRC -> per drc row (cls = one class, e.g.
-        "clearance track-track"; default 3 per class + every short/crossing) select the dialog row with the same
-        text, screenshot the dialog and the board view at the marker (yellow ring). Records: PNG paths, GUI vs
-        kicad-cli text, match flag (row found, selected, spot in view)."""
+        "clearance track-track"; per_class > 0 caps a class; default all rows) select the dialog row with the same
+        text in ONE KiCad session (DRC run once), screenshot the dialog and the board view at the marker (yellow
+        ring). Records: PNG paths, GUI vs kicad-cli text, match (row found + selected), KiCad's focus point; a failed
+        row is reported and the walk goes on. The session stays open for cleanup (idle timeout 600 s)."""
         return tools.drc_spots(run_id, cls, per_class, zoom, keep_session)
 
     @srv.tool()

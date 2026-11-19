@@ -1,5 +1,17 @@
 # mcp-drc: KiCad-DRC feedback tools in topor's MCP server (design note)
 
+> **As built (2026-11-19), where it differs from the plan below.** (a) One KiCad session per run board copy, started
+> by the first GUI call and reused: DRC runs once per board state, `drc_spots` walks the whole row list in it, a
+> failed row is reported and the walk goes on, `cleanup` runs in the same session (lead/user rule). (b) Rows are
+> selected by one real click on the list's first line + Down keys, each step read back (`drc_selected`): KiCad
+> 10.0.8 crashed 3x on a synthetic `DataViewCtrl.Select/EnsureVisible/GetItemRect` of a solder_mask_bridge row, a
+> real click never did. (c) No screen->board transform: KiCad's cross-probe centres the marker in the canvas part
+> left of the dialog; the pointer is moved there (no click) and the status bar X/Y read (`focus_mm`, finest grid);
+> `match` = same text + items, selection on it, focus within 1 mm of the row's nearest track/via. (d) KiCad 10 keeps
+> the DRC gear toggles in pcbnew.json `"DRC"` (`report_all_track_errors`, `crossprobe`, `scroll_on_crossprobe`);
+> with the KiCad 9 `drc_dialog` keys the GUI showed 49 rows where kicad-cli `--all-track-errors` showed 51.
+> (e) Helper commands as listed in docs/dev/mcp.md "DRC feedback".
+
 **What.** Five tools next to route/report/explain: `drc(run_id)`, `drc_spots(run_id, cls=None)`,
 `cleanup(run_id, options)`, `compare(run_a, run_b)`, plus `register_run(routed_copy, input_copy, result=None)` so
 a board routed in real KiCad (gui_e2e) can use them too, and `gui_session(action)` (status/stop). Same

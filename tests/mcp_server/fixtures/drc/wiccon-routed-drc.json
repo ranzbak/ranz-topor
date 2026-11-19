@@ -1,0 +1,185 @@
+{
+ "$schema": "https://schemas.kicad.org/drc.v1.json",
+ "coordinate_units": "mm",
+ "date": "2026-11-19T16:12:40",
+ "ignored_checks": [
+  {
+   "description": "Footprint has no courtyard defined",
+   "key": "missing_courtyard"
+  },
+  {
+   "description": "Track endpoint not centered on via",
+   "key": "track_not_centered_on_via"
+  },
+  {
+   "description": "Tuning profile track geometries",
+   "key": "tuning_profile_track_geometries"
+  },
+  {
+   "description": "Footprint doesn't match symbol's footprint filters",
+   "key": "footprint_filters_mismatch"
+  },
+  {
+   "description": "Silkscreen clearance",
+   "key": "silk_overlap"
+  },
+  {
+   "description": "Silkscreen clipped by solder mask",
+   "key": "silk_over_copper"
+  },
+  {
+   "description": "PTH inside courtyard",
+   "key": "pth_inside_courtyard"
+  },
+  {
+   "description": "NPTH inside courtyard",
+   "key": "npth_inside_courtyard"
+  }
+ ],
+ "included_severities": [
+  "error",
+  "warning"
+ ],
+ "kicad_version": "10.0.8",
+ "source": "2023.kicad_pcb",
+ "violations": [
+  {
+   "description": "Padstack is questionable (PTH pad hole leaves no copper)",
+   "items": [
+    {
+     "description": "PTH pad MH1 [<no net>] of S1",
+     "pos": {
+      "x": 188.64066,
+      "y": 137.05934
+     },
+     "uuid": "0a0bd914-8a00-43f9-bf63-abc3259111e1"
+    }
+   ],
+   "severity": "error",
+   "type": "padstack"
+  },
+  {
+   "description": "Padstack is questionable (PTH pad hole leaves no copper)",
+   "items": [
+    {
+     "description": "PTH pad MH2 [<no net>] of S1",
+     "pos": {
+      "x": 186.51934,
+      "y": 139.18066
+     },
+     "uuid": "e4d0a9b8-2268-425a-a709-8320bd007c22"
+    }
+   ],
+   "severity": "error",
+   "type": "padstack"
+  },
+  {
+   "description": "Text height out of range (board setup constraints silk text height min height 0,8000 mm; actual 0,3000 mm)",
+   "items": [
+    {
+     "description": "PCB text '3.3v' on B.Silkscreen",
+     "pos": {
+      "x": 131.064,
+      "y": 143.256
+     },
+     "uuid": "4a22bbb6-0f7f-4755-9493-3c599f703db9"
+    }
+   ],
+   "severity": "warning",
+   "type": "text_height"
+  },
+  {
+   "description": "Front solder mask aperture bridges items with different nets",
+   "items": [
+    {
+     "description": "Polygon of Ref** on F.Mask",
+     "pos": {
+      "x": 117.4177,
+      "y": 125.859174
+     },
+     "uuid": "a79d0835-15d4-43bc-a832-ad949f3b575a"
+    },
+    {
+     "description": "Track [Net-(D3-Pad2)] on F.Cu, length 58,2048 mm",
+     "pos": {
+      "x": 140.419101,
+      "y": 155.164054
+     },
+     "uuid": "ccb1508f-bcc2-45e3-8741-cc62711d8d79"
+    }
+   ],
+   "severity": "error",
+   "type": "solder_mask_bridge"
+  },
+  {
+   "description": "Front solder mask aperture bridges items with different nets",
+   "items": [
+    {
+     "description": "Polygon of Ref** on F.Mask",
+     "pos": {
+      "x": 176.777788,
+      "y": 66.186156
+     },
+     "uuid": "c954bb3b-9568-491b-8106-f4af7326755b"
+    },
+    {
+     "description": "Track [Net-(D1-Pad2)] on F.Cu, length 68,9146 mm",
+     "pos": {
+      "x": 201.49,
+      "y": 95.6375
+     },
+     "uuid": "c653cb41-3983-4b34-99ae-2491a11f40ca"
+    }
+   ],
+   "severity": "error",
+   "type": "solder_mask_bridge"
+  },
+  {
+   "description": "Thermal relief connection to zone incomplete (layer B.Cu; zone min spoke count 2; actual 1)",
+   "items": [
+    {
+     "description": "Zone [GND] on F.Cu and B.Cu, priority 0",
+     "pos": {
+      "x": 309.2,
+      "y": 36.2
+     },
+     "uuid": "584ea1d1-9e2a-4a33-9ff7-ffc83d59fbe1"
+    },
+    {
+     "description": "Pad 1 [GND] of R1 on B.Cu",
+     "pos": {
+      "x": 113.42,
+      "y": 103.35
+     },
+     "uuid": "110528ae-6558-4323-8e45-e46329a5fdd6"
+    }
+   ],
+   "severity": "error",
+   "type": "starved_thermal"
+  },
+  {
+   "description": "Thermal relief connection to zone incomplete (layer B.Cu; zone min spoke count 2; actual 1)",
+   "items": [
+    {
+     "description": "Zone [GND] on F.Cu and B.Cu, priority 0",
+     "pos": {
+      "x": 309.2,
+      "y": 36.2
+     },
+     "uuid": "584ea1d1-9e2a-4a33-9ff7-ffc83d59fbe1"
+    },
+    {
+     "description": "Pad 1 [GND] of TP1 on B.Cu",
+     "pos": {
+      "x": 134.32,
+      "y": 139.69
+     },
+     "uuid": "6b24d300-90f9-4a91-ba6b-7d27678c665b"
+    }
+   ],
+   "severity": "error",
+   "type": "starved_thermal"
+  }
+ ],
+ "unconnected_items": []
+}

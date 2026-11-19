@@ -77,6 +77,8 @@ class _E2E(E2E):
 class GuiSession:
     """One Xephyr + pcbnew on a copy of a board. Start with :meth:`start`; stop with :meth:`stop` (idempotent)."""
 
+    starts_total = 0  # pcbnew processes started by this server process (tests: one per drc_spots call at most)
+
     def __init__(self, board: Path, out: Path, *, display: str | None = None, idle_s: float = IDLE_S):
         self.board = Path(board)
         self.out = Path(out)
@@ -88,6 +90,10 @@ class GuiSession:
         self.last_use = time.monotonic()
         self.steps: list = []
         self._lock = threading.RLock()
+        self.board_state = "as opened"  # changes when a tool edits the open board (cleanup)
+        self.drc_state_of = None  # board state the last DRC run belongs to
+        self.drc_rows: list = []
+        self.kicad_starts = 0
 
     # ---------------------------------------------------------------- lifecycle
     def start(self, timeout_s: float = 240.0) -> "GuiSession":
@@ -96,8 +102,12 @@ class GuiSession:
         cfg = e.home / ".config/kicad/10.0"
         pj = cfg / "pcbnew.json"
         d = json.loads(pj.read_text()) if pj.is_file() else {}
-        # the GUI DRC as kicad-cli runs it: zones refilled, every track error (drc_dialog keys of pcbnew.json)
-        d.setdefault("drc_dialog", {}).update(refill_zones=True, test_all_track_errors=True)
+        # the GUI DRC as kicad-cli runs it (--all-track-errors): KiCad 10 keeps the DRC dialog's gear-menu toggles in
+        # pcbnew.json "DRC" (strings of _pcbnew.kiface 10.0.8: DRC.report_all_track_errors, DRC.crossprobe,
+        # DRC.scroll_on_crossprobe; the KiCad 9 "drc_dialog" keys are gone). Zone refill = the dialog's checkbox,
+        # checked in drc_run. Selecting a row must cross-probe and centre on the marker.
+        d.pop("drc_dialog", None)
+        d.setdefault("DRC", {}).update(report_all_track_errors=True, crossprobe=True, scroll_on_crossprobe=True)
         pj.write_text(json.dumps(d, indent=1))
         plugins = e.home / ".local/share/kicad/10.0/scripting/plugins"
         plugins.mkdir(parents=True, exist_ok=True)
@@ -110,6 +120,8 @@ class GuiSession:
             raise GuiError(f"start: display {self.display} was already running (not ours); refusing to use it")
         try:
             e.start_kicad(self.board)
+            self.kicad_starts += 1
+            GuiSession.starts_total += 1
             t0 = time.monotonic()
             w = e.wait(f"{self.board.stem} — PCB Editor", min(180.0, timeout_s))
             if not w:
@@ -249,44 +261,115 @@ class GuiSession:
         self.step("drc dialog placed", str(r))
 
     def drc_run(self, timeout_s: float = 600.0) -> dict:
+        """Run DRC ONCE per board state: Run DRC pressed, the run seen (progress page / Run disabled / the status
+        line changed, polled every 0.1 s for 15 s), then the results page with "Completed" in the status line.
+        Returns the dialog state; the rows are kept in `self.drc_rows` for this board state."""
         st = self.must("drc_state", "drc state")
         if not st["boxes"].get("Refill all zones before performing DRC", True):
             self.fail("drc run: 'Refill all zones before performing DRC' is off (kicad-cli refills)")
+        before = st.get("status", "")
         self.must("button", "drc run", title=DRC_TITLE, label="Run DRC")
-        time.sleep(1.0)
+        t0 = time.monotonic()
+        seen = False
+        while time.monotonic() - t0 < 15 and not seen:
+            try:
+                x = self.call("drc_state")
+            except GuiError:
+                x = None  # busy while the DRC runs
+            seen = x is None or not x["run_enabled"] or x["results_page"] != 1 or x.get("status", "") != before
+            time.sleep(0.1)
+        if not seen:
+            self.fail("drc run: the run was not observed within 15 s (no progress page, Run never disabled, status "
+                      f"line unchanged: {before!r})")
         st = self.wait_for("drc run: results shown", timeout_s,
-                           lambda: (lambda s: s if s["run_enabled"] and s["results_page"] == 1 and
-                                    any(t.startswith("Violations (") for t in s["tabs"]) else None)(self.call("drc_state")),
-                           every=1.0, on_poll=self.answer_confirmation)
-        self.step("drc ran", ", ".join(st["tabs"][:2]))
+                           lambda: (lambda x: x if x["run_enabled"] and x["results_page"] == 1 and
+                                    x.get("status", "").startswith("Completed") else None)(self.call("drc_state")),
+                           every=0.5, on_poll=self.answer_confirmation)
+        self.drc_rows = self.must("drc_rows", "drc rows", tab="violations")
+        self.drc_state_of = self.board_state
+        self.step("drc ran", f"{', '.join(st['tabs'][:2])}; {st['status']}")
         return st
 
+    def activate(self, title: str) -> None:
+        w = self.xid(title)
+        if not w:
+            self.fail(f"activate: no window {title!r}")
+        self.e.x("xdotool", "windowactivate", "--sync", w)
+        self.e.x("xdotool", "windowraise", w)
+
+    def drc_walk(self, targets: list, settle_s: float = 1.0):
+        """Yield (k, selected_text, error) for each top-level DRC row index in `targets` (ascending), selecting it as
+        a user does: one click on the list's first line, then Down keys (the dialog lists every row expanded:
+        headline, then its item lines). After every key the selection is read back and must be the expected line;
+        a mismatch is reported for that row (error) and the walk re-syncs once by clicking the first line again."""
+        lines = []
+        for r in self.drc_rows:
+            lines.append((r["k"], r["text"]))
+            lines.extend((r["k"], t) for t in r["items"])
+        head = {k: i for i, (k, t) in reversed(list(enumerate(lines))) if t == self.drc_rows[k]["text"]}
+
+        def sel():
+            return self.call("drc_selected", tab="violations").get("selected")
+
+        def first():
+            self.activate(DRC_TITLE)
+            x, y, w, h = self.must("drc_list_rect", "drc list")["rect"]
+            self.e.click_abs(x + 80, y + 12)
+            time.sleep(0.5)
+            got = sel()
+            if got != lines[0][1]:
+                self.fail(f"drc walk: a click on the first line selected {got!r}, not {lines[0][1]!r}")
+            return 0
+
+        pos = first()
+        for k in targets:
+            want = head[k]
+            err = None
+            for attempt in (0, 1):
+                ok = True
+                while pos < want:
+                    self.activate(DRC_TITLE)
+                    self.e.x("xdotool", "key", "Down")
+                    pos += 1
+                    time.sleep(0.08)
+                    got = sel()
+                    if got != lines[pos][1]:
+                        err = f"after Down to line {pos} the selection is {got!r}, expected {lines[pos][1]!r}"
+                        ok = False
+                        break
+                if ok:
+                    break
+                self.step("drc walk resync", err)
+                pos = first()  # once, then the row is reported with its error
+            if pos != want:
+                yield k, None, err
+                continue
+            time.sleep(settle_s)
+            yield k, sel(), None
+
     # ---------------------------------------------------------------- view transform
-    def cursor_mm(self, sx: int, sy: int) -> tuple:
-        """Board position (mm) under screen point (sx, sy): pointer warped there, KiCad's status bar read."""
-        self.e.x("xdotool", "mousemove", str(sx), str(sy))
-        time.sleep(0.35)
+    def _status_xy(self):
         for f in self.call("status"):
             m = re.match(r"^X\s*(-?[\d.,]+)\s+Y\s*(-?[\d.,]+)$", f.strip())
             if m:
                 return float(m.group(1).replace(",", ".")), float(m.group(2).replace(",", "."))
         self.fail("view: no 'X .. Y ..' field in the status bar")
 
-    def view(self) -> dict:
-        """Screen -> board transform of the canvas: two pointer positions 600 px apart (grid = finest)."""
+    def focus(self) -> dict:
+        """Where KiCad focused after a DRC row was selected. Its cross-probe centres the marker in the part of the
+        canvas the DRC dialog does not cover (spot_px, screen px) without moving the pointer, and the status bar's
+        X/Y only follows the pointer: the pointer is moved onto spot_px (no click) and X/Y read there (focus_mm,
+        snapped to the finest grid; 0.35 s settle). Returns {focus_mm, canvas, spot_px}."""
         x0, y0, w, h = self.call("canvas_rect")
-        cx, cy = x0 + w // 2, y0 + h // 2
-        a = self.cursor_mm(cx - 300, cy - 300)
-        b = self.cursor_mm(cx + 300, cy + 300)
-        self.e.x("xdotool", "mousemove", "1700", "1065")  # off the canvas: no crosshair / hover in the pictures
-        sx, sy = (b[0] - a[0]) / 600.0, (b[1] - a[1]) / 600.0
-        if abs(sx) < 1e-9 or abs(sy) < 1e-9:
-            self.fail(f"view: degenerate transform {a} -> {b}")
-        return {"canvas": [x0, y0, w, h], "mm_per_px": (sx, sy), "origin": (a[0] - sx * (cx - 300), a[1] - sy * (cy - 300))}
-
-    @staticmethod
-    def to_screen(v: dict, x_mm: float, y_mm: float) -> tuple:
-        return (round((x_mm - v["origin"][0]) / v["mm_per_px"][0]), round((y_mm - v["origin"][1]) / v["mm_per_px"][1]))
+        free_w = max(1, min(x0 + w, DRC_RECT[0]) - x0)
+        sx, sy = x0 + free_w // 2, y0 + h // 2
+        # two moves: the pointer may already sit on spot_px from the last row (no motion event, a stale X/Y)
+        self.e.x("xdotool", "mousemove", str(sx + 3), str(sy + 3))
+        time.sleep(0.15)
+        self.e.x("xdotool", "mousemove", str(sx), str(sy))
+        time.sleep(0.35)
+        xy = self._status_xy()
+        return {"focus_mm": list(xy), "canvas": [x0, y0, w, h], "spot_px": [sx, sy]}
 
 
 # ------------------------------------------------------------------ the one session of this process

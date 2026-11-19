@@ -1,9 +1,10 @@
 """KiCad DRC for the MCP tools: kicad-cli runs with the board's project provably used, the delta vs the unrouted
 input, classes, our copper -> engine connection ids, and per-class comparisons. No GUI, no pcbnew.
 
-Project proof (why: a DRC copy without its .kicad_pro silently uses KiCad's default rules; plugin
-DRC_WITHOUT_PROJECT, branch drc-project-fix): the .kicad_pro / .kicad_dru bytes are read ONCE from the board copy,
-written from memory beside every DRC copy, and must be present with the same sha256 before AND after kicad-cli;
+Project proof (why: a DRC copy without its .kicad_pro silently uses KiCad's default rules): the plugin's own
+drc-project-fix code (topor.run.project_snapshot / _variant / project_missing, error DRC_WITHOUT_PROJECT): the
+.kicad_pro / .kicad_dru bytes are read ONCE, written from memory beside every DRC copy, and must be there unchanged
+before AND after kicad-cli;
 every clearance KiCad quotes must be one the project defines (a net class clearance, the Board Setup minimum or a
 .kicad_dru clearance). Either check failing = ToolError ``DRC_WITHOUT_PROJECT`` / ``RULES_MISMATCH`` and no numbers.
 
@@ -26,9 +27,9 @@ import subprocess
 import time
 from pathlib import Path
 
+from topor.postrun import drc_without_project
+from topor.run import PROJECT_EXTS, _variant, project_missing, project_snapshot  # drc-project-fix (one copy)
 from toporlib import pcbfile
-
-PROJECT_EXTS = (".kicad_pro", ".kicad_dru")
 CLEARANCE_LIKE = {"clearance", "hole_clearance", "shorting_items", "tracks_crossing", "hole_to_hole",
                   "solder_mask_bridge", "copper_edge_clearance", "items_not_allowed"}
 KIND_ORDER = {"track": 0, "via": 1, "pad": 2, "zone": 3, "hole": 4}
@@ -52,11 +53,6 @@ class DrcError(ValueError):
 
 def sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
-
-
-def project_snapshot(pcb: Path) -> dict:
-    """{ext: bytes} of the .kicad_pro / .kicad_dru beside `pcb` (only those that exist). Read once. O(file)."""
-    return {ext: pcb.with_suffix(ext).read_bytes() for ext in PROJECT_EXTS if pcb.with_suffix(ext).is_file()}
 
 
 #: bump when the DRC command or its environment changes (part of the cache key)
@@ -104,16 +100,20 @@ def run_kicad_cli(pcb: Path, out_json: Path, home: Path, timeout_s: float = KICA
         raise DrcError("KICAD_CLI_FAILED", f"kicad-cli drc exit {cp.returncode} on {pcb}: {(cp.stderr or '')[-800:]}")
 
 
-def run_checked(pcb: Path, work: Path, tag: str, *, project: dict | None = None, runner=run_kicad_cli,
+_REAL_CLI = run_kicad_cli  # the cache key carries kicad-cli's version only for the real runner
+
+
+def run_checked(pcb: Path, work: Path, tag: str, *, project: dict | None = None, runner=None,
                 timeout_s: float = KICAD_CLI_TIMEOUT_S) -> dict:
     """kicad-cli DRC of `pcb` on a copy in ``work/<tag>/`` with the project snapshot written beside it; the
     project proof (module docstring) must pass. `project` = the snapshot ({ext: bytes}; default: read from beside
     `pcb` now). Cached: the same board + project + kicad-cli version returns the stored result. Returns
     {"json": path, "doc": parsed report, "proof": {...}, "cached": bool}. O(kicad-cli)."""
     pcb = Path(pcb)
+    runner = run_kicad_cli if runner is None else runner  # looked up per call (tests patch the module name)
     project = project_snapshot(pcb) if project is None else project
     board = pcb.read_bytes()
-    ver = (kicad_cli_version() if runner is run_kicad_cli else "runner") + "/" + CACHE_VERSION
+    ver = (kicad_cli_version() if runner is _REAL_CLI else "runner") + "/" + CACHE_VERSION
     key = sha256(board + b"".join(project.get(e, b"") for e in PROJECT_EXTS) + ver.encode())[:16]
     d = Path(work) / f"{tag}-{key}"
     meta = d / "drc-proof.json"
@@ -124,31 +124,27 @@ def run_checked(pcb: Path, work: Path, tag: str, *, project: dict | None = None,
     if d.exists():
         shutil.rmtree(d)
     d.mkdir(parents=True)
-    copy = d / pcb.name
-    copy.write_bytes(board)
-    for ext, b in project.items():
-        copy.with_suffix(ext).write_bytes(b)
+    copy = _variant(pcb, board.decode("utf-8"), d, project)  # project files written from memory (topor.run)
     for n in ("fp-lib-table",):
         if (pcb.parent / n).is_file():
             shutil.copy(pcb.parent / n, d / n)
     want = {ext: sha256(b) for ext, b in project.items()}
+    if missing := project_missing(copy, project):
+        raise DrcError("DRC_WITHOUT_PROJECT", drc_without_project(missing).message)
     t0 = time.monotonic()
     runner(copy, d / "drc.json", Path(work) / "cli-home", timeout_s)
     seconds = round(time.monotonic() - t0, 2)
     after = {ext: (sha256(copy.with_suffix(ext).read_bytes()) if copy.with_suffix(ext).is_file() else None)
              for ext in PROJECT_EXTS}
-    bad = {ext: after.get(ext) for ext, h in want.items() if after.get(ext) != h}
-    if bad:
-        raise DrcError("DRC_WITHOUT_PROJECT",
-                       f"the DRC copy {copy} lost or changed {sorted(bad)} during kicad-cli: its numbers would use "
-                       f"other rules than the board's; nothing reported")
+    if missing := project_missing(copy, project):  # re-checked after kicad-cli (drc-project-fix r2, F1)
+        raise DrcError("DRC_WITHOUT_PROJECT", drc_without_project(missing).message + f" (DRC copy {copy})")
     doc = json.loads((d / "drc.json").read_text())
     rules = rules_check(doc.get("violations") or [], project)
     if rules.get("verdict", "").startswith("MISMATCH"):
         raise DrcError("RULES_MISMATCH", f"{rules['verdict']} ({copy})")
     proof = {"project_files": sorted(project), "sha256": want, "sha256_after": {k: after[k] for k in want},
              "rules": rules, "kicad_cli": ver, "seconds": seconds, "board_sha256": sha256(board),
-             "project_used": bool(project) and not bad,
+             "project_used": bool(project),
              "note": None if project else "the board has no .kicad_pro: KiCad's default rules apply (legitimately)"}
     meta.write_text(json.dumps(proof, indent=1))
     return {"json": str(d / "drc.json"), "doc": doc, "proof": proof, "cached": False}
@@ -196,17 +192,29 @@ _PTS = re.compile(r"\((start|mid|end|at)\s+(-?[\d.]+)\s+(-?[\d.]+)")
 _W = re.compile(r"\((?:width|size)\s+([\d.]+)\)")
 
 
+_TSTAMP = re.compile(r'\(tstamp\s+"?([0-9A-Za-z\-]+)"?\s*\)')
+_NET_TABLE = re.compile(r'^\s*\(net\s+(\d+)\s+"((?:[^"\\]|\\.)*)"\)', re.M)
+
+
 def board_items(text: str) -> dict:
     """{uuid: {kind: track|via, net, layers, pts {start,mid,end,at: (x, y) mm}, width}} of the top-level segments,
-    arcs and vias (toporlib.pcbfile.find_items). O(len(text))."""
+    arcs and vias (toporlib.pcbfile.find_items). Files before KiCad 8 name items by ``(tstamp …)`` and nets by
+    number: both are read too (the number through the board's net table). O(len(text))."""
     out = {}
+    names = dict(_NET_TABLE.findall(text))
     for sp in pcbfile.find_items(text):
+        if not sp.uuid:  # pre-KiCad-8 id token
+            m = _TSTAMP.search(text, sp.start, sp.end)
+            if not m:
+                continue
+            sp = pcbfile.ItemSpan(sp.kind, m.group(1), sp.start, sp.end)
         body = text[sp.start:sp.end]
         n = _NET.search(body)
         lay = _LAYERS.search(body)
         pts = {k: (float(x), float(y)) for k, x, y in _PTS.findall(body)}
         w = _W.search(body)
-        out[sp.uuid] = {"kind": "via" if sp.kind == "via" else "track", "net": (n.group(1) or n.group(2)) if n else "",
+        net = (n.group(1) if n.group(1) is not None else names.get(n.group(2), n.group(2))) if n else ""
+        out[sp.uuid] = {"kind": "via" if sp.kind == "via" else "track", "net": net,
                         "layers": re.findall(r'"([^"]+)"', lay.group(1)) if lay else [], "pts": pts,
                         "width": float(w.group(1)) if w else None}
     return out
@@ -274,6 +282,16 @@ def _pieces(it: dict) -> list:
     if "mid" in p:
         return [(p["start"], p["mid"]), (p["mid"], p["end"])]
     return [(p["start"], p["end"])] if "start" in p and "end" in p else []
+
+
+def marker_dist(p, row: dict, items: dict):
+    """Distance (mm) from `p` to the nearest track / via of an index row (KiCad puts the marker on the violation,
+    i.e. on or between its items); rows without such an item: to the items' mean position. None if unknown."""
+    ds = [_seg_dist(p, a, b) for i in row.get("items", []) if i.get("uuid") in items
+          for a, b in _pieces(items[i["uuid"]])]
+    if ds:
+        return round(min(ds), 3)
+    return None if row.get("x") is None else round(math.hypot(p[0] - row["x"], p[1] - row["y"]), 3)
 
 
 def components(items: dict, uuids) -> dict:
