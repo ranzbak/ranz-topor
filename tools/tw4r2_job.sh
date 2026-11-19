@@ -3,6 +3,7 @@
 #   tw4r2_job.sh one <run>   one run; <run> = <cfg>:<board>[:<threads>]
 #   tw4r2_job.sh tests       cargo tests of the round (viacut unit tests, topo_cm1_room)
 #   tw4r2_job.sh io6         tests + esp/qmtech rounds=1 for every option of item (2)
+#   tw4r2_job.sh dh          (2b): tests, defaults rounds=1 on 4 boards (off = main copper), Kh/Kbh/Krh/Kbrh esp+qmtech, vgap probe
 #   tw4r2_job.sh verify      mutants (own tree copy), the whole release test suite, pytest (CI=1)
 #   tw4r2_job.sh eq <cfgs>   equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults),
 #                            plus eprom/wiccon rounds=1 with the defaults (off = main copper)
@@ -65,6 +66,15 @@ case ${1:-} in
     ( hzq run --threads 4 --name t4r2-mut -- bash -c "mkdir -p $R/mt && tar -C $ROOT --exclude=./engine/target --exclude=./target --exclude=./scratch -cf - . | tar -C $R/mt -xf - && cd $R/mt && CARGO_TARGET_DIR=$R/mt/target-mut python3 tools/tw4r2_mutate.py run $R/mut" > $R/u-mut.log 2>&1 9>&-; note "unit mut rc $?" ) &
     ( hzq run --threads 4 --name t4r2-suite -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast" > $R/suite.log 2>&1 9>&-; note "unit suite rc $?" ) &
     ( hzq run --threads 4 --name t4r2-pytest -- bash -c "cd $ROOT && CI=1 python -m pytest -q -p no:cacheprovider" > $R/pytest.log 2>&1 9>&-; note "unit pytest rc $?" ) &
+    wait; note "all done" ;;
+  dh)
+    python -m harness.tw4r2_patterns $R/pat > $R/gen.log 2>&1; note "gen rc $?"
+    ( hzq run --threads 4 --name t4r2-tests -- bash $ROOT/tools/tw4r2_job.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
+    ( hzq run --threads 4 --name t4r2-off -- bash -c "for b in eprom wiccon esp qmtech; do bash $ROOT/tools/tw4r2_job.sh one K:\$b & done; wait" > $R/u-off.log 2>&1; note "unit off rc $?" ) &
+    for b in esp qmtech; do
+      ( hzq run --threads 4 --name t4r2-h$b -- bash -c "for c in Kh Kbh Krh Kbrh; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-h$b.log 2>&1; note "unit h$b rc $?" ) &
+    done
+    ( hzq run --threads 4 --name t4r2-hpat -- bash -c "for r in Kh:vgap Kbh:vgap Mh:vgap Mbh:vgap; do bash $ROOT/tools/tw4r2_job.sh one \$r & done; wait" > $R/u-hpat.log 2>&1; note "unit hpat rc $?" ) &
     wait; note "all done" ;;
   pour)
     for b in esp qmtech; do
