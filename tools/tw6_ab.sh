@@ -6,9 +6,11 @@
 #   tw6_ab.sh pats           planned_crossing_window + site_or_stay + lead_via_end, K and M per cfg in PCFG (default "- s p sh shp")
 #   tw6_ab.sh eq <cfgs>      equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults)
 #   tw6_ab.sh ac <cfgs>      tests + off + pats + eq <cfgs> (the A+C round)
+#   tw6_ab.sh be <cfgs>      tests + lint (clippy) + pytest (CI=1, full) + pats + eq <cfgs> (the B search + E round)
 # cfg: K = rounds=1; M = rounds=40; e<k> = equal time seed k; suffixes (any order, at the end):
 #   s = [vias] site_price = "graded"; h = [capacity] via_disc_height = true; x = [capacity] pad_exits = true;
-#   p = [vias] pair_room = true.
+#   p = [vias] pair_room = true; b = [factors] weight via_site_social = $SITE_W (default 50);
+#   m = [optimize] site_move = true; j = [optimize] branch_move = true.
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
@@ -27,6 +29,9 @@ one() {
     elif [ "${c%h}" != "$c" ]; then SETS+=(--set capacity.via_disc_height=true); c=${c%h}
     elif [ "${c%x}" != "$c" ]; then SETS+=(--set capacity.pad_exits=true); c=${c%x}
     elif [ "${c%p}" != "$c" ]; then SETS+=(--set vias.pair_room=true); c=${c%p}
+    elif [ "${c%b}" != "$c" ]; then SETS+=(--set "factors.weight={\"via_site_social\": ${SITE_W:-50}}"); c=${c%b}
+    elif [ "${c%m}" != "$c" ]; then SETS+=(--set optimize.site_move=true); c=${c%m}
+    elif [ "${c%j}" != "$c" ]; then SETS+=(--set optimize.branch_move=true); c=${c%j}
     else break; fi
   done
   case $c in
@@ -47,6 +52,8 @@ one() {
 }
 tests() {
   ( cd engine && cargo test --release --test topo_site_price > $R/test-site.log 2>&1 9>&-; note "test topo_site_price rc $?"
+    cargo test --release --test topo_site_social > $R/test-social.log 2>&1 9>&-; note "test topo_site_social rc $?"
+    cargo test --release --test topo_g0 > $R/test-g0.log 2>&1 9>&-; note "test topo_g0 rc $?"
     cargo test --release --test topo_cm1_room --test topo_disc_height --test topo_pad_exit > $R/test-tw4r2.log 2>&1 9>&-; note "test cm1_room+disc_height+pad_exit rc $?"
     cargo test --release --lib > $R/test-lib.log 2>&1 9>&-; note "test lib rc $?" )
 }
@@ -73,6 +80,17 @@ case ${1:-} in
       done
     done
     wait ;;
+  lint) ( cd engine && rustup component add clippy > /dev/null 2>&1; cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; note "clippy rc $?" ) ;;
+  pytest) ( CI=1 python -m pytest -q -rs -p no:cacheprovider > $R/pytest.log 2>&1 9>&-; note "pytest rc $?"; tail -3 $R/pytest.log >> $R/rc.txt ) ;;
+  be)
+    # B search + E round: tests + clippy + full pytest (Python touched) + pats (PCFG) + eq <cfgs>
+    shift
+    ( hzq run --threads 4 --name tw6-tests -- bash $ROOT/tools/tw6_ab.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
+    ( hzq run --threads 4 --name tw6-lint -- bash $ROOT/tools/tw6_ab.sh lint > $R/u-lint.log 2>&1; note "unit lint rc $?" ) &
+    ( hzq run --threads 4 --name tw6-py -- bash $ROOT/tools/tw6_ab.sh pytest > $R/u-py.log 2>&1; note "unit pytest rc $?" ) &
+    ( hzq run --threads 4 --name tw6-pats -- bash $ROOT/tools/tw6_ab.sh pats > $R/u-pats.log 2>&1; note "unit pats rc $?" ) &
+    bash $ROOT/tools/tw6_ab.sh eq "$@"
+    wait; note "all done" ;;
   ac)
     shift
     ( hzq run --threads 4 --name tw6-tests -- bash $ROOT/tools/tw6_ab.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &

@@ -175,6 +175,34 @@ traversals; amount 1 + deficit / (d + s), 0 with a site). `assign_two`: each dom
 `n_cost` and the expansion edges. The refinement's own trans stays (its CM1 entry carries the graded site price).
 The search term (`via_site_social`) and the `wire_stretches` count are not done yet (HANDOFF.md).
 
+**B search as implemented (round 3; `[factors] via_site_social`, default 0).** New factor
+`factors/via_site_social.rs` (`Event::ViaSite`, registered last so the earlier factors' draws stay), weight
+`InitWeights::site_mm`. `init::arc_chords`: each different-net crossing adds `site_mm x min(A_own(t), A_o(o, k))`,
+A = `Packer::site_amount(room, d, s)` = 1 + deficit / (d + s) without a site, 0 with one (the same function the
+layering's `site_amount` now calls). `A_own(t)`: the connection's own room in the crossing's triangle
+(`State::site_own`, filled with the triangle's chords). `A_o(o, k)`: `State::site_k[o][k]`, from the loop's layering
+(`State::mark_site_k` in `set_lr` and at the loop start; cleared after the loop): inside a via interval
+(`refine::via_ranges`, strict with between_crossings) the best room over the interval, elsewhere the traversal's own
+room (a crossing there would put the via there; the note's "present via interval" generalised to wires without one).
+The state holds `pack::SiteRooms` (the packer's room cache shared by `Arc`, its via sizes), set only when the weight
+is > 0, so P2 and the default are untouched (weight 0 adds 0.0: bit-equal). Tests (topo_site_social.rs): a crossing
+in a no-via keepout moves to where a via fits (still one crossing, the path round costs more); 0 where the crossed
+wire's via has a site (the min); the interval amount; opt-in.
+
+**E as implemented (round 3; `[optimize] site_move`, `branch_move`, default false).** After `pair_move` in every
+cycle, per wire present at the cycle's start, its site-less via interval with the largest amount
+(`viaopt::siteless_intervals`, the packer's static room over the interval, part A's measure; the plan's taken sites
+and end sites are left to the evaluation): (i) `site_move`: the wire's single reroute (its own judge, B's search term
+when on); not kept: (ii) the wires whose crossings are the interval's two events (`viaopt::bounding_wires`, the
+layering's partners) laid again together (`Sp::relay_kept`, the body of `pair_move` without the held stretch: the
+crossers see the interval's two layers already); `branch_move`: the branch arms of the junctions inside the
+interval (`viaopt::tee_arms`: a branch on a turn of the wire there, or the wire itself at its junction end) laid again
+one at a time (the tree search picks a new junction). Every relay is kept when the board's evaluation drops (its
+predicted violations count a via without a site; with site_price its graded deficit too, so no extra price is
+added: one count). Counted inside the cycle's `max_ripped`. Report: `loop.site_move` / `branch_move` [kept, tried]
+and one warning line (`core::site_move_line`). `pair_move` is left as it was (no refactor, bit-equal by
+construction).
+
 **E. Loop moves (submode 2).**
 - `site_move`: per via with d > 0, after `pair_move` and at the end-of-cycle via weight:
   - (i) re-lay its own wire, with B's search terms;
