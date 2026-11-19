@@ -72,6 +72,8 @@ one() {
     O) SETS+=("${OLD[@]}") ;;
     N) SETS+=("${NEW[@]}") ;;
     N[a-e]) mapfile -t x < <(part ${o#N}); SETS+=("${x[@]}") ;;
+    F) SETS+=(--set optimize.free_wire_cross=0.0) ;;  # the defaults (TW5 off) with crossing-free wires crossed at their freedom
+    NF) SETS+=("${NEW[@]}" --set optimize.free_wire_cross=0.0) ;;
     Nt) x=("${NEW[@]}"); x[5]='optimize.escape_take="not_worse"'; SETS+=("${x[@]}") ;;  # N with whole-board moves undone when worse
     *) note "unknown cfg $c"; return ;;
   esac
@@ -189,6 +191,25 @@ case ${1:-} in
     u i 1 "$ln"
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  r8)
+    # Round 8 (free_wire_cross): targeted tests + its mutants; O = main copper at 1 cycle (vs tw5oc-fa0b28f);
+    # F / NF on the D8 boards (seeds 0-4) and F at 16 cycles on esp s1, wiccon, qmtech.
+    mkdir -p $R/d8; PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns $R/d8 --drc > $R/d8-gen.log 2>&1; note "d8 gen rc $?"
+    l1=""; for n in layering_zero_vias oscillating_cross layering_escape_fig8; do for s_ in 0 1 2 3 4; do l1+="Fr16s$s_:d-$n NFr16s$s_:d-$n "; done; done
+    u d 2 "$l1"
+    u o 4 "Or1:esp" "Or1:eprom Or1:wiccon" "Or1:qmtech"
+    u f 6 "Fr16s1:esp Fr16:wiccon Fr16:eprom" "Fr16:qmtech:2"
+    ( hzq run --pin --threads 2 --name fw-tests -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast --test loop_local --test tw5_escape --test topo_c0 -- --nocapture > $R/cargo-fw.log 2>&1; echo rc \$? >> $R/cargo-fw.log" > /dev/null 2>&1
+      note "fw tests: $(grep -E '^test result' $R/cargo-fw.log | tr '\n' ' ') $(tail -1 $R/cargo-fw.log)"
+      hzq run --pin --threads 2 --name fw-mut -- bash $ROOT/tools/tw5_job.sh mutfw > $R/mutfw.log 2>&1; note "mutfw rc $?" ) & sleep 1
+    wait
+    PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns_png $R/d8 $R $R/d8out > $R/d8-png.log 2>&1; note "d8 png rc $? $(tr '\n' ';' < $R/d8-png.log)"
+    note "all done" ;;
+  mutfw)
+    I=$ROOT/engine/src/topo/init.rs
+    sub 'cross += wt.cross_mm * f' 'cross += wt.cross_mm' | mut f1_share $I --test loop_local a_wire_that_crosses_nothing
+    sub 'if self.free_now.get(w).copied().unwrap_or(false) {' 'if false {' | mut f2_free_held $I --test loop_local a_wire_that_crosses_nothing
+    sub 'self.cross_k = (0..self.wires.len()).map(|w| a + (1.0 - a) * k(w) as f64 / (1.0 + k(w) as f64)).collect();' 'self.cross_k = (0..self.wires.len()).map(|_| a).collect();' | mut f3_graded $I --test loop_local a_wire_that_crosses_nothing ;;
   r7)
     # Round 7 (TW5 default off, main 1503c13b merged, inner_layer_room declares In2.Cu power): the fit fixtures
     # regenerated (In1 routed) into the tree, then the merge trial; qmtech 16 cycles single-part ablations for the
