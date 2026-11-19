@@ -7,7 +7,7 @@ first run. Unknown keys give a warning; an invalid value gives a warning and the
 Options at their default are written as commented lines (`# key = value`), so a later version can change the
 default for you; a line without `# ` is your own value and is never changed by the plugin.
 Options added in a later version are not added to an existing file (see the known limitation at the end).
-Keys marked *since 0.5.0* are accepted but written commented-out until that engine feature is available.
+Keys marked *since 0.5.0* are accepted but written commented-out until that engine feature is available; a value you set there is ignored with the warning `CFG_NOT_YET_AVAILABLE`.
 Keys that were removed (listed at the end) are ignored with the warning `CFG_REMOVED_KEY`; deprecated keys
 (section Deprecated keys) are ignored with the warning `CFG_DEPRECATED_KEY`, which names their line.
 

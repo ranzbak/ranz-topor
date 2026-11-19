@@ -386,3 +386,15 @@ def test_unavailable_overrides_and_opt_in(monkeypatch):
     assert unavailable_overrides([("search", "dangling_ends"), "optimize.rounds", ("nope", "x")]) == ["search.dangling_ends (since 0.5.0)"]
     monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")
     assert unavailable_overrides([("search", "dangling_ends")]) == []
+
+
+def test_opt_in_reaches_engine_options(monkeypatch):
+    from topor.config import Config
+    cfg = Config.defaults()
+    cfg.values[("search", "dangling_ends")] = "fixed"
+    monkeypatch.delenv("TOPOR_UNRELEASED_SETTINGS", raising=False)
+    without = cfg.engine_options()
+    monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")
+    with_ = cfg.engine_options()
+    assert "dangling_ends" not in str(without)
+    assert "dangling_ends" in str(with_) and "fixed" in str(with_)

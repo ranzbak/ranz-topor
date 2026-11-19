@@ -192,7 +192,7 @@ class Config:
         nested ``expert`` table. Settings whose engine feature is not available yet are omitted."""
         out: dict = {}
         for s in SETTINGS:
-            if not s.engine_field or not available(s):
+            if not s.engine_field or not (available(s) or unreleased_allowed()):
                 continue
             v = self.values[(s.section, s.key)]
             f = s.engine_field

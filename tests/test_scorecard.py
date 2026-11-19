@@ -115,6 +115,6 @@ def test_route_board_set_of_unreleased_setting_is_an_error(tmp_path, monkeypatch
     from harness.route_board import route_board
     monkeypatch.delenv("TOPOR_UNRELEASED_SETTINGS", raising=False)
     with pytest.raises(SystemExit) as e:
-        route_board("eprom-to-kernal", tmp_path / "o", overrides={("search", "dangling_ends"): "fixed"})
+        route_board(str(tmp_path / "no-such-board"), tmp_path / "o", overrides={("search", "dangling_ends"): "fixed"})
     assert "search.dangling_ends (since 0.5.0)" in str(e.value)
     assert not (tmp_path / "o").exists()
