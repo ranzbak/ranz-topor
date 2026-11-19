@@ -326,3 +326,39 @@ def test_the_wait_line_is_a_time_limit_wait_finding():
         assert f.severity == "warning" and f.message.startswith("The limit was reached during ") and f.message.endswith(").")
         assert f.fix == MESSAGES["TIME_LIMIT_WAIT"].fix and "drawing_grace_s" in f.fix
     assert "TIME_LIMIT_WAIT" in postrun.POSTRUN_CODES
+
+
+def _no_net_drc(required="0,1500"):
+    return [{"description": f"Clearance violation (netclass 'Default' clearance {required} mm; actual 0,1300 mm)",
+             "severity": "error", "type": "clearance", "items": [
+                 {"description": "Pad 15 [<no net>] of U2", "pos": {"x": 1.0, "y": 2.0}, "uuid": "aa11"},
+                 {"description": "Track [TX0_N] on F.Cu, length 1,0000 mm", "pos": {"x": 1.0, "y": 2.0},
+                  "uuid": "bb22"}]}]
+
+
+def _hdmi_model(default_nm, tx_nm=127_000):
+    return {"nets": [{"code": 1, "name": "TX0_N"}],
+            "rules": {"default": {"clearance": default_nm}, "per_net": {"1": {"clearance": tx_nm}}},
+            "pads": [], "pours": []}
+
+
+def test_rules_mismatch_item_without_net_uses_the_default_netclass_clearance():
+    """drc-project-fix (2026-11-19): a pad without a net sits in the Default net class and KiCad takes the larger
+    clearance of the two items (pcbnew manual, "Working with zones -> Zone properties -> Clearances & pad
+    connections": "if two clearance values are in conflict, the larger clearance value will be used"). The engine
+    gave TX0_N 0.127 mm but Default 0.15 mm: KiCad's 0.15 mm is not a mismatch."""
+    assert postrun.rules_mismatch(_no_net_drc(), _hdmi_model(150_000)) is None
+    # the check is still alive: a Default the engine really got smaller is a mismatch, nets or not
+    f = postrun.rules_mismatch(_no_net_drc(), _hdmi_model(127_000))
+    assert f is not None and f.code == "RULES_MISMATCH"
+    # two items without a net: only the Default class applies
+    both = _no_net_drc()
+    both[0]["items"][1]["description"] = "Pad 3 [<no net>] of U4"
+    assert postrun.rules_mismatch(both, _hdmi_model(150_000)) is None
+    f = postrun.rules_mismatch(both, _hdmi_model(127_000))
+    assert f is not None
+    # F3 (verify r1): a readable item name, never an empty net; a mixed pair names the no-net side too
+    assert ": KiCad requires" in f.message and "<no net>: KiCad requires 0.1500 mm" in f.message
+
+    g = postrun.rules_mismatch(_no_net_drc(), _hdmi_model(127_000))
+    assert "<no net> – TX0_N: KiCad requires" in g.message or "TX0_N – <no net>: KiCad requires" in g.message, g.message

@@ -25,7 +25,7 @@ lad() {  # NAME BOARD SEED THREADS SETS...
   local t0=$(date +%s)
   env RAYON_NUM_THREADS=$t TOPO_TIMES=1 python -m harness.score_runs $R/lad/$n $b --only $s --threads $t --no-png "$@" > $R/lad-$n.log 2>&1 9>&-
   note "lad $n rc $? wall $(( $(date +%s) - t0 )) s sets=[$*]"
-  rm -rf $R/lad/$n/*/s*/work 2>/dev/null
+  rm -rf $R/lad/$n/*/s$s/work 2>/dev/null  # only this run's work dir (drc-project-fix)
 }
 unit() {  # NAME THREADS lad-args...
   local n=$1 t=$2; shift 2
