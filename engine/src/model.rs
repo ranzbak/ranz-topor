@@ -1023,6 +1023,12 @@ pub struct Options {
     /// rip-up limit). Default 0.25 (round-3 equal-time A/B, docs/dev/design/tw7-moves.md §11:
     /// the loop keeps its cycle rate and the fewest detours > 1.5).
     pub pattern_share: f64,
+    /// TW7 B (`[optimize] pattern_stuck`, docs/dev/design/tw7-moves.md §12): the weight of a
+    /// pattern's fruitless tries in the moves' order: a pattern runs by its excess length times
+    /// `1 / (1 + pattern_stuck x stuck)`, `stuck` = the tries of its two connections' pattern since
+    /// it was last kept (graded, no cutoff: a pattern that keeps failing moves down, never out).
+    /// 0 = the excess length alone (round 3). Default 1.
+    pub pattern_stuck: f64,
     /// TW7 part D (`[factors] detour`): per connection, the length coefficient of its next re-lay
     /// in the TopoR loop is raised by `1 + detour * (r - 1)^2`, `r` = its projected length over
     /// the straight distance at the cycle's start (Polubasov 2010 «Перекладка»: per-wire
@@ -1767,6 +1773,7 @@ impl Default for Options {
             crossing_rules: true,
             pattern_moves: Vec::new(),
             pattern_share: 0.25,
+            pattern_stuck: 1.0,
             detour_k: 0.0,
             reroute_rounds: 6,
             via_reduce: true,

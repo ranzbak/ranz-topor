@@ -15,6 +15,8 @@
 #   u = [optimize] pattern_moves = all five kinds; c = only "u_clinch", "evasion";
 #   d = [factors] detour = $DETOUR_K (default 1); x = [optimize] crossing_rules = false;
 #   h = [optimize] pattern_share = $SHARE_H (default 0.25); q = pattern_share = $SHARE_Q (default 0.1).
+#   round 4: z = [optimize] pattern_stuck = 0 (the excess-length order alone); l / m = [factors] detour = 0.25 / 0.5;
+#   v = pattern_moves = the five kinds + "via_trade" (part C); p = [capacity] pour_cuts = true (part E needs it).
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
@@ -33,6 +35,11 @@ one() {
     elif [ "${c%x}" != "$c" ]; then SETS+=(--set optimize.crossing_rules=false); c=${c%x}
     elif [ "${c%h}" != "$c" ]; then SETS+=(--set optimize.pattern_share=${SHARE_H:-0.25}); c=${c%h}
     elif [ "${c%q}" != "$c" ]; then SETS+=(--set optimize.pattern_share=${SHARE_Q:-0.1}); c=${c%q}
+    elif [ "${c%z}" != "$c" ]; then SETS+=(--set optimize.pattern_stuck=0); c=${c%z}
+    elif [ "${c%l}" != "$c" ]; then SETS+=(--set factors.detour=0.25); c=${c%l}
+    elif [ "${c%m}" != "$c" ]; then SETS+=(--set factors.detour=0.5); c=${c%m}
+    elif [ "${c%v}" != "$c" ]; then SETS+=(--set 'optimize.pattern_moves=["clinch","double","unlayerable","u_clinch","evasion","via_trade"]'); c=${c%v}
+    elif [ "${c%p}" != "$c" ]; then SETS+=(--set capacity.pour_cuts=true); c=${c%p}
     else break; fi
   done
   case $c in

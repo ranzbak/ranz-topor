@@ -4611,6 +4611,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             detour_amt: Vec<f64>,
             share: super::escape::Share,
             mark: Option<(usize, usize, usize)>,
+            /// `[optimize] pattern_stuck`: the weight of a pattern's fruitless tries in the moves'
+            /// order, and per pattern (its two connections, the lower first) the tries since its
+            /// last kept move (loop-wide: a restore keeps it).
+            stuck_w: f64,
+            stuck: BTreeMap<(usize, usize), u32>,
         }
         struct Tw5<'a, 'p> {
             /// (a) `[optimize] oscillation = "bounded"` and its amplitude bounds.
@@ -5321,8 +5326,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// pad-to-pad wires of their own connection (as the batch pass: a wire of a free net
             /// tree keeps its place), each pair once (the first kind found wins: mutual evasion
             /// before U-clinch), the pair with the most excess length first (the graded detour
-            /// amounts, [`super::xrules::detour_amount`]; ties by wire ids). Detection only reads
-            /// the state. O(detectors).
+            /// amounts, [`super::xrules::detour_amount`]), each times `1 / (1 + w x stuck)` (`w` =
+            /// `[optimize] pattern_stuck`, `stuck` = the pair's fruitless tries since its last kept
+            /// move, [`Sp::pattern_key`]: graded, no cutoff); ties by wire ids. Detection only
+            /// reads the state. O(detectors).
             fn pattern_cands(&self) -> Vec<super::xrules::Pair> {
                 use super::xrules::{self as xr, Kind};
                 let _pg = super::prof::g(super::prof::K::XrDetect);
@@ -5361,10 +5368,20 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     if p.first == p.second || !plain(p.first) || !plain(p.second) || !seen.insert((p.first.min(p.second), p.first.max(p.second))) {
                         continue;
                     }
-                    out.push((xr::detour_amount(self.st, p.first) + xr::detour_amount(self.st, p.second), p));
+                    let amt = xr::detour_amount(self.st, p.first) + xr::detour_amount(self.st, p.second);
+                    let n = self.tw7.stuck.get(&self.pattern_key(&p)).copied().unwrap_or(0);
+                    out.push((pattern_rank(amt, n, self.tw7.stuck_w), p));
                 }
                 out.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.first.cmp(&b.1.first)).then(a.1.second.cmp(&b.1.second)));
                 out.into_iter().map(|x| x.1).collect()
+            }
+            /// TW7 B: a pattern's key in the fruitless-try counts (`[optimize] pattern_stuck`): its
+            /// two wires' connections, the lower first (wire ids change at every re-lay, the
+            /// connections stay).
+            fn pattern_key(&self, p: &super::xrules::Pair) -> (usize, usize) {
+                let c = |w: WireId| self.wire_conn.get(w).copied().unwrap_or(usize::MAX);
+                let (a, b) = (c(p.first), c(p.second));
+                (a.min(b), a.max(b))
             }
             /// TW7 B: one targeted pattern move. The wires `order` (and the branches on their
             /// junctions) are taken out together and laid again, `order`'s connections first in
@@ -6034,6 +6051,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             continue;
                         }
                         let k0 = self.work_mark();
+                        let key = self.pattern_key(p);
+                        cs.pat_retried += usize::from(self.tw7.stuck.get(&key).is_some_and(|&n| n > 0));
                         let mut tries = 1usize;
                         cs.pat_moved += 1;
                         ripped += 2;
@@ -6052,8 +6071,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         cs.pat_kinds[p.kind.idx()][1] += tries;
                         cs.pat_kinds[p.kind.idx()][2] += usize::from(kept);
                         cs.pat_kept += usize::from(kept);
+                        // `[optimize] pattern_stuck`: the pattern's fruitless tries (graded order).
+                        if kept {
+                            self.tw7.stuck.remove(&key);
+                        } else {
+                            *self.tw7.stuck.entry(key).or_insert(0) += tries as u32;
+                        }
                     }
                     self.tw7.mark = Some(self.work_mark());
+                    cs.pat_stuck = self.tw7.stuck.len();
                 } else {
                 let x0 = (self.xkept)();
                 self.resync();
@@ -6337,6 +6363,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 detour_amt: Vec::new(),
                 share: super::escape::Share::new(opts.pattern_share),
                 mark: None,
+                stuck_w: if opts.pattern_stuck.is_finite() { opts.pattern_stuck.max(0.0) } else { 0.0 },
+                stuck: BTreeMap::new(),
             },
             pre: pre_loop.clone(),
         };
@@ -6716,6 +6744,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "pattern_share".into(),
                 serde_json::json!({
                     "share": opts.pattern_share,
+                    "stuck_w": opts.pattern_stuck,
+                    "retried": rep.stats.pat_retried,
+                    "stuck_patterns": rep.stats.pat_stuck,
                     "waited": rep.stats.pat_waited,
                     "work": (rep.stats.pat_work * 1e3).round() / 1e3,
                     "other_work": (rep.stats.pat_base * 1e3).round() / 1e3,
@@ -6724,7 +6755,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             );
         }
         if !opts.pattern_moves.is_empty() {
-            warnings.push(pattern_moves_line(&opts.pattern_moves, super::escape::Share::new(opts.pattern_share).share, &rep.stats));
+            let stuck_w = if opts.pattern_stuck.is_finite() { opts.pattern_stuck.max(0.0) } else { 0.0 };
+            warnings.push(pattern_moves_line(&opts.pattern_moves, super::escape::Share::new(opts.pattern_share).share, stuck_w, &rep.stats));
         }
         if opts.via_pair_min {
             warnings.push(format!(
@@ -9513,8 +9545,16 @@ fn patdbg(model: &BoardModel, st: &State, unlayerable: &[(WireId, WireId)], seed
     }
 }
 
+/// TW7 B (`[optimize] pattern_stuck` = `w`): a found pattern's place in the moves' order, its
+/// excess length `amt` (the graded detour amounts of its two wires) times `1 / (1 + w x stuck)`,
+/// `stuck` = its fruitless tries since its last kept move. Graded, no cutoff: it falls with every
+/// fruitless try and stays above 0; `w = 0` = `amt`. O(1).
+fn pattern_rank(amt: f64, stuck: u32, w: f64) -> f64 {
+    amt / (1.0 + w * f64::from(stuck))
+}
+
 /// TW7 B: the run report line of `[optimize] pattern_moves` (and its entries no kind matches).
-fn pattern_moves_line(kinds: &[String], share: f64, st: &super::optimise::CycleStats) -> String {
+fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, st: &super::optimise::CycleStats) -> String {
     use super::xrules::Kind;
     let bad: Vec<&str> = kinds.iter().map(String::as_str).filter(|k| Kind::parse(k).is_none()).collect();
     let per: Vec<String> = Kind::ALL
@@ -9543,6 +9583,11 @@ fn pattern_moves_line(kinds: &[String], share: f64, st: &super::optimise::CycleS
     } else {
         s.push_str(&format!("; no work budget ([optimize] pattern_share = 1): the moves took {measured:.1} % of the loop's work"));
     }
+    if stuck_w > 0.0 {
+        s.push_str(&format!("; order: excess length x 1 / (1 + {stuck_w} x the pattern's fruitless tries) ([optimize] pattern_stuck = {stuck_w})"));
+    } else {
+        s.push_str("; order: excess length alone ([optimize] pattern_stuck = 0)");
+    }
     if !bad.is_empty() {
         s.push_str(&format!("; unknown entries ignored: {} (known: clinch, double, unlayerable, u_clinch, evasion)", bad.join(", ")));
     }
@@ -9551,6 +9596,23 @@ fn pattern_moves_line(kinds: &[String], share: f64, st: &super::optimise::CycleS
 
 #[cfg(test)]
 mod tests {
+    /// TW7 B `[optimize] pattern_stuck`: the order falls with every fruitless try, never to 0,
+    /// and weight 0 is the excess length alone.
+    #[test]
+    fn the_pattern_rank_is_graded_by_fruitless_tries() {
+        let r = super::pattern_rank;
+        assert_eq!(r(0.8, 0, 1.0), 0.8);
+        assert_eq!(r(0.8, 7, 0.0), 0.8, "weight 0 = the excess alone");
+        assert!((r(0.8, 1, 1.0) - 0.4).abs() < 1e-12 && (r(0.8, 3, 0.5) - 0.32).abs() < 1e-12);
+        let mut last = f64::MAX;
+        for k in 0..200 {
+            let x = r(0.8, k, 1.0);
+            assert!(x < last && x > 0.0, "graded, no cutoff at {k}: {x}");
+            last = x;
+        }
+        assert!(r(1.0, 3, 1.0) < r(0.3, 0, 1.0), "a pattern that keeps failing gives way to a fresh smaller one");
+    }
+
     /// TW7 B: the pattern moves' report line, per kind, with and without the work budget, with
     /// unknown entries and with no known kind.
     #[test]
@@ -9559,15 +9621,18 @@ mod tests {
         st.pat_kinds[super::super::xrules::Kind::UClinch.idx()] = [6, 3, 1];
         st.pat_kinds[super::super::xrules::Kind::MutualEvasion.idx()] = [3, 2, 1];
         let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let a = super::pattern_moves_line(&k(&["u_clinch", "evasion"]), 0.25, &st);
+        let a = super::pattern_moves_line(&k(&["u_clinch", "evasion"]), 0.25, 1.0, &st);
         assert!(a.contains("2 of 5 moves kept (9 patterns found; u_clinch 1/3 kept, 6 found; evasion 1/2 kept, 3 found;"), "{a}");
         assert!(a.contains("pattern_share = 0.25: the moves took 25.0 % of the loop's work, 4 found pattern(s) waited"), "{a}");
         assert!(!a.contains("unknown") && !a.contains("no work budget"), "{a}");
-        let b = super::pattern_moves_line(&k(&["u_clinch", "bogus"]), 1.0, &st);
+        assert!(a.ends_with("; order: excess length x 1 / (1 + 1 x the pattern's fruitless tries) ([optimize] pattern_stuck = 1)"), "{a}");
+        let b = super::pattern_moves_line(&k(&["u_clinch", "bogus"]), 1.0, 0.0, &st);
         assert!(b.contains("u_clinch 1/3 kept, 6 found;") && !b.contains("evasion 1/2"), "{b}");
         assert!(b.contains("no work budget ([optimize] pattern_share = 1): the moves took 25.0 %"), "{b}");
-        assert!(b.ends_with("unknown entries ignored: bogus (known: clinch, double, unlayerable, u_clinch, evasion)"), "{b}");
-        let c = super::pattern_moves_line(&k(&["bogus"]), 1.0, &super::super::optimise::CycleStats::default());
+        assert!(b.ends_with("; order: excess length alone ([optimize] pattern_stuck = 0); unknown entries ignored: bogus (known: clinch, double, unlayerable, u_clinch, evasion)"), "{b}");
+        let h = super::pattern_moves_line(&k(&["u_clinch"]), 0.25, 0.5, &st);
+        assert!(h.contains("(1 + 0.5 x the pattern's fruitless tries) ([optimize] pattern_stuck = 0.5)"), "{h}");
+        let c = super::pattern_moves_line(&k(&["bogus"]), 1.0, 1.0, &super::super::optimise::CycleStats::default());
         assert!(c.contains("0 of 0 moves kept (0 patterns found; no known kind;") && c.contains("took 0.0 %"), "{c}");
     }
 

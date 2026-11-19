@@ -319,6 +319,8 @@ fn pattern_share_bounds_the_moves_graded() {
     let uc = |j: &serde_json::Value, i: usize| j["pattern_kinds"]["u_clinch"][i].as_u64().unwrap();
     assert!(pm(&all, 1) >= 3, "one move per cycle: {}", all["pattern_moves"]);
     assert_eq!(all["pattern_share"]["waited"], 0, "no budget: nothing waits");
+    assert_eq!(all["pattern_share"]["retried"].as_u64().unwrap(), pm(&all, 1) - 1, "one pattern, every try fruitless: each try after the first is a retry");
+    assert_eq!(all["pattern_share"]["stuck_patterns"], 1);
     for j in [&all] {
         assert_eq!((uc(j, 2), uc(j, 1), uc(j, 0)), (pm(j, 0), pm(j, 1), pm(j, 2)), "per kind = totals (one kind on)");
         assert_eq!(j["pattern_kinds"]["clinch"], serde_json::json!([0, 0, 0]));
@@ -348,4 +350,34 @@ fn pattern_share_still_takes_the_best_move() {
     assert_eq!(vias(&r.items), 0);
     assert!(net_len(&r.items, 1) < 4.5, "N {}", net_len(&r.items, 1));
     assert!(r.warnings.iter().any(|w| w.contains("pattern_share = 0.05: the moves took")), "{:?}", r.warnings);
+}
+
+/// Part B, `[optimize] pattern_stuck` (docs/dev/design/tw7-moves.md §12): two u_clinch boards
+/// side by side, A (nets 1, 2; M's end at y 12.4: every move undone) and B (nets 3, 4; y 13.3:
+/// the move is kept, after it B's reversed pattern, M round N's pad, has a little excess and its
+/// moves are undone). After B's kept move A has the most excess (about 0.5 against B's reversed
+/// 0.02). At share 0.25 (about one move per cycle, 9 cycles) with the excess alone (weight 0) A's
+/// fruitless pattern takes the budget every cycle and B's reversed one is never tried; with
+/// weight 3 A falls below it after a few fruitless tries (0.5 / (1 + 3 k)), so both get tried
+/// (graded order, no cutoff; weight 1 needs more cycles than this run has). B is laid straight
+/// either way.
+#[test]
+fn pattern_stuck_lets_a_fresh_pattern_past_a_fruitless_one() {
+    let m = board(
+        56.0,
+        22.0,
+        &[(1, 12.0, 11.0, 1.0), (1, 16.0, 11.0, 1.0), (2, 14.0, 2.5, 1.0), (2, 14.0, 12.4, 1.0), (3, 40.0, 11.0, 1.0), (3, 44.0, 11.0, 1.0), (4, 42.0, 2.5, 1.0), (4, 42.0, M2Y, 1.0)],
+        &[0.25, 0.5, 0.25, 0.5],
+    );
+    let run = |w: f64| {
+        let o = Options { pattern_share: 0.25, pattern_stuck: w, ..opts(&["u_clinch"], 0) };
+        let r = route_with(&m, &o, &RunControl::new());
+        assert_eq!(r.failed, 0, "{:?}", r.warnings);
+        assert!(net_len(&r.items, 3) < 4.5, "weight {w}: B's N straight: {}", net_len(&r.items, 3));
+        loop_json(&m, &o)
+    };
+    let plain = run(0.0);
+    let graded = run(3.0);
+    assert_eq!(plain["pattern_share"]["stuck_patterns"], 1, "excess alone: only A's pattern is retried: {}", plain["pattern_share"]);
+    assert_eq!(graded["pattern_share"]["stuck_patterns"], 2, "graded: B's reversed pattern gets its tries too: {}", graded["pattern_share"]);
 }

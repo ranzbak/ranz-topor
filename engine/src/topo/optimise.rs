@@ -149,6 +149,10 @@ pub struct CycleStats {
     /// `[optimize] pattern_share`: found patterns left for a later cycle (the work budget was
     /// spent), the moves' measured work and the loop's other work (work units).
     pub pat_waited: usize,
+    /// `[optimize] pattern_stuck`: moves tried on a pattern that had fruitless tries before.
+    pub pat_retried: usize,
+    /// `[optimize] pattern_stuck`: the most patterns with fruitless tries at once (a stage-4 end).
+    pub pat_stuck: usize,
     pub pat_work: f64,
     pub pat_base: f64,
     /// Whole-board moves (floating up, crossing passes) undone because the board's evaluation
@@ -248,6 +252,8 @@ impl CycleStats {
             }
         }
         self.pat_waited += o.pat_waited;
+        self.pat_retried += o.pat_retried;
+        self.pat_stuck = self.pat_stuck.max(o.pat_stuck);
         self.pat_work += o.pat_work;
         self.pat_base += o.pat_base;
         self.undone += o.undone;
