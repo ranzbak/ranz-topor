@@ -20,7 +20,7 @@ What it does (every step leaves a screenshot in <out_dir>/shots/ and a line in <
   4. Clicks the Topor button (found in the toolbar by its icon), then: first-run notice -> Continue (only without
      a topor.toml), pre-flight -> Route, progress (screenshots; with --cancel-after S presses Cancel after S seconds; with
      --ok-at-stable presses OK when the dialog says "Routes stable" and checks the board is the best result shown), preview -> Accept,
-     finished -> Close.
+     (no finished window: Accept or Reject just closes the dialog).
   5. Over the KiCad API (an external kipy client in the plugin environment): counts the tracks / vias after
      Accept, presses Ctrl+Z (one undo step, two with run.refill_after_accept, must remove them all), Ctrl+Shift+Z (back), saves the board.
   6. `harness.board_metrics` judges the saved board with kicad-cli DRC (unconnected, routing_new, vias) and
