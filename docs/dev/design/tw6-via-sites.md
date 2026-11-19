@@ -131,6 +131,19 @@ scratch/agent-wt/reports/tw6-via-sites-data/vsite.py.
 - First step of round 1 (diagnosis, pattern only): `TOPO_VIAREL` plus a drawing dump, to show why the drawing finds
   the planned sites "not free". The two candidate causes are the relocated point itself, or SDA's planned room.
   Only the cause the dump shows gets fixed.
+- **Dump result (round 1, tag tw6r1-c1d6afd, K and D identical).** The diver is VCC (POWER, 0.8 mm via). SDA's taut
+  crossing on VCC is at arc 10.56 mm (x ≈ 11.56), 0.24 mm left of the B.Cu window (x 11.8 .. 14.2).
+  - Via 0: interval [3.375, 10.56] lies wholly left of the window. Relocation finds no legal point (gap −0.600 before
+    and after) and still moves it 7.967 → 6.403. The drawing refuses it (the planned point is in the rule area, the site
+    is marked tight). The search then forces it out of the plan's class at (12.28, 7.90), with room −0.308 mm.
+  - Via 1: relocated to (13.375, 7.0), gap 0.225, legal alone. The drawing refuses it on `via_pair_price` = 0.175 mm
+    against the forced via 0 (SDA needs room between the pair). It is drawn at (13.30, 7.0).
+  - The 4 KiCad clearance errors are SDA × VCC's forced via at (12.58, 7.25) (drc_digest).
+  - Cause: the plan hands over a via interval with no site (A/B), not the relocation of a legal pair. Part D's
+    quantity (`via_pair_price`) is only the second refusal, caused by the first via being forced. Fix order unchanged:
+    A (graded deficit of via 0's interval) + B (layering: the deficit-weighted edge lets SDA dive, 0.6 via, or moves
+    the crossing into the window). D keeps the pair's room once both vias have sites. Side finding: relocation moves a
+    via with zero gain (gap −0.6 → −0.6); D keeps a tight via at its plan point (no move without gain).
 
 **E. Loop moves (submode 2).**
 - `site_move`: per via with d > 0, after `pair_move` and at the end-of-cycle via weight:
@@ -191,6 +204,11 @@ untouched). Order after the merge: A+C, D, B (search term), E; all opt-in until 
     0 vias. The geometry comes from ADV_SCL.
   - `lead_via_end`: a dangling lead with no via room at its end. Expected: the run stays on the lead's layer, or the
     via goes to the lead's via end.
+  - Round 1 (harness/tw6_patterns.py, PROPOSED, tag tw6r1-c1d6afd): both reference boards have KiCad DRC 0. **main
+    already solves both under K and D** (site_or_stay: 0 vias, DRC 0; lead_via_end: 1 via at the via end (8.982, 6),
+    DRC 0). They are acceptance guards (no regression), not failure reproducers. A reproducer of the qmtech class needs
+    the crossing to be cheaper than the detour in today's S (a longer detour, or congestion round the row); the user
+    decides whether to keep them, or to grow site_or_stay until main fails.
 - Boards:
   - qmtech rounds=1, judged per connection (the 6 plus CTS/RTS).
   - Equal time as in tw4-r2: wall 300 s, 4 threads, esp s0-4 and qmtech s0.
