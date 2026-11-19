@@ -434,6 +434,13 @@ pub struct Predicted {
     pub parts: MeasureParts,
 }
 
+/// tw4 fix round 2 (verifier F2, test hook): the neck-depth part (`[factors] neck_depth` / violation
+/// weight x Σ d²) of the last whole-board measure of the TopoR loop, as f64 bits.
+pub mod neckcheck {
+    use std::sync::atomic::AtomicU64;
+    pub static LAST: AtomicU64 = AtomicU64::new(0);
+}
+
 /// The parts of a [`Predicted`] (loop-local).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MeasureParts {

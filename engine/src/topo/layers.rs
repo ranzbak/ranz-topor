@@ -989,6 +989,9 @@ pub fn via_neighbourhood(st: &State, free: &[bool], events: &[Vec<(usize, f64, i
     iv.sort_unstable();
     iv.dedup();
     let mut focus = out.clone();
+    // A free wire with a path traverses its own triangles, which lie in their star, so it is in `l1` already; this
+    // adds only free wires without a triangle, which have no pass and so no via term (verifier mutant b of tw4
+    // round 1 is equivalent for that reason; kept so the focus says "the free wires" without that argument).
     for (w, f) in focus.iter_mut().enumerate() {
         *f |= st.wires[w].alive && free.get(w).copied().unwrap_or(false);
     }

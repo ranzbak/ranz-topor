@@ -3702,6 +3702,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let neck_k = if viol_mm > 0.0 { reg.weight("neck_depth").unwrap_or(0.0).max(0.0) / viol_mm } else { 0.0 };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
             let neck = if neck_k > 0.0 { neck_k * st.neck_depth(None) } else { 0.0 };
+            // tw4 fix round 2 (verifier F2, test hook): the neck-depth part of the last whole-board measure.
+            super::optimise::neckcheck::LAST.store(neck.to_bits(), std::sync::atomic::Ordering::Relaxed);
             let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).with_neck(neck).shorts_ranked(opts.pick_shorts, opts.short_weight);
             if let Some(v) = reused(st, lr) {
                 return pred(v);
@@ -3877,10 +3879,30 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             };
             let cap_b = cap_of(st, &prev.events, &wm);
+            // tw4 fix round 2 (verifier F1, test hook): the same change judged with every model wire in focus.
+            let focus_check = opts.via_cuts && super::refine::viacheck::FOCUS_ON.load(std::sync::atomic::Ordering::Relaxed);
+            let cap_all = |st: &State, evl: &[Vec<(usize, f64, i32)>]| -> (usize, f64) {
+                let only = &wm[..st.wires.len().min(wm.len())];
+                let dirs = packer.taut_dirs_only(st, only);
+                let fo = vec![true; st.wires.len()];
+                CapModel::new_only_focus(st, &packer, &dirs, evl, bottom, overflow_mm, only, &fo).violations()
+            };
+            let all_b = if focus_check { cap_all(st, &prev.events) } else { (0, 0.0) };
             let nd_b = if neck_k > 0.0 { st.neck_depth(Some(&wm)) } else { 0.0 };
             let fc_b = foreign_copper_only(st, &layers_now_only(st, &prev.events, bottom, Some(&free_b)), Some(&free_b));
             st.restore(after);
             let cap_a = cap_of(st, &lr.events, &wm);
+            if focus_check {
+                // the focus cut is exact for the change (after - before), not for each side's total
+                let all_a = cap_all(st, &lr.events);
+                let (dn, dg) = (cap_a.0 as i64 - cap_b.0 as i64, cap_a.1 - cap_b.1);
+                let (an, ag) = (all_a.0 as i64 - all_b.0 as i64, all_a.1 - all_b.1);
+                use std::sync::atomic::Ordering::Relaxed;
+                super::refine::viacheck::FOCUS_CHECKED.fetch_add(1, Relaxed);
+                if dn != an || (dg - ag).abs() > 1e-6 * (1.0 + ag.abs()) {
+                    super::refine::viacheck::FOCUS_BAD.fetch_add(1, Relaxed);
+                }
+            }
             let nd_a = if neck_k > 0.0 { st.neck_depth(Some(&wm)) } else { 0.0 };
             let fc_a = foreign_copper_only(st, &layers_now_only(st, &lr.events, bottom, Some(&free)), Some(&free));
             LoopCtr::add(&lctr.local_free, free.iter().filter(|&&f| f).count());

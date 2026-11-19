@@ -30,7 +30,7 @@ one() {
     if [ "${c%v}" != "$c" ]; then SETS+=(--set capacity.via_cuts=true); ENVS+=(TOPO_VIACHECK=1); c=${c%v}
     elif [ "${c%w}" != "$c" ]; then SETS+=(--set capacity.via_cuts=true); c=${c%w}
     elif [ "${c%n}" != "$c" ]; then SETS+=(--set 'factors.weight={"neck_depth": 1000}'); c=${c%n}
-    elif [ "${c%c}" != "$c" ]; then SETS+=(--set search.dangling_lead_choice=true); c=${c%c}
+    elif [ "${c%c}" != "$c" ]; then SETS+=(--set search.dangling_lead_choice=true); ENVS+=(TOPOR_UNRELEASED_SETTINGS=1); c=${c%c}
     elif [ "${c%d}" != "$c" ]; then SETS+=(--set 'factors.weight={"dangling_turn": 4}'); c=${c%d}
     else break; fi
   done

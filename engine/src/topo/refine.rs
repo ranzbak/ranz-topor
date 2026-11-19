@@ -91,6 +91,12 @@ pub mod viacheck {
     /// Via entries whose stored price differs from a fresh pricing, and the priced entries.
     pub static BAD: AtomicUsize = AtomicUsize::new(0);
     pub static CHECKED: AtomicUsize = AtomicUsize::new(0);
+    /// tw4 fix round 2 (verifier F1): with [`FOCUS_ON`] every local judgement under via cuts is priced again with
+    /// every model wire in focus; the change (after - before, count and graded) must be the same. Judgements
+    /// compared, and those that differ.
+    pub static FOCUS_ON: AtomicBool = AtomicBool::new(false);
+    pub static FOCUS_CHECKED: AtomicUsize = AtomicUsize::new(0);
+    pub static FOCUS_BAD: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub mod shadow {

@@ -114,3 +114,24 @@ fn via_prices_stay_fresh_through_rejected_moves() {
     assert!(n > 0, "no priced via entry was checked: the case does not show");
     assert_eq!(bad, 0, "{bad} stale via prices of {n}");
 }
+
+/// tw4 fix round 2 (verifier F1): the local judge prices the via terms only for its focus (the free
+/// wires and the traversers of their paths' vertex star, union of both states). That cut must be exact
+/// for the judged change: every judgement priced again with every model wire in focus gives the same
+/// change of the count and of the graded price (qmtech USB corner, the via moves of the loop).
+#[test]
+fn the_via_focus_of_the_local_judge_equals_every_wire_in_focus() {
+    use std::sync::atomic::Ordering;
+    use topor_engine::topo::refine::viacheck;
+    let path = format!("{}/tests/fixtures/qmtech-usb-crop.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses");
+    let o = Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "via_cuts": true}"#).expect("options parse");
+    viacheck::FOCUS_ON.store(true, Ordering::Relaxed);
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let _ = route_with(&m, &o, &ctl);
+    let (bad, n) = (viacheck::FOCUS_BAD.load(Ordering::Relaxed), viacheck::FOCUS_CHECKED.load(Ordering::Relaxed));
+    eprintln!("via focus: {n} local judgements checked, {bad} differ");
+    assert!(n > 0, "no local judgement was checked: the case does not show");
+    assert_eq!(bad, 0, "{bad} of {n} local judgements differ from the judge with every wire in focus");
+}
