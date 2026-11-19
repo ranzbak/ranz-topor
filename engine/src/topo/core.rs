@@ -3566,6 +3566,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
         via_site_r: crate::vias::plan_via_need(&model.rules, opts),
+        site_price: opts.via_site_price == "graded",
         n_signal: b.n_signal,
         plane_mm: reg.price(&Event::PlaneLength { wire: 0, layer: b.n_signal, mm: 1.0 }, &WireCtx::default()),
         plane_cut: reg.price(&Event::PlaneCut { wire: 0, layer: b.n_signal }, &WireCtx::default()),

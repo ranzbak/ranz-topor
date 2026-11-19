@@ -168,6 +168,13 @@ first via's interval end and the second's start (Σ width + max clearance); `gap
 between the pair. A via whose site predicts a violation (rule gap < 0) moves only for a larger force gap (the side
 finding of the round-1 dump: 7.967 → 6.403 at −0.6 → −0.6).
 
+**B layering as implemented (round 2; under `[vias] site_price = "graded"`, `LayerParams::site_price`).**
+`layers::site_amount` (best `Packer::site_room` over the traversals strictly between the two events, else the end
+traversals; amount 1 + deficit / (d + s), 0 with a site). `assign_two`: each domain-graph edge weighs
+`via_mm + cap_mm x amount`. `assign_n`: `Costs::site` per event and `Costs::trans_at` in the greedy colouring,
+`n_cost` and the expansion edges. The refinement's own trans stays (its CM1 entry carries the graded site price).
+The search term (`via_site_social`) and the `wire_stretches` count are not done yet (HANDOFF.md).
+
 **E. Loop moves (submode 2).**
 - `site_move`: per via with d > 0, after `pair_move` and at the end-of-cycle via weight:
   - (i) re-lay its own wire, with B's search terms;
