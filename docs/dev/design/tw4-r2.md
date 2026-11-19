@@ -195,9 +195,10 @@ vias, plane stubs; `draw::track_item` / `via_item`) through `pourcheck::check_po
 (cell budget a parameter, e.g. 1 M cells; static fill rasters cached per run). Each cut-off component holding a
 pour-served pad (KiCad: one missing connection) = 1 count, graded 1 + its pads beyond the first x 0.25 (a ring round
 three GND pads costs more than one pad, smoothly). Costly, not forbidden; weight = the violation weight x
-`[factors] pour_cut` (default 1 after the A/B). Whole-board measure: every call. Local judge: the term again only when
-the move's free wires have a stretch on a layer of another net's pour inside its fill box (else the old value), so a
-move pays its own cut. Cost to be measured first (one full check today ~50-100 ms on esp; at 94 local judgements per
+`[factors] pour_cut` (default 1 after the A/B). Whole-board measure: every call. Local judge: the term of the state after the move, whole
+(a ring is decided by the whole board's copper; the local-window skip "only when a free wire has a stretch on a pour layer"
+was not implemented: the meter's `local_kept` field was never incremented and is removed, 2026-11-19; TW7 may add the skip).
+Cost to be measured first (one full check today ~50-100 ms on esp; at 94 local judgements per
 cycle that could double a cycle: if so, a per-window check in the local judge and the full one per cycle, said so).
 Option `[capacity] pour_cuts` (default off until the A/B).
 
