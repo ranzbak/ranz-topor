@@ -1215,6 +1215,9 @@ pub struct Options {
     /// Tests (engine only): every refinement epoch evaluates at least this many candidates, also
     /// past a kept one ([`crate::topo::refine_par::lanes::with_window`]); 0 = off.
     pub refine_test_window: usize,
+    /// Tests (engine only): every in-loop P4 round (TW5 (f), `loop_p4`) treats its second
+    /// victim's placing as failed (no path), so the round's restore is exercised; false = off.
+    pub loop_p4_test_fail: bool,
     /// `[drawing] draw_lanes` (par-draw, docs/dev/design/par-draw.md): how many lanes compute the
     /// drawing's order-free units at once (the extended rubber band of every stretch, the cut
     /// measurement of every layer; [`crate::topo::par`]). JSON `"auto"` (default; 0 in Rust) = one
@@ -1679,6 +1682,7 @@ impl Default for Options {
             loop_p4: false,
             free_wire_cross: 1.0,
             refine_test_window: 0,
+            loop_p4_test_fail: false,
             draw_lanes: 0,
             draw_test_reverse: false,
             loop_crossing: 0.25,

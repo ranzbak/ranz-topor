@@ -81,6 +81,21 @@ fn loop_p4_rounds_fold_the_preloop_rounds_into_the_loop() {
     }
 }
 
+/// TW5 (f): a round in which a wire finds no path is undone, never dropped (costly, not failed):
+/// with the tests' forced failure of every round's second placing (`loop_p4_test_fail`), every
+/// round is undone and every connection stays routed, on the layering the loop had.
+#[test]
+fn loop_p4_round_without_a_path_is_undone() {
+    let m = model("inner_layer_room");
+    let base = r#""topo_rounds": 6, "stable_patience": 6, "seed": 2, "preloop_p4": false, "loop_p4": true"#;
+    let r = route(&m, &opts(&format!(r#"{base}, "loop_p4_test_fail": true"#)));
+    let t = loop_p4_text(&r);
+    eprintln!("{t}\n{}", layers_of(&r));
+    assert!(t.starts_with("0 taken") && !t.contains(", 0 undone (a wire found no path)"), "every round undone as without a path: {t}");
+    assert_eq!((r.routed, r.failed), (5, 0), "no connection dropped: {}", layers_of(&r));
+    assert!(r.connections.iter().all(|c| !c.layers.is_empty()), "every connection drawn: {}", layers_of(&r));
+}
+
 /// TW5 (f): a round is kept like the loop's other whole-board moves: `escape_take = "always"`
 /// takes every round (none undone as worse), `"not_worse"` (default) undoes the ones that make the
 /// board worse (on inner_layer_room with the pre-loop rounds on, every round is worse than the

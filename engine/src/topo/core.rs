@@ -4183,8 +4183,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             hist_base: Vec<f64>,
             /// (d) floating up per wire.
             float_wire: bool,
-            /// (f) one P4 rip-up round per cycle inside the loop (`[optimize] loop_p4`).
+            /// (f) one P4 rip-up round per cycle inside the loop (`[optimize] loop_p4`), and the
+            /// tests' forced failure of its second placing (`loop_p4_test_fail`).
             loop_p4: bool,
+            p4_test_fail: bool,
             /// Escapes so far in this run (their seeds).
             n_esc: u64,
         }
@@ -4642,10 +4644,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let seed = super::optimise::mix_seed(c.seed, 0x4C50_3400_0000 | c.cycle as u64);
                 let via_w = c.emphasis.via_at(1.0);
                 let mut lost = false;
-                for &ci in &cis {
+                for (k, &ci) in cis.iter().enumerate() {
                     self.forced.borrow_mut().remove(&self.conn_of[ci]);
                     let (reg_w, _) = self.conn_reg(ci, seed, c.amp, via_w);
-                    if !(self.place)(self.st, ci, self.cap, self.wire_conn, &reg_w) {
+                    // A placing fails only when the wire has no path at all ([`State::any_path`]
+                    // ignores room; the rips only free room, so not in practice): the round is undone.
+                    if !(self.place)(self.st, ci, self.cap, self.wire_conn, &reg_w) || (self.tw5.p4_test_fail && k == 1) {
                         lost = true;
                         break;
                     }
@@ -5402,6 +5406,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 hist_base: hist_base0,
                 float_wire: opts.float_wire && judge_local,
                 loop_p4: opts.loop_p4,
+                p4_test_fail: opts.loop_p4_test_fail,
                 n_esc: 0,
             },
         };
