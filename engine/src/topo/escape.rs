@@ -35,9 +35,33 @@ pub fn bounded_amp(lo: f64, hi: f64, b: f64) -> f64 {
 /// tries in a row as `stuck / (1 + stuck)`. Each term >= 0, unbounded terms enter as they are (the
 /// amplitude itself is bounded). O(1).
 pub fn badness(len: f64, straight: f64, crowd: f64, stuck: u32) -> f64 {
-    let detour = if straight > 0.0 && len.is_finite() { (len / straight - 1.0).max(0.0) } else { 0.0 };
     let s = f64::from(stuck);
-    detour + crowd.max(0.0) + s / (1.0 + s)
+    detour_excess(len, straight) + crowd.max(0.0) + s / (1.0 + s)
+}
+
+/// The detour of a path of length `len` between ends `straight` apart: `len / straight - 1`
+/// (>= 0; 0 for a straight path and without a reference: `straight <= 0`, an infinite `len`).
+/// The ratio of the run report's detour metric minus one. O(1).
+pub fn detour_excess(len: f64, straight: f64) -> f64 {
+    if straight > 0.0 && len.is_finite() {
+        (len / straight - 1.0).max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// TW6 r4 (`[optimize] site_move_detour`): the graded detour price, in violations, of a path
+/// [`detour_excess`] `e` over its straight line on the scale `scale` (an excess ratio):
+/// `(e / scale)^2`, the shape of the via-pair stretch price
+/// ([`super::viaopt::pair_len_price`]): a near-straight path costs next to nothing, one whose
+/// excess equals the scale costs one violation, and the price keeps growing smoothly (no cutoff).
+/// `scale <= 0` = no price (0). O(1).
+pub fn detour_price(len: f64, straight: f64, scale: f64) -> f64 {
+    if scale <= 0.0 || !scale.is_finite() {
+        return 0.0;
+    }
+    let r = detour_excess(len, straight) / scale;
+    r * r
 }
 
 /// When the next layering escape runs (TW5 b), counted in work units (deterministic: the copper

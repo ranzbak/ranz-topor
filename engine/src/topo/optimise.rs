@@ -170,6 +170,15 @@ pub struct CycleStats {
     /// Kept moves whose stretch was longer than the `[vias] pair_max_mm` scale (its graded price
     /// grows with the square of the length over that scale; warned).
     pub pair_moved_long: usize,
+    /// TW6 part E (`[optimize] site_move` / `branch_move`): tries / kept of the site moves (own
+    /// wire laid again, then the bounding crossers) and of the branch moves.
+    pub site_moved: usize,
+    pub site_kept: usize,
+    pub branch_moved: usize,
+    pub branch_kept: usize,
+    /// TW6 r4 (`[optimize] site_move_detour`): site and branch moves the evaluation alone would
+    /// have kept that the graded detour price refused.
+    pub site_detour_refused: usize,
     /// loop-local (deterministic work counters): whole-board layerings and whole-board measures
     /// (capacity model builds) in the cycle, local layerings, and over them the free wires and the
     /// wires of the local capacity models (before + after).
@@ -250,6 +259,11 @@ impl CycleStats {
         self.pair_moved_kept += o.pair_moved_kept;
         self.pair_moved_wires += o.pair_moved_wires;
         self.pair_moved_long += o.pair_moved_long;
+        self.site_moved += o.site_moved;
+        self.site_kept += o.site_kept;
+        self.branch_moved += o.branch_moved;
+        self.branch_kept += o.branch_kept;
+        self.site_detour_refused += o.site_detour_refused;
         self.layer_global += o.layer_global;
         self.measure_global += o.measure_global;
         self.layer_local += o.layer_local;
@@ -967,6 +981,12 @@ pub trait Rerouter<'p> {
     fn violations_after(&mut self, st: &mut State<'p>, _saved: &Topology, _gone: &[WireId], _new: &[WireId]) -> f64 {
         self.violations(st, true)
     }
+    /// TW6 r4 (`[optimize] site_move_detour`): a price (mm) the judge adds to one side of the
+    /// comparison, read on the state as it is: `after` false = before the try (the wires `ws` =
+    /// the set, still in place), true = after it (`ws` = the new wires). 0 (default) = none.
+    fn judge_extra(&mut self, _st: &mut State<'p>, _ws: &[WireId], _after: bool) -> f64 {
+        0.0
+    }
     /// The try was undone (the state is back as before): undo the bookkeeping of `place`.
     fn undo(&mut self);
     /// The try was kept (adopt what `violations(after)` computed for the new state).
@@ -998,7 +1018,7 @@ pub struct RerouteOut {
 pub fn reroute_set<'p>(st: &mut State<'p>, set: &[WireId], r: &mut dyn Rerouter<'p>, extra: f64) -> RerouteOut {
     let saved = st.topology();
     let viol_old = r.violations(st, false);
-    let old: f64 = set.iter().map(|&w| r.price(st, w)).sum::<f64>() + viol_old;
+    let old: f64 = set.iter().map(|&w| r.price(st, w)).sum::<f64>() + viol_old + r.judge_extra(st, set, false);
     for &w in set {
         super::tree::remove_wire(st, w);
     }
@@ -1006,7 +1026,7 @@ pub fn reroute_set<'p>(st: &mut State<'p>, set: &[WireId], r: &mut dyn Rerouter<
         Some(ws) => {
             let local: f64 = ws.iter().map(|&w| r.price(st, w)).sum();
             let v = r.violations_after(st, &saved, set, &ws);
-            (local + v, v)
+            (local + v + r.judge_extra(st, &ws, true), v)
         }
         None => (f64::INFINITY, f64::INFINITY),
     };
