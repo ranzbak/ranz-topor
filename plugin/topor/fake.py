@@ -192,9 +192,6 @@ class ScriptedUi:
         self.calls.append(("preview", (png, report)))
         return bool(self._next(self._accept, True))
 
-    def done(self, outcome: str, report, report_dir: Path) -> None:
-        self.calls.append(("done", (outcome, report, report_dir)))
-
     def error(self, finding: Finding) -> None:
         self.calls.append(("error", (finding,)))
 

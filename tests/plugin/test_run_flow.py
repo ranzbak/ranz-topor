@@ -98,6 +98,11 @@ def _ok(out):
         pytest.fail("run failed:\n" + (out.report_dir / "log.txt").read_text()[-2500:])
 
 
+def _last(ui) -> str:
+    """The last UI call that is not ``set_context`` (the run flow sets the context right before every dialog)."""
+    return [n for n in ui.names() if n != "set_context"][-1]
+
+
 def do_run(eprom, tmp_path, *, ui=None, cfg=CFG, engine=topor_engine, board=None, strict=True):
     board = board or make_board(eprom)
     ui = ui or ScriptedUi()
@@ -297,9 +302,7 @@ def test_run_accept_single_commit(accepted, tmp_path):
     assert pcbfile.parse_zone_fills(board.text) == {**pcbfile.parse_zone_fills(board.text), **req.zone_fills}
     assert "same undo step" in (out.report_dir / "report.md").read_text()
     assert board.actions == ["pcbnew.GlobalEdit.cleanupTracksAndVias", "pcbnew.GlobalEdit.editTeardrops"]
-    names = ui.names()
-    assert names.index("preview") < names.index("done")
-    assert [c for c in ui.calls if c[0] == "done"][0][1][0] == "accepted"
+    assert "preview" in ui.names() and _last(ui) == "preview"  # no finished window after Accept (2026-11-19)
     # the second save_copy holds the commit; kicad-cli judges it (M4b gate numbers)
     copy, rep = _result(board, out, tmp, "after")
     spans = pcbfile.find_items(copy.read_text())
@@ -338,8 +341,7 @@ def test_run_reject_leaves_board_untouched(rejected, eprom):
     assert board.commits == [] and board.refills == 0 and board.actions == []
     assert board.text.count(MARKER) == 1 and eprom.text == eprom.pcb.read_text()
     assert not any(c[0] in ("commit", "refill_zones", "run_action") for c in board.calls)
-    done = [c for c in ui.calls if c[0] == "done"]
-    assert len(done) == 1 and done[0][1][0] == "rejected" and done[0][1][2] == out.report_dir
+    assert _last(ui) == "preview" and "error" not in ui.names()  # no finished window after Reject (user 2026-11-19)
     assert "rejected" in (out.report_dir / "report.md").read_text()
 
 
@@ -405,7 +407,57 @@ def test_run_cancel_with_nothing_routed_is_cancelled(app, eprom, tmp_path, repor
     board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng)
     assert out.status == "cancelled" and board.commits == []
     assert "preview" not in ui.names()
-    assert [c[1][0] for c in ui.calls if c[0] == "done"] == ["cancelled"]
+    assert "error" not in ui.names()  # Cancel before any copper: silent (the user pressed it)
+
+
+def _no_copper_complete(out_json):
+    d = json.loads(out_json)
+    d.update(items=[], routed=0, stop_reason="stable", timed_out=False, connections=[], vias=0)
+    return json.dumps(d)
+
+
+def test_run_router_produced_no_copper_is_a_loud_error(app, eprom, tmp_path, reports):
+    """N > 0 connections and no copper (not cancelled) = whole-run failure: one NOTHING_ROUTED error dialog, nothing
+    committed, outcome error; never a quiet notice (fail-fast rule; lead 2026-11-19)."""
+    eng = ProxyEngine(hold=2, patch=_no_copper_complete)
+    board, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=True), engine=eng, strict=False)
+    assert out.total > 0 and out.routed == 0 and not out.cancelled
+    assert out.status == "error" and out.error is not None and out.error.code == "NOTHING_ROUTED"
+    assert board.commits == [] and "preview" not in ui.names()
+    assert [c[1][0].code for c in ui.calls if c[0] == "error"] == ["NOTHING_ROUTED"] and _last(ui) == "error"
+    res = json.loads((out.report_dir / "result.json").read_text())
+    assert res["status"] == "error" and "NOTHING_ROUTED" in [f["code"] for f in res["findings"]]
+
+
+def test_run_nothing_to_route_is_silent(app, eprom, tmp_path, reports):
+    """Zero connections: the pre-flight SCOPE_EMPTY warning covered it; no error and no window afterwards."""
+    def zero(out_json):
+        d = json.loads(_no_copper_complete(out_json))
+        d["connections_total"] = 0
+        return json.dumps(d)
+
+    board, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=True), engine=ProxyEngine(hold=2, patch=zero), strict=False)
+    assert out.total == 0 and out.status == "rejected" and board.commits == []
+    assert "error" not in ui.names() and "preview" not in ui.names()
+
+
+@pytest.mark.parametrize("commit,refill", [(False, False), (False, True), (True, False), (True, True)])
+def test_run_preview_summary_carries_the_press_b_hint_only_when_both_are_off(app, eprom, tmp_path, reports, commit, refill):
+    """Neither run.commit_fills nor run.refill_after_accept: the preview summary says press B (the hint the removed
+    finished window carried); any other combination: no such line."""
+    seen = []
+
+    class Ui(ScriptedUi):
+        def preview(self, png, report):
+            seen.append(list(report.summary_lines()))
+            return super().preview(png, report)
+
+    cfg = CFG.with_values({("run", "commit_fills"): commit, ("run", "refill_after_accept"): refill})
+    do_run(eprom, tmp_path, ui=Ui(accept=False), cfg=cfg)
+    assert len(seen) == 1
+    hint = [ln for ln in seen[0] if "press B" in ln]
+    assert (len(hint) == 1 and hint[0].startswith("After Accept")) == (not commit and not refill), (seen[0], hint)
+    assert len(hint) == int(not commit and not refill)
 
 
 def test_run_aborts_on_error_finding(app, eprom, tmp_path, reports):
@@ -473,7 +525,7 @@ def test_run_engine_panic_reported_not_crashed(app, eprom, tmp_path, reports, en
     assert "log.txt" in errs[0].fix and "debug.md" in errs[0].fix
     log = (out.report_dir / "log.txt").read_text()
     assert "panicked" in log and "Traceback" in log
-    assert "done" not in ui.names() and "preview" not in ui.names()
+    assert "preview" not in ui.names()
     ctx = [c for c in ui.calls if c[0] == "set_context"]
     assert ctx and ctx[-1][1][1] == out.report_dir  # error dialog can open the report folder
 
@@ -554,10 +606,10 @@ class FailingBoard(FakeBoard):
             raise RuntimeError(f"unknown action {action}")
 
 
-@pytest.mark.parametrize("step", ["refill", "action", "report", "done"])
+@pytest.mark.parametrize("step", ["refill", "action", "report"])
 def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, monkeypatch, step):
     """Ruling C30 (gate review I-1): a failure after the successful commit (refill, KiCad action, report write,
-    the done dialog) keeps status "accepted" and adds the POST_COMMIT_STEP_FAILED warning; never INTERNAL /
+    the error dialog) keeps status "accepted" and adds the POST_COMMIT_STEP_FAILED warning; never INTERNAL /
     "board not changed"."""
     from topor import app as app_mod
 
@@ -576,11 +628,7 @@ def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, 
 
         monkeypatch.setattr(run_mod.RunReport, "write", write)
 
-    class Ui(ScriptedUi):
-        def done(self, outcome, report, report_dir):
-            super().done(outcome, report, report_dir)
-            if step == "done":
-                raise RuntimeError("wx: dialog could not be created")
+    Ui = ScriptedUi
 
     text = eprom.text.rstrip()
     board = FailingBoard(eprom.pcb, eprom.model, live_text=text[:-1].rstrip("\n") + "\n" + LIVE_EDIT + ")\n",
@@ -594,11 +642,8 @@ def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, 
     assert "committed" in pc[0].message and "Ctrl+Z" in pc[0].fix and "Edit → Undo" in pc[0].fix
     assert not any(f.code == "INTERNAL" for f in out.findings) and out.error is None
     errs = [c[1][0] for c in ui.calls if c[0] == "error"]
-    if step == "done":
-        assert [e.code for e in errs] == ["POST_COMMIT_STEP_FAILED"]
-    else:
-        assert errs == []
-        assert [c[1][0] for c in ui.calls if c[0] == "done"] == ["accepted"]
+    # the failed step is loud (one error dialog, the routes are on the board); no finished window
+    assert [e.code for e in errs] == ["POST_COMMIT_STEP_FAILED"] and _last(ui) == "error"
     if step in ("refill", "action"):
         res = json.loads((out.report_dir / "result.json").read_text())
         assert res["status"] == "accepted" and "POST_COMMIT_STEP_FAILED" in (out.report_dir / "report.md").read_text()
@@ -612,7 +657,7 @@ def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, 
 
 def test_run_default_refills_zones_after_accept(app, eprom, tmp_path, reports):
     """Default run.refill_after_accept = true (user 2026-11-17: pours came back stale): exactly one refill after the
-    commit, the report and the done notice say so; a topor.toml pinning false keeps Accept = one undo step."""
+    commit, the report says so; a topor.toml pinning false keeps Accept = one undo step."""
     board, ui, out = do_run(eprom, tmp_path / "on", ui=ScriptedUi(accept=True), cfg=CFG_DEFAULT_REFILL)
     assert out.status == "accepted" and board.refills == 1 and len(board.commits) == 1
     assert out.report.facts["zones_refilled"] is True
@@ -652,8 +697,8 @@ def test_routed_fills_every_skip_path_is_named(accepted, tmp_path):
 
 @pytest.mark.parametrize("why", ["no_copy", "other_items", "not_applied"])
 def test_run_zone_fills_skip_is_shown_to_the_user(app, eprom, tmp_path, reports, monkeypatch, why):
-    """Fail fast: fills that commit_fills could not write are a ZONE_FILLS_SKIPPED warning in the done notice facts,
-    the report's Outcome line and findings, not only the log; moot when the live refill redid the zones."""
+    """Fail fast: fills that commit_fills could not write are a ZONE_FILLS_SKIPPED warning that is an error dialog,
+    in the report's Outcome line and findings, not only the log; moot when the live refill redid the zones."""
     real = run_mod._routed_fills
     if why == "not_applied":  # a fill for a zone that is not on the board: the port reports it
         monkeypatch.setattr(run_mod, "_routed_fills",
@@ -664,19 +709,26 @@ def test_run_zone_fills_skip_is_shown_to_the_user(app, eprom, tmp_path, reports,
     f = [x for x in out.findings if x.code == "ZONE_FILLS_SKIPPED"]
     assert len(f) == 1 and f[0].severity == "warning" and "Fill All Zones" in f[0].fix, out.findings
     assert out.status == "accepted" and out.report.facts["post_commit_failed"] == f
+    # fail fast (no finished window any more): exactly one error dialog, ZONE_FILLS_SKIPPED, and nothing after it
+    assert [c[1][0].code for c in ui.calls if c[0] == "error"] == ["ZONE_FILLS_SKIPPED"]
+    assert _last(ui) == "error"
     assert out.report.facts["zone_fills_skipped"] == why and out.report.facts["zone_fills_committed"] == 0
     md = (out.report_dir / "report.md").read_text()
     assert "ZONE_FILLS_SKIPPED" in md and "zone fills NOT written" in md and "press B" in md
     # with the live refill on the pours are redone anyway: nothing to warn about
     board, ui, out = do_run(eprom, tmp_path / "b", ui=ScriptedUi(accept=True), cfg=CFG_DEFAULT_REFILL)
     assert not [x for x in out.findings if x.code == "ZONE_FILLS_SKIPPED"] and board.refills == 1
+    assert "error" not in ui.names()
     monkeypatch.setattr(run_mod, "_routed_fills", real)
 
 
 def test_run_commit_fills_off_is_not_a_warning(app, eprom, tmp_path, reports):
-    """The user's own run.commit_fills = false: the done notice already says press B; no ZONE_FILLS_SKIPPED."""
+    """The user's own run.commit_fills = false: the preview summary and the report say press B; no ZONE_FILLS_SKIPPED.
+    A clean Accept ends at the preview: no error and no finished window (live test; the single-commit test is xfail)."""
     cfg = CFG.with_values({("run", "commit_fills"): False})
     board, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=True), cfg=cfg)
+    assert out.status == "accepted" and _last(ui) == "preview" and "error" not in ui.names()
+    assert not hasattr(ui, "done")  # the finished window is gone from the UI port
     assert out.report.facts["zone_fills_skipped"] == "off" and out.report.facts["zone_fills_committed"] == 0
     assert not [x for x in out.findings if x.code == "ZONE_FILLS_SKIPPED"]
     assert "zones not refilled: press B" in (out.report_dir / "report.md").read_text()

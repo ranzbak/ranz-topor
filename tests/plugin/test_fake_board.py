@@ -80,11 +80,9 @@ def test_scripted_ui_records_calls(tmp_path):
     assert ui.progress(Progress("route", 2)) is True
     assert ui.progress(Progress("route", 3)) is False
     assert ui.preview(tmp_path / "a.png", None) is False
-    ui.done("rejected", None, tmp_path)
     ui.error(f)
     assert [c[0] for c in ui.calls] == ["first_run_notice", "preflight", "progress", "progress",
-                                         "preview", "done", "error"]
-    assert ui.calls[-2] == ("done", ("rejected", None, tmp_path))
+                                         "preview", "error"]
 
 
 def test_scripted_ui_defaults_and_lists():

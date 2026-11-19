@@ -606,7 +606,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** The routes were committed to the board, then a later step failed (zone refill, a KiCad cleanup / teardrop action, writing the report or showing the done notice); the routes stay on the board.
+**Cause.** The routes were committed to the board, then a later step failed (zone refill, a KiCad cleanup / teardrop action, or writing the report); the routes stay on the board.
 
 **Fix.** Ctrl+Z (Edit → Undo) removes the routes; or keep them and do the failed step yourself: refill zones with B (KiCad → Edit → Fill All Zones), run KiCad → Tools → Cleanup Tracks & Vias, or check the report folder (output.report_dir).
 
