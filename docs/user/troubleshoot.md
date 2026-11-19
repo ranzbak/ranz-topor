@@ -202,6 +202,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** In the pre-flight dialog select the finding and tick Use the current default: Route then comments the line out. Or delete the line the finding names by hand; runs without the dialog keep their stop at stable (optimize.stable_patience). docs/user/configuration.md, section Deprecated keys, says why.
 
+### CFG_NOT_YET_AVAILABLE
+
+*Severity: warning.*
+
+**Cause.** topor.toml sets an option whose engine feature arrives in a later version (e.g. search.dangling_lead_mm, 0.5.0); this version does not pass it to the engine, so the run behaves as if the line were not there.
+
+**Fix.** Comment the line out until the version the finding names (e.g. search.dangling_lead_mm), or install that version; docs/user/configuration.md lists each option's version.
+
 ### CFG_PARSE
 
 *Severity: warning.*
