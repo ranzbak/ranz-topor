@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 C = "engine/src/topo/core.rs"
 X = "engine/src/topo/xrules.rs"
 P = "engine/src/topo/pourplan.rs"
+S = "engine/src/topo/escape.rs"
 M = {
     "d_off": (C, '} else if name == "length" && self.tw7.detour_k > 0.0 {', '} else if false && name == "length" && self.tw7.detour_k > 0.0 {'),
     "d_amt_ignored": (C, "1.0 + self.tw7.detour_k * self.tw7.detour_amt.get(ci).copied().unwrap_or(0.0)", "1.0 + self.tw7.detour_k"),
@@ -35,8 +36,19 @@ M = {
     "e_one_side": (P, "ras.island_at(p + nrm * off) == l || ras.island_at(p - nrm * off) == l", "ras.island_at(p + nrm * off) == l"),
     "e_base_ignored": (P, "c.pads.iter().copied().filter(|p| !base.cut_pads.contains(p)).collect()", "c.pads.to_vec()"),
     "e_probe_on_track": (P, "let off = t.width as f64 / 2.0 + clr + 1.5 * res;", "let off = 0.0;"),
+    # round 3: [optimize] pattern_share (escape::Share) and the per-kind counters
+    "s_budget_off": (C, "                        if !self.tw7.share.allows() {", "                        if false {"),
+    "s_no_spend": (C, "                        self.tw7.share.spend(w);", "                        let _ = w;"),
+    "s_no_earn": (C, "                    self.tw7.share.earn(other);", "                    let _ = other;"),
+    "s_no_mark": (C, "                    self.tw7.mark = Some(self.work_mark());", "                    self.tw7.mark = None;"),
+    "s_no_floor": (C, "let w = self.work_since(k0).max(tries as f64);", "let w = self.work_since(k0);"),
+    "s_ratio_plain": (S, "self.credit += u * self.share / (1.0 - self.share);", "self.credit += u * self.share;"),
+    "s_debt_forgiven": (S, "            self.credit -= w;", "            self.credit = (self.credit - w).max(0.0);"),
+    "s_allows_ge": (S, "self.unbounded() || self.credit > 0.0", "self.unbounded() || self.credit >= 0.0"),
+    "k_kind_zero": (C, "                        cs.pat_kinds[p.kind.idx()][0] += 1;", "                        cs.pat_kinds[0][0] += 1;"),
+    "k_line_share": (C, "    if share < 1.0 {\n        s.push_str(&format!(\n            \"; work budget", "    if share <= 1.0 {\n        s.push_str(&format!(\n            \"; work budget"),
 }
-TESTS = ["--lib", "--test", "topo_tw7_patterns", "--", "pourplan", "u_clinch", "evasion", "unknown_pattern", "detour_coefficient"]
+TESTS = ["--lib", "--test", "topo_tw7_patterns", "--", "pourplan", "u_clinch", "evasion", "unknown_pattern", "detour_coefficient", "pattern_share", "the_pattern_moves_line"]
 
 
 def run(out: Path) -> int:
