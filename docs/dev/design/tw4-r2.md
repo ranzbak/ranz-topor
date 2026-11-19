@@ -113,6 +113,20 @@ each pack item the track's lean (`PackItem::lean`, `pack::lean_dir` of the pass'
   all of these hold: IO6 is removed, no connection (ENABLE included) gets a new det > 1.5, and KiCad new does not
   rise.
 
+### (2b) result and TW6 input (lead 2026-11-19: stays opt-in; the drawing side moves to TW6 part A)
+Equal time (rev 0f4af7a2 = main 706cf43c merged; wall 300 s, 4 threads, esp s0-4 + qmtech s0; KiCad new / unconnected /
+vias / det > 1.5; base 850 / 69 / 446 / 97): `h` 784 / 79 / 418 / 91, `bh` 726 / 79 / 424 / 87, `rh` 798 / 78 / 426 / 88,
+`brh` 718 / 78 / 421 / 86.
+- IO6 U3.20 -> U4.11 is removed in every seed and config (1.9-2.0 -> 1.06-1.31).
+- 20-23 new det > 1.5 per config (30-33 gone), the same nets each time: ENABLE U4.27 -> U5.1 (every seed, 1.6-1.9),
+  IO7 R10.1 -> U3.21 (to 1.87), IO5 U3.19 -> U4.10, IO10_SDA U3.16 -> U4.17; qmtech ADV_DVDD, JS1_1 J3.1 -> U6.8,
+  Net-(U7-PVSS) (1.1 -> 2.9).
+- The plan/draw mismatch lead condition (1) warned of: predicted errors 197 -> 74-83, drawn drawing_loss 198 -> 229-255,
+  drawn pad_exit 25 -> 41-52. The plan packs the discs at their heights, the drawing on the edge line, so the plan finds
+  room the drawing does not take.
+- **TW6 part A:** one site room read by the plan and the drawing alike (the drawing packs a via disc at its drawn
+  point's height). Re-measure these nets then.
+
 ## (1) T1 part 2: the pad exit as a plan object
 Per wire end at a pad with another net's copper closer than w + 2s (the 5.10 fine-pitch test, `board::exit_stub`'s
 gate, without its stub), the plan holds `Exit { wire, end, pad, side, at, dir, w_e, reach }`, read from the plan:
