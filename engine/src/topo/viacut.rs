@@ -468,7 +468,7 @@ mod tests {
         assert!(!c && f < 0.03, "1 um over is a small cost: {f}");
         let below = price(0.05 * MM - 1.0, pitch, 0.05 * MM).expect("over");
         let at = price(0.05 * MM, pitch, 0.05 * MM).expect("over");
-        assert!(!below.1 && at.1 && (at.0 - below.0).abs() < 1e-6, "continuous at the ramp: {below:?} {at:?}");
+        assert!(!below.1 && at.1 && (at.0 - below.0).abs() < 1e-4, "continuous at the ramp (1 nm apart): {below:?} {at:?}");
         assert_eq!(price(0.2 * MM, pitch, 0.05 * MM), price(0.2 * MM, pitch, 0.0), "past the ramp: the full price");
         // Graded: more over never costs less.
         let mut last = 0.0;

@@ -94,6 +94,12 @@ pub mod viacheck {
     /// tw4 fix round 2 (verifier F1): with [`FOCUS_ON`] every local judgement under via cuts is priced again with
     /// every model wire in focus; the change (after - before, count and graded) must be the same. Judgements
     /// compared, and those that differ.
+    ///
+    /// Process-global, like [`ON`]: a test that sets it leaves it on for every later run of the same test binary
+    /// (slower judgements, never different routing), and the counters add up over every test running in that
+    /// process, in parallel too. A test reads the change of the counters over its own run (and asserts on a 0
+    /// difference only, which other tests' entries cannot hide); a count that must belong to one run needs its
+    /// own test binary or `--test-threads=1`.
     pub static FOCUS_ON: AtomicBool = AtomicBool::new(false);
     pub static FOCUS_CHECKED: AtomicUsize = AtomicUsize::new(0);
     pub static FOCUS_BAD: AtomicUsize = AtomicUsize::new(0);

@@ -30,7 +30,7 @@ one() {
     *) note "unknown cfg $c"; return ;;
   esac
   local t0=$(date +%s)
-  python -m harness.score_runs $o "$(board_path $b)" --only $only --no-png --threads $th "${CLK[@]}" "${SETS[@]}" \
+  TOPOR_UNRELEASED_SETTINGS=1 python -m harness.score_runs $o "$(board_path $b)" --only $only --no-png --threads $th "${CLK[@]}" "${SETS[@]}" \
     > $R/$cc-$b.log 2>&1 9>&-
   note "run $cc $b th $th rc $? wall $(( $(date +%s) - t0 )) s"
 }

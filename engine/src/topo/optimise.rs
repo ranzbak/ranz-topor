@@ -616,6 +616,11 @@ pub struct Predicted {
 
 /// tw4 fix round 2 (verifier F2, test hook): the neck-depth part (`[factors] neck_depth` / violation
 /// weight x Σ d²) of the last whole-board measure of the TopoR loop, as f64 bits.
+///
+/// Process-global and last-writer-wins: every routing run in the process stores into it, so a test reads it
+/// right after its own `route_with` and is exact only while no other test of the same binary routes at the
+/// same time (`tests/topo_neck_depth.rs` relies on its routing tests not overlapping the read; run it with
+/// `--test-threads=1` when a new routing test joins that binary, or give the hook a per-run slot).
 pub mod neckcheck {
     use std::sync::atomic::AtomicU64;
     pub static LAST: AtomicU64 = AtomicU64::new(0);
