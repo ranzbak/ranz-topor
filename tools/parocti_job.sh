@@ -59,6 +59,22 @@ case ${1:-all} in
     done
     cp $R/par.rs.orig src/topo/par.rs; cp $R/octi.rs.orig src/topo/octi.rs
     note "all done" ;;
+  r3)  # fix round 3 (verifier F1-F5): targeted tests (lib par:: octi exact:: erbs, par_draw, ERBS tests), config pytest;
+       # wiccon/esp erbs RAYON 4 hashes (vs main); mutants M5-M8 (tools/parocti_mut3.py) with a 600 s cap each (a hang = killed)
+    ( hzq run --threads 4 --name pd-tests -- bash -c "cd $ROOT/engine && RAYON_NUM_THREADS=4 cargo test --release --lib -- par:: octi exact:: erbs 9>&- > $R/tests.log 2>&1; echo \"lib rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/tests.log 2>&1; echo \"par_draw rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test topo_erbs_margin --test topo_drawing_grace --test topo_pad_end 9>&- >> $R/tests.log 2>&1; echo \"near rc \$?\" >> $R/tests.log; cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py tests/test_docs_links.py >> $R/tests.log 2>&1; echo \"pytest rc \$?\" >> $R/tests.log" ) & sleep 1
+    one wiccon-erbs-t4 $W 4 --set optimize.rounds=1 --set optimize.runs=1 --set drawing.realise=erbs & sleep 1
+    one esp-erbs-t4 $E 4 --set optimize.rounds=1 --set optimize.runs=1 --set drawing.realise=erbs & sleep 1
+    wait
+    grep -E "rc [0-9]|^test result|FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
+    cd $ROOT/engine; mkdir -p $R/orig; cp src/topo/par.rs src/topo/exact.rs src/topo/erbs.rs $R/orig/
+    for M in M5 M6 M7 M8; do
+      cp $R/orig/*.rs src/topo/
+      python3 $ROOT/tools/parocti_mut3.py $M; note "mutant $M applied rc $?"
+      hzq run --threads 4 --name pd-mut$M -- bash -c "RAYON_NUM_THREADS=4 timeout 600 cargo test --release --lib -- a_rayon_wait_inside octilinear_shape_cache erbs_fold 9>&- > $R/mut$M.log 2>&1; echo \"lib rc \$?\" >> $R/mut$M.log"
+      grep -E "rc [0-9]|^test result|FAILED" $R/mut$M.log | while read -r l; do note "mutant $M: $l"; done
+    done
+    cp $R/orig/*.rs src/topo/
+    note "all done" ;;
   rb)  # the rebase onto a new main (par-draw-tw2's joint bands included): tests, near tests, clippy, config pytest;
        # 4 boards x sequential/erbs x RAYON 1 and 8; mutant M1 (completion order: par::map incl. the joint bands, the crew)
     ( hzq run --threads 4 --name pd-tests -- bash -c "cd $ROOT/engine && RAYON_NUM_THREADS=4 cargo test --release --lib -- par:: octi exact:: joint 9>&- > $R/tests.log 2>&1; echo \"lib rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_draw -- --test-threads 1 9>&- >> $R/tests.log 2>&1; echo \"par_draw rc \$?\" >> $R/tests.log; RAYON_NUM_THREADS=4 cargo test --release --test par_refine --test par_refine_dense --test topo_drawing_grace --test topo_m3_class_keep --test topo_erbs_margin --test topo_pad_end 9>&- >> $R/tests.log 2>&1; echo \"near rc \$?\" >> $R/tests.log; cargo clippy --release --all-targets 9>&- >> $R/tests.log 2>&1; echo \"clippy rc \$?\" >> $R/tests.log; cd $ROOT && CI=1 python -m pytest -q tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py tests/test_docs_links.py >> $R/tests.log 2>&1; echo \"pytest rc \$?\" >> $R/tests.log" ) & sleep 1
