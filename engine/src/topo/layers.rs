@@ -1089,6 +1089,62 @@ pub fn neighbourhood(st: &State, free: &[bool]) -> Vec<bool> {
     out
 }
 
+/// tw4 T2 (CM1 on the local judge): the wires a capacity model over `free`'s neighbourhood also
+/// needs so that its via-cut terms change exactly as the whole board's, under the labels
+/// `events`. A via term a free wire can enter lies in a triangle of the vertex star S of the free
+/// wires' paths: a gap cut's crossers, a via-to-via partner and a pair's crossers all lie in the
+/// via triangle's vertex star ([`super::refine`] `reprice_vias`; the relation is symmetric). So:
+/// every live wire that traverses S (the free wires' own vias' participants, and every wire that
+/// can own such a via), and for each of them with a layer change in `events` the traversers of
+/// the vertex star of that change's traversals (its via's interval: the other participants of
+/// its terms). Wires without a layer change own no via, so their second star is left out (the
+/// two-star rule of ae57e35f, 2.4x the model wires on esp). O(free wires' triangles x star sizes
+/// x traversals + layer changes there x their intervals' stars). Returns `(model wires, focus)`:
+/// focus = the free wires and the traversers of S (the only wires that can own a via term a free
+/// wire enters; [`super::refine::CapModel::new_only_focus`]).
+pub fn via_neighbourhood(st: &State, free: &[bool], events: &[Vec<(usize, f64, i32)>]) -> (Vec<bool>, Vec<bool>) {
+    let pr = st.proj;
+    let mut out = vec![false; st.wires.len()];
+    let star = |ts: &mut dyn Iterator<Item = usize>| -> Vec<usize> {
+        let mut v: Vec<usize> = ts.flat_map(|t| pr.tris[t].iter().flat_map(|&x| pr.vert_tris[x].iter().copied())).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let s1 = star(&mut st.wires.iter().enumerate().filter(|(w, wi)| wi.alive && free.get(*w).copied().unwrap_or(false)).flat_map(|(_, wi)| wi.tris.iter().copied()));
+    let mut l1: Vec<usize> = s1.iter().flat_map(|&t| st.tri_trav[t].iter().map(|x| x.0)).filter(|&w| st.wires[w].alive).collect();
+    l1.sort_unstable();
+    l1.dedup();
+    let mut iv: Vec<usize> = Vec::new();
+    for &w in &l1 {
+        out[w] = true;
+        let tris = &st.wires[w].tris;
+        let Some(tl) = tris.len().checked_sub(1) else { continue };
+        let ev = events.get(w).map_or(&[][..], |e| e.as_slice());
+        for p in ev.windows(2).filter(|p| p[0].2 != p[1].2) {
+            let (a, b) = (p[0].0.min(p[1].0).min(tl), p[0].0.max(p[1].0).min(tl));
+            iv.extend_from_slice(&tris[a..=b]);
+        }
+    }
+    iv.sort_unstable();
+    iv.dedup();
+    let mut focus = out.clone();
+    // A free wire with a path traverses its own triangles, which lie in their star, so it is in `l1` already; this
+    // adds only free wires without a triangle, which have no pass and so no via term (verifier mutant b of tw4
+    // round 1 is equivalent for that reason; kept so the focus says "the free wires" without that argument).
+    for (w, f) in focus.iter_mut().enumerate() {
+        *f |= st.wires[w].alive && free.get(w).copied().unwrap_or(false);
+    }
+    for t in star(&mut iv.into_iter()) {
+        for &(w, _) in &st.tri_trav[t] {
+            if st.wires[w].alive {
+                out[w] = true;
+            }
+        }
+    }
+    (out, focus)
+}
+
 /// The free wires' part of a local layering ([`assign_local`]), before it is merged with the
 /// held one: per wire (empty for held ones) the labelled events, the refinement's masks and
 /// partners (inside the free set), the reported masks (a crossing with a held wire may take

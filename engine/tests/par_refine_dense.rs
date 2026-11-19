@@ -84,9 +84,11 @@ fn dense(n: usize, gap: f64) -> BoardModel {
 
 /// The TopoR method's settings, headless (as tests/par_refine.rs), ending after
 /// the plan (the refinements are what is tested, the drawing is not); `extra` adds keys.
+/// `via_cuts` off: since it became the default (tw4, 2026-11-19) this board took 87 s release (57 s before, the 60 s
+/// test budget); the lanes with via cuts are checked by tests/par_refine.rs, which runs at the default.
 fn opts(extra: &str) -> Options {
     let mut o: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "runs": 1, "stop_after": "plan"}"#)
+        serde_json::from_str(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "runs": 1, "stop_after": "plan", "via_cuts": false}"#)
             .expect("base");
     let more: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&format!("{{{}}}", extra.trim_start_matches(','))).expect("extra options");
     o.extend(more);

@@ -112,7 +112,12 @@ def test_witness_crosses_its_cuts(generated, name):
 def test_binding_cut_verdict(name):
     pat = fp.PATTERNS[name]()
     fp.check_hand(pat)
-    c = next(c for c in pat.cuts if c.role == "binding")
+    c = next((c for c in pat.cuts if c.role == "binding"), None)
+    if c is None:  # no cut decides it (dangling_lead_away: the cheapest start on the lead)
+        dl = pat.extra["dangling_lead"]
+        assert min(dl["starts"], key=lambda r: r["total"])["start"] == dl["expected_start"] == "hand end"
+        assert dl["expected_turn_deg"] <= 90.0
+        return
     v = fp.cut_values(pat, c)
     s = v.get("slack_floor", v["slack_e"])
     if pat.kind == "solvable":
@@ -129,7 +134,10 @@ def test_kicad_drc(generated, name):
     doc = json.loads(generated[name]["expected"].read_text())
     pb = generated[name]["problem"]
     r = run_drc(pb, pb.with_name("drc.json"))
-    assert r.violations == [], [v.description for v in r.violations]
+    # existing copper of the problem (dangling_lead_away's hand track) may carry the stated warnings
+    allowed = set(doc.get("dangling_lead", {}).get("problem_drc_allowed", []))
+    bad = [v for v in r.violations if getattr(v, "type", "") not in allowed]
+    assert bad == [], [v.description for v in bad]
     assert len(r.unconnected) == doc["connections"]
     if "reference" in generated[name]:
         rb = generated[name]["reference"]

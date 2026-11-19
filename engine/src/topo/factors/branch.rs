@@ -135,6 +135,21 @@ pub fn dangling_turn_shape(deg: f64) -> f64 {
     1.0 - deg.to_radians().cos()
 }
 
+/// tw4 T3 (user 2026-11-18): the [`DanglingTurn`] weight when `[search] dangling_lead_choice` is on
+/// and the user sets none (off it stays 0): the price that makes a lead's start a choice.
+pub const DANGLING_TURN_WITH_CHOICE: f64 = 4.0;
+
+/// The options with `dangling_turn` at [`DANGLING_TURN_WITH_CHOICE`] when `dangling_lead_choice` is
+/// on and `[factors] weight` names no `dangling_turn`; `None` = use the options as they are.
+pub fn with_lead_choice_turn(opts: &crate::model::Options) -> Option<crate::model::Options> {
+    if !opts.dangling_lead_choice || opts.factors.weight.contains_key("dangling_turn") {
+        return None;
+    }
+    let mut o = opts.clone();
+    o.factors.weight.insert("dangling_turn".to_string(), DANGLING_TURN_WITH_CHOICE);
+    Some(o)
+}
+
 /// Dangling turn (exist-term, `[search] dangling_ends = "continue"`): the new copper continues a
 /// hand-started track that ends at nothing; the planned lead of `[search] dangling_lead_mm`
 /// already leaves the end along the track, and a trace that leaves the lead (or the bare end,
@@ -142,7 +157,9 @@ pub fn dangling_turn_shape(deg: f64) -> f64 {
 /// cos angle)`: a graded price (lead 2026-11-17: "a cost that grows with the angle off d, not a
 /// hard rule"), so the plan turns where going on straight costs more than the turn. Opt-in
 /// (default weight 0): the search takes the angle toward its first crossed edge, which for a
-/// lead lies on the lead's own copper, so the price barely steers the plan yet.
+/// lead lies on the lead's own copper, so the price barely steers the plan yet. With `[search]
+/// dangling_lead_choice` on, the default is [`DANGLING_TURN_WITH_CHOICE`] (tw4 T3: the turn at the
+/// chosen start on the lead decides how much of the lead is kept).
 pub struct DanglingTurn;
 
 impl Factor for DanglingTurn {

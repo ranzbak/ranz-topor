@@ -191,6 +191,16 @@ fn fail(o: &mut [Outcome], i: usize, reason: impl Into<String>) {
 pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &mut dyn FnMut(&mut RouteResult)) -> RouteResult {
     super::prof::begin();
     let t0 = Instant::now();
+    // tw4 T3 (user 2026-11-18): with `[search] dangling_lead_choice` the `dangling_turn` factor
+    // defaults to `DANGLING_TURN_WITH_CHOICE` (a weight the user sets wins).
+    let with_turn;
+    let opts = match super::factors::with_lead_choice_turn(opts) {
+        Some(o) => {
+            with_turn = o;
+            &with_turn
+        }
+        None => opts,
+    };
     let n = opts.runs.max(1);
     let obj = Objective::from_options(&opts.objective, opts.mm_per_via, &opts.pick);
     ctl.update("setup", 0, 0, 0, 0, 0.0);
@@ -1831,7 +1841,7 @@ pub fn probe(model: &BoardModel, opts: &Options) -> Probe {
 /// The projection's build options of a route: `[search] steiner` adds the Steiner grid (4.2).
 fn build_opts(opts: &Options) -> BuildOpts {
     let d = BuildOpts::default();
-    BuildOpts { steiner_mm: if opts.steiner { d.steiner_mm } else { 0.0 }, existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, kept_tracks: true, lead_margin_nm: opts.margin_nm.max(0) as f64 + super::pack::DRAW_TOL_NM, ..d }
+    BuildOpts { steiner_mm: if opts.steiner { d.steiner_mm } else { 0.0 }, existing_vias: true, keepouts: true, plane_layers: opts.plane_signals != "forbidden", copper_shapes: true, kept_tracks: true, lead_margin_nm: opts.margin_nm.max(0) as f64 + super::pack::DRAW_TOL_NM, lead_choice: opts.dangling_lead_choice, ..d }
 }
 
 /// The failure reason of a connection whose ends the topological core does not route: an end on
@@ -2595,6 +2605,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut exist_groups: BTreeMap<usize, (i32, Vec<VertId>)> = BTreeMap::new();
     let mut exist_dang: BTreeSet<VertId> = BTreeSet::new();
     let mut cont_dirs: BTreeMap<VertId, Vec2> = BTreeMap::new();
+    // tw4 T3 (`[search] dangling_lead_choice`): per continued dangling end's main vertex (its
+    // lead's end), the start points its lead offers `(vertex, distance from the hand end, nm)`.
+    let mut lead_alt: BTreeMap<VertId, Vec<(VertId, f64)>> = BTreeMap::new();
     for c in &dec.connections {
         let i = c.id;
         let (ta, tb) = (&c.from.kind, &c.to.kind);
@@ -2677,15 +2690,25 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 };
                 match (res(&c.from), res(&c.to)) {
                     (Ok((oa, va, ea)), Ok((ob, vb, eb))) => {
-                        for (v, e) in [(va, &ea), (vb, &eb)] {
+                        for (v, o, e) in [(va, oa, &ea), (vb, ob, &eb)] {
                             if let Some(ExistEnd::Kept { kept, dangling, dir, .. }) = e {
+                                // tw4 T3: a lead's start points (empty unless dangling_lead_choice)
+                                let ch: &[(VertId, f64)] = if *dangling { b.kept_ends.iter().find(|k| k.obs == o).map_or(&[], |k| &k.choices[..]) } else { &[] };
                                 if let Some(&cl) = dec.kept_cluster.get(kept) {
-                                    exist_groups.entry(cl).or_insert_with(|| (c.net, Vec::new())).1.push(v);
+                                    let g = &mut exist_groups.entry(cl).or_insert_with(|| (c.net, Vec::new())).1;
+                                    g.push(v);
+                                    g.extend(ch.iter().map(|x| x.0));
                                 }
                                 if *dangling {
                                     exist_dang.insert(v);
                                     if let Some(d) = dir {
                                         cont_dirs.insert(v, *d);
+                                        for &(u, _) in ch {
+                                            cont_dirs.insert(u, *d);
+                                        }
+                                    }
+                                    if !ch.is_empty() {
+                                        lead_alt.insert(v, ch.to_vec());
                                     }
                                 }
                             }
@@ -2748,6 +2771,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.pre_join.extend(g.1.windows(2).map(|x| (x[0], x[1])));
     }
     st.cont_dir = cont_dirs.clone();
+    if std::env::var_os("TOPO_T3DBG").is_some() {
+        // Debug (tw4 T3): the kept ends with a lead / with start points, and the dangling ends rooted here.
+        let leads = b.kept_ends.iter().filter(|k| k.lead.is_some()).count();
+        let ch = b.kept_ends.iter().filter(|k| !k.choices.is_empty()).count();
+        eprintln!("T3DBG round {round}: kept ends {}, with a lead {leads}, with start points {ch}; dangling roots {}, with start points {}", b.kept_ends.len(), exist_dang.len(), lead_alt.len());
+    }
     // 4.3: the length the search prices (`[search] length`).
     st.taut_len = opts.search_length == "taut";
     // M-C: the plan necks a wire where its nominal width does not fit (width in P2).
@@ -2853,11 +2882,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // picked it as the cluster's nearest port) continues that end: the search starts
                 // at its lead alone, not at another vertex of the cluster that may be cheaper
                 // (test a_dangling_end_the_decomposition_picked_stays_the_root_behind_a_wall).
-                if exist_dang.contains(&c.a) {
-                    src.retain(|e| e.v == c.a);
-                }
-                if exist_dang.contains(&c.b) {
-                    dst.retain(|e| e.v == c.b);
+                // tw4 T3 (`dangling_lead_choice`): at any start point its lead offers. The lead up to
+                // it is not priced (as the fixed lead: it continues the hand track); the search
+                // prices the length from it and the `dangling_turn` there, so a lead pointing
+                // past its target is cut where going on costs more than turning.
+                for (v, ends) in [(c.a, &mut src), (c.b, &mut dst)] {
+                    if !exist_dang.contains(&v) {
+                        continue;
+                    }
+                    match lead_alt.get(&v) {
+                        Some(alt) => ends.retain(|e| alt.iter().any(|x| x.0 == e.v)),
+                        None => ends.retain(|e| e.v == v),
+                    }
                 }
                 // The branch reward, the SMD assembly cost and the junction angle are priced in the
                 // search (social factors): a sharp or costly branch loses to a separate path.
@@ -2870,6 +2906,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 let ((path, tris), i, j) = st.search_tree(c, &src, &dst, w, (c.w + c.s) / ws0, None)?;
                 let (sa, sb) = (src[i], dst[j]);
+                if std::env::var_os("TOPO_T3DBG").is_some() {
+                    // Debug (tw4 T3): the start a continued dangling end's search took on its lead.
+                    for (v, e) in [(c.a, sa), (c.b, sb)] {
+                        if let Some(alt) = lead_alt.get(&v) {
+                            let t = alt.iter().find(|x| x.0 == e.v).map_or(-1.0, |x| x.1);
+                            let l = alt.last().map_or(0.0, |x| x.1);
+                            eprintln!("T3DBG net {} end ({:.3}, {:.3}) lead {:.3} mm start t {:.3} mm{}", c.net, proj.pos[v].x / 1e6, -proj.pos[v].y / 1e6, l / 1e6, t / 1e6, if t < l - 1.0 { " SHORTENED" } else { "" });
+                        }
+                    }
+                }
                 for e in [sa, sb] {
                     if let Some((tw, k)) = e.on {
                         st.add_turn(tw, k, e.v);
@@ -3332,7 +3378,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let bad_cuts: Vec<(usize, usize, f64)> = cm.cut.as_ref().map(|c| c.overfull_list()).unwrap_or_default();
         let bad = if cm.cut.is_some() { Vec::new() } else { cm.overfull_list() };
         let nosite = cm.nosite_wires();
-        if bad.is_empty() && bad_cuts.is_empty() && nosite.is_empty() {
+        // CM1: vias whose gap / via-to-via cuts are over-full, with the wires crossing them.
+        let bad_vias = cm.via_cut_list();
+        if bad.is_empty() && bad_cuts.is_empty() && nosite.is_empty() && bad_vias.is_empty() {
             break;
         }
         let mut bad_edges: Vec<usize> = bad.iter().map(|x| x.0).collect();
@@ -3360,6 +3408,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 for kk in ka.saturating_sub(1)..(kb + 1).min(n) {
                     history[st.passes[st.wires[w].passes[kk]].edge] += 1.0;
                 }
+            }
+        }
+        // CM1: an over-full via cut rips the via's wire and, routed last first, one crosser
+        // (the cut's room is the via's neighbourhood; the next round prices the rest again),
+        // with history on the edges of the via's traversals.
+        for (w, xs) in &bad_vias {
+            victims.insert(*w);
+            for &k in &cm.via_k[*w] {
+                let ps = &st.wires[*w].passes;
+                for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < ps.len()) {
+                    history[st.passes[ps[j]].edge] += 1.0;
+                }
+            }
+            if let Some(&x) = xs.iter().filter(|&&x| st.wires[x].alive && wire_conn.get(x).is_some_and(|&c| c != usize::MAX)).max_by_key(|&&x| (rank[wire_conn[x]], x)) {
+                victims.insert(x);
             }
         }
         // First P4 round: the wires whose planned via count rose against the cycle before are
@@ -3656,9 +3719,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let f = lr.fin_cap.filter(|_| opts.measure_reuse && !cuts_on)?;
             (f.packer == &packer as *const Packer as usize && f.bottom == bottom && f.price == overflow_mm.to_bits() && f.key == super::refine::cap_key(st, &lr.events)).then_some(f.viol)
         };
+        // tw4 T1 (`[factors] neck_depth`): the neck-depth part of the measure, as a share of the
+        // violation weight (graded only: price = viol_mm x graded).
+        let neck_k = if viol_mm > 0.0 { reg.weight("neck_depth").unwrap_or(0.0).max(0.0) / viol_mm } else { 0.0 };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
             let _pg = super::prof::g(super::prof::K::Measure);
-            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).shorts_ranked(opts.pick_shorts, opts.short_weight);
+            let neck = if neck_k > 0.0 { neck_k * st.neck_depth(None) } else { 0.0 };
+            // tw4 fix round 2 (verifier F2, test hook): the neck-depth part of the last whole-board measure.
+            super::optimise::neckcheck::LAST.store(neck.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).with_neck(neck).shorts_ranked(opts.pick_shorts, opts.short_weight);
             if let Some(v) = reused(st, lr) {
                 return pred(v);
             }
@@ -3800,22 +3869,64 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let held = layers::Held { prev, free: &free };
             let lr = assign_l(st, ties, &held);
             // The model's wires W, after and before.
-            let w_after = layers::neighbourhood(st, &free);
+            let mut w_after = layers::neighbourhood(st, &free);
+            // tw4 T2: with the via cuts, every wire their changed terms involve (both states).
+            let or = |a: &mut Vec<bool>, b: Vec<bool>| a.iter_mut().zip(b).for_each(|(x, y)| *x |= y);
+            let mut vfocus: Vec<bool> = Vec::new();
+            if opts.via_cuts {
+                let (m, f) = layers::via_neighbourhood(st, &free, &lr.events);
+                or(&mut w_after, m);
+                vfocus = f;
+            }
             let after = st.take_topology();
             st.restore(saved.clone());
             let nb = st.wires.len();
             let free_b: Vec<bool> = (0..nb).map(|w| free.get(w).copied().unwrap_or(false) || gone.contains(&w)).collect();
-            let w_before = layers::neighbourhood(st, &free_b);
+            let mut w_before = layers::neighbourhood(st, &free_b);
+            if opts.via_cuts {
+                let (m, f) = layers::via_neighbourhood(st, &free_b, &prev.events);
+                or(&mut w_before, m);
+                // One focus for both states (the union), so a term is priced on both sides or on none.
+                vfocus.resize(vfocus.len().max(f.len()), false);
+                or(&mut vfocus, f);
+            }
             let wm: Vec<bool> = (0..nw.max(nb)).map(|w| w_after.get(w).copied().unwrap_or(false) || w_before.get(w).copied().unwrap_or(false)).collect();
             let cap_of = |st: &State, evl: &[Vec<(usize, f64, i32)>], only: &[bool]| -> (usize, f64) {
                 let only = &only[..st.wires.len().min(only.len())];
                 let dirs = packer.taut_dirs_only(st, only);
-                CapModel::new_only(st, &packer, &dirs, evl, bottom, overflow_mm, only).violations()
+                if opts.via_cuts {
+                    let fo: Vec<bool> = (0..st.wires.len()).map(|w| vfocus.get(w).copied().unwrap_or(false)).collect();
+                    CapModel::new_only_focus(st, &packer, &dirs, evl, bottom, overflow_mm, only, &fo).violations()
+                } else {
+                    CapModel::new_only(st, &packer, &dirs, evl, bottom, overflow_mm, only).violations()
+                }
             };
             let cap_b = cap_of(st, &prev.events, &wm);
+            // tw4 fix round 2 (verifier F1, test hook): the same change judged with every model wire in focus.
+            let focus_check = opts.via_cuts && super::refine::viacheck::FOCUS_ON.load(std::sync::atomic::Ordering::Relaxed);
+            let cap_all = |st: &State, evl: &[Vec<(usize, f64, i32)>]| -> (usize, f64) {
+                let only = &wm[..st.wires.len().min(wm.len())];
+                let dirs = packer.taut_dirs_only(st, only);
+                let fo = vec![true; st.wires.len()];
+                CapModel::new_only_focus(st, &packer, &dirs, evl, bottom, overflow_mm, only, &fo).violations()
+            };
+            let all_b = if focus_check { cap_all(st, &prev.events) } else { (0, 0.0) };
+            let nd_b = if neck_k > 0.0 { st.neck_depth(Some(&wm)) } else { 0.0 };
             let fc_b = foreign_copper_only(st, &layers_now_only(st, &prev.events, bottom, Some(&free_b)), Some(&free_b));
             st.restore(after);
             let cap_a = cap_of(st, &lr.events, &wm);
+            if focus_check {
+                // the focus cut is exact for the change (after - before), not for each side's total
+                let all_a = cap_all(st, &lr.events);
+                let (dn, dg) = (cap_a.0 as i64 - cap_b.0 as i64, cap_a.1 - cap_b.1);
+                let (an, ag) = (all_a.0 as i64 - all_b.0 as i64, all_a.1 - all_b.1);
+                use std::sync::atomic::Ordering::Relaxed;
+                super::refine::viacheck::FOCUS_CHECKED.fetch_add(1, Relaxed);
+                if dn != an || (dg - ag).abs() > 1e-6 * (1.0 + ag.abs()) {
+                    super::refine::viacheck::FOCUS_BAD.fetch_add(1, Relaxed);
+                }
+            }
+            let nd_a = if neck_k > 0.0 { st.neck_depth(Some(&wm)) } else { 0.0 };
             let fc_a = foreign_copper_only(st, &layers_now_only(st, &lr.events, bottom, Some(&free)), Some(&free));
             LoopCtr::add(&lctr.local_free, free.iter().filter(|&&f| f).count());
             LoopCtr::add(&lctr.local_model, wm.iter().filter(|&&f| f).count());
@@ -3826,6 +3937,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 unlayerable: lr.unlayerable.len(),
                 forced: forced.borrow().len(),
                 foreign: (du(pp.foreign.0, fc_a.0, fc_b.0), (pp.foreign.1 + fc_a.1 - fc_b.1).max(0.0), du(pp.foreign.2, fc_a.2, fc_b.2)),
+                neck: if neck_k > 0.0 { (pp.neck + neck_k * (nd_a - nd_b)).max(0.0) } else { 0.0 },
             };
             let p = Predicted::from_parts(parts, opts.pick_shorts, opts.short_weight);
             if local_check {
@@ -5693,6 +5805,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // Cost per move (shopping list 3.1 measurement; process-wide sums so far).
         let (mv_n, mv_us, vp_n, vp_us) = super::refine::meter::read();
         m["move_cost"] = serde_json::json!({"moves": mv_n, "us_per_move": (mv_us * 10.0).round() / 10.0, "via_positions": vp_n, "us_per_via_position": (vp_us * 10.0).round() / 10.0});
+        let (vc_n, vc_ms, bd_n, bd_ms) = super::refine::meter::read_cm1();
+        m["move_cost"]["via_cut"] = serde_json::json!({"calls": vc_n, "ms_in": vc_ms.round(), "builds": bd_n, "ms_builds": bd_ms.round()});
         // par-refine: the lane executor's epochs, lane-epochs, candidates evaluated past a kept one
         // (wasted) and again for an end-site fill (redone); the build memo's hits and misses.
         {
@@ -5714,8 +5828,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let fset = forced.borrow().clone();
             // `[capacity] compass_cut_check` (model = "edges"): the read-only cut test runs after the
             // drawing (end of this round), outside the time limit.
-            // `pad_exits`: shopping list 5.10 fills it from `b.exit_stubs` (see compass::pad_exit_items).
-            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: None };
+            // `pad_exits`: with 5.10's stubs on, the planned stubs and the needed exits no legal stub
+            // realises (compass::exit_stub_items); off: no pad-exit plan object (not predicted).
+            let px = opts.pad_exit_stubs.then(|| super::compass::exit_stub_items(b, &st, &wc, &lname));
+            let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: px.as_deref() };
             let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
             compass_plan = Some(cp);
@@ -8004,6 +8120,14 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
         })
         .collect();
     let mut violations = Vec::new();
+    // cm1-room: the exit pins of every connection's terminal pads (`route::exit_pins`), for the
+    // violation class; computed once per connection with a violation.
+    let pad_keys: Vec<(&str, &str, Vec2)> = model.pads.iter().map(|p| (p.ref_.as_str(), p.number.as_str(), p.center.to_vec2())).collect();
+    let term_pad = |t: &crate::decompose::TermRef| match t.kind {
+        crate::decompose::TermKind::Pad(i) => Some(i),
+        _ => None,
+    };
+    let mut exits_of: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for (ci, ev) in viol_events(model, dec, out) {
         let Event::Violation { kind, at, layer, depth_nm, len_nm, against, cause } = &ev else { continue };
         let c = &dec.connections[ci];
@@ -8022,7 +8146,12 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
             against: against.clone(),
             cause: cause.clone(),
             price_mm: (reg.price(&ev, &WireCtx { net: c.net, tier: c.tier }) * 10.0).round() / 10.0,
-            class: crate::route::violation_class(against, cause, &r.from.label, &r.to.label).into(),
+            class: crate::route::violation_class(
+                against,
+                cause,
+                exits_of.entry(ci).or_insert_with(|| [&c.from, &c.to].into_iter().filter_map(&term_pad).flat_map(|i| crate::route::exit_pins(&pad_keys, i)).collect()),
+            )
+            .into(),
         });
     }
     let mut diff_pairs = Vec::new();

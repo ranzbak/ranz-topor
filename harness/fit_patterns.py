@@ -181,6 +181,8 @@ class Pattern:
     # others stay "signal". Any non-signal type makes topor use the KiCad types (plugin/topor/layers.py) instead of
     # its default stackup by copper count, so a pattern whose answer needs an inner layer declares it here.
     layer_types: dict = field(default_factory=dict)
+    # existing copper on the problem board too (a hand-started track: tw4 T3); the reference keeps it
+    kept_tracks: list[Track] = field(default_factory=list)
 
     @property
     def solvable(self) -> bool:
@@ -391,6 +393,208 @@ def neck_fit() -> Pattern:
 
 def neck_too_narrow() -> Pattern:
     return _neck("neck_too_narrow", 0.50)
+
+
+def neck_or_detour() -> Pattern:
+    """tw4 T1. neck_fit's header gap with a clean way round: a second header pin J3.1 1.30 mm east of J1.2 leaves a
+    passage that holds the 0.8 mm wire at full width; the straight way through the pin gap fits only at the floor."""
+    W, H, Yr = 8.44, 15.1, 7.5
+    xc = 2.72
+    w_pow, floor = 0.8, 0.40
+    r_pin = 0.85
+    xp = 1.27
+    j1 = Fp("J1", [Pad("1", None, (xc - xp, Yr), (1.7, 1.7), "circle", drill=1.0),
+                   Pad("2", None, (xc + xp, Yr), (1.7, 1.7), "circle", drill=1.0)], "wall")
+    e_gap = w_pow + 2 * CLEAR + 0.10  # 1.30: the full-width wire plus 0.10 slack
+    x_j3 = xc + xp + r_pin + e_gap + r_pin  # 6.99
+    j3 = Fp("J3", [Pad("1", None, (x_j3, Yr), (1.7, 1.7), "circle", drill=1.0)], "wall")
+    u2 = Fp("U2", [Pad("1", "VBUS", (xc, 1.5), (1.2, 1.2))], "terminal")
+    j2 = Fp("J2", [Pad("1", "VBUS", (xc, 13.5), (2.0, 2.0))], "terminal")
+    xe = xc + xp + r_pin + e_gap / 2  # 5.49: the centre of the passage E1
+    ref = [(xc, 1.5), (xe, Yr - 1.0), (xe, Yr + 1.0), (xc, 13.5)]
+    length = sum(math.dist(a, b) for a, b in zip(ref, ref[1:]))
+    n1 = Cut("N1", "F.Cu", (xc - xp + r_pin, Yr), (xc + xp - r_pin, Yr), ("J1", "1"), ("J1", "2"),
+             "rightmost point of the round pad", "leftmost point of the round pad", [],
+             hand={"len_e": 0.84, "len_o": 0.84, "need": 0.0},
+             role="empty",
+             note="The straight way (12.00 mm), empty in the expected answer: the pin gap of neck_fit, 0.84; the wire "
+                  "would fit only necked to the 0.40 floor (0.80 + 2 x 0.2 ... demand 0.80, slack +0.04), over-full "
+                  "by 0.36 at its 0.8 mm width.")
+    e1 = Cut("E1", "F.Cu", (xc + xp + r_pin, Yr), (x_j3 - r_pin, Yr), ("J1", "2"), ("J3", "1"),
+             "rightmost point of the round pad", "leftmost point of the round pad", ["VBUS"],
+             hand={"len_e": 1.30, "len_o": 1.30, "need": 1.20, "slack": 0.10, "need_floor": 0.80, "slack_floor": 0.50},
+             note="The clean way round J1.2: 1.30 between the pins, the 0.8 mm wire needs 0.8 + 2 x 0.2 = 1.20 (slack "
+                  "+0.10) at full width.")
+    dru = (f'(version 1)\n(rule "POWER neck floor"\n  (condition "A.NetClass == \'POWER\'")\n'
+           f'  (constraint track_width (min {floor:g}mm)))\n')
+    classes = [dict(DEFAULT_CLASS), {"name": "POWER", "clearance": CLEAR, "track_width": w_pow, "via_diameter": 0.8,
+                                     "via_drill": 0.4, "priority": 0}]
+    straight = 13.5 - 1.5
+    neck = {
+        "nominal_width": w_pow, "floor": floor, "floor_source": ".kicad_dru rule 'POWER neck floor' (track_width min)",
+        "max_neck_width_n1": round(0.84 - 2 * CLEAR, 6),
+        "straight_length": straight, "reference_length": round(length, 4),
+        "detour_ratio": round(length / straight, 4),
+        "expected_neck": None,
+        "rule": "TopoR 6.3 manual p. 56: the minimum width is used in bottlenecks 'unless a different path is "
+                "available'; tw4 baseline: every connection drawn necked to the floor had drawn violations (17 of 17).",
+        "graded": "tw4 T1 prices a planned neck by its depth d = (w - w_neck) / (w - floor) (one violation's price "
+                  "times d^2 at the floor); the 12 % longer clean way costs less than a floor neck at the default "
+                  "weights. A clean way much longer than this (or none: neck_fit) keeps the neck.",
+    }
+    return Pattern(
+        name="neck_or_detour", title="Wide wire: a floor neck through the pin gap or 12 % longer at full width",
+        kind="solvable", gap_classes=["fit / neck planned where a full-width way exists (pad exit with its neck, tw4)"],
+        purpose="The same 0.8 mm VBUS wire (POWER class, neck floor 0.40 mm) as neck_fit, from U2.1 to J2.1 12 mm "
+                "below it, past a 2.54 mm header (J1). East of J1.2 a third pin J3.1 leaves a 1.30 mm passage.",
+        answer=(f"VBUS at its full 0.8 mm width through E1 (J1.2 to J3.1, 1.30 mm, slack +0.10), {length:.2f} mm "
+                f"long ({length / straight:.3f} x the 12.00 mm straight way), no neck. Not through N1 (fits only "
+                "necked to the 0.40 floor)."),
+        why=("Solvable by construction: the reference wire was laid first (straight to the passage centre x = 5.49, "
+             "2 mm along it, straight to J2.1) and the passage sized from it: 0.8 + 2 x 0.2 + 0.10. West of J1.1 and "
+             "east of J3.1 the 0.6 mm to the edge holds no wire even at the floor (0.5 + 0.4 + 0.2 = 1.1); B.Cu is "
+             "closed."),
+        size=(W, H), layers=2, nets=["VBUS"], fps=[j1, j3, u2, j2],
+        connections=[("VBUS", "U2.1", "J2.1")], cuts=[e1, n1],
+        keepouts=[Keepout(["B.Cu"], _strip(W, 0.0, H))], classes=classes,
+        net_patterns=[{"netclass": "POWER", "pattern": "VBUS"}], dru=dru,
+        ref_tracks=[Track("VBUS", "F.Cu", w_pow, ref)],
+        witness={"VBUS": ("F.Cu", ref)},
+        closed=[{"way": "past J1.1 or J3.1 to the side edge", "capacity": 0.6,
+                 "demand_one_wire_at_floor": round(EDGE + floor + CLEAR, 3), "formula": "edge + floor + s"},
+                {"way": "through N1 (the pin gap)", "capacity": 0.84, "demand_full": 1.20, "demand_at_floor": 0.80,
+                 "note": "open only necked to the floor"},
+                {"way": "on B.Cu", "capacity": 0.0, "formula": "rule area on B.Cu (tracks, vias) over the board"}],
+        extra={"neck": neck})
+
+
+def exit_tip_from_plan() -> Pattern:
+    """tw4 T1. A QFN pin whose target lies across the chip: the straight line to it leaves the pad through its inner
+    tip, where a stub fits but the ring channel round the exposed pad leads nowhere; the planned path leaves through
+    the outer tip and goes round the chip."""
+    W, H = 8.0, 10.0
+    cx, cy, R, e = 4.0, 5.0, 1.9, 0.8
+    pads = []
+    for i in range(5):  # north 1-5 (west to east), east 6-10 (north to south), south 11-15 (east to west), west 16-20
+        d = (i - 2) * QFN_P
+        pads.append(Pad(str(1 + i), "SIG" if i == 2 else None, (cx + d, cy - R), (QFN_W, QFN_L)))
+    for i in range(5):
+        pads.append(Pad(str(6 + i), None, (cx + R, cy + (i - 2) * QFN_P), (QFN_L, QFN_W)))
+    for i in range(5):
+        pads.append(Pad(str(11 + i), None, (cx - (i - 2) * QFN_P, cy + R), (QFN_W, QFN_L)))
+    for i in range(5):
+        pads.append(Pad(str(16 + i), None, (cx - R, cy - (i - 2) * QFN_P), (QFN_L, QFN_W)))
+    pads.append(Pad("21", None, (cx, cy), (2 * e, 2 * e)))
+    u1 = Fp("U1", pads, "wall")
+    c1 = Fp("C1", [Pad("1", None, (cx - 0.5, cy - 3.6), (0.6, 0.6))], "wall")
+    t1 = Fp("T1", [Pad("1", "SIG", (cx - 1.0, cy + 4.0), (0.8, 0.8))], "terminal")
+    tip_o, tip_i = cy - R - QFN_L / 2, cy - R + QFN_L / 2  # outer 1.70, inner 2.50
+    yw, xw = tip_o - 0.45, cx - R - QFN_L / 2 - 0.45  # 1.25: s + w past the tip; x 1.25 past the west tips
+    ref = [(cx, cy - R), (cx, yw), (xw, yw), (xw, cy + 2.25), (cx - 1.0, cy + 4.0)]
+    p1 = Cut("P1", "F.Cu", (cx - 0.5, cy - 3.3), (cx - 0.5, tip_o), ("C1", "1"), ("U1", "2"),
+             "bottom side of the pad", "outer tip of the pad", ["SIG"],
+             hand={"len_e": 1.0, "len_o": 1.0, "need": 0.65, "slack": 0.35},
+             note="The planned way out: between the decoupling pad C1.1 and the north row, 1.00; one Default wire needs "
+                  "0.25 + 2 x 0.2 = 0.65.")
+    i1 = Cut("I1", "F.Cu", (cx, tip_i), (cx, cy - e), ("U1", "3"), ("U1", "21"),
+             "inner tip of the pad", "top side of the exposed pad", [], hand={"len_e": 0.70, "len_o": 0.70, "need": 0.0},
+             role="empty",
+             note="The straight line to T1.1 leaves U1.3 here (the 5.10 tip facing the target). A stub fits (s + w = "
+                  "0.45 past the tip, 0.25 from the exposed pad), but the 0.70 ring channel round the exposed pad is "
+                  "closed at every corner (0.495 < 0.65) and between the pads (0.20): no way on.")
+    return Pattern(
+        name="exit_tip_from_plan", title="QFN pin with its target across the chip: leave through the outer tip",
+        kind="solvable", gap_classes=["pad exit: the exit side from the plan, not from the straight line (tw4 T1)"],
+        purpose="A 20-pin QFN (0.30 x 0.80 mm pads at 0.5 mm pitch, 1.6 mm exposed pad 0.70 mm inside the rows). "
+                "Pin U1.3 (SIG, north row middle) connects to T1.1, 4 mm below the chip centre. Every other pad has "
+                "no net. B.Cu is a rule area.",
+        answer=("SIG leaves U1.3 through its outer (north) tip, passes P1 (slack +0.35), runs round the chip's "
+                "north-west corner and down its west side to T1.1. The planned pad exit of U1.3 is the outer tip; a stub "
+                "at the inner tip (the 5.10 straight-line choice) is wrong."),
+        why=("Solvable by construction: the reference wire (45 degree corners) keeps 0.325 mm from the row tips and "
+             "0.425 from C1.1. The inner tip leads into the closed ring channel round the exposed pad; between the pads "
+             "0.20 holds no wire."),
+        size=(W, H), layers=2, nets=["SIG"], fps=[u1, c1, t1],
+        connections=[("SIG", "U1.3", "T1.1")], cuts=[p1, i1],
+        keepouts=[Keepout(["B.Cu"], _strip(W, 0.0, H))],
+        ref_tracks=[Track("SIG", "F.Cu", W_SIG, ref)],
+        witness={"SIG": ("F.Cu", ref)},
+        closed=[{"way": "U1.3's inner tip into the ring channel round the exposed pad", "capacity": 0.70,
+                 "note": "the channel is closed at its corners (0.495) and between the pads (0.20); a wire needs 0.65"},
+                {"way": "between two pads of a row", "capacity": 0.20, "formula": "pitch - pad width"},
+                {"way": "on B.Cu", "capacity": 0.0, "formula": "rule area on B.Cu (tracks, vias) over the board"}],
+        extra={"pad_exit": {"pin": "U1.3", "expected_tip": "outer (north)", "straight_line_tip": "inner (south)",
+                            "stub_510_inner": "legal (0.45 past the tip, 0.25 to the exposed pad) and a dead end",
+                            "rule": "tw4 T1: the exit side is read from the plan (the triangle the planned path "
+                                    "leaves the pad through), not from the straight line to the target"}})
+
+
+def dangling_lead_away() -> Pattern:
+    """tw4 T3. A hand-started track whose end points past its target: the lead that continues it (dangling_lead_mm)
+    is a plan choice (dangling_lead_choice); the start on the lead that costs least (the lead's length plus the
+    graded dangling_turn price of the turn after it) wins, so the lead is shortened."""
+    W, H = 14.0, 12.0
+    end, lead = (8.0, 6.0), 1.5
+    r2 = (8.3, 9.5)
+    turn_w, ws = 4.0, W_SIG + CLEAR  # [factors] weight dangling_turn, the price unit width + clearance
+    r1 = Fp("R1", [Pad("1", "SIG", (3.0, 6.0), (1.0, 1.0))], "terminal")
+    t2 = Fp("R2", [Pad("1", "SIG", r2, (0.8, 0.8))], "terminal")
+    hand = Track("SIG", "F.Cu", W_SIG, [(3.0, 6.0), end])
+    ref = [end, r2]
+    rows = []
+    for k, t in enumerate((0.0, lead / 3, 2 * lead / 3, lead)):
+        p = (end[0] + t, end[1])
+        dx, dy = r2[0] - p[0], r2[1] - p[1]
+        a = math.degrees(math.atan2(dy, dx))  # off +x (the hand track's direction), KiCad frame
+        price = turn_w * ws * (1 - math.cos(math.radians(a)))
+        rows.append({"start": ["hand end", "1/3", "2/3", "lead end"][k], "t": _r(t), "at": [_r(p[0]), _r(p[1])],
+                     "turn_deg": round(a, 2), "length_from_start": _r(math.hypot(dx, dy)), "turn_price": _r(price),
+                     "total": _r(math.hypot(dx, dy) + price)})
+    # the search's cost of each start: length from it + dangling_turn there (the lead up to it is free, as today's)
+    hand_rows = {"hand end": (85.10, 5.1591), "1/3": (93.27, 5.4084), "2/3": (101.31, 5.7223), "lead end": (108.92, 6.0838)}
+    for r in rows:
+        ha, ht = hand_rows[r["start"]]
+        assert abs(r["turn_deg"] - ha) < 0.01 and abs(r["total"] - ht) < 1e-3, (r, ha, ht)
+    best = min(rows, key=lambda r: r["total"])
+    assert best["start"] == "hand end"
+    return Pattern(
+        name="dangling_lead_away", title="Hand-started track pointing past its target: shorten the lead",
+        kind="solvable", gap_classes=["dangling lead length as a plan choice (tw4 T3, DANGLE-TURN D2)"],
+        purpose="A hand-started F.Cu track (SIG, 0.25 mm) from R1.1 (3, 6) ends at nothing at (8, 6), heading +x. "
+                "Its other terminal R2.1 lies 3.5 mm below, 0.3 mm past the end. Options: [search] dangling_ends = "
+                "\"continue\" (default), dangling_lead_mm = 1.5, dangling_lead_choice = true, [factors] weight "
+                "dangling_turn = 4. B.Cu is a rule area.",
+        answer=("SIG continues the hand track from its end (8, 6) without a lead (shortened from 1.5 mm to none) and "
+                "leaves it 85.1 deg off its direction (at most 90 deg), straight to R2.1. Cost of each start (length "
+                "from it + dangling_turn 4 x 0.45 x (1 - cos a) there; the lead up to it is free, as today's): "
+                "hand end 5.16, 1/3 5.41, 2/3 5.72, lead end 6.08. Without the choice (today) the trace runs the "
+                "full 1.5 mm lead to (9.5, 6) and turns 108.9 deg back to R2.1 (drawn: down, then back)."),
+        why=("Solvable by construction: nothing but the two pads and the hand track; the reference is the straight "
+             "track from the hand end to R2.1. The lead's start points are its hand end and 1/3, 2/3 of it besides "
+             "its end; from every point the straight line to R2.1 is free, so the costs above are the plan's."),
+        size=(W, H), layers=2, nets=["SIG"], fps=[r1, t2],
+        connections=[("SIG", "R1.1", "R2.1")], cuts=[],
+        keepouts=[Keepout(["B.Cu"], _strip(W, 0.0, H))],
+        ref_tracks=[Track("SIG", "F.Cu", W_SIG, ref)],
+        witness={"SIG": ("F.Cu", ref)},
+        closed=[{"way": "on B.Cu", "capacity": 0.0, "formula": "rule area on B.Cu (tracks, vias) over the board"}],
+        kept_tracks=[hand],
+        extra={"dangling_lead": {
+            "hand_end": list(end), "direction": [1.0, 0.0], "lead_mm": lead, "starts": rows,
+            "expected_start": best["start"], "expected_lead_mm": best["t"], "expected_turn_deg": best["turn_deg"],
+            "today": {"lead_mm": lead, "turn_deg": rows[-1]["turn_deg"]},
+            "options": {"search.dangling_ends": "continue", "search.dangling_lead_mm": lead,
+                        "search.dangling_lead_choice": True, "factors.weight.dangling_turn": turn_w},
+            "rule": "tw4 T3: the lead's length in [0, lead] is a plan choice priced by the length from its end and "
+                    "the graded dangling_turn there (1 - cos a, no cutoff); TopoR 6.3 manual p. 56 (exits), Maley "
+                    "1987 p. 29 (features are segments).",
+            "weight_0_note": "with dangling_turn at its default 0 the length alone decides: 1/3 (3.506 mm) beats the "
+                             "hand end (3.513 mm) and the turn there is 93.3 deg; the pattern names weight 4",
+            "problem_drc_note": "the hand track is dangling: KiCad's DRC reports a track_dangling warning on the "
+                                "problem board; 1 unconnected (R2.1)",
+            "problem_drc_allowed": ["track_dangling"],
+            "approved": "user 2026-11-18, as drawn (the hand end, no lead, 85.1 deg, straight to R2.1)",
+            "detail_box": [6.5, 4.5, 10.5, 10.3]}})
 
 
 def model_gap_cut() -> Pattern:
@@ -633,7 +837,11 @@ def diagonal_cut_norm() -> Pattern:
 
 
 PATTERNS = {f.__name__: f for f in (channel_fit, channel_overfull, neck_fit, neck_too_narrow, model_gap_cut,
-                                     inner_layer_room, diagonal_cut_norm)}
+                                     inner_layer_room, diagonal_cut_norm, neck_or_detour, exit_tip_from_plan,
+                                     dangling_lead_away)}
+# Proposed for the user's approval (patterns rule): generated with the rest, not in the test suite (tests use PATTERNS)
+# until approved; their expected answers are provisional. (dangling_lead_away: approved by the user 2026-11-18.)
+PROPOSED: dict = {}
 
 
 # ----------------------------------------------------------------------------------------------- expected values
@@ -832,6 +1040,15 @@ def build_board(pat: Pattern, *, copper: bool) -> pcbnew.BOARD:
         ol.SetClosed(True)
         z.AddPolygon(ol)
         b.Add(z)
+    for t in getattr(pat, "kept_tracks", ()):  # diffpair / via patterns reuse build_board without the field
+        for a, c in zip(t.pts, t.pts[1:]):
+            tr = pcbnew.PCB_TRACK(b)
+            tr.SetStart(_v(*a))
+            tr.SetEnd(_v(*c))
+            tr.SetWidth(int(round(t.width * MM)))
+            tr.SetLayer(LAYER_IDS[t.layer])
+            tr.SetNet(nets[t.net])
+            b.Add(tr)
     if copper:
         for t in pat.ref_tracks:
             for a, c in zip(t.pts, t.pts[1:]):
@@ -867,7 +1084,7 @@ def write_board(pat: Pattern, path: Path, *, copper: bool) -> Path:
 
 def generate(name: str, out: Path, *, png: bool = True) -> dict:
     """Write one pattern under out/<name>/: problem/, reference/ (solvable), expected.json, <name>.png."""
-    pat = PATTERNS[name]()
+    pat = {**PATTERNS, **PROPOSED}[name]()
     d = Path(out) / name
     d.mkdir(parents=True, exist_ok=True)
     paths = {"problem": write_board(pat, d / "problem" / f"{name}.kicad_pcb", copper=False)}
@@ -915,6 +1132,11 @@ def readme(out: Path) -> Path:
         lines += [f"## {i}. `{name}`: {pat.title}", "",
                   f"{pat.purpose} **Gap class:** {'; '.join(pat.gap_classes)}. **Expected:** {pat.answer} "
                   f"**Why {pat.kind}:** {pat.why}", "", f"![{name}]({name}/{name}.png)", ""]
+    for name, f in PROPOSED.items():
+        pat = f()
+        lines += [f"## Proposed (awaiting approval): `{name}`: {pat.title}", "",
+                  f"{pat.purpose} **Expected (provisional):** {pat.answer} **Why {pat.kind}:** {pat.why}", "",
+                  f"![{name}]({name}/{name}.png)", ""]
     lines += [
         "## Notes for the review", "",
         "- **Changes to the proposed set.** (a) Case 6 asked for a 45 deg cut; at exactly 45 deg the octagonal and "
@@ -949,7 +1171,7 @@ def readme(out: Path) -> Path:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     out = Path(argv[0]) if argv else Path(__file__).resolve().parents[1] / "scratch" / "fit-patterns"
-    for name in PATTERNS:
+    for name in [*PATTERNS, *PROPOSED]:
         paths = generate(name, out)
         print(name, *(str(p) for p in paths.values()))
     print(readme(out))
