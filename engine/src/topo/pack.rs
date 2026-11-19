@@ -254,6 +254,9 @@ impl Bounds {
 /// 2 um (the S2a value) 115 / 60. 10 nm is far below any fab or DRC resolution.
 pub const DRAW_TOL_NM: f64 = 10.0;
 
+/// [`Packer::via_cands`] cache key: triangle, net, radius bits, clearance bits.
+type ViaCandKey = (usize, i32, u64, u64);
+
 /// Margin cache key: edge, end, net, width bits, clearance bits, layer (`u8::MAX`: any layer),
 /// height bits (tw4-r2 (2b): the centre off the edge line; 0 for a centre line on it).
 type MarginKey = (usize, u8, i32, u64, u64, u8, u64);
@@ -353,7 +356,7 @@ pub struct Packer<'a> {
     /// model). Filled only for the packer's own projection ([`Packer::same_proj`]).
     pub(crate) via_static: super::viacut::GeoCache,
     /// tw4-r2: [`Packer::via_cands`] per (triangle, net, radius bits, clearance bits).
-    via_cands: Mutex<FxHashMap<(usize, i32, u64, u64), Arc<Vec<Vec2>>>>,
+    via_cands: Mutex<FxHashMap<ViaCandKey, Arc<Vec<Vec2>>>>,
     /// Reach diameter of the first via size of every net (nm, [`crate::vias::via_reach`] x 2:
     /// the copper disc, or larger where the drill's hole clearance reaches further; 5.4 task 1);
     /// nets not listed use `via_d0`. 0 = the planner gives vias no room (a packer built without
