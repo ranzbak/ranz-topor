@@ -72,6 +72,7 @@ one() {
     O) SETS+=("${OLD[@]}") ;;
     N) SETS+=("${NEW[@]}") ;;
     N[a-e]) mapfile -t x < <(part ${o#N}); SETS+=("${x[@]}") ;;
+    Nt) x=("${NEW[@]}"); x[5]='optimize.escape_take="not_worse"'; SETS+=("${x[@]}") ;;  # N with whole-board moves undone when worse
     *) note "unknown cfg $c"; return ;;
   esac
   SETS+=(--set optimize.rounds=$n --set optimize.stable_patience=$n)
@@ -91,7 +92,7 @@ u() {  # name threads "lane1 runs" "lane2 runs" ...
   for l in "$@"; do cmd+="bash $ROOT/tools/tw5_job.sh lane $l & "; done
   cmd+="wait"
   printf '%s\n' "$cmd" > $R/unit-$n.sh
-  ( hzq run --threads $t --name $n -- bash $R/unit-$n.sh > $R/unit-$n.log 2>&1; note "unit $n rc $?" ) & sleep 1
+  ( hzq run --pin --threads $t --name $n -- bash $R/unit-$n.sh > $R/unit-$n.log 2>&1; note "unit $n rc $?" ) & sleep 1
 }
 mut() {  # name file test-args... ; the python snippet on stdin edits the file (as looplocal_job.sh)
   local n=$1 f=$2; shift 2
@@ -188,6 +189,31 @@ case ${1:-} in
     u i 1 "$ln"
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  r7)
+    # Round 7 (TW5 default off, main 1503c13b merged, inner_layer_room declares In2.Cu power): the fit fixtures
+    # regenerated (In1 routed) into the tree, then the merge trial; qmtech 16 cycles single-part ablations for the
+    # via-site loss (Nb, Nt, Na); inner_layer_room O vs N seeds 0-9 (KiCad types, no --declared-layers); D8.
+    # Units pinned (tw5r4/tw5r6: moved units' outputs did not come back).
+    mkdir -p $R/fitpat $R/fixtures
+    PYTHONPATH=$ROOT:$ROOT/plugin python - $R/fitpat > $R/fitpat.log 2>&1 <<'PY'
+import sys
+from pathlib import Path
+from harness import fit_patterns
+for n in fit_patterns.PATTERNS:
+    fit_patterns.generate(n, Path(sys.argv[1]), png=False)
+PY
+    note "fitpat rc $?"
+    PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.fit_fixtures $R/fitpat $R/fixtures > $R/fixtures.log 2>&1; note "fixtures rc $?"
+    for f in $R/fixtures/*.json; do cmp -s $f engine/tests/fixtures/fit/$(basename $f) || note "fixture changed: $(basename $f)"; done
+    cp $R/fixtures/*.json engine/tests/fixtures/fit/
+    gen
+    l1=""; l2=""; for s_ in 0 1 2 3 4; do l1+="Or16s$s_:p-inner_layer_room Nr16s$s_:p-inner_layer_room "; done
+    for s_ in 5 6 7 8 9; do l2+="Or16s$s_:p-inner_layer_room Nr16s$s_:p-inner_layer_room "; done
+    u i 2 "$l1" "$l2"
+    u q 6 "Nbr16:qmtech:2" "Ntr16:qmtech:2" "Nar16:qmtech:2"
+    ( bash $ROOT/tools/tw5_job.sh final > $R/final-mode.log 2>&1 ) & sleep 1
+    ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
+    wait; note "all done" ;;
   r6)
     # Round 6: the esp copper-to-edge sweep (O and N, 1 cycle and N 16 cycles) and the merge trial (final).
     edge_boards 0.02 0.025 0.03 0.04 0.05
@@ -202,7 +228,7 @@ case ${1:-} in
     wait; note "all done" ;;
   final)
     # Merge trial on the tip (main merged in): every engine test, clippy, the full pytest (CI=1).
-    ( hzq run --threads 6 --name tw5-final -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast > $R/cargo-all.log 2>&1; echo rc \$? >> $R/cargo-all.log; cargo clippy --release --all-targets > $R/clippy.log 2>&1; echo rc \$? >> $R/clippy.log; cd $ROOT && CI=1 python -m pytest -q > $R/pytest.log 2>&1; echo rc \$? >> $R/pytest.log" > $R/final.log 2>&1; note "final unit rc $?" ) & sleep 1
+    ( hzq run --pin --threads 6 --name tw5-final -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast > $R/cargo-all.log 2>&1; echo rc \$? >> $R/cargo-all.log; cargo clippy --release --all-targets > $R/clippy.log 2>&1; echo rc \$? >> $R/clippy.log; cd $ROOT && CI=1 python -m pytest -q > $R/pytest.log 2>&1; echo rc \$? >> $R/pytest.log" > $R/final.log 2>&1; note "final unit rc $?" ) & sleep 1
     wait
     note "cargo: $(grep -E '^test result' $R/cargo-all.log | awk '{p+=$4; f+=$6} END {print p" passed "f" failed"}'), $(tail -1 $R/cargo-all.log); FAILED: $(grep -E '^test .* FAILED$' $R/cargo-all.log | awk '{print $2}' | tr '\n' ' ')"
     note "clippy: $(grep -cE '^(warning|error)' $R/clippy.log) warnings/errors, $(tail -1 $R/clippy.log)"
