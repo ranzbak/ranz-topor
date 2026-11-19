@@ -9393,14 +9393,14 @@ mod tests {
     fn slot_idle_counts_free_slots_while_a_loop_runs() {
         let slots = Slots::new(2);
         slots.acquire_first();
-        std::thread::sleep(std::time::Duration::from_millis(30)); // no loop yet: not counted
+        std::thread::sleep(std::time::Duration::from_millis(150)); // no loop yet: not counted
         slots.enter_loop();
         std::thread::sleep(std::time::Duration::from_millis(60)); // 1 of 2 slots free
         slots.leave_loop();
-        std::thread::sleep(std::time::Duration::from_millis(30)); // no loop: not counted
+        std::thread::sleep(std::time::Duration::from_millis(150)); // no loop: not counted
         let (idle, span, n) = slots.idle();
         assert_eq!(n, 2);
-        assert!((0.055..0.25).contains(&span), "span {span}");
+        assert!((0.055..0.2).contains(&span), "only the loop's time counts: span {span}");
         assert!((idle - span).abs() < 0.01, "one free slot over the span: idle {idle} span {span}");
         slots.release();
     }

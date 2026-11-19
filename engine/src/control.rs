@@ -1164,6 +1164,21 @@ impl Job {
 
 #[cfg(test)]
 mod tests {
+
+    /// sync-wait: the cycle lines keep the last CYCLE_LINES, numbered by `cycles_logged`.
+    #[test]
+    fn the_cycle_lines_keep_the_last_ones_and_count_all() {
+        let ctl = RunControl::new();
+        for i in 1..=(CYCLE_LINES + 44) {
+            ctl.cycle_line(format!("line {i}"));
+        }
+        let p = ctl.snapshot();
+        assert_eq!(p.cycles_logged as usize, CYCLE_LINES + 44);
+        assert_eq!(p.cycle_lines.len(), CYCLE_LINES);
+        assert_eq!(p.cycle_lines[0], "line 45");
+        assert_eq!(p.cycle_lines.last().map(String::as_str), Some(format!("line {}", CYCLE_LINES + 44).as_str()));
+    }
+
     use super::*;
 
     #[test]
