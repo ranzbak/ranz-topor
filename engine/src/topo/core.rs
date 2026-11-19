@@ -273,6 +273,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     // "stable" as a stop reason = every run ENDED because its routes were stable; a dialog run that
     // went on past stable to the cycle cap ends at the cap (stop_reason "round cap").
     let stable_stop_all = outs.iter().all(|o| o.stable_stop);
+    // TW3 D2 (R1 verify r2): read before the pick is taken out of `outs` below
+    let relay_stop_any = outs.iter().any(|o| o.relay_stop);
     let cancel = ctl.is_cancelled();
     let time_hit = outs.iter().any(|o| o.time_hit);
     // verify-sl3 F1: the limit (acting as hard) cut the drawing of the picked run's plan: its board
@@ -317,7 +319,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         "timeout"
     } else if stable_stop_all {
         "stable"
-    } else if outs.iter().any(|o| o.relay_stop) {
+    } else if relay_stop_any {
         // TW3 D2: a work cap like rounds, named for what ended it
         "re-lay budget"
     } else {

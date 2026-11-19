@@ -258,7 +258,7 @@ def test_bests_summary_line_several_rows_and_missing_drawn_fields():
     assert parts == ["*best, errors, vias: 24 errors / 45 vias / 998.7 mm",
                      "shortest: 19 errors / n/a vias / n/a mm",
                      "-: n/a errors / n/a vias / n/a mm"], parts
-    assert line.count("*") == 1, "only the applied row is marked"
+    assert sum(x.startswith("*") for x in parts) == 1, "only the applied row is marked"
 
 
 def test_bests_table_md_rows_predicted_drawn_and_applied():

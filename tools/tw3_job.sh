@@ -119,7 +119,7 @@ case ${1:-} in
     D=/root/tw3-mut-$(basename $ROOT); rm -rf $D; mkdir -p $D; cp -a $ROOT/engine $D/; rm -rf $D/engine/target
     export CARGO_TARGET_DIR=/root/tw3-mut-target-$(basename $ROOT)
     sub 'if p.stop_at_stable && rep.stable_at.is_some_and(|s| cycle > s + p.stable_patience) {' 'if p.stop_at_stable && rep.stable_at.is_some() {' | mut v1_sync_ignores_patience src/topo/optimise.rs --test topo_mb0
-    sub '    } else if outs.iter().any(|o| o.relay_stop) {' '    } else if false {' | mut d2_relay_is_round_cap src/topo/core.rs --test topo_tw3_table
+    sub '    } else if relay_stop_any {' '    } else if false {' | mut d2_relay_is_round_cap src/topo/core.rs --test topo_tw3_table
     pmut() {  # NAME FILE pytest-args... ; the python snippet on stdin edits FILE in place
       local n=$1 f=$ROOT/$2; shift 2
       cp $f $f.orig; python3 - $f; local pr=$?

@@ -112,14 +112,14 @@ class ProxyJob:
     """Delegates to a real RouteJob; `done()` stays False for `hold` polls so the progress loop runs.
 
     `end_real` (TW3 / D6, lead 2026-11-19): a dialog run has no cycle cap, so the real job ends only by Cancel / OK or
-    its time limit. With it the double passes the plugin's Cancel / OK on to the real job, as the dialog does, and
-    after `hold` polls presses Cancel itself when the test's UI never ends the run. Without it (headless runs, and
-    dialog runs that keep the cap: restart = "stall" / "off") Cancel / OK are recorded only and the real job runs to
-    its own end, for a deterministic result."""
+    its time limit. With it the double presses OK on the real job itself, after `hold` polls, at the first poll whose
+    progress shows "Routes stable" with a pick to keep (the user's OK there: the run ends "stable"). The plugin's own
+    Cancel / OK stays recorded only, as without it (headless runs, and dialog runs that keep the cap: restart =
+    "stall" / "off"), so the real job never ends before it has a plan and the result stays deterministic."""
 
     def __init__(self, real, hold=1, patch=None, end_real=False):
         self.real, self.hold, self.polls, self.cancelled, self.patch = real, hold, 0, False, patch
-        self.end_real, self.real_cancelled = end_real, False
+        self.end_real, self.real_cancelled, self.last = end_real, False, {}
         self.reached = False
         self.ok = None  # cancel(ok=...): what the button read
         self.hardened = False
@@ -128,21 +128,20 @@ class ProxyJob:
     def progress(self):
         self.polls += 1
         d = json.loads(self.real.progress())
+        self.last = dict(d)
         d["iteration"] = max(d.get("iteration", 0), 1)
         return json.dumps(d)
 
     def done(self):
-        if self.end_real and self.polls >= self.hold and not self.real_cancelled:
+        if self.end_real and self.polls >= self.hold and not self.real_cancelled and self.last.get("stable") \
+                and self.last.get("best_total"):
             self.real_cancelled = True
-            self.real.cancel(None)  # the dialog's Cancel (OK if the progress shows Routes stable at this moment)
+            self.real.cancel(True)  # OK at Routes stable (the progress the plugin polled last)
         return self.polls >= self.hold and self.real.done()
 
     def cancel(self, ok=None):
-        self.cancelled = True  # recorded (and passed on with end_real)
+        self.cancelled = True  # recorded only: the real job has to finish for a deterministic result
         self.ok = ok  # what the plugin said the button read (user 2026-11-17: the engine latches it)
-        if self.end_real and not self.real_cancelled:
-            self.real_cancelled = True
-            self.real.cancel(ok)
 
     def reach_limit(self):
         self.reached = True  # M2.TL soft limit (CPU clock): recorded only, as cancel

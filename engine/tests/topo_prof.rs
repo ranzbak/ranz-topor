@@ -69,9 +69,12 @@ fn counters_do_not_touch_the_copper_and_add_up() {
         let n = cycles.len() as f64;
         assert!(loc > 0.0, "{f}: the local judge ran: {line}");
         assert!(calls("assign_with") as f64 >= (glob + loc - 0.1) * n, "{f}: assign_with {} calls < layerings {} ({line})", calls("assign_with"), (glob + loc) * n);
-        // the closing mark("finish") of report() is in the tail window
-        let tail = stages.iter().find(|s| s["stage"] == "tail").unwrap();
-        assert!(tail["labels"].as_array().unwrap().iter().any(|l| l == "finish"), "{f}: tail labels {:?}", tail["labels"]);
+        // the closing mark("finish") of report() ends the run's last window, a tail one (R2 verify tw3
+        // r2: TW3's draw rounds of the four bests give several tail windows; the windows stay in run
+        // order, unmerged, as tools/prof_fold.py bisects their mono times)
+        let tail = stages.last().unwrap();
+        assert_eq!(tail["stage"], "tail", "{f}: the last window: {names:?}");
+        assert!(tail["labels"].as_array().unwrap().iter().any(|l| l == "finish"), "{f}: last tail labels {:?}", tail["labels"]);
         assert!(laps <= loop_s * 1.001 && laps >= 0.5 * loop_s, "{f}: laps {laps} s of the loop window {loop_s} s");
     }
 }
