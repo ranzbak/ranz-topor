@@ -767,7 +767,7 @@ def build_board(pat: Pattern, *, copper: bool) -> pcbnew.BOARD:
     pcbnew.KIID.SeedGenerator(1)
     b = pcbnew.CreateEmptyBoard()
     b.SetCopperLayerCount(pat.layers)
-    for lname, ltype in pat.layer_types.items():
+    for lname, ltype in getattr(pat, "layer_types", {}).items():  # VPat/DPat reuse build_board
         b.SetLayerType(LAYER_IDS[lname], getattr(pcbnew, f"LT_{ltype.upper()}"))
     nets = {}
     for name in pat.nets:

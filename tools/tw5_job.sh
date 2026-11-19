@@ -191,6 +191,17 @@ case ${1:-} in
     u i 1 "$ln"
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  r9)
+    # Round 9: the rewritten free_wire_cross tests + mutants, the fit fixture/test checks, the pattern pytest that the
+    # build_board fix touches, the run-flow press test alone (flaky under load in tw5r7?); qmtech single parts c/d/e and
+    # two more seeds of O and N (noise of the 16-cycle numbers).
+    u q 14 "Ncr16:qmtech:2" "Ndr16:qmtech:2" "Ner16:qmtech:2" "Or16s1:qmtech:2" "Nr16s1:qmtech:2" "Or16s2:qmtech:2" "Nr16s2:qmtech:2"
+    ( hzq run --pin --threads 2 --name fw-tests -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast --test loop_local --test tw5_escape --test topo_c0 --test topo_fit -- --nocapture > $R/cargo-fw.log 2>&1; echo rc \$? >> $R/cargo-fw.log" > /dev/null 2>&1
+      note "fw tests: $(grep -E '^test result' $R/cargo-fw.log | tr '\n' ' ') $(tail -1 $R/cargo-fw.log)"
+      hzq run --pin --threads 2 --name fw-mut -- bash $ROOT/tools/tw5_job.sh mutfw > $R/mutfw.log 2>&1; note "mutfw rc $?" ) & sleep 1
+    ( hzq run --pin --threads 2 --name py -- bash -c "cd $ROOT && CI=1 python -m pytest -q tests/test_fit_patterns.py tests/test_via_patterns.py tests/test_diffpair_patterns.py tests/test_pair_patterns.py 'tests/plugin/test_run_flow.py::test_the_button_read_at_the_press_reaches_the_engine' > $R/pytest-t.log 2>&1; echo rc \$? >> $R/pytest-t.log" > /dev/null 2>&1
+      note "pytest targeted: $(tail -2 $R/pytest-t.log | tr '\n' ' ')" ) & sleep 1
+    wait; note "all done" ;;
   r8)
     # Round 8 (free_wire_cross): targeted tests + its mutants; O = main copper at 1 cycle (vs tw5oc-fa0b28f);
     # F / NF on the D8 boards (seeds 0-4) and F at 16 cycles on esp s1, wiccon, qmtech.
