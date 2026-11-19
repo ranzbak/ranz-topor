@@ -107,6 +107,15 @@ case ${1:-} in
     u eqn-2 16 "e2w:esp:4" "e2wn:esp:4" "e3w:esp:4" "e3wn:esp:4"
     u eqn-3 16 "e4w:esp:4" "e4wn:esp:4" "e0w:qmtech:4" "e0wn:qmtech:4"
     wait; note "all done" ;;
+  r2)
+    # TW4 fix round 2 on the merge with main 1503c13b: targeted release tests + clippy, targeted pytest, and the
+    # via_cuts-on copper of esp / qmtech (rounds 1, runs 1, 1 thread) against the verifier's vt4-019241b on-*-t1
+    ( hzq run --threads 4 --name r2-cargo -- bash -c "cd $ROOT/engine && cargo clippy --release --all-targets > $R/clippy.log 2>&1 9>&-; echo \"clippy rc \$?\" >> $R/rc.txt; RUST_TEST_THREADS=4 cargo test --release --no-fail-fast --lib --test topo_cm1_room --test topo_neck_depth --test loop_local --test topo_compass --test topo_exits --test par_refine --test par_refine_dense --test topo_mc --test topo_g0 > $R/cargo.log 2>&1 9>&-; echo \"cargo rc \$?\" >> $R/rc.txt" ) & sleep 1
+    ( hzq run --threads 2 --name r2-py -- bash -c "cd $ROOT && CI=1 python -m pytest -q -rs -p no:cacheprovider tests/test_route_board_netclasses.py tests/test_scorecard.py tests/test_strip.py tests/test_engine_surface.py tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py > $R/pytest.log 2>&1 9>&-; echo \"pytest rc \$?\" >> $R/rc.txt" ) & sleep 1
+    for b in esp qmtech; do
+      ( mkdir -p $R/o/on-$b-t1; hzq run --threads 1 --name r2-$b -- env RAYON_NUM_THREADS=1 tools/route_board.sh $(board_path $b) $R/o/on-$b-t1 --no-png --clock cpu --timeout 2400 --set optimize.rounds=1 --set optimize.runs=1 > $R/on-$b.log 2>&1 9>&-; note "on-$b rc $?" ) & sleep 1
+    done
+    wait; note "all done" ;;
   abn)
     # TW4 merge round (lead 2026-11-19, no exclusive ccx43 free): neck_depth 1000 A/B at a fixed cycle count (rounds 16,
     # stable_patience 16) on the via_cuts default, esp s0-s4 + qmtech s0; off and on side by side in each unit (same load);
