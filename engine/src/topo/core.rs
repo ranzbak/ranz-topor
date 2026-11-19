@@ -5193,12 +5193,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             }
             /// TW7 D: per connection its detour amount `(r - 1)^2` now, `r` = the projected length
-            /// of its wires over the straight distance of its ends (0 for none). O(wires x path).
+            /// of its wires ([`State::wire_len`], taut with `[search] length = "taut"`) over the straight
+            /// distance of its ends (0 for none). O(wires x path).
             fn detour_amounts(&self) -> Vec<f64> {
                 let mut len = vec![0.0f64; self.conns.len()];
                 for w in (0..self.st.wires.len()).filter(|&w| self.st.wires[w].alive) {
                     if let Some(&ci) = self.wire_conn.get(w).filter(|&&ci| ci < len.len()) {
-                        len[ci] += super::xrules::poly_len(&self.st.polyline(w));
+                        len[ci] += self.st.wire_len(w);
                     }
                 }
                 self.conns

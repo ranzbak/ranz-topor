@@ -146,14 +146,15 @@ pub fn poly_len(pl: &[V2]) -> f64 {
 /// TW7: the graded detour amount of wire `w` (Luzin 2015 p. 7: loops, half-loops and clinches
 /// "lead to excess length"): `(r - 1)^2` with `r` = its projected length over the straight
 /// distance of its two ends (0 for a straight wire or ends that coincide). No threshold: a wire
-/// 10 % long has 0.01, one twice as long 1. O(path).
+/// 10 % long has 0.01, one twice as long 1. The length is the loop's ([`State::wire_len`]: taut
+/// with `[search] length = "taut"`). O(path).
 pub fn detour_amount(st: &State, w: WireId) -> f64 {
     let wi = &st.wires[w];
     let d = (st.proj.pos[wi.b] - st.proj.pos[wi.a]).len();
     if d <= 0.0 {
         return 0.0;
     }
-    let r = poly_len(&st.polyline(w)) / d;
+    let r = st.wire_len(w) / d;
     (r - 1.0).max(0.0).powi(2)
 }
 
@@ -164,6 +165,30 @@ fn bbox(pl: &[V2]) -> Bb {
 
 fn boxes_meet(a: Bb, b: Bb) -> bool {
     a.0 <= b.2 && b.0 <= a.2 && a.1 <= b.3 && b.1 <= a.3
+}
+
+/// How often the polyline `pl` passes from one side of the segment `a`-`b` to the other within
+/// it, half-open (a point on the line counts as the negative side, so a pass point on a
+/// triangulation edge between the two terminals, which the projection has, counts once, not
+/// zero or two times; a touch counts an even number, so the parity is exact). O(segments).
+pub fn line_crossings(pl: &[V2], a: V2, b: V2) -> usize {
+    let d = b - a;
+    let dd = d.x * d.x + d.y * d.y;
+    if dd <= 0.0 {
+        return 0;
+    }
+    let side = |p: V2| d.cross(p - a);
+    pl.windows(2)
+        .filter(|s| {
+            let (sp, sq) = (side(s[0]), side(s[1]));
+            if (sp > 0.0) == (sq > 0.0) {
+                return false;
+            }
+            let x = s[0] + (s[1] - s[0]) * (sp / (sp - sq));
+            let t = ((x.x - a.x) * d.x + (x.y - a.y) * d.y) / dd;
+            (0.0..=1.0).contains(&t)
+        })
+        .count()
 }
 
 /// U-clinches (Luzin, Popov & Popov 2012 p. 117 sign 2, Fig. 4: "an edge between equipotential
@@ -198,7 +223,7 @@ pub fn u_clinches(st: &State, skip: &dyn Fn(WireId) -> bool) -> Vec<Pair> {
             if o == w || oi.net == wi.net || !boxes_meet(lb, polys[&o].1) {
                 continue;
             }
-            let n = polys[&o].0.windows(2).filter(|s| seg_cross(s[0], s[1], ca, cb)).count();
+            let n = line_crossings(&polys[&o].0, ca, cb);
             if n % 2 == 1 && !crossed.get_or_insert_with(|| st.crossings(w).into_iter().map(|x| x.other).collect()).contains(&o) {
                 out.push(Pair { first: w, second: o, kind: Kind::UClinch });
             }
@@ -212,7 +237,7 @@ pub fn u_clinches(st: &State, skip: &dyn Fn(WireId) -> bool) -> Vec<Pair> {
 /// (the move tries both orders). O(|uc| log |uc|).
 pub fn mutual_evasions(st: &State, uc: &[Pair]) -> Vec<Pair> {
     let set: BTreeSet<(WireId, WireId)> = uc.iter().map(|p| (p.first, p.second)).collect();
-    let len = |w: WireId| poly_len(&st.polyline(w));
+    let len = |w: WireId| st.wire_len(w);
     set.iter()
         .filter(|&&(a, b)| a < b && set.contains(&(b, a)))
         .map(|&(a, b)| {
@@ -258,7 +283,7 @@ pub fn attribute(st: &State, pairs: &[Pair], loops: &[(WireId, WireId)], ratio: 
         if d <= 0.0 {
             continue;
         }
-        let r = poly_len(&st.polyline(w)) / d;
+        let r = st.wire_len(w) / d;
         if r <= ratio {
             continue;
         }
