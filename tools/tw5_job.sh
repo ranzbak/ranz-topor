@@ -192,6 +192,7 @@ case ${1:-} in
     lo=""; l1=""; l2=""; for x in 0.02 0.025 0.03 0.04 0.05; do lo+="Or1:e-$x "; l1+="Nr1:e-$x "; l2+="Nr16:e-$x "; done
     u x 3 "$lo" "$l1" "$l2"
     ( bash $ROOT/tools/tw5_job.sh final > $R/final-mode.log 2>&1 ) & sleep 1
+    ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
   final)
     # Merge trial on the tip (main merged in): every engine test, clippy, the full pytest (CI=1).
