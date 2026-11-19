@@ -274,3 +274,18 @@ fn detour_coefficient_leaves_the_careless_state() {
         assert_eq!(variants(&m, &Options { detour_k: 0.0, ..opts(&[], seed) }), off, "seed {seed}: 0 = off");
     }
 }
+
+/// Part B, the judge: with M's lower pad at y 12.4 the way round its end costs N only 2.85 mm,
+/// less than M's way round N's pad, so every U-clinch move is tried and none kept (each restored
+/// exactly: the drawn copper equals the run without moves).
+#[test]
+fn u_clinch_moves_that_do_not_gain_are_undone() {
+    let m = u_clinch_at(12.4);
+    let r0 = route_with(&m, &opts(&[], 0), &RunControl::new());
+    let r = route_with(&m, &opts(&["u_clinch"], 0), &RunControl::new());
+    let line = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics");
+    let v: serde_json::Value = serde_json::from_str(line.trim_start_matches("plan metrics:").trim()).expect("JSON");
+    let pm = &v["loop"]["pattern_moves"];
+    assert!(pm[1].as_u64().unwrap() > 0 && pm[0].as_u64().unwrap() == 0, "tried, none kept: {pm}");
+    assert_eq!(format!("{:?}", r.items), format!("{:?}", r0.items), "undone moves leave the copper as without them");
+}
