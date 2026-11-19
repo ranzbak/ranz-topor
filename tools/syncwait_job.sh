@@ -63,6 +63,9 @@ tests() {  # targeted release tests (rule 14c) + clippy + the plugin's own pytes
 case ${1:-} in
   one) one "$2" ;;
   tests) tests ;;
+  tunit)  # the tests as one 4-thread hzq unit (the bulk VM's queue)
+    ( hzq run --pin --threads 4 --name tests -- bash $ROOT/tools/syncwait_job.sh tests > $R/unit-tests.log 2>&1; note "unit tests rc $?" )
+    note "all done" ;;
   mut)
     # mutants in their own tree copy + target dir (never beside a suite)
     mkdir -p $R/mt && git -C $ROOT archive HEAD 2>/dev/null | tar -x -C $R/mt 2>/dev/null || rsync -a --exclude target --exclude scratch $ROOT/ $R/mt/
