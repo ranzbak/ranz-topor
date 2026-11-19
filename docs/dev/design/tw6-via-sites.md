@@ -8,7 +8,7 @@ Baseline job: tw6b-479cc5a (rev 479cc5a8 = main's engine + job script + pattern 
 ## Baseline today (no new long-board runs)
 Measure: a connection is "via-site forced" when its first failed check is `via k of n: no site in its interval`.
 That means the drawing had to place a via with no legal site. Counts come from result.json; the parser is
-scratch/vsite.py in the report.
+scratch/agent-wt/reports/tw6-via-sites-data/vsite.py.
 - **qmtech s0, main de9e3977** (the default copper, unchanged by TW5), run tw5m3-de9e397/Mr1, rounds=1:
   - 6 via-site-forced connections: ADV_DDCSCL (18 violations), ADV_DVDD, ADV_SCL, MAX_SCLK, Net-(U7-PVSS), USB_VBUS.
   - 8 vias placed by force.
