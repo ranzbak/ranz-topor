@@ -99,7 +99,7 @@ MESSAGES: dict[str, Msg] = {
         "The board was edited while Topor ran (items were added, deleted or moved), so the computed routes may no longer fit. Nothing was committed and the board is exactly as you left it.",
         "Undo your edits (KiCad → Edit → Undo) or run Topor again; do not edit the board while Topor runs."),
     "POST_COMMIT_STEP_FAILED": Msg("warning",
-        "The routes were committed to the board, then a later step failed (zone refill, a KiCad cleanup / teardrop action, writing the report or showing the done notice); the routes stay on the board.",
+        "The routes were committed to the board, then a later step failed (zone refill, a KiCad cleanup / teardrop action, or writing the report); the routes stay on the board.",
         "Ctrl+Z (Edit → Undo) removes the routes; or keep them and do the failed step yourself: refill zones with B (KiCad → Edit → Fill All Zones), run KiCad → Tools → Cleanup Tracks & Vias, or check the report folder (output.report_dir)."),
     "ENGINE_BOARD_UNREADABLE": Msg("error",
         "The routing engine could not read this board: building its map of the board (one triangulation of every pad, via, rule area, copper graphic and the outline, on all layers at once) failed, so every connection would fail. Topor checks this right after reading the board and stopped before the pre-flight DRC and the settings dialog. The board was not changed. The message names the copper where it failed, with its layer, net and place.",

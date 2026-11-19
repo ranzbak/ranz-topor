@@ -1,7 +1,7 @@
 """Run report (B5 seam, B8 full report): the summary block of the wireframe (section 5, at most 20 lines) and the
 report folder files ``report.md``, ``preview.png`` (written by preview.py), ``result.json``, ``drc.json``,
-``log.txt``. Satisfies ``ports.Report`` (``dir``, ``summary_lines()``) and carries ``stop_reason`` for the
-done notice.
+``log.txt``. Satisfies ``ports.Report`` (``dir``, ``summary_lines()``) and carries ``stop_reason`` (the run flow's
+stop text).
 
 ``RunReport.facts`` is the one dict of numbers; ``build_report`` fills it from the engine result, the classified
 DRC, the Config, findings, scope, the stats of the current board and timing (pure Python, no pcbnew).
@@ -177,6 +177,12 @@ def _types(d) -> str:
     return " (" + ", ".join(f"{k} {v}" for k, v in sorted(d.items())) + ")" if d else ""
 
 
+#: preview summary line while neither run.commit_fills nor run.refill_after_accept is on: the pours stay as they were
+#: until the user refills them (the hint the removed "finished" window used to carry)
+ZONE_HINT_LINE = ("After Accept: zones are not refilled (run.commit_fills and run.refill_after_accept are off): "
+                  "press B (Edit → Fill All Zones), a separate undo step")
+
+
 class RunReport:
     """Facts + files of one run. `facts` keys (all optional, missing -> n/a): version, board, timestamp, routed,
     total, nets, layers, partial, failed, vias, vias_before, length_mm, length_before_mm, routing_new,
@@ -256,6 +262,7 @@ class RunReport:
                 f"{x.code} ({len(x.items)})" if x.items else x.code for x in fnd
                 if x.code in POSTRUN_CODES and x.severity != "info"]) else []),
             f"Outcome: {outcome_text(self.status, self.error_code)}" + self._refill_note(),
+            *([ZONE_HINT_LINE] if f.get("zone_hint") and self.status == "pending" else []),
             *(["Warning: time budget hit: result may differ between runs ("
                + (f"time limit {limit_text(tl.get('final_s'))}" + (" set during the run, " if tl.get("changes") else ", ")
                   if tl else "")

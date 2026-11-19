@@ -1,6 +1,6 @@
 """DoD item 13 matrix (from the verifier of refill-default r1) for ZONE_FILLS_SKIPPED and the
 refill default flip. commit_fills x refill_after_accept (on / off / on-but-fails) x skip path (none, no_copy,
-other_items, not_applied all, not_applied partial): finding, result.json, report Outcome line, DoneDialog widgets."""
+other_items, not_applied all, not_applied partial): finding, result.json, report Outcome line, error dialogs."""
 import json
 import re
 
@@ -34,8 +34,6 @@ CASES = [(False, r, "off") for r in ("on", "off", "fails")] + \
 
 @pytest.mark.parametrize("commit,refill,skip", CASES, ids=[f"commit{int(c)}-{r}-{s}" for c, r, s in CASES])
 def test_refill_matrix(app, eprom, tmp_path, reports, monkeypatch, commit, refill, skip):  # noqa: F811
-    from topor import ui_wx
-
     _skip_patch(monkeypatch, skip)
     cfg = CFG.with_values({("run", "commit_fills"): commit, ("run", "refill_after_accept"): refill != "off"})
     board = make_board(eprom)
@@ -44,7 +42,7 @@ def test_refill_matrix(app, eprom, tmp_path, reports, monkeypatch, commit, refil
             raise RuntimeError("AS_BUSY")
         board.refill_zones = boom
     from topor.fake import ScriptedUi
-    _b, _ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=True), cfg=cfg, board=board)
+    _b, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=True), cfg=cfg, board=board)
     assert out.status == "accepted"
     refilled = refill == "on"
     assert out.report.facts["zones_refilled"] is refilled
@@ -82,39 +80,7 @@ def test_refill_matrix(app, eprom, tmp_path, reports, monkeypatch, commit, refil
         assert "same undo step" in line
     else:
         assert "zones not refilled: press B" in line
-    # done notice
-    dd = ui_wx.DoneDialog("accepted", out.report, out.report_dir)
-    try:
-        want = ("done_refilled" if refilled else "done_refill_hint" if (warn or not commit) else "done_fills_committed")
-        for wid in ("done_refilled", "done_refill_hint", "done_fills_committed"):
-            assert (dd.widget(wid) is not None) == (wid == want), (wid, want)
-        assert "one undo step" not in re.sub(r"\s+", " ", dd.widget("done_accepted").GetLabel())
-        # several done_post_commit rows can exist (a failed refill AND a skipped fill): look at every child
-        posts = [re.sub(r"\s+", " ", c.GetLabel()) for c in dd.GetChildren()
-                 if hasattr(c, "GetLabel") and "The routes were committed" in c.GetLabel()]
-        if warn:
-            assert any(re.sub(r"\s+", " ", zf[0].message) in t for t in posts), posts
-        if not warn and refill != "fails":
-            assert not posts
-    finally:
-        dd.Destroy()
-
-
-def test_done_notice_without_counts_never_claims_one_undo_step(app, tmp_path):  # noqa: F811
-    """The done notice when the report has no 'Routed n/m' line (fallback text) must not claim one undo step either:
-    with the default refill Accept is two."""
-    from topor import ui_wx
-
-    class NoCounts:
-        facts = {"zones_refilled": True}
-        stop_reason = None
-
-        def summary_lines(self):
-            return []
-
-    dd = ui_wx.DoneDialog("accepted", NoCounts(), tmp_path)
-    try:
-        txt = re.sub(r"\s+", " ", dd.widget("done_accepted").GetLabel())
-        assert txt.startswith("Applied to the board") and "one undo step" not in txt, txt
-    finally:
-        dd.Destroy()
+    # fail fast, no finished window: one error dialog per step that failed after the commit, in order
+    errs = [c[1][0].code for c in ui.calls if c[0] == "error"]
+    assert errs == (["POST_COMMIT_STEP_FAILED"] if refill == "fails" else []) + (["ZONE_FILLS_SKIPPED"] if warn else []), errs
+    assert ui.names()[-1] == ("error" if errs else "preview")
