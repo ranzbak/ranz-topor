@@ -171,6 +171,24 @@ Option `[capacity] pad_exits` (default off until the equal-time A/B). 5.10 (`pad
   - The row measurements: the tip stub fits at full width, the long-side stub stands on U1.4, via room beside and
     clear of the row, stored = fresh.
 
+### (1) result and TW6 input (equal time, rev a9362d5c, `pad_exits` = (b) + (c); stays opt-in)
+Wall 300 s, 4 threads, esp s0-4 + qmtech s0, base = t4r2q `-` (main 706cf43c); KiCad new / unconnected / vias /
+det > 1.5: base 850 / 69 / 446 / 97, `x` 929 / 52 / 429 / 98 (routed 1061 both). Off copper = main on eprom and wiccon.
+- Fewer unconnected (-17) and vias (-17), more KiCad new (+79: esp s2 +67, qmtech +45, s1/s3/s4 fewer).
+- Detours: 36 new det > 1.5 against 34 gone. The same connections each seed: +3V3 C6.1 -> pour (1.3-1.4 -> 1.7-2.4 on
+  all five esp seeds), IO7 R10.1 -> U3.21, IO8_SCL U4.13 -> U4.18, IO10_SDA, Net-(D6-Pad2) (2 vias -> 0, 1.1 -> 1.6-2.1);
+  qmtech USB_C_D+ U1.1 -> U9.3 (1.12 -> 3.17), Net-(U7-PVSS) (1.1 -> 2.9), JS2_3/5/9, JS_INTB_5V, VIN5V.
+- The terms split at rounds = 1 puts these on (c) (`KxC`: D6-Pad2 and IO7 lose their via pair and go round on one
+  layer, C6.1 1.32 -> 1.52); (b) alone changes nothing measurable (400 vs 397).
+- drawn losses (tw4_analyse, drawn) 339 -> 416, predicted 197 -> 282: the plan sees more of what is drawn, the drawing
+  still loses more.
+- **Reading:** (c) prices a via in the exit zone but the only move that removes the price is to remove the via, not to
+  move it to a free site next to the exit; the wire then takes the long way on one layer. That is the detour rule's
+  failure case, so the default stays off.
+- **TW6 part A input:** `padexit::exit_via_room` becomes a reader of the site room: the via is moved to the nearest
+  free site beyond the exit zone (priced by distance, graded) rather than paid for in place; re-measure C6.1, IO7,
+  D6-Pad2, USB_C_D+ and U7-PVSS then.
+
 ## (3) Graded pour-cut term
 `MeasureParts.pour = (count, graded)`: the plan's copper (per wire its layer stretches at their pass widths, planned
 vias, plane stubs; `draw::track_item` / `via_item`) through `pourcheck::check_pour_reach` at a plan resolution
