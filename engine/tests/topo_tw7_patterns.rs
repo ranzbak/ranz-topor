@@ -416,10 +416,16 @@ fn via_trades_are_found_on_the_careless_state() {
     let (wm, wn) = (w[0], w[1]);
     assert_eq!(xrules::via_trades(&st, &|_| true), vec![(wn, vec![wm])]);
     assert!(xrules::via_trades(&st, &|x| x != wn).is_empty(), "the caller's subject filter");
-    // N laid straight across M (the crossing priced away): M crosses N's line and N itself, so no mover.
-    let (st3, w3) = routed_x(&b, &m, &[2, 1], Some(0.0));
-    assert!(st3.crossings(w3[1]).iter().any(|x| x.other == w3[0]));
-    assert!(xrules::via_trades(&st3, &|_| true).iter().all(|(s, mv)| *s != w3[1] || !mv.contains(&w3[0])), "{:?}", xrules::via_trades(&st3, &|_| true));
+    // N laid across M (the crossing priced away): M crosses N's line and N itself, so no mover. The
+    // subject must be one (excess length > 0, else the case tests nothing: N laid dead straight has
+    // none, verify tw7-moves r4): M one pitch lower and laid after N, N bends a little and still
+    // crosses M.
+    let m3 = u_clinch_at(11.0);
+    let b3 = board::build(&m3, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let (st3, w3) = routed_x(&b3, &m3, &[1, 2], Some(0.0));
+    assert!(st3.crossings(w3[0]).iter().any(|x| x.other == w3[1]), "N crosses M");
+    assert!(xrules::detour_amount(&st3, w3[0]) > 0.0, "the subject has excess length: {}", xrules::detour_amount(&st3, w3[0]));
+    assert!(xrules::via_trades(&st3, &|_| true).is_empty(), "N crosses M: M is no mover: {:?}", xrules::via_trades(&st3, &|_| true));
     assert_eq!(Kind::parse("via_trade"), Some(Kind::ViaTrade));
     assert_eq!(Kind::parse("pour"), Some(Kind::PourCut));
     assert_eq!(Kind::known(), "clinch, double, unlayerable, u_clinch, evasion, via_trade, pour");
@@ -501,21 +507,15 @@ fn pad_gap(items: &[Item], net: i32, c: (f64, f64), s: f64) -> f64 {
 /// picture hz-runs/tw7s2-17228bd/sketch/detour_trade.png; Luzin 2015 pp. 9-10 fig. 21a-c; Luzin,
 /// Popov & Popov 2013 p. 134 step 8.1): two 0.5 mm rails B1 (net 2, y 14) and B2 (net 3, y 15.5),
 /// x 10-50, across the line of a 0.25 mm wire A (net 1) from A1 (30, 5) to A2 (30, 19); 1 mm pads.
-/// Expected = panel (c): A straight (14 mm), no via; B1 and B2 dip round A2 together at the rails'
-/// constant 1.5 mm pitch (1.0 mm copper gap, no narrowing at the V), B1 at the 0.20 mm clearance
-/// from A2, each 44.93 mm with the sketch's 45 degree legs (a drawn dip may be shorter, never
-/// longer). Seed 1 of the defaults ends careless (A round the rails, about 49 mm); part C
+/// Expected = panel (c): A straight (14 mm), no via; B1 and B2 dip round A2 together, packed
+/// at clearance (B1-B2 copper gap 0.20 mm at the V), B1 at the 0.20 mm clearance from A2, B1 at
+/// most 44.93 mm with the sketch's 45 degree legs (a drawn dip may be shorter, never longer). Seed 1 of the defaults ends careless (A round the rails, about 49 mm); part C
 /// (`pattern_moves` = ["via_trade"], alone and with the other kinds) must reach (c), seeds 0 and 1.
 ///
-/// EXPECTED TO FAIL (round 4), on the pitch only: every other part of panel (c) holds (A
-/// straight, no via, both rails round A2, B1 at the clearance, DRC clean), but the drawing packs
-/// B2 against B1 at the V: the copper gap there is 0.20 mm (the clearance), not the rails' 1.0 mm.
-/// The topology is the expected one, so this is the drawing's packing of a bundle through a bend
-/// (it keeps clearance, not the pair's pitch), not part C. The test checks everything else first
-/// and fails only on that assert; when the drawing keeps the pitch it fails the other way and
-/// the `should_panic` goes.
+/// Pitch (user 2026-11-19, replaces the sketch's constant 1.5 mm pitch): the bundle is packed at
+/// clearance round the bend (rule "bundles tight-packed"): B2 lies against B1 at the V with a
+/// copper gap of the 0.20 mm clearance (B2 about 44.27 mm), not the rails' 1.0 mm.
 #[test]
-#[should_panic(expected = "constant pitch, no narrowing at the V")]
 fn detour_trade_pattern_reaches_fig_21c() {
     let m = board(
         60.0,
@@ -525,7 +525,7 @@ fn detour_trade_pattern_reaches_fig_21c() {
     );
     let r0 = route_with(&m, &Options { seed: 1, ..Options::default() }, &RunControl::new());
     assert!(piece_len(&pieces(&r0.items, 1)) > 20.0, "moves off, seed 1: careless A round the rails: {}", piece_len(&pieces(&r0.items, 1)));
-    let mut narrow = Vec::new();
+    let mut loose = Vec::new();
     for (name, kinds) in [("via_trade", &["via_trade"][..]), ("all kinds + via_trade", &["clinch", "double", "unlayerable", "u_clinch", "evasion", "via_trade"][..])] {
         for seed in [0u64, 1] {
             let o = Options { seed, pattern_moves: kinds.iter().map(|k| k.to_string()).collect(), ..Options::default() };
@@ -541,12 +541,12 @@ fn detour_trade_pattern_reaches_fig_21c() {
             assert!(g1a > 0.2 - 0.01 && g1a < 0.2 + 0.1, "{tag}: B1 at the clearance from A2: {g1a}");
             let rep = Checker::new(&m, &Options::default()).check_items(&r.items);
             assert!(rep.violations.is_empty(), "{tag}: {:?}", rep.violations.first());
-            if g12 <= 1.0 - 0.05 {
-                narrow.push(format!("{tag}: gap {g12:.3}"));
+            if !(g12 > 0.2 - 0.01 && g12 < 0.2 + 0.05) {
+                loose.push(format!("{tag}: gap {g12:.3}"));
             }
         }
     }
-    assert!(narrow.is_empty(), "constant pitch, no narrowing at the V (B1-B2 copper gap 1.0 mm): {narrow:?}");
+    assert!(loose.is_empty(), "bundle packed at clearance at the V (B1-B2 copper gap = the 0.20 mm clearance): {loose:?}");
 }
 
 /// PROPOSED variant of the approved `detour_trade` (round 4; not user-approved, so ignored and not
@@ -626,6 +626,7 @@ fn pour_move_is_found_and_tried_and_needs_pour_cuts() {
     let j = loop_json(&m, &o);
     let pk = &j["pattern_kinds"]["pour"];
     assert!(pk[0].as_u64().unwrap() >= 1 && pk[1].as_u64().unwrap() >= 1, "found and tried: {}", j["pattern_kinds"]);
+    assert!(pk[2].as_u64().unwrap() >= 1, "and kept (plan eval 1279.4 -> 30.9; kills e_no_bump): {}", j["pattern_kinds"]);
     let r = route_with(&m, &o, &RunControl::new());
     assert_eq!(r.failed, 0, "{:?}", r.warnings);
     assert!(r.warnings.iter().any(|w| w.contains("[optimize] pattern_moves = pour") && !w.contains("finds nothing")), "{:?}", r.warnings);
@@ -655,4 +656,25 @@ fn terminal_clinch_pattern_reaches_the_expected_answer() {
         assert!(net_len(&r.items, 2) < 17.5, "seed {seed}: M {} (round b1)", net_len(&r.items, 2));
         assert!(Checker::new(&m, &Options::default()).check_items(&r.items).violations.is_empty(), "seed {seed}");
     }
+}
+
+/// Verify tw7-moves r3/r4 (survivor vt_one_mover_dup): with u_clinch and via_trade both listed, the
+/// careless u_clinch state's one-mover via trade (N, [M]) is the U-clinch's pair and is not counted
+/// as a via trade too.
+#[test]
+fn the_u_clinch_pair_is_not_found_as_a_via_trade_too() {
+    let m = u_clinch_board();
+    let both = loop_json(&m, &opts(&["u_clinch", "via_trade"], 0));
+    assert_eq!(both["pattern_kinds"]["via_trade"][0], 0, "the U-clinch pair is not a via trade too: {}", both["pattern_kinds"]);
+}
+
+/// Verify tw7-moves r4 (survivor e_no_bump): the pour move is kept, so the cut's price on the
+/// passes matters (the same assert as in pour_move_is_found_and_tried_and_needs_pour_cuts, here
+/// alone and with the pour kind only).
+#[test]
+fn the_pour_move_is_kept_with_pour_cuts() {
+    let m = pour_board();
+    let o = Options { pour_cuts: true, ..opts(&["pour"], 0) };
+    let j = loop_json(&m, &o);
+    assert!(j["pattern_kinds"]["pour"][2].as_u64().unwrap() >= 1, "kept: {}", j["pattern_kinds"]);
 }
