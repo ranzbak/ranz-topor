@@ -298,3 +298,9 @@ qmtech ADV_CEC / ADV_TXC- / JS2_9 (1-2 DRC in seeds 1-4, base 0): vias dropped i
 (shorting_items ADV_CEC via on pad 15 ADV_TXC-) and JS2_4/JS2_9 at RN3; a via site in a pad row, not traced yet to plan or drawing (parking list).
 Flip proposal (lead/user): `pattern_moves` = the five kinds with `[factors] detour`
 0.5 (um) holds over all qmtech seeds on vias and detours and 4/5 on completion.
+**C on real boards** (u vs v = u + "via_trade", cpu clock 1200 s on the shared VM, fair between arms but not a timing
+run; tag tw7rc2-06a2329c, qmtech and esp s0-4): the detector finds 700-3450 via trades per run, the move is tried
+116-355 times and kept 3 times in 1849 tries over the 10 runs. Metrics stay inside the seed noise (qmtech v vs u:
+vias 4/1 seeds better, -13; unconnected 1/3, +8; esp: vias 0/4, +12; unconnected 3/1, -2). C stays opt-in; on real
+boards it needs a narrower subject (excess against the price of the via the crossing implies) before an A/B can show
+a gain.
