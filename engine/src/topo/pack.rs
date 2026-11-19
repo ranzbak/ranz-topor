@@ -200,6 +200,8 @@ pub struct Packer<'a> {
     /// shared by every capacity model built on this packer (the CM1 cost was its rebuild per
     /// model). Filled only for the packer's own projection ([`Packer::same_proj`]).
     pub(crate) via_static: super::viacut::GeoCache,
+    /// tw4-r2: [`Packer::via_cands`] per (triangle, net, radius bits, clearance bits).
+    via_cands: Mutex<FxHashMap<(usize, i32, u64, u64), Arc<Vec<Vec2>>>>,
     /// Reach diameter of the first via size of every net (nm, [`crate::vias::via_reach`] x 2:
     /// the copper disc, or larger where the drill's hole clearance reaches further; 5.4 task 1);
     /// nets not listed use `via_d0`. 0 = the planner gives vias no room (a packer built without
@@ -222,6 +224,12 @@ pub struct Packer<'a> {
     /// CM1 (`[capacity] via_cuts`): the planned vias are features of the capacity test (their
     /// gap cuts, [`super::viacut`]), measured in this planning norm; `None` = off.
     pub via_cuts: Option<super::sheet::Norm>,
+    /// tw4-r2 (`[capacity] via_best_point`): price a via's cuts at the least-over site point of
+    /// its triangle ([`Packer::via_cands`]).
+    pub via_best: bool,
+    /// tw4-r2 (`[capacity] via_over_ramp`, nm): the over-full via price ramps from 0 over this
+    /// overage ([`super::viacut::price`]); 0 = the step at zero.
+    pub via_ramp: f64,
     /// M-45: the drawing is octilinear; a pass's oblique factor is the octilinear one
     /// ([`super::demand::octi_stretch`]).
     pub octi: bool,
@@ -280,6 +288,9 @@ impl<'a> Packer<'a> {
             reserve_sites: false,
             via_between: false,
             via_cuts: None,
+            via_best: false,
+            via_ramp: 0.0,
+            via_cands: Mutex::new(fxmap()),
             octi: false,
             cuts: None,
             edge_memo: std::sync::Mutex::new(Default::default()),
@@ -345,6 +356,8 @@ impl<'a> Packer<'a> {
         p.reserve_sites = opts.reserve_via_sites;
         p.via_between = opts.via_between;
         p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
+        p.via_best = opts.via_best_point;
+        p.via_ramp = opts.via_over_ramp_mm.max(0.0) * 1e6;
         p.octi = opts.draw_style == "octilinear" && opts.octi_room;
         if opts.capacity_model == "cuts" {
             p.cuts = Some(super::cutmodel::CutCtx::new(super::cutmodel::CutOpts::from_options(opts), opts.cut_vias, p.outline.clone()));
@@ -376,6 +389,21 @@ impl<'a> Packer<'a> {
         let p = super::cutflow::via_point(self.pr, self, t, net, 0.5 * d, s).0;
         self.via_pt.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p);
         p
+    }
+
+    /// tw4-r2 (`[capacity] via_best_point`): the site points of triangle `t`
+    /// ([`tri_site_points`], in their order) where a via of `net` (diameter `d`, clearance `s`)
+    /// has static room ([`super::cutflow::point_free`] at least the radius); the first is
+    /// [`Packer::via_point_cached`]'s point when any has room. Cached per (triangle, net, radius,
+    /// clearance). O(9 x obstacles) on the first call, O(1) after.
+    pub fn via_cands(&self, t: usize, net: i32, d: f64, s: f64) -> Arc<Vec<Vec2>> {
+        let key = (t, net, (0.5 * d).to_bits(), s.to_bits());
+        if let Some(c) = lock(&self.via_cands).get(&key) {
+            return c.clone();
+        }
+        let [a, b, c] = self.pr.tris[t].map(|v| self.pr.pos[v]);
+        let pts: Vec<Vec2> = tri_site_points(a, b, c).into_iter().filter(|&q| super::cutflow::point_free(self.pr, self, q, net, s) >= 0.5 * d).collect();
+        lock(&self.via_cands).entry(key).or_insert(Arc::new(pts)).clone()
     }
 
     /// tw4 T2: the static gap cuts of a via of `net` at `at` in triangle `t` of the projection

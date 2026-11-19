@@ -135,3 +135,43 @@ fn the_via_focus_of_the_local_judge_equals_every_wire_in_focus() {
     assert!(n > 0, "no local judgement was checked: the case does not show");
     assert_eq!(bad, 0, "{bad} of {n} local judgements differ from the judge with every wire in focus");
 }
+
+/// tw4-r2 (2): `[capacity] via_best_point` and `[capacity] via_over_ramp` are opt-in (default =
+/// the model before them, bit-identical), and a JSON options object sets them.
+#[test]
+fn via_best_point_and_ramp_are_opt_in() {
+    let d = Options::default();
+    assert!(!d.via_best_point);
+    assert_eq!(d.via_over_ramp_mm, 0.0);
+    let o = Options::from_json(r#"{"via_best_point": true, "via_over_ramp_mm": 0.05}"#).expect("options parse");
+    assert!(o.via_best_point);
+    assert!((o.via_over_ramp_mm - 0.05).abs() < 1e-12);
+}
+
+/// tw4-r2 (2): with the via measured at its best point and the graded ramp, every refinement still
+/// ends with stored via prices equal to a fresh pricing, and the local judge's via focus stays exact
+/// (the best point lies in the via's own triangle, so its neighbourhood, crossers and partners are
+/// the ones the repricing already covers). The qmtech USB corner, as the two tests above.
+#[test]
+fn best_point_and_ramp_prices_stay_fresh_and_focus_exact() {
+    use std::sync::atomic::Ordering;
+    use topor_engine::topo::refine::viacheck;
+    let path = format!("{}/tests/fixtures/qmtech-usb-crop.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses");
+    let o = Options::from_json(
+        r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "via_cuts": true, "via_best_point": true, "via_over_ramp_mm": 0.05}"#,
+    )
+    .expect("options parse");
+    viacheck::ON.store(true, Ordering::Relaxed);
+    viacheck::FOCUS_ON.store(true, Ordering::Relaxed);
+    let (b0, f0) = (viacheck::BAD.load(Ordering::Relaxed), viacheck::FOCUS_BAD.load(Ordering::Relaxed));
+    let (n0, g0) = (viacheck::CHECKED.load(Ordering::Relaxed), viacheck::FOCUS_CHECKED.load(Ordering::Relaxed));
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let _ = route_with(&m, &o, &ctl);
+    let (bad, n) = (viacheck::BAD.load(Ordering::Relaxed) - b0, viacheck::CHECKED.load(Ordering::Relaxed) - n0);
+    let (fbad, fn_) = (viacheck::FOCUS_BAD.load(Ordering::Relaxed) - f0, viacheck::FOCUS_CHECKED.load(Ordering::Relaxed) - g0);
+    assert!(n > 0 && fn_ > 0, "the case does not show: {n} via entries, {fn_} judgements checked");
+    assert_eq!(bad, 0, "{bad} stale via prices of {n}");
+    assert_eq!(fbad, 0, "{fbad} of {fn_} local judgements differ from the judge with every wire in focus");
+}

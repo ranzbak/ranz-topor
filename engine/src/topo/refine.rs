@@ -1148,32 +1148,53 @@ impl<'a> Frame<'a> {
             super::demand::Item { net: xi.net, w: wd, s: xi.s }
         };
         let on1 = |x: WireId, k: usize| (0..self.nl).find(|&l| on(x, k, l));
+        let ramp = self.packer.via_ramp;
         for (i, &vp) in m.vpts(w).iter().enumerate() {
             let Some((t, p)) = vp else { continue };
-            let g = self.geo(t, wi.net, p, norm);
-            let o = viacut::over(&g, via, &on, &item);
-            tot.count += o.count;
-            tot.graded += o.graded;
-            // Via-to-via cuts: the partners in the via triangle's vertex star.
-            // (Every partner of another net traverses the star, so it is a chord wire.)
-            for &u in &g.wires[g.wires.partition_point(|&u| u <= w)..] {
-                let ui = &st.wires[u];
-                let du = self.wire_d[u];
-                if !ui.alive || du <= 0.0 || ui.net == wi.net {
-                    continue;
-                }
-                let b = super::demand::Item { net: ui.net, w: du, s: ui.s };
-                for (j, &vq) in m.vpts(u).iter().enumerate() {
-                    let Some((tu, q)) = vq else { continue };
-                    if (u, j) <= (w, i) || g.tris.binary_search(&tu).is_err() {
+            // The gap cuts of the via at `g.at` and its via-to-via cuts to the partners in the
+            // via triangle's vertex star (every partner of another net traverses the star, so it
+            // is a chord wire; a pair is priced at the lower `(wire, via)`, with the partner at its
+            // planned point).
+            let at = |g: &ViaGeom| {
+                let mut o = viacut::over(g, via, ramp, &on, &item);
+                for &u in &g.wires[g.wires.partition_point(|&u| u <= w)..] {
+                    let ui = &st.wires[u];
+                    let du = self.wire_d[u];
+                    if !ui.alive || du <= 0.0 || ui.net == wi.net {
                         continue;
                     }
-                    if let Some(f) = viacut::pair_over(&g, via, q, b, norm, &on1, &item) {
-                        tot.count += 1;
-                        tot.graded += f;
+                    let b = super::demand::Item { net: ui.net, w: du, s: ui.s };
+                    for (j, &vq) in m.vpts(u).iter().enumerate() {
+                        let Some((tu, q)) = vq else { continue };
+                        if (u, j) <= (w, i) || g.tris.binary_search(&tu).is_err() {
+                            continue;
+                        }
+                        if let Some((f, counted)) = viacut::pair_over(g, via, q, b, norm, ramp, &on1, &item) {
+                            o.count += counted as usize;
+                            o.graded += f;
+                        }
+                    }
+                }
+                o
+            };
+            let mut o = at(&self.geo(t, wi.net, p, norm));
+            // tw4-r2 `[capacity] via_best_point`: an over-full via is priced at the least-over
+            // site point of its triangle with static room (Maley 1987 pp. 32-33: routable iff no
+            // critical cut is over-full for the via at some position; the drawing relocates vias).
+            // Ties keep the planned point; a via that fits there is never re-measured.
+            if self.packer.via_best && o.graded > 0.0 {
+                for &q in self.packer.via_cands(t, wi.net, d, wi.s).iter().filter(|&&q| q != p) {
+                    let oq = at(&self.geo(t, wi.net, q, norm));
+                    if oq.graded < o.graded {
+                        o = oq;
+                        if o.graded <= 0.0 {
+                            break;
+                        }
                     }
                 }
             }
+            tot.count += o.count;
+            tot.graded += o.graded;
         }
         tot
     }
@@ -1706,7 +1727,7 @@ impl<'a> CapModel<'a> {
     pub fn via_cut_list(&self) -> Vec<(WireId, Vec<WireId>)> {
         let Some(norm) = self.fx.packer.via_cuts else { return Vec::new() };
         (0..self.vpts.len())
-            .filter(|&w| self.cost[self.fx.vbase + w] > 0.0)
+            .filter(|&w| self.via_counted(w))
             .map(|w| {
                 let net = self.fx.st.wires[w].net;
                 let mut xs: Vec<WireId> = self.vpts[w].iter().flatten().flat_map(|&(t, p)| self.fx.geo(t, net, p, norm).cuts.iter().flat_map(|c| c.cross.iter().map(|x| x.0)).collect::<Vec<_>>()).collect();
@@ -1739,7 +1760,14 @@ impl<'a> CapModel<'a> {
 
     /// CM1: the planned vias with an over-full via cut, located: `(wire, via point)` (the compass).
     pub fn via_cut_points(&self) -> Vec<(WireId, Vec2)> {
-        (0..self.vpts.len()).filter(|&w| self.cost[self.fx.vbase + w] > 0.0).flat_map(|w| self.vpts[w].iter().flatten().map(move |&(_, p)| (w, p))).collect()
+        (0..self.vpts.len()).filter(|&w| self.via_counted(w)).flat_map(|w| self.vpts[w].iter().flatten().map(move |&(_, p)| (w, p))).collect()
+    }
+
+    /// Whether wire `w` has a via entry that counts as a predicted violation: a price, and with
+    /// `[capacity] via_over_ramp` an over-full cut at least the ramp over ([`viacut::price`]).
+    /// O(1), or O(its vias' pricing) with a ramp.
+    fn via_counted(&self, w: WireId) -> bool {
+        self.cost[self.fx.vbase + w] > 0.0 && (self.fx.packer.via_ramp <= 0.0 || self.fx.via_over(&self.a, w).count > 0)
     }
 
     /// The predicted violations of this labelling as the TopoR loop's archive and every loop move

@@ -1488,6 +1488,18 @@ pub struct Options {
     /// two edges its own wire crosses / on static cuts within reach). Default true since the tw4
     /// equal-time A/B (2026-11-19: esp 5 seeds + qmtech at wall 300 s, KiCad DRC -23 % / -28 %).
     pub via_cuts: bool,
+    /// tw4-r2 (`[capacity] via_best_point`, docs/dev/design/tw4-r2.md (2)): with via_cuts, a
+    /// planned via's gap and via-to-via cuts are priced at the least-over of its triangle's site
+    /// points with static room (`topo::pack::tri_site_points`), not at the first one: Maley 1987
+    /// pp. 32-33 (routable iff no critical cut is over-full) holds for the via at *some*
+    /// position, and the drawing relocates vias. Ties keep the first point, so a via with no
+    /// over-full cut prices as before. false (default) = the first site point only.
+    pub via_best_point: bool,
+    /// tw4-r2 (`[capacity] via_over_ramp`, mm): with via_cuts, a via cut over-full by `over`
+    /// costs `min(1, over / ramp) x (1 + over / pitch)` instead of `1 + over / pitch` (graded from
+    /// 0 at zero overage, no step there) and counts as a predicted violation only from `over >=
+    /// ramp`. 0 (default) = the step at zero (every over-full cut a full violation).
+    pub via_over_ramp_mm: f64,
     /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
     /// after the plan of its first cycle (later cycles need the drawing's feedback), before the
     /// drawing; the result has no copper and its warnings carry the plan metrics line. `""`
@@ -1690,6 +1702,8 @@ impl Default for Options {
             overflow_softness: 0.1,
             cut_vias: true,
             via_cuts: true,
+            via_best_point: false,
+            via_over_ramp_mm: 0.0,
             stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,
