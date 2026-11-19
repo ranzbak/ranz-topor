@@ -9793,7 +9793,6 @@ mod tests {
     /// sync-wait (d9402d48): at the moment the lower waiter takes the slot, the run that turns is already
     /// queued (one lock frees the slot and queues it); with two locks a waiter behind it could take the slot in the gap.
     /// Observes the invariant at the hand-over, so it catches the two-lock turn (an end-state order test did not).
-    /// ignored line: is queued before the run it gave its slot to can take it.
     #[test]
     fn a_turning_run_is_queued_when_the_lower_waiter_takes_its_slot() {
         use std::sync::atomic::{AtomicUsize, Ordering};

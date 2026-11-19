@@ -661,7 +661,7 @@ mod tests {
             }
         }
         assert!(read > 100, "the test read the table often: {read}");
-        assert!(finals.windows(2).all(|w| w[0] == w[1]), "the final table is the same for every lag and interleaving");
+        assert!(finals.windows(2).all(|w| w[0] == w[1]), "the final table is the same for every lag and each of the seeded interleavings");
     }
 
     /// sync-wait: lag 2 lets a run 2 cycles ahead of another read without a wait; lag 0 waits.

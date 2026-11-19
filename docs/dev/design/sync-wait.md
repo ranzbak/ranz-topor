@@ -56,7 +56,7 @@ Simulated on the round-slow per-cycle logs (main r5, 4 slots, 300 s loop, sync p
 - Yields never past the time limit (as today); the stop checks bound every wait as today.
 
 ## Tests (targeted, rule 14c)
-- table.rs: replay view = T(c-1-L) under shuffled arrival and every interleaving of a 3-run toy, L = 0..3
+- table.rs: replay view = T(c-1-L) under shuffled arrival and 12 seeded random interleavings per lag of a 3-run toy, L = 0..3
   (mutants: commit past `min done - L`; view without replay; lag off by one).
 - optimise.rs threaded toys: same table/restarts at 1/2/4 threads and slots with L = 2; L = 0 = main's.
 - Slots: priority order, cycle-boundary turn, a yielded run gets its slot back, no lane lent while one waits.
