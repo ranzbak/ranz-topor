@@ -685,4 +685,23 @@ mod tests {
             assert_eq!(t.lock().st.committed, 2usize.checked_sub(lag), "lag {lag}");
         }
     }
+
+    /// A run whose loop ended (time limit, its own stable, re-lay budget) holds no view back: the
+    /// others read without waiting for cycles it will never offer, at any lag.
+    #[test]
+    fn a_run_that_ended_is_never_waited_for() {
+        let obj = Objective::from_options("length_vias", 25.0, "best");
+        for lag in [0usize, 2] {
+            let t: SharedTable<usize> = SharedTable::new(2, 8, obj, 4).with_lag(lag);
+            t.offer(1, 0, "b0".into(), c(1, 1, 20.0), row(1, 0), CHECK_NONE);
+            t.offer(1, 1, "b1".into(), c(1, 1, 19.0), row(1, 1), CHECK_NONE);
+            t.end(1);
+            for cy in 0..=6 {
+                t.offer(0, cy, format!("a{cy}"), c(1, 1, 30.0 + cy as f64), row(0, cy), CHECK_NONE);
+            }
+            let v = t.sync(0, 7, &mut || true, &|| {}, &|| {}).expect("run 1 ended: no wait");
+            assert!(v.rows.iter().any(|r| r.0 == "b1"), "lag {lag}: the ended run's rows stay readable");
+            assert!(v.fps_before.is_empty(), "lag {lag}: the ended run has no state at cycle {}", 6 - lag);
+        }
+    }
 }

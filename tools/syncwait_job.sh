@@ -92,5 +92,12 @@ case ${1:-} in
     nproc > $R/nproc.txt; uptime >> $R/nproc.txt
     for l in 0 1 2; do one "wt$l:$2:0:4"; done
     note "all done" ;;
+  lagseq)
+    # TIMING pair half: lag $2 on the boards given, one after another; the other slot runs the other lag at the same
+    # time (same neighbour load in both slots: the ccx33's 2 slots share its 4 cores' hyperthreads)
+    nproc > $R/nproc.txt; uptime >> $R/nproc.txt
+    l=$2; shift 2
+    for b in "$@"; do one "wt$l:$b:0:4"; uptime >> $R/nproc.txt; done
+    note "all done" ;;
   *) echo "usage: $0 hash|ab|timing <board>|one <cfg>:<board>:<seed>:<threads>"; exit 2 ;;
 esac
