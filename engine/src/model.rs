@@ -1592,6 +1592,17 @@ pub struct Options {
     /// between them, and moves a via whose site predicts a violation only for a larger smallest
     /// gap. false (default) = as before.
     pub via_pair_room: bool,
+    /// TW6 part E (`[optimize] site_move`, docs/dev/design/tw6-via-sites.md E): in every cycle of
+    /// the TopoR loop, after the via-pair moves, a wire with a via whose interval has no site
+    /// (`topo::pack::Packer::site_room`) is laid again, and when that is not kept the wires whose
+    /// crossings bound the interval are laid again together (TopoR 6.3 manual p. 179, Shift Vias
+    /// submode 2; Luzin, Popov & Popov 2013 p. 134 step 8.1); kept by the board's evaluation.
+    /// false (default) = as before.
+    pub opt_site_move: bool,
+    /// TW6 part E (`[optimize] branch_move`): likewise, the branch arm of a junction inside such an
+    /// interval (its tee via has no site) is laid again (`tree::dependents`, the tree search), so
+    /// the junction moves. false (default) = as before.
+    pub opt_branch_move: bool,
     /// tw4-r2 (1) (`[capacity] pad_exits`, docs/dev/design/tw4-r2.md (1)): with via_cuts, every
     /// wire end at a fine-pitch pad (another net's copper beside it closer than the wire could
     /// pass) holds its planned exit, read from the plan (the leaving pass, the pad side it leaves
@@ -1842,6 +1853,8 @@ impl Default for Options {
             via_disc_height: false,
             via_site_price: "off".into(),
             via_pair_room: false,
+            opt_site_move: false,
+            opt_branch_move: false,
             pad_exits: false,
             pad_exit_static: false,
             pour_cuts: false,

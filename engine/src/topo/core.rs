@@ -2109,6 +2109,19 @@ fn item_edges(st: &State, items: &[(WireId, usize)]) -> Vec<usize> {
     v
 }
 
+/// TW6 part E: the run report's line for `[optimize] site_move` / `branch_move` (`site`, `branch`:
+/// which is on) with the loop's counts `st`. O(1).
+pub fn site_move_line(site: bool, branch: bool, st: &super::optimise::CycleStats) -> String {
+    let mut parts = Vec::new();
+    if site {
+        parts.push(format!("{} of {} site moves kept (a trace with a via without room laid again, else the traces closing its stretch in; [optimize] site_move)", st.site_kept, st.site_moved));
+    }
+    if branch {
+        parts.push(format!("{} of {} branch moves kept (the branch of a junction inside such a stretch laid again; [optimize] branch_move)", st.branch_kept, st.branch_moved));
+    }
+    format!("TopoR loop, vias without room (TopoR Shift Vias with rerouting): {}", parts.join("; "))
+}
+
 /// The victims of one negotiated P4 rip-up round (the pre-loop rounds and TW5 (f) `[optimize]
 /// loop_p4` inside the loop, one choice for both), read from the capacity model `cm` of the present
 /// layering: the wires with a via without a site, a bad via cut's wire and its crosser routed last,
@@ -4599,6 +4612,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// 5.8 `[vias] pair_move`: the length scale (nm, `[vias] pair_max_mm`) of the graded
             /// stretch price ([`super::viaopt::pair_len_price`]); `None` = off.
             pair_move: Option<f64>,
+            /// TW6 part E: `[optimize] site_move` / `branch_move`.
+            site_move: bool,
+            branch_move: bool,
             /// The objective's price of a via (mm, `mm_per_via`), the unit of that stretch price.
             via_mm: f64,
             /// loop-local Step A: the per-wire stretch cache of the layerings (exact).
@@ -5334,6 +5350,83 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 kept
             }
+            /// TW6 part E: [`super::viaopt::siteless_intervals`] of wire `w` in the current layering.
+            fn siteless(&self, w: WireId) -> Vec<(usize, usize, usize, f64)> {
+                self.lr.events.get(w).map_or_else(Vec::new, |ev| super::viaopt::siteless_intervals(self.st, self.packer, w, ev))
+            }
+            fn has_conn(&self, x: WireId) -> bool {
+                self.wire_conn.get(x).is_some_and(|&c| c != usize::MAX)
+            }
+            /// TW6 part E: [`super::viaopt::bounding_wires`] of events `i`, `i + 1` of wire `w`.
+            fn bounding(&self, w: WireId, i: usize) -> Vec<WireId> {
+                let p = self.lr.partner.get(w).map_or(&[][..], |p| &p[..]);
+                super::viaopt::bounding_wires(self.st, w, p, i, &|x| self.has_conn(x))
+            }
+            /// TW6 part E: [`super::viaopt::tee_arms`] of traversals `lo..=hi` of wire `w`. O(wires).
+            fn tee_arms(&self, w: WireId, lo: usize, hi: usize) -> Vec<WireId> {
+                super::viaopt::tee_arms(self.st, &tree::junctions(self.st), w, lo, hi, &|x| self.has_conn(x))
+            }
+            /// TW6 part E: the wires `obs` (and the branches on their junctions) taken out together
+            /// and laid again in route order, each with its own try coefficients at the via weight
+            /// `via_w` (as [`Sp::pair_move`] lays its obstructing wires); the board is layered again
+            /// and the change kept when the archive's evaluation of the whole board ([`evaluation`]:
+            /// violations first, a via without a site among them, with `[vias] site_price` its
+            /// graded deficit too) drops, else everything comes back exactly. Each connection counts
+            /// the try. A priced move, no gate. Whether it was kept.
+            fn relay_kept(&mut self, obs: &[WireId], seed: u64, amp: f64, via_w: f64) -> bool {
+                let e0 = self.eval_now();
+                let before = self.snapshot();
+                let obs_cis: BTreeSet<usize> = obs.iter().map(|&x| self.wire_conn[x]).collect();
+                let gone: BTreeSet<WireId> = obs.iter().copied().collect();
+                let set: Vec<WireId> = gone.iter().copied().chain(tree::dependents(self.st, &gone)).collect();
+                let mut cis: Vec<usize> = set.iter().map(|&x| self.wire_conn[x]).collect();
+                cis.sort_by_key(|&ci| (self.rank[ci], ci));
+                cis.dedup();
+                for &x in &set {
+                    tree::remove_wire(self.st, x);
+                }
+                for &ci in &cis {
+                    self.forced.borrow_mut().remove(&self.conn_of[ci]);
+                }
+                let regs: Vec<Registry> = cis.iter().map(|&ci| self.conn_reg(ci, seed, amp, via_w).0).collect();
+                let n0 = self.st.wires.len();
+                self.st.took_part.clear();
+                let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
+                let mut kept = false;
+                if placed {
+                    if let Some(local) = self.local {
+                        let new: Vec<WireId> = (n0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive).collect();
+                        let (lr, p) = local(self.st, &before.topo, &set, &new, &before.lr, &before.pred, self.ties);
+                        self.set_lr(lr, Some(p));
+                        self.pred_local = true;
+                    } else {
+                        let lr = (self.assign_t)(self.st, self.ties);
+                        self.set_lr(lr, None);
+                    }
+                    let e1 = self.eval_now();
+                    if self.dbg {
+                        eprintln!("LOOPDBG[{}] site/branch move: wires {obs:?} laid again, eval {e0:.3} -> {e1:.3}", self.dbg_tag);
+                    }
+                    if e1 < e0 - 1e-6 {
+                        for &ci in &cis {
+                            self.reroutes[ci] += 1;
+                        }
+                        kept = true;
+                    }
+                }
+                if !kept {
+                    self.restore(&before);
+                }
+                for ci in obs_cis {
+                    self.tries[ci] += 1;
+                    if kept {
+                        self.stuck[ci] = 0;
+                    } else {
+                        self.stuck[ci] += 1;
+                    }
+                }
+                kept
+            }
         }
         impl<'p> Space for Sp<'_, 'p> {
             type Var = LoopVar;
@@ -5739,6 +5832,59 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                 }
                 super::prof::lap(&mut plap, super::prof::K::StPairmove);
+                // TW6 part E (`[optimize] site_move` / `branch_move`; TopoR 6.3 manual p. 179, Shift
+                // Vias submode 2: "wires can be rerouted as well"; Luzin, Popov & Popov 2013 p. 134
+                // step 8.1): per wire (id order, the wires present at the start) its via interval
+                // without a site with the largest amount: (i) the wire laid again (the single
+                // reroute, its own judge); not kept: (ii) the wires whose crossings close the
+                // interval in laid again together, so it can grow to a site; then the branch arms
+                // of the junctions inside it. Each kept by the board's evaluation.
+                if self.site_move || self.branch_move {
+                    let n_w = self.st.wires.len();
+                    for w in 0..n_w {
+                        if ripped >= self.max_ripped || stop() {
+                            break;
+                        }
+                        if !self.st.wires[w].alive || self.wire_conn.get(w).is_none_or(|&ci| ci == usize::MAX) {
+                            continue;
+                        }
+                        let Some(&(_, lo0, hi0, _)) = self.siteless(w).first() else { continue };
+                        let mut tee = (lo0, hi0);
+                        if self.site_move {
+                            cs.site_moved += 1;
+                            ripped += 1;
+                            if self.reroute(&mut topo, w, c.seed ^ 0x5173, c.amp, c.emphasis.via_at(1.0)) {
+                                cs.site_kept += 1;
+                                continue;
+                            }
+                            let Some(&(i, lo, hi, _)) = self.siteless(w).first() else { continue };
+                            tee = (lo, hi);
+                            let obs = self.bounding(w, i);
+                            if !obs.is_empty() && ripped < self.max_ripped && !stop() {
+                                cs.site_moved += 1;
+                                ripped += obs.len();
+                                if self.relay_kept(&obs, c.seed ^ 0x5174, c.amp, c.emphasis.via_at(1.0)) {
+                                    cs.site_kept += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        if self.branch_move {
+                            let arms: Vec<WireId> = self.tee_arms(w, tee.0, tee.1).into_iter().filter(|&b| !(self.site_move && b == w)).collect();
+                            for b in arms {
+                                if ripped >= self.max_ripped || stop() || !self.st.wires[b].alive {
+                                    break;
+                                }
+                                cs.branch_moved += 1;
+                                ripped += 1;
+                                if self.relay_kept(&[b], c.seed ^ 0xB7A9, c.amp, c.emphasis.via_at(1.0)) {
+                                    cs.branch_kept += 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 // loop-local: the variant this cycle offers carries the board's measure.
                 self.resync();
                 cs.busy_s = t0.elapsed().as_secs_f64();
@@ -5836,6 +5982,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pred: pred0,
             pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             pair_move: opts.via_pair_move.then(|| opts.via_pair_max_mm.max(0.0) * MM),
+            site_move: opts.opt_site_move,
+            branch_move: opts.opt_branch_move,
             via_mm: opts.mm_per_via,
             scache: scache_ref,
             local: judge_local.then_some(local_ref),
@@ -6220,6 +6368,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
             "crossing_share": opts.loop_crossing,
             "pair_move": [rep.stats.pair_moved_kept, rep.stats.pair_moved, rep.stats.pair_moved_wires, rep.stats.pair_moved_long],
+            "site_move": [rep.stats.site_kept, rep.stats.site_moved],
+            "branch_move": [rep.stats.branch_kept, rep.stats.branch_moved],
             "variants_table": arch.items.iter().map(|v| serde_json::json!({"label": v.label, "gen": v.payload.gen, "cycle": v.payload.cycle, "errors": v.crit.errors, "penalty": (v.crit.penalty * 1e3).round() / 1e3, "vias": v.crit.vias, "length_mm": (v.crit.length_mm * 1e3).round() / 1e3, "shrinkages": v.crit.shrinkages})).collect::<Vec<_>>(),
             "layer_share_pct": (1000.0 * rep.stats.layer_s / loop_s.max(1e-9)).round() / 10.0,
             "judge": {
@@ -6249,6 +6399,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     rep.stats.pair_moved_long, opts.via_pair_max_mm
                 ));
             }
+        }
+        if opts.opt_site_move || opts.opt_branch_move {
+            warnings.push(site_move_line(opts.opt_site_move, opts.opt_branch_move, &rep.stats));
         }
         if let Some(r) = crep.as_mut() {
             r.stage("after the TopoR loop", &st, &lr.events, &packer, bottom, &|w| wire_conn.get(w).filter(|&&c| c != usize::MAX).map(|&c| conn_of[c]));

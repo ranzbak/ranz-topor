@@ -235,6 +235,69 @@ pub fn crossing_stretch_len(st: &State, w: WireId, events: &[Vec<(usize, f64, i3
     (pos(j) - pos(i)).abs()
 }
 
+/// TW6 part E (`[optimize] site_move`): the via intervals of wire `w` under its layering events
+/// `ev` that have no site by the packer's static room ([`super::pack::Packer::site_room`], part
+/// A's one measure; intervals as [`super::refine::via_ranges`], strict with `[vias]
+/// between_crossings`): per interval (events `i`, `i + 1` change layer) its traversals `lo..=hi`
+/// and graded site amount (> 0, [`super::pack::Packer::site_amount`]); largest amount first, then
+/// event order. Empty for a dead or empty wire. O(events + interval traversals), cached rooms.
+pub fn siteless_intervals(st: &State, pk: &super::pack::Packer, w: WireId, ev: &[(usize, f64, i32)]) -> Vec<(usize, usize, usize, f64)> {
+    let mut out = Vec::new();
+    let Some(wi) = st.wires.get(w) else { return out };
+    let n = wi.tris.len();
+    if !wi.alive || n == 0 {
+        return out;
+    }
+    let d = pk.via_d(wi.net);
+    let (iv, _) = super::refine::via_ranges(ev, pk.via_between);
+    let idx = ev.windows(2).enumerate().filter(|(_, x)| x[0].2 != x[1].2).map(|(i, _)| i);
+    for (i, &(lo, hi)) in idx.zip(&iv) {
+        let (lo, hi) = (lo.min(n - 1), hi.min(n - 1));
+        let (lo, hi) = (lo.min(hi), hi.max(lo));
+        let room = (lo..=hi).map(|k| pk.site_room(wi.tris[k], wi.net, wi.s)).fold(f64::NEG_INFINITY, f64::max);
+        let a = super::pack::Packer::site_amount(room, d, wi.s);
+        if a > 0.0 {
+            out.push((i, lo, hi, a));
+        }
+    }
+    out.sort_by(|x, y| y.3.total_cmp(&x.3).then(x.0.cmp(&y.0)));
+    out
+}
+
+/// TW6 part E: the other nets' wires whose crossings are the events `i` and `i + 1` of wire `w`
+/// (`partner`: its events' crossing partners; they close its via interval in), alive and with a
+/// connection (`has_conn`), ascending.
+pub fn bounding_wires(st: &State, w: WireId, partner: &[Option<(WireId, usize)>], i: usize, has_conn: &dyn Fn(WireId) -> bool) -> Vec<WireId> {
+    let net = st.wires[w].net;
+    let mut v: Vec<WireId> = [i, i + 1]
+        .iter()
+        .filter_map(|&j| partner.get(j).copied().flatten())
+        .map(|(o, _)| o)
+        .filter(|&o| o != w && st.wires.get(o).is_some_and(|x| x.alive && x.net != net) && has_conn(o))
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// TW6 part E (`[optimize] branch_move`): the branch arms whose junction lies inside traversals
+/// `lo..=hi` of wire `w` (`junctions` = [`super::tree::junctions`]: `(branch, end, trunk,
+/// traversal, vertex)`): branches ending on a turn of `w` there, and `w` itself when its own
+/// junction end lies in the interval (the branch of a tee whose via has no site); with a
+/// connection, ascending.
+pub fn tee_arms(st: &State, junctions: &[(WireId, usize, WireId, usize, super::state::VertId)], w: WireId, lo: usize, hi: usize, has_conn: &dyn Fn(WireId) -> bool) -> Vec<WireId> {
+    let n = st.wires[w].tris.len();
+    let mut v: Vec<WireId> = junctions
+        .iter()
+        .filter(|&&(b, end, t, k, _)| (t == w && (lo..=hi).contains(&k)) || (b == w && ((end == 0 && lo == 0) || (end == 1 && hi + 1 >= n))))
+        .map(|&(b, ..)| b)
+        .filter(|&b| has_conn(b))
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// 5.8 (`[vias] pair_move`): the graded price (mm) of moving the wires that cross a via pair's
 /// stretch `len` (nm) round it, on the scale `scale` (nm, `[vias] pair_max_mm`): `mm_per_via x
 /// (len / scale)^2`. Luzin, Popov & Popov 2013 (p. 2) look only at pairs "shorter than a given

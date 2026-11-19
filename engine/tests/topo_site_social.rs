@@ -177,3 +177,151 @@ fn crossed_wire_amount_takes_its_via_interval() {
 fn via_site_social_is_opt_in() {
     assert_eq!(InitWeights::default().site_mm, 0.0);
 }
+
+// ---------------------------------------------------------------- part E (site_move, branch_move)
+
+use topor_engine::topo::viaopt::{bounding_wires, siteless_intervals, tee_arms};
+
+/// B routed straight through the keepout (net 2, x = 20 mm from y = 3 to 37), then A across it:
+/// the state, the packer (via intervals strict, the default), B's wire and A's.
+fn with_b<R>(f: impl FnOnce(&State, &Packer, usize, usize) -> R) -> R {
+    let m = board(true);
+    let b = board::build(&m, &opts()).unwrap();
+    let pk = Packer::for_model(&m, &Options::default(), &b.proj);
+    let mut st = State::new(&b.proj);
+    let ob = |r: &str| m.pads.iter().position(|p| p.ref_ == r).map(|i| b.pad_of.iter().position(|&x| x == i).unwrap()).unwrap();
+    let (pa, pb) = (ob("B1"), ob("B2"));
+    let c = Conn { net: 2, pa, pb, a: b.centre[pa].unwrap(), b: b.centre[pb].unwrap(), w: 0.25 * MM, s: 0.2 * MM };
+    let (w, _) = st.route_conn(&c, &InitWeights::default(), 1.0).expect("B routes");
+    let (qa, qb) = (ob("A1"), ob("A2"));
+    let ca = Conn { net: 1, pa: qa, pb: qb, a: b.centre[qa].unwrap(), b: b.centre[qb].unwrap(), w: 0.25 * MM, s: 0.2 * MM };
+    let (wa, _) = st.route_conn(&ca, &InitWeights::default(), 1.0).expect("A routes");
+    f(&st, &pk, w, wa)
+}
+
+/// A layer change whose interval lies inside the keepout has no site (amount > 1, its traversals
+/// reported); one whose interval reaches out of it has one (not listed); no layer change, no entry;
+/// the largest amount comes first.
+#[test]
+fn siteless_intervals_read_the_room_of_the_whole_interval() {
+    with_b(|st, pk, w, _| {
+        let n = st.wires[w].tris.len();
+        let wi = &st.wires[w];
+        let no_site = |k: usize| Packer::site_amount(pk.site_room(wi.tris[k], wi.net, wi.s), pk.via_d(wi.net), wi.s) > 0.0;
+        // The run of site-less traversals round the middle (y = 20 mm, inside the keepout).
+        let mid = n / 2;
+        assert!(no_site(mid), "B's middle traversal has no site");
+        let (mut k0, mut k1) = (mid, mid);
+        while k0 > 1 && no_site(k0 - 1) {
+            k0 -= 1;
+        }
+        while k1 + 2 < n && no_site(k1 + 1) {
+            k1 += 1;
+        }
+        assert!(k1 >= k0 + 2 && k0 > 1 && k1 + 2 < n, "a site-less run inside the keepout: {k0}..={k1} of {n}");
+        // Events at the first and last site-less traversal, strict: the interval between them.
+        let ev = vec![(0, 0.0, 0), (k0, 0.5, 0), (k1, 0.5, 1), (n - 1, 1.0, 1)];
+        let got = siteless_intervals(st, pk, w, &ev);
+        assert_eq!(got.len(), 1, "{got:?}");
+        let (i, lo, hi, a) = got[0];
+        assert_eq!((i, lo, hi), (1, k0 + 1, k1 - 1));
+        assert!(a > 1.0, "amount {a}");
+        // The interval from the start: it reaches pad B1's surroundings outside the keepout.
+        let ev2 = vec![(0, 0.0, 0), (k1, 0.5, 1), (n - 1, 1.0, 1)];
+        assert!(siteless_intervals(st, pk, w, &ev2).is_empty());
+        assert!(siteless_intervals(st, pk, w, &[(0, 0.0, 0), (n - 1, 1.0, 0)]).is_empty());
+        // Two site-less intervals: the larger amount first, ties by event order.
+        let ev3 = vec![(0, 0.0, 0), (k0, 0.5, 0), (k1, 0.5, 1), (k1, 0.6, 1), (k1, 0.7, 0), (n - 1, 1.0, 0)];
+        let got3 = siteless_intervals(st, pk, w, &ev3);
+        assert!(got3.windows(2).all(|x| x[0].3 > x[1].3 || (x[0].3 == x[1].3 && x[0].0 < x[1].0)), "{got3:?}");
+    });
+}
+
+/// The bounding wires are the crossing partners of the interval's two events: other nets only,
+/// alive, with a connection, each once.
+#[test]
+fn bounding_wires_are_the_interval_partners() {
+    with_b(|st, _, w, wa| {
+        let all = |_: usize| true;
+        // B's events 1 and 2 crossed by A, event 3 by B itself (same net: never).
+        let p = vec![None, Some((wa, 0)), Some((wa, 1)), Some((w, 2))];
+        assert_eq!(bounding_wires(st, w, &p, 1, &all), vec![wa], "A once");
+        assert_eq!(bounding_wires(st, w, &p, 2, &all), vec![wa], "same net left out");
+        assert!(bounding_wires(st, w, &p, 1, &|x| x != wa).is_empty(), "no connection");
+        assert!(bounding_wires(st, w, &[], 0, &all).is_empty());
+    });
+}
+
+/// The tee arms of an interval: a branch ending on a turn of the wire inside it, or the wire itself
+/// when its own junction end lies in it; outside the interval or without a connection, none.
+#[test]
+fn tee_arms_are_the_junctions_inside_the_interval() {
+    with_b(|st, _, w, _| {
+        let n = st.wires[w].tris.len();
+        let all = |_: usize| true;
+        let none = |_: usize| false;
+        // (branch, end, trunk, traversal, vertex): branch 7 on B's traversal 5, B the branch of
+        // trunk 9 at its end 1.
+        let j = vec![(7, 0, w, 5, 0), (w, 1, 9, 2, 0)];
+        assert_eq!(tee_arms(st, &j, w, 4, 6, &all), vec![7]);
+        assert!(tee_arms(st, &j, w, 6, 8, &all).is_empty());
+        let mut both = vec![7, w];
+        both.sort_unstable();
+        assert_eq!(tee_arms(st, &j, w, 4, n - 1, &all), both);
+        assert!(tee_arms(st, &j, w, 4, 6, &none).is_empty());
+        let j0 = vec![(w, 0, 9, 2, 0)];
+        assert_eq!(tee_arms(st, &j0, w, 0, 3, &all), vec![w]);
+        assert!(tee_arms(st, &j0, w, 1, 3, &all).is_empty());
+    });
+}
+
+#[test]
+fn site_and_branch_moves_are_opt_in_and_parse() {
+    let d = Options::default();
+    assert!(!d.opt_site_move && !d.opt_branch_move);
+    let o = Options::from_json(r#"{"opt_site_move": true, "opt_branch_move": true}"#).expect("options parse");
+    assert!(o.opt_site_move && o.opt_branch_move);
+}
+
+/// The report line names exactly the moves that are on, with their counts.
+#[test]
+fn site_move_line_names_the_moves_on() {
+    use topor_engine::topo::core::site_move_line;
+    use topor_engine::topo::optimise::CycleStats;
+    let s = CycleStats { site_moved: 7, site_kept: 2, branch_moved: 5, branch_kept: 1, ..CycleStats::default() };
+    let a = site_move_line(true, false, &s);
+    assert!(a.contains("2 of 7 site moves kept") && a.contains("site_move") && !a.contains("branch"), "{a}");
+    let b = site_move_line(false, true, &s);
+    assert!(b.contains("1 of 5 branch moves kept") && b.contains("branch_move") && !b.contains("site moves"), "{b}");
+    let c = site_move_line(true, true, &s);
+    let (i, j) = (c.find("2 of 7 site moves kept").expect("site part"), c.find("; 1 of 5 branch moves kept").expect("branch part"));
+    assert!(i < j, "{c}");
+}
+
+fn qmtech_crop() -> BoardModel {
+    let path = format!("{}/tests/fixtures/qmtech-usb-crop.json", env!("CARGO_MANIFEST_DIR"));
+    BoardModel::from_json(&std::fs::read_to_string(path).expect("fixture")).expect("fixture parses")
+}
+
+/// Off = the default copper: the search term at weight 0 and both moves false give the routed
+/// items of the options absent; with all on (and the site price) the run completes and reports
+/// the moves.
+#[test]
+fn off_is_the_default_copper_and_on_reports() {
+    use topor_engine::control::RunControl;
+    use topor_engine::route::route_with;
+    let m = qmtech_crop();
+    let base = r#""wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 1, "via_cuts": true"#;
+    let run = |extra: &str| {
+        let o = Options::from_json(&format!("{{{base}{extra}}}")).expect("options parse");
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        route_with(&m, &o, &ctl)
+    };
+    let items = |r: &topor_engine::route::RouteResult| format!("{:?}", r.items);
+    let r0 = run("");
+    assert_eq!(items(&r0), items(&run(r#", "opt_site_move": false, "opt_branch_move": false, "factors": {"weight": {"via_site_social": 0.0}}"#)));
+    assert!(!r0.warnings.iter().any(|w| w.contains("[optimize] site_move") || w.contains("[optimize] branch_move")));
+    let r1 = run(r#", "via_site_price": "graded", "opt_site_move": true, "opt_branch_move": true, "factors": {"weight": {"via_site_social": 50.0}}"#);
+    assert!(r1.warnings.iter().any(|w| w.contains("site moves kept") && w.contains("branch moves kept")), "{:?}", r1.warnings);
+}
