@@ -351,6 +351,7 @@ fn a_tee_event_bounds_the_strict_interval_but_lies_outside_it() {
 fn site_and_branch_moves_are_opt_in_and_parse() {
     let d = Options::default();
     assert!(!d.opt_site_move && !d.opt_branch_move);
+    assert_eq!(d.opt_site_move_detour, 0.5, "r4: the detour price is on with the moves");
     let o = Options::from_json(r#"{"opt_site_move": true, "opt_branch_move": true}"#).expect("options parse");
     assert!(o.opt_site_move && o.opt_branch_move);
 }
@@ -505,4 +506,44 @@ fn a_strict_detour_price_keeps_the_moves_that_shorten() {
     assert!(l0.contains("no detour price ([optimize] site_move_detour = 0)"), "{l0}");
     assert!(l1.contains("refused for their detour ([optimize] site_move_detour = 0.001)"), "{l1}");
     assert!(k1 > k0, "the price keeps the moves that shorten: {l0} / {l1}");
+}
+
+/// TW6 r4: `reroute_set` adds the rerouter's judge price to both sides of its comparison (the state
+/// before the try with the set in place, the state after with the new wires): B laid again on the
+/// same path keeps its length, so the move is kept exactly when the judge price drops.
+#[test]
+fn reroute_set_adds_the_judge_price_on_both_sides() {
+    use topor_engine::topo::optimise::{reroute_set, Rerouter};
+    use topor_engine::topo::state::WireId;
+    struct Mock {
+        c: Conn,
+        before: f64,
+        after: f64,
+    }
+    impl<'p> Rerouter<'p> for Mock {
+        fn price(&mut self, st: &mut State<'p>, w: WireId) -> f64 {
+            st.wire_len(w) / MM
+        }
+        fn place(&mut self, st: &mut State<'p>, _gone: &[WireId]) -> Option<Vec<WireId>> {
+            st.route_conn(&self.c, &InitWeights::default(), 1.0).map(|(w, _)| vec![w])
+        }
+        fn judge_extra(&mut self, _st: &mut State<'p>, _ws: &[WireId], after: bool) -> f64 {
+            if after { self.after } else { self.before }
+        }
+        fn undo(&mut self) {}
+    }
+    let m = board(false);
+    let b = board::build(&m, &opts()).unwrap();
+    let ob = |r: &str| m.pads.iter().position(|p| p.ref_ == r).map(|i| b.pad_of.iter().position(|&x| x == i).unwrap()).unwrap();
+    let (pa, pb) = (ob("B1"), ob("B2"));
+    let c = Conn { net: 2, pa, pb, a: b.centre[pa].unwrap(), b: b.centre[pb].unwrap(), w: 0.25 * MM, s: 0.2 * MM };
+    let kept = |before: f64, after: f64| {
+        let mut st = State::new(&b.proj);
+        let (w, _) = st.route_conn(&c, &InitWeights::default(), 1.0).expect("B routes");
+        reroute_set(&mut st, &[w], &mut Mock { c, before, after }, 0.0).kept
+    };
+    assert!(!kept(0.0, 0.0), "the same path: not kept");
+    assert!(kept(10.0, 0.0), "the judge price drops");
+    assert!(!kept(0.0, 10.0), "the judge price rises");
+    assert!(!kept(10.0, 10.0), "the same judge price on both sides");
 }
