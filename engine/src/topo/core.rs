@@ -4041,12 +4041,27 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // tw4 T1 (`[factors] neck_depth`): the neck-depth part of the measure, as a share of the
         // violation weight (graded only: price = viol_mm x graded).
         let neck_k = if viol_mm > 0.0 { reg.weight("neck_depth").unwrap_or(0.0).max(0.0) / viol_mm } else { 0.0 };
+        // tw4-r2 (3) (`[capacity] pour_cuts`): the pour terminals the plan's copper cuts off
+        // ([`super::pourplan`]), against the board's own cut-off pads before routing.
+        let pour_base = opts.pour_cuts.then(|| super::pourplan::PourBase::new(model, opts.pour_cut_cells));
+        let pour_of = |st: &State, evl: &[Vec<(usize, f64, i32)>]| -> (usize, f64) {
+            match pour_base.as_ref() {
+                Some(pb) if pb.any => super::pourplan::pour_cuts(model, &super::pourplan::plan_items(st, &packer, b, evl, bottom), pb),
+                _ => (0, 0.0),
+            }
+        };
         let measure = |st: &State, lr: &layers::LayerReport| -> Predicted {
             let _pg = super::prof::g(super::prof::K::Measure);
+            let pour = if pour_base.is_some() {
+                super::pourplan::meter::GLOBAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                pour_of(st, &lr.events)
+            } else {
+                (0, 0.0)
+            };
             let neck = if neck_k > 0.0 { neck_k * st.neck_depth(None) } else { 0.0 };
             // tw4 fix round 2 (verifier F2, test hook): the neck-depth part of the last whole-board measure.
             super::optimise::neckcheck::LAST.store(neck.to_bits(), std::sync::atomic::Ordering::Relaxed);
-            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).with_neck(neck).shorts_ranked(opts.pick_shorts, opts.short_weight);
+            let pred = |viol: (usize, f64)| Predicted::of(viol, lr.unlayerable.len(), forced.borrow().len()).with_foreign(foreign_copper(st, &layers_now(st, &lr.events, bottom))).with_neck(neck).with_pour(pour).shorts_ranked(opts.pick_shorts, opts.short_weight);
             if let Some(v) = reused(st, lr) {
                 return pred(v);
             }
@@ -4257,6 +4272,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 forced: forced.borrow().len(),
                 foreign: (du(pp.foreign.0, fc_a.0, fc_b.0), (pp.foreign.1 + fc_a.1 - fc_b.1).max(0.0), du(pp.foreign.2, fc_a.2, fc_b.2)),
                 neck: if neck_k > 0.0 { (pp.neck + neck_k * (nd_a - nd_b)).max(0.0) } else { 0.0 },
+                // tw4-r2 (3): the pour term of the state after the move, whole (a ring is no local
+                // thing: the cut-off component is decided by the whole board's copper).
+                pour: if pour_base.is_some() {
+                    super::pourplan::meter::LOCAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    pour_of(st, &lr.events)
+                } else {
+                    (0, 0.0)
+                },
             };
             let p = Predicted::from_parts(parts, opts.pick_shorts, opts.short_weight);
             if local_check {
@@ -5906,6 +5929,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         m["move_cost"] = serde_json::json!({"moves": mv_n, "us_per_move": (mv_us * 10.0).round() / 10.0, "via_positions": vp_n, "us_per_via_position": (vp_us * 10.0).round() / 10.0});
         let (vc_n, vc_ms, bd_n, bd_ms) = super::refine::meter::read_cm1();
         m["move_cost"]["via_cut"] = serde_json::json!({"calls": vc_n, "ms_in": vc_ms.round(), "builds": bd_n, "ms_builds": bd_ms.round()});
+        let (pg_n, pl_n, pl_skip, p_ms) = super::pourplan::meter::read();
+        m["move_cost"]["pour_cut"] = serde_json::json!({"global": pg_n, "local": pl_n, "local_kept": pl_skip, "ms_in": p_ms.round()});
         // par-refine: the lane executor's epochs, lane-epochs, candidates evaluated past a kept one
         // (wasted) and again for an end-site fill (redone); the build memo's hits and misses.
         {

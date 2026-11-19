@@ -636,6 +636,9 @@ pub struct MeasureParts {
     /// tw4 T1: the neck-depth part of `graded` (`[factors] neck_depth` / violation weight x the
     /// state's Σ d², [`super::state::State::neck_depth`]); no count.
     pub neck: f64,
+    /// tw4-r2 (3) (`[capacity] pour_cuts`): the pour terminals the plan's copper cuts off
+    /// `(count, graded)` ([`super::pourplan::pour_cuts`]).
+    pub pour: (usize, f64),
 }
 
 /// Equal predictions: the same numbers; how they were made ([`Predicted::parts`]) is not
@@ -651,14 +654,14 @@ impl Predicted {
     /// connections. O(1).
     pub fn of(cap: (usize, f64), unlayerable: usize, forced: usize) -> Predicted {
         let n = unlayerable + forced;
-        let parts = MeasureParts { cap, unlayerable, forced, foreign: (0, 0.0, 0), neck: 0.0 };
+        let parts = MeasureParts { cap, unlayerable, forced, foreign: (0, 0.0, 0), neck: 0.0, pour: (0, 0.0) };
         Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0, shorts: unlayerable, short_extra: 0.0, parts }
     }
     /// loop-local: the prediction of `parts` (the per-edge model; no shrinkages), shorts ranked
     /// as [`Predicted::shorts_ranked`]. Equal to the measure's own prediction of the same parts.
     /// O(1).
     pub fn from_parts(parts: MeasureParts, pick_shorts: bool, short_weight: f64) -> Predicted {
-        Predicted::of(parts.cap, parts.unlayerable, parts.forced).with_foreign(parts.foreign).with_neck(parts.neck).shorts_ranked(pick_shorts, short_weight)
+        Predicted::of(parts.cap, parts.unlayerable, parts.forced).with_foreign(parts.foreign).with_neck(parts.neck).with_pour(parts.pour).shorts_ranked(pick_shorts, short_weight)
     }
     /// Plus the traversals through foreign copper `(count, graded, shorts)` ([`foreign_copper`]:
     /// the ones through a no-tracks rule area are violations but no shorts). O(1).
@@ -673,6 +676,15 @@ impl Predicted {
         }
         let parts = MeasureParts { neck: self.parts.neck + x, ..self.parts };
         Predicted { graded: self.graded + x, parts, ..self }
+    }
+    /// tw4-r2 (3): plus the pour terminals the plan cuts off `(count, graded)` (both 0 leaves it
+    /// as it was). O(1).
+    pub fn with_pour(self, x: (usize, f64)) -> Predicted {
+        if x.0 == 0 && x.1 == 0.0 {
+            return self;
+        }
+        let parts = MeasureParts { pour: (self.parts.pour.0 + x.0, self.parts.pour.1 + x.1), ..self.parts };
+        Predicted { count: self.count + x.0, graded: self.graded + x.1, parts, ..self }
     }
     /// The same prediction with the shorts ranked at weight `k` (`[optimize] short_weight`, at
     /// least 1) when `on` (`[optimize] pick_shorts`); off: not ranked (they stay in `count` and

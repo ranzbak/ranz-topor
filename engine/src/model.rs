@@ -1500,6 +1500,14 @@ pub struct Options {
     /// 0 at zero overage, no step there) and counts as a predicted violation only from `over >=
     /// ramp`. 0 (default) = the step at zero (every over-full cut a full violation).
     pub via_over_ramp_mm: f64,
+    /// tw4-r2 (3) (`[capacity] pour_cuts`): the TopoR loop's measure counts a pour terminal (a
+    /// pad that reaches its net only through a pour) that the plan's copper cuts off its pour as
+    /// a predicted violation, graded by the pads cut off (`topo::pourplan`). false (default) =
+    /// not priced in the plan (the stitching after the drawing repairs what it can).
+    pub pour_cuts: bool,
+    /// tw4-r2 (3) (`[capacity] pour_cut_cells`): raster cells per pour layer of the plan's pour
+    /// check (coarser = faster; the check of the drawn copper uses 4 M).
+    pub pour_cut_cells: f64,
     /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
     /// after the plan of its first cycle (later cycles need the drawing's feedback), before the
     /// drawing; the result has no copper and its warnings carry the plan metrics line. `""`
@@ -1704,6 +1712,8 @@ impl Default for Options {
             via_cuts: true,
             via_best_point: false,
             via_over_ramp_mm: 0.0,
+            pour_cuts: false,
+            pour_cut_cells: 1.0e6,
             stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,

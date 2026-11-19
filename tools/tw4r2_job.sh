@@ -6,7 +6,8 @@
 #   tw4r2_job.sh eq <cfgs>   equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads)
 # Every run: harness.score_runs (cpu clock 2400 s unless equal time), optimize.runs=1, --no-png, realise erbs.
 # cfg: K = rounds=1; e<k> = equal time (wall 300 s) seed k; suffixes (any order, at the end):
-#   b = [capacity] via_best_point = true; r = [capacity] via_over_ramp = 0.05; R = via_over_ramp = 0.1.
+#   b = [capacity] via_best_point = true; r = [capacity] via_over_ramp = 0.05; R = via_over_ramp = 0.1;
+#   p = [capacity] pour_cuts = true.
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
@@ -22,6 +23,7 @@ one() {
     if [ "${c%b}" != "$c" ]; then SETS+=(--set capacity.via_best_point=true); c=${c%b}
     elif [ "${c%r}" != "$c" ]; then SETS+=(--set capacity.via_over_ramp=0.05); c=${c%r}
     elif [ "${c%R}" != "$c" ]; then SETS+=(--set capacity.via_over_ramp=0.1); c=${c%R}
+    elif [ "${c%p}" != "$c" ]; then SETS+=(--set capacity.pour_cuts=true); c=${c%p}
     else break; fi
   done
   case $c in
@@ -45,6 +47,11 @@ case ${1:-} in
     ( hzq run --threads 4 --name t4r2-tests -- bash $ROOT/tools/tw4r2_job.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
     for b in esp qmtech; do
       ( hzq run --threads 4 --name t4r2-$b -- bash -c "for c in K Kb Kr KR; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-$b.log 2>&1; note "unit $b rc $?" ) &
+    done
+    wait; note "all done" ;;
+  pour)
+    for b in esp qmtech; do
+      ( hzq run --threads 1 --name t4r2-p$b -- bash $ROOT/tools/tw4r2_job.sh one Kp:$b > $R/u-p$b.log 2>&1; note "unit p$b rc $?" ) &
     done
     wait; note "all done" ;;
   eq)
