@@ -103,6 +103,10 @@ SETTINGS: list[Setting] = [
        kicad="KiCad → Edit → Fill All Zones (B); Edit → Cleanup Tracks & Vias"),
     _s("run", "refill_after_accept", "bool", True, "After Accept, KiCad refills all zones itself (a second undo step), so the pours and the DRC counts are right without pressing B. false = Accept is exactly one undo step; the zones keep the fill written by commit_fills (or, with commit_fills = false, the fill from before the run) until you press B (Edit → Fill All Zones).",
        kicad="KiCad → Edit → Fill All Zones (B)"),
+    _s("run", "progress_preview", "str", "last", "Which result the progress dialog's board image shows first while the router runs (a toggle in the dialog switches at any time): last = the last round, whatever its score (user 2026-11-19: during the TopoR loop the plan of the loop cycle that finished last, predicted, not drawn copper; once a round is drawn its copper); run = the newest pick of the run whose own best changed last (of the N seeded runs); best = the best so far over all runs (what OK / Cancel keeps; the post-run preview always shows that one, it is what Accept writes); off = no image (no sketches are built). The image is drawn from the board model inside the plugin, without kicad-cli or DRC, and the router builds a sketch only when the dialog asks for one (see progress_preview_interval_s): runs without the dialog never build any.",
+       choices=("last", "run", "best", "off"), since=V5),
+    _s("run", "progress_preview_interval_s", "float", 2.0, "How often the progress dialog asks the router for a new sketch of the shown result (seconds of wall time). A shorter interval follows the loop more closely and costs the router a little more (one sketch per request, at the end of a loop cycle: about the work of measuring the plan once); a longer one is cheaper. The dialog redraws only when a new sketch arrived. No effect with progress_preview = off.",
+       unit="s", range=(0.2, 600), since=V5),
     # ---- [nets]
     _s("nets", "do_not_touch", "list", [], "Net names or glob patterns whose copper is a fixed obstacle and never routed, ripped or smoothed.",
        elem="str"),

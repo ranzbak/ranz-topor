@@ -354,6 +354,51 @@ def test_run_cancel_keeps_best_result_and_previews(app, eprom, tmp_path, reports
     assert out.cancelled is True
 
 
+class _SketchJob(ProxyJob):
+    """ProxyJob that records whether the plugin switched the engine's sketches on (last-preview); asks and fetches are no-ops."""
+    enabled = False
+
+    def enable_sketches(self):
+        self.enabled = True
+
+    def request_sketch(self):
+        pass
+
+    def sketch(self, kind):
+        return None
+
+
+class _SketchEngine(ProxyEngine):
+    def route_async(self, m, o):
+        j = _SketchJob(topor_engine.route_async(m, o), self.hold, self.patch, end_real=_dialog_without_cap(o))
+        self.jobs.append(j)
+        return j
+
+
+class _ImageUi(ScriptedUi):
+    """A progress dialog with a board image (or, `kind` None, with "off")."""
+
+    def __init__(self, kind, **kw):
+        super().__init__(**kw)
+        self.kind = kind
+
+    def preview_wanted(self):
+        return self.kind
+
+    def sketch(self, kind, sk):
+        pass
+
+
+@pytest.mark.parametrize("kind", [None, "last"])
+def test_run_builds_sketches_only_when_the_dialog_shows_an_image(app, eprom, tmp_path, reports, kind):
+    """verify-last-preview F3: progress_preview = off (preview_wanted() None) never switches the engine's sketches on
+    (the router then builds none: no cost); an image kind does."""
+    eng = _SketchEngine(hold=2)
+    ui = _ImageUi(kind, accept=False, cancel_at_iteration=1)
+    do_run(eprom, tmp_path, ui=ui, engine=eng)
+    assert eng.jobs[0].enabled is (kind is not None)
+
+
 def test_run_cancel_with_nothing_routed_is_cancelled(app, eprom, tmp_path, reports):
     eng = ProxyEngine(hold=2, patch=_nothing_routed)
     ui = ScriptedUi(accept=True, cancel_at_iteration=1)

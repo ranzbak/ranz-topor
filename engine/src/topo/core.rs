@@ -1319,6 +1319,8 @@ impl<'a> Coord<'a> {
                 p.best_open = b.crit.open;
                 p.best_shrinkages = b.crit.shrinkages;
                 p.best_round = b.cycle as u32;
+                // last-preview: drawn (a run's drawn pick) or predicted (a TopoR loop's pick)
+                p.best_kind = if self.best_of(&s).is_some() { "copper" } else { "plan" }.into();
             }
             if let Some((cycle, judged, line)) = round {
                 if let Some((j, vs, dec)) = judged {
@@ -1334,11 +1336,64 @@ impl<'a> Coord<'a> {
                     p.last_vs_best = vs.to_string();
                     p.last_decider = dec.map_or(String::new(), |d| d.0.to_string());
                     p.last_delta = dec.map_or(0.0, |d| d.1);
+                    p.last_at_s = self.ctl.since_start_s();
                 }
                 p.push_round_line(line);
             }
         });
     }
+}
+
+/// last-preview: what a run's loop remembers for the progress dialog's sketches: its pick at the
+/// last cycle's end (a change = its new best) and the mid states of the cycle running now that
+/// may become its pick ([`Space::after_cycle`]).
+#[derive(Default)]
+struct SketchBook {
+    pick: Option<Criteria>,
+    mid: Vec<(Criteria, crate::control::Sketch)>,
+}
+
+/// last-preview: a sketch of `items` with `crit`'s numbers. O(1) + the move.
+fn sketch_of(run: u32, cycle: usize, kind: &str, crit: &Criteria, items: Vec<Item>) -> crate::control::Sketch {
+    crate::control::Sketch { run, cycle: cycle as u32, kind: kind.into(), errors: crit.errors, open: crit.open, violations: crit.violations, vias: crit.vias, length_mm: crit.length_mm, items, ..Default::default() }
+}
+
+/// last-preview: loop cycle `cycle` of run `run` (1-based) ended at `at` s with its own state's
+/// predicted criteria `c` (the Last round row while the loop runs). O(1).
+fn note_loop_cycle(p: &mut crate::control::Progress, run: u32, cycle: usize, restarts: usize, at: f64, c: &Criteria) {
+    if cycle > 0 {
+        p.cycles_total += 1;
+    }
+    p.loop_restarts = restarts as u32;
+    p.loop_run = run;
+    p.loop_cycle = cycle as u32;
+    p.loop_at_s = at;
+    p.loop_errors = c.errors;
+    p.loop_open = c.open;
+    p.loop_violations = c.violations;
+    p.loop_vias = c.vias;
+    p.loop_length_mm = c.length_mm;
+    p.loop_shrinkages = c.shrinkages;
+}
+
+/// last-preview: run `run`'s own pick changed (the Last run row): it came from cycle `cycle`,
+/// `kind` "plan" (predicted) or "copper" (drawn). O(1).
+fn note_run_pick(p: &mut crate::control::Progress, run: u32, cycle: usize, at: f64, kind: &str, c: &Criteria) {
+    let k = (run as usize).saturating_sub(1);
+    if p.pick_cycles.len() <= k {
+        p.pick_cycles.resize(k + 1, 0);
+    }
+    p.pick_cycles[k] = cycle as u32;
+    p.runbest_run = run;
+    p.runbest_cycle = cycle as u32;
+    p.runbest_at_s = at;
+    p.runbest_kind = kind.into();
+    p.runbest_errors = c.errors;
+    p.runbest_open = c.open;
+    p.runbest_violations = c.violations;
+    p.runbest_vias = c.vias;
+    p.runbest_length_mm = c.length_mm;
+    p.runbest_shrinkages = c.shrinkages;
 }
 
 /// Seed of run `k` of a best-of-N call: run 0 keeps the configured seed.
@@ -1385,6 +1440,8 @@ struct Run {
     /// TW3: rows of the four bests this run still draws (draw-only rounds) and the ones it drew.
     queue: Vec<Assigned>,
     rows_drawn: Vec<(Assigned, Criteria, RouteResult)>,
+    /// last-preview: the run's drawn pick after its last judged round (a change = its new best).
+    drawn_pick: Option<Criteria>,
 }
 
 impl Run {
@@ -1410,6 +1467,7 @@ impl Run {
             done: false,
             queue: Vec::new(),
             rows_drawn: Vec::new(),
+            drawn_pick: None,
         }
     }
 
@@ -1569,6 +1627,16 @@ impl Run {
                 judged = Some(Judged { crit, routed, total, as_drawn });
             }
         };
+        // last-preview: the copper of the variant the round is judged by (only while the caller
+        // shows sketches: the last round's sketch).
+        // The same choice as `note_judged`: the better of the variants by the objective.
+        let judged_items: std::cell::RefCell<Option<(Criteria, Vec<Item>)>> = std::cell::RefCell::new(None);
+        let keep_items = |c: &Criteria, r: &RouteResult| {
+            let mut ji = judged_items.borrow_mut();
+            if ctl.sketches.enabled() && ji.as_ref().is_none_or(|(b, _)| obj.better(c, b)) {
+                *ji = Some((*c, r.items.clone()));
+            }
+        };
         // The limit cut this cycle's pour stitching (set below; verify-sl3 F1).
         let mut cycle_stitch_cut = false;
         if !interrupted || self.arch.items.is_empty() {
@@ -1641,6 +1709,7 @@ impl Run {
                 let (r, c) = stitched(r, c);
                 if !past() || empty {
                     note_judged(c, r.routed, true);
+                    keep_items(&c, &r);
                     note_row(c, &r);
                     self.arch.offer(Variant { label: format!("round {cycle} as drawn{tag}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
                 }
@@ -1652,6 +1721,7 @@ impl Run {
             (cyc_err, cyc_viol) = (c.errors, c.violations);
             if !past() || self.arch.items.is_empty() {
                 note_judged(c, r.routed, false);
+                keep_items(&c, &r);
                 note_row(c, &r);
                 self.arch.offer(Variant { label: format!("round {cycle}{tag}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
             }
@@ -1663,6 +1733,31 @@ impl Run {
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
         coord.publish(pc, !self.arch.items[pick].payload.result.timed_out);
+        // last-preview: the drawn round's copper (the variant it is judged by) is the last round's
+        // sketch, and the run's pick, when it changed, its best one (the Last run row); the copper
+        // is copied only while the caller shows sketches.
+        {
+            let run = ctl.run.max(1);
+            let at = ctl.since_start_s();
+            let changed = self.drawn_pick.as_ref() != Some(&pc);
+            if changed {
+                self.drawn_pick = Some(pc);
+                let bc = self.arch.items[pick].payload.cycle;
+                ctl.with_progress(|p| note_run_pick(p, run, bc, at, "copper", &pc));
+            }
+            if ctl.sketches.enabled() {
+                let items_of = |i: usize| self.arch.items[i].payload.result.items.clone();
+                if let (Some(j), Some((c, items))) = (judged, judged_items.borrow_mut().take()) {
+                    if c == j.crit {
+                        ctl.publish_sketch(sketch_of(run, cycle, "copper", &j.crit, items), crate::control::SketchTo { last: true, best: false });
+                    }
+                }
+                if changed {
+                    let bc = self.arch.items[pick].payload.cycle;
+                    ctl.publish_sketch(sketch_of(run, bc, "copper", &pc, items_of(pick)), crate::control::SketchTo { last: false, best: true });
+                }
+            }
+        }
         // Soft cuts (M-B2, Haas 2026 §VI-E: "every hard cut so far becomes a soft cost"): a cycle
         // worse than the best so far turns the lowered rooms into a price on their passages (edge
         // history, which fades like the rest), so they no longer forbid what the plan needs.
@@ -4703,8 +4798,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ctl: &'a RunControl,
             /// TW5 ESCAPE.
             tw5: Tw5<'a, 'p>,
+            /// last-preview: the board (layers of the plan sketch) and the sketch bookkeeping.
+            board: &'a board::Board,
+            sk: SketchBook,
         }
         impl<'p> Sp<'_, 'p> {
+            /// last-preview: the plan sketch of the current state (its layer stretches and planned
+            /// vias, [`super::pourplan::plan_items`], KiCad frame), labelled with `crit`. Reads the
+            /// state only (the via site cache it may fill is a pure memo). O(passes).
+            fn plan_sketch(&self, cycle: usize, crit: &Criteria) -> crate::control::Sketch {
+                let t0 = std::time::Instant::now();
+                let items = super::pourplan::plan_items(self.st, self.packer, self.board, &self.lr.events, self.bottom);
+                let sk = sketch_of(self.ctl.run.max(1), cycle, "plan", crit, items);
+                let dt = t0.elapsed().as_secs_f64();
+                self.ctl.with_progress(|p| p.sketch_build_s += dt);
+                sk
+            }
             /// Debug: the criteria now as one short text.
             fn dbg_crit(&mut self) -> String {
                 let c = self.criteria();
@@ -5178,6 +5287,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 let fp = self.fingerprint();
                 let var = self.snapshot();
+                // last-preview: a mid state better than everything the archive held may become the
+                // run's pick at the cycle's end; its state is gone by then, so its sketch is taken now
+                // (only while the caller shows sketches)
+                if self.ctl.sketches.enabled() && self.tw5.floor.iter().all(|f| self.obj.better(&crit, f)) {
+                    let sk = self.plan_sketch(0, &crit);
+                    self.sk.mid.push((crit, sk));
+                }
                 self.tw5.floor.push(crit);
                 self.tw5.offers.push((label, crit, var, fp));
             }
@@ -5570,6 +5686,46 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             fn take_offers(&mut self) -> Vec<(String, Criteria, LoopVar, u64)> {
                 std::mem::take(&mut self.tw5.offers)
+            }
+            fn after_cycle(&mut self, cycle: usize, pick: &Criteria, own: &Criteria, restarts: usize) {
+                // last-preview: the cycle's own state goes to the progress (the Last round row, the
+                // cycle counter); a changed pick is the run's new best (the Last run row). Sketches
+                // only while the caller shows them: the run's pick when it changed (its own end
+                // state, or a mid state taken in `offer_mid`), the end state when one is asked for.
+                let run = self.ctl.run.max(1);
+                let at = self.ctl.since_start_s();
+                self.ctl.with_progress(|p| note_loop_cycle(p, run, cycle, restarts, at, own));
+                let mid = std::mem::take(&mut self.sk.mid);
+                let changed = self.sk.pick.as_ref() != Some(pick);
+                if changed {
+                    self.sk.pick = Some(*pick);
+                    self.ctl.with_progress(|p| note_run_pick(p, run, cycle, at, "plan", pick));
+                }
+                if !self.ctl.sketches.enabled() {
+                    return;
+                }
+                let want = self.ctl.sketches.wanted();
+                let mut sent_last = false;
+                if changed {
+                    let sk = if own == pick {
+                        Some(self.plan_sketch(cycle, own))
+                    } else {
+                        mid.into_iter().find(|(c, _)| c == pick).map(|(_, mut sk)| {
+                            sk.cycle = cycle as u32;
+                            sk
+                        })
+                    };
+                    if let Some(sk) = sk {
+                        // the run's new pick is its own end state: the same sketch is the last one
+                        let to_last = want && own == pick;
+                        sent_last = to_last;
+                        self.ctl.publish_sketch(sk, crate::control::SketchTo { last: to_last, best: true });
+                    }
+                }
+                if want && !sent_last {
+                    let sk = self.plan_sketch(cycle, own);
+                    self.ctl.publish_sketch(sk, crate::control::SketchTo { last: true, best: false });
+                }
             }
             fn restore(&mut self, v: &LoopVar) {
                 let _pg = super::prof::g(super::prof::K::SpRestore);
@@ -6114,6 +6270,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 offers: Vec::new(),
             },
             pre: pre_loop.clone(),
+            board: b,
+            sk: SketchBook::default(),
         };
         let bounded_osc = opts.oscillation == "bounded";
         // TW3 (D6): the dialog run has no cycle cap (OK, Cancel or the time limit end it); headless
