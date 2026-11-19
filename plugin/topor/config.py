@@ -63,7 +63,7 @@ def coerce(s: Setting, raw):
         if word in ("auto", "none"):
             return ("auto" if word == "auto" else 0.0), None
         return s.default, 'must be a number of seconds, "auto" or "none"'
-    if s.key == "refine_lanes" and isinstance(raw, str):  # par-refine: "auto" (the default) or a lane count
+    if s.key in ("refine_lanes", "draw_lanes") and isinstance(raw, str):  # par-refine / par-draw: "auto" (the default) or a lane count
         if raw.strip().lower() == "auto":
             return "auto", None
         return s.default, 'must be a lane count (1 .. 256) or "auto"'
@@ -192,11 +192,11 @@ class Config:
         nested ``expert`` table. Settings whose engine feature is not available yet are omitted."""
         out: dict = {}
         for s in SETTINGS:
-            if not s.engine_field or not available(s):
+            if not s.engine_field or not (available(s) or unreleased_allowed()):
                 continue
             v = self.values[(s.section, s.key)]
             f = s.engine_field
-            if f == "refine_lanes" and v == "auto":
+            if f in ("refine_lanes", "draw_lanes") and v == "auto":
                 v = 0  # the engine's "auto"
             if f in _ENGINE_AUTO:
                 v = v if isinstance(v, bool) else _ENGINE_AUTO[f](self.values) if v == "auto" else v == "on"
@@ -232,6 +232,27 @@ def _doc_line(s: Setting) -> str:
         parts.append(f"[{s.unit}]")
     parts.append(f"default {toml_value(s.default)}, range {_range_text(s)}")
     return "# " + " ".join(parts)
+
+
+def unreleased_allowed() -> bool:
+    """``TOPOR_UNRELEASED_SETTINGS=1``: settings of a later release (schema ``since`` > CURRENT_VERSION) reach the
+    engine (measurement switch of the harness; never set by the plugin). O(1)."""
+    return os.environ.get("TOPOR_UNRELEASED_SETTINGS") == "1"
+
+
+def unavailable_overrides(keys) -> list:
+    """The ``section.key`` names among ``keys`` ((section, key) tuples or "section.key" strings) whose setting is
+    not available in this version (schema ``since``) and so would never reach the engine. Empty with
+    TOPOR_UNRELEASED_SETTINGS=1. Fail-fast helper of the harness (--set of such a setting is an error). O(keys)."""
+    if unreleased_allowed():
+        return []
+    out = []
+    for k in keys:
+        sk = tuple(k.split(".", 1)) if isinstance(k, str) else tuple(k)
+        s = SETTINGS_BY_KEY.get(sk)
+        if s is not None and not available(s):
+            out.append(f"{sk[0]}.{sk[1]} (since {s.since})")
+    return out
 
 
 def _since_note(s: Setting) -> str:
@@ -376,6 +397,12 @@ def load_config(project_dir: Path) -> tuple[Config, list[Finding]]:
                 findings.append(Finding("CFG_VALUE", "warning", f"{full} = {raw!r} {err}; the default {s.default!r} is used.",
                                         f"Correct {full} in {CONFIG_NAME} (allowed: {_range_text(s)}).", (full,)))
             values[(sec, key)] = v
+            if not err and not available(s) and v != s.default:
+                findings.append(Finding("CFG_NOT_YET_AVAILABLE", "warning",
+                                        f"{CONFIG_NAME}{_line_text(key_line(text, sec, key))} sets {full} = {toml_value(v)}, "
+                                        f"which arrives in {s.since} (this is {CURRENT_VERSION}); the engine does not get it, "
+                                        f"the run behaves as if the line were not there.",
+                                        f"Comment the line out until {s.since}; {DOCS_HINT}.", (full,)))
             if not err:
                 pin = _pinned_old_default(s, v, key_line(text, sec, key))
                 if pin:

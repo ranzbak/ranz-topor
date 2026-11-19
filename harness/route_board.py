@@ -118,6 +118,12 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
     from topor.fake import FakeBoard, ScriptedUi
 
     t_start = time.monotonic()
+    from topor.config import unavailable_overrides
+    if bad := unavailable_overrides(overrides or {}):
+        # fail fast, before any work: such a setting never reaches the engine (Config.engine_options leaves out
+        # `since` > CURRENT_VERSION), the run would silently use the default
+        raise SystemExit("route_board: --set of a setting that does not reach the engine in this version: "
+                         + ", ".join(bad) + " (TOPOR_UNRELEASED_SETTINGS=1 lets later-release settings through for measurement)")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     hand, inp, srep = strip.prepare(board, out_dir, whole_project=whole_project, name=name, keep_copper=keep_copper)
@@ -218,6 +224,9 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         "limit_cut": (outcome.time_limit or {}).get("cut"),
         "report_dir": str(outcome.report_dir) if outcome.report_dir else None,
     }
+    if outcome.profile:  # TW0 (TOPO_PROF=1): counters for tools/prof_table.py
+        from topor.run import _profile_facts
+        m["profile"] = _profile_facts(outcome)
     # M1 compass (toporlib.compass): per violation class predicted vs drawn vs KiCad DRC, per connection detour and
     # vias planned vs drawn; full table in <name>--compass.json, flat columns in the metrics
     try:

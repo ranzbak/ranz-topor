@@ -861,6 +861,7 @@ impl<'p> State<'p> {
     /// used). A junction end (`on: Some((w, k))`) is reached only in its triangle, and the chords
     /// of `w` there are not crossed (the trunk turns at the corner).
     pub fn search_tree(&self, c: &Conn, src: &[TreeEnd], dst: &[TreeEnd], wt: &InitWeights, scale: f64, hook: Option<&PassHook>) -> Option<TreePath> {
+        let _pg = super::prof::g(super::prof::K::SearchTree);
         let pr = self.proj;
         let mut off = Vec::with_capacity(pr.edges.len() + 1);
         let mut acc = 0;
@@ -984,6 +985,7 @@ impl<'p> State<'p> {
     /// stretches between them run through the same edges) until none is left; a swap is kept
     /// only when it lowers the different-net crossing count of the triangles it touches.
     pub fn uncross_all(&mut self, max_rounds: usize) -> usize {
+        let _pg = super::prof::g(super::prof::K::UncrossAll);
         let mut swaps = 0;
         for _ in 0..max_rounds {
             let mut changed = false;
@@ -1040,6 +1042,7 @@ impl State<'_> {
     /// [`State::uncross_from`] and the wires that took part in a kept swap (ascending, once each):
     /// the ones Polubasov 2010 lays anew ([`State::relay`]).
     pub fn uncross_from_touched(&mut self, w: WireId, max_swaps: usize) -> (usize, Vec<WireId>) {
+        let _pg = super::prof::g(super::prof::K::UncrossTouched);
         let mut swaps = 0;
         let mut took_part: std::collections::BTreeSet<WireId> = std::collections::BTreeSet::new();
         let mut todo: Vec<WireId> = vec![w];
@@ -1109,6 +1112,7 @@ impl State<'_> {
     /// A wire with a junction end or turns is left alone. Returns `(old id, new id)` of the wires
     /// that were replaced (a kept lay is a new wire; the old one is dead). At most `max` wires.
     pub fn relay(&mut self, ws: &[WireId], max: usize, conn_of: &dyn Fn(WireId) -> Option<(Conn, InitWeights, f64)>) -> Vec<(WireId, WireId)> {
+        let _pg = super::prof::g(super::prof::K::Relay);
         let mut replaced = Vec::new();
         for &w in ws.iter().take(max) {
             let wi = &self.wires[w];
@@ -1139,6 +1143,7 @@ impl State<'_> {
     /// their price is the caller's report), by breadth-first search, through the first gap of
     /// each edge. `None` only when the two lie in parts of the board no edge joins. O(triangles).
     pub fn any_path(&self, c: &Conn) -> Option<Path> {
+        let _pg = super::prof::g(super::prof::K::AnyPath);
         let pr = self.proj;
         let ok = |t: TriId| !pr.tri_out[t];
         let starts: Vec<TriId> = pr.vert_tris[c.a].iter().copied().filter(|&t| ok(t)).collect();

@@ -401,6 +401,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         Some((Score { incomplete: c.errors, shorts: c.shorts, ranked: c.ranked(), value: obj.value(&c), scale: obj.base(&c) }, obj.value(&c)))
     };
     let offer = |sp: &mut S, arch: &mut Archive<Gen<S::Var>>, label: String, gen: usize, cycle: usize, rep: &mut LoopReport| -> bool {
+        let _pg = super::prof::g(super::prof::K::Offer);
         let crit = sp.criteria();
         rep.offered += 1;
         let kept = if arch.items.iter().any(|o| o.crit.covers(&crit)) {
@@ -425,7 +426,9 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         sh.offer(cycle, label.to_string(), gen, crit, var, fp, check);
         fp
     };
+    super::prof::mark("pre-loop");
     offer(sp, arch, "initial plan (gen 0)".into(), 0, 0, &mut rep);
+    super::prof::mark("offer0");
     let mut my_fp = share(sp, &format!("run {} initial plan (gen 0)", p.run + 1), 0, 0, super::table::CHECK_NONE);
     let Some((s0, v0)) = score(arch) else { return rep };
     on_pick(0, &arch.items[arch.pick(&obj).expect("scored")].crit, false);
@@ -542,6 +545,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             rep.stable_at = Some(cycle);
         }
         on_pick(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, rep.stable_at.is_some());
+        super::prof::cycle(cycle, cs.tried, cs.kept, cs.relaid, cs.pair_moved, cs.pair_relaid, kept);
         rep.lines.push(format!(
             "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, judge {}g/{}m/{}l, {}{}, best {:.1}{}",
             ctx.amp,
@@ -688,6 +692,7 @@ pub fn foreign_copper(st: &State, layers: &[Vec<u64>]) -> (usize, f64, usize) {
 /// [`foreign_copper`] of the wires `only[w]` alone (loop-local; per wire, so the sum over all
 /// wires is the board's). O(their traversals x obstacles per triangle).
 pub fn foreign_copper_only(st: &State, layers: &[Vec<u64>], only: Option<&[bool]>) -> (usize, f64, usize) {
+    let _pg = super::prof::g(super::prof::K::ForeignCopper);
     let pr = st.proj;
     let all = if pr.n_layers >= 64 { u64::MAX } else { (1u64 << pr.n_layers) - 1 };
     let (mut count, mut graded, mut shorts) = (0usize, 0.0f64, 0usize);
@@ -762,6 +767,7 @@ pub fn layers_now(st: &State, events: &[Vec<(usize, f64, i32)>], bottom: i32) ->
 /// [`layers_now`] of the wires `only[w]`, empty for the others (loop-local). O(their traversals
 /// + events) plus O(wires).
 pub fn layers_now_only(st: &State, events: &[Vec<(usize, f64, i32)>], bottom: i32, only: Option<&[bool]>) -> Vec<Vec<u64>> {
+    let _pg = super::prof::g(super::prof::K::LayersNow);
     let bit = |l: i32| 1u64 << l.clamp(0, 63);
     (0..st.wires.len())
         .map(|w| {

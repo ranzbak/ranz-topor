@@ -377,7 +377,7 @@ impl Drawer<'_> {
             // narrower than the minimum (they are kept apart without a clearance).
             // An exit stub (5.10) is no copper: the wires of its own net pass through it freely.
             let own_pad = e.net == Some(wp.net) && i < n_obs && !wp.own.contains(&i) && !self.is_exit_stub(i) && !self.is_kept_end(i);
-            e.live && (wp.layer == usize::MAX || (e.mask >> wp.layer) & 1 == 1) && (e.net != Some(wp.net) || own_pad) && (i < self.n_static || !self.only_static.get())
+            e.live && (wp.layer == usize::MAX || (e.mask >> wp.layer) & 1 == 1) && (e.net != Some(wp.net) || own_pad) && (i < self.n_static || !self.only_static.load(std::sync::atomic::Ordering::Relaxed))
         });
         ids
     }
@@ -950,6 +950,11 @@ mod tests {
     /// Run `f` on a few random fields, each with one routed net-1 wire (wire 0) and random
     /// drawn copper of nets 2 and 3 committed.
     fn with_fields(f: &mut dyn FnMut(&Drawer, &mut Rng)) {
+        with_fields_opts(&Options::default(), f)
+    }
+
+    /// [`with_fields`] with the given options.
+    fn with_fields_opts(opts0: &Options, f: &mut dyn FnMut(&Drawer, &mut Rng)) {
         for seed in 1..=4u64 {
             let mut g = Rng(0x51_7c_c1_b7_27_22_0a_95 ^ seed);
             let m = field(&mut g);
@@ -958,7 +963,7 @@ mod tests {
             let mut st = State::new(&b.proj);
             let c = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
             st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
-            let opts = Options::default();
+            let opts = opts0.clone();
             let checker = Checker::new(&m, &opts);
             let mut dr = Drawer::new(&m, &opts, &b, &st, &checker);
             for _ in 0..40 {
@@ -985,6 +990,106 @@ mod tests {
         });
         let relax = [0.0, 0.0, 20_000.0, 1e9][g.int(0, 3) as usize];
         Wp { wire: 0, net: g.int(1, 3) as i32, w: 100_000.0 + 400_000.0 * g.f(), s: 100_000.0 + 200_000.0 * g.f(), layer: g.int(0, 1) as usize, own: [wi.pa, wi.pb], neck, relax }
+    }
+
+    /// nd-perf F2: the verdict without the price (`via_in_class`) is `via_reach`'s; the call sites'
+    /// `via_reach_for_price` is `via_reach` itself with `[vias] reach_price` on and (the verdict, 0)
+    /// with it off (0 = what `reach_cost` gives then). Random via sites on the routed wire's
+    /// traversals of the pad field with drawn copper.
+    #[test]
+    fn via_reach_verdict_is_the_same_and_priced_only_when_read() {
+        if std::env::var_os("TOPO_VIADBG").is_some() {
+            return;
+        }
+        let crossed = crate::topo::draw::ClassCrossings::new();
+        let (mut priced, mut out_of_class) = (0usize, 0usize);
+        for on in [false, true] {
+            let opts = Options { via_reach_price: on, ..Options::default() };
+            with_fields_opts(&opts, &mut |dr, g| {
+                let n = dr.st.wires[0].passes.len();
+                for _ in 0..80 {
+                    let (k, p, la, lb) = (g.int(0, n as i64) as usize, pt(g), g.int(0, 1) as usize, g.int(0, 1) as usize);
+                    let full = dr.via_reach(0, k, p, la, lb, &crossed);
+                    assert_eq!(dr.via_in_class(0, k, p, la, lb, &crossed), full.0);
+                    let used = dr.via_reach_for_price(0, k, p, la, lb, &crossed);
+                    if on {
+                        assert_eq!((used.0, used.1.to_bits()), (full.0, full.1.to_bits()));
+                        priced += usize::from(full.1 > 0.0);
+                    } else {
+                        assert_eq!(used, (full.0, 0.0));
+                    }
+                    out_of_class += usize::from(!full.0);
+                }
+            });
+        }
+        assert!(priced > 20, "only {priced} priced reaches");
+        assert!(out_of_class > 0, "no out-of-class site exercised");
+    }
+
+    /// nd-perf F1: the violations without probes ([`viols_measured`] with `probe = false`) bound the
+    /// measured ones from below: the same groups (kind, depth, place for vias, against, layer), each
+    /// length at most the measured one, so the short amount, the total and the price are at most the
+    /// measured ones. Random runs of net 1 (one to four segments, any width, either layer, a via
+    /// sometimes) across the pad field and the random drawn copper of nets 2 and 3.
+    #[test]
+    fn unprobed_violations_bound_the_measured_ones() {
+        use crate::topo::draw::{viol_key, viols_measured, viols_with, Viol};
+        let mut with_viols = 0usize;
+        with_fields(&mut |dr, g| {
+            for _ in 0..40 {
+                let layer = [0u32, 2][g.int(0, 1) as usize];
+                let w = 100_000.0 + 400_000.0 * g.f();
+                let mut items = Vec::new();
+                let mut p = pt(g);
+                for _ in 0..g.int(1, 4) {
+                    let q = pt(g);
+                    items.push(track_item(1, layer, w, p, q, None));
+                    p = q;
+                }
+                if g.int(0, 3) == 0 {
+                    items.push(via_item(1, p, ViaSize { d: 600_000, drill: 300_000 }, None));
+                }
+                let rep = dr.checker.check_against(&dr.idx, &items, &[]);
+                let exact = viols_with(dr.model, dr.opts, dr.checker, &dr.idx, &items, &rep);
+                let lb = viols_measured(dr.model, dr.opts, dr.checker, &dr.idx, &items, &rep, false);
+                with_viols += usize::from(!exact.is_empty());
+                assert_eq!(lb.len(), exact.len());
+                for (a, b) in lb.iter().zip(&exact) {
+                    assert_eq!((a.kind, a.layer, a.via, &a.against, a.depth_nm), (b.kind, b.layer, b.via, &b.against, b.depth_nm));
+                    assert!(a.len_nm <= b.len_nm, "{a:?} vs {b:?}");
+                    assert!(a.amount() <= b.amount());
+                }
+                let (kl, ke) = (viol_key(&lb), viol_key(&exact));
+                assert!(kl.0 <= ke.0 && kl.1 <= ke.1, "{kl:?} vs {ke:?}");
+                let (pl, pe): (f64, f64) = (lb.iter().map(Viol::amount).sum(), exact.iter().map(Viol::amount).sum());
+                assert!(pl <= pe);
+                // The lazy candidate priced later is the eager one (violations in the same order,
+                // the same price bits), and its bound is at or below that key.
+                let wire = 0;
+                let (p0, mut vs0, lazy) = dr.lazy_cand(wire, &items, &rep);
+                // A graze violation (none arise on this field: no minimum connection width) goes
+                // after the measured ones, as the eager pricing appended it.
+                let mut graze = dr.graze_viols(wire, &items);
+                assert_eq!(vs0, graze);
+                if g.int(0, 1) == 0 {
+                    let fake = Viol { kind: "connection_width", at: p, layer, depth_nm: 1000.0, len_nm: w, against: "own-net pad or via".into(), via: false };
+                    vs0.push(fake.clone());
+                    graze.push(fake);
+                }
+                let mut c: crate::topo::draw::ForcedCand = (p0, Vec::new(), items.clone(), vs0, None, "test", lazy);
+                let bound = dr.cand_bound(&c);
+                dr.price_cand(&mut c);
+                let mut eager = dr.viols_of(&items, &rep);
+                eager.extend(graze);
+                let pe: f64 = eager.iter().map(Viol::amount).sum();
+                assert!(c.6.is_none());
+                assert_eq!(c.3, eager);
+                assert_eq!(c.0.to_bits(), pe.to_bits());
+                let ke = crate::topo::draw::forced_key(&eager, pe);
+                assert!(bound.0 <= ke.0 && bound.1 <= ke.1 && bound.2 <= ke.2, "{bound:?} vs {ke:?}");
+            }
+        });
+        assert!(with_viols > 40, "only {with_viols} runs with violations");
     }
 
     /// [`Drawer::seg_clear_near`] (the [`Near`] grid) and [`Drawer::seg_clear`] (the cached
@@ -1389,7 +1494,9 @@ mod tests {
     /// runs of the routed wire with and without pad exits.
     #[test]
     fn octilinear_shape_cache_matches_the_reference_loop() {
-        use super::super::octi::{OCTI_HITS, OCTI_REF};
+        use super::super::octi::{OCTI_HITS, OCTI_LANE_MIN, OCTI_NODE_SPLIT, OCTI_REF};
+        // per lane count: nodes done alone and on the crew (lanes 2, 4, 8 must do every node on the crew)
+        let mut split = [[0usize; 2]; 4];
         let (mut some, mut runs) = (0, 0);
         with_octi_fields(&mut |dr, g| {
             let wi = &dr.st.wires[0];
@@ -1408,6 +1515,25 @@ mod tests {
                 let relax = [0.0, 20_000.0][g.int(0, 1) as usize];
                 OCTI_REF.with(|f| f.set(false));
                 let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
+                // par-draw: every node's successors on 1/2/4/8 lanes (pair rule 1, the reverse
+                // hook: the first successors finish last). The test switch and the node counts are
+                // thread-locals of the thread that calls `octilinear`: the pool's worker.
+                let laned: Vec<_> = [1usize, 2, 4, 8]
+                    .iter()
+                    .enumerate()
+                    .map(|(ki, &k)| {
+                        let pool = rayon::ThreadPoolBuilder::new().num_threads(k).build().expect("pool");
+                        pool.install(|| {
+                            OCTI_LANE_MIN.with(|f| f.set(1));
+                            OCTI_NODE_SPLIT.with(|c| c.set([0, 0]));
+                            let r = super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax));
+                            let c = OCTI_NODE_SPLIT.with(|c| c.get());
+                            OCTI_LANE_MIN.with(|f| f.set(0));
+                            split[ki] = [split[ki][0] + c[0], split[ki][1] + c[1]];
+                            r
+                        })
+                    })
+                    .collect();
                 OCTI_REF.with(|f| f.set(true));
                 let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
                 OCTI_REF.with(|f| f.set(false));
@@ -1415,9 +1541,17 @@ mod tests {
                 some += usize::from(want.is_some());
                 let bits = |v: &Option<super::super::octi::OctiOut>| v.as_ref().map(|o| o.pts.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>());
                 assert_eq!(bits(&got), bits(&want));
+                for (k, l) in [1usize, 2, 4, 8].iter().zip(&laned) {
+                    assert_eq!(bits(l), bits(&want), "{k} lanes");
+                }
             }
         });
         let hits = OCTI_HITS.with(|h| h.get());
         assert!(some > 10 && hits[0] > 20, "{some} of {runs}, hits {hits:?}");
+        // one lane: every node alone; 2, 4, 8 lanes: every node on the crew
+        assert!(split[0][0] > 0 && split[0][1] == 0, "1 lane: {:?}", split[0]);
+        for (ki, k) in [(1usize, 2usize), (2, 4), (3, 8)] {
+            assert!(split[ki][1] > 0 && split[ki][0] == 0, "{k} lanes: nodes alone / on the crew {:?}", split[ki]);
+        }
     }
 }

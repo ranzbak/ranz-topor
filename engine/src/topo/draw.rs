@@ -717,7 +717,7 @@ pub struct Widths<'a> {
     pub pass_w: Vec<f64>,
     pub min_w: Vec<f64>,
     #[allow(clippy::type_complexity)]
-    pub seg: Box<dyn Fn(WireId, usize, Vec2, Vec2) -> f64 + 'a>,
+    pub seg: Box<dyn Fn(WireId, usize, Vec2, Vec2) -> f64 + Send + Sync + 'a>,
 }
 
 /// Where a pass sits in its packing: `(edge, layer, index in the lane, lmin, rmax)` (nm).
@@ -886,7 +886,7 @@ pub struct Drawer<'a> {
     /// The wire of each drawn (dynamic) object that has one, by ent id ([`Drawer::pair_disc_clear`]).
     ent_wire: BTreeMap<usize, usize>,
     /// Diagnosis: ignore the copper drawn so far.
-    pub(super) only_static: std::cell::Cell<bool>,
+    pub(super) only_static: std::sync::atomic::AtomicBool,
     /// Trial drawing (via reduction): a rejected run is not diagnosed or recorded.
     pub quiet: bool,
     /// Per-stretch widths (the drawing witness); `None`: every wire has its own single width.
@@ -1037,7 +1037,7 @@ impl<'a> Drawer<'a> {
             qgrow: 0.0,
             n_static: 0,
             ent_wire: BTreeMap::new(),
-            only_static: std::cell::Cell::new(false),
+            only_static: std::sync::atomic::AtomicBool::new(false),
             quiet: false,
             widths: None,
             tight: false,
@@ -1988,7 +1988,7 @@ impl<'a> Drawer<'a> {
                         let price = self.via_plan_price(w, ka, kb.max(ka), p, dr) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
                         // In the plan's class only; the reach's violations priced like the squeeze
                         // (one via diameter of squeeze per violation unit, graded).
-                        let (in_class, reach) = self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
+                        let (in_class, reach) = self.via_reach_for_price(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
                         // `[vias] reach_price` (default off): the reach's violations priced too.
                         let price = price + self.reach_cost(reach, self.octi.room * dv);
                         if dbg {
@@ -2051,7 +2051,7 @@ impl<'a> Drawer<'a> {
                 let any_site = forced_in.is_none();
                 if let Some((k, p, sz, vs)) = forced_in.or_else(|| self.force_via(w, plan, i, ka, kb.max(ka), &sizes, None)) {
                     // A site forced over every site may be out of the class: counted like the legal one.
-                    if any_site && !self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed).0 {
+                    if any_site && !self.via_in_class(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed) {
                         self.stats.via_out_of_class += 1;
                     }
                     let id = self.commit(&via_item(net, p, sz, Some(w)));
@@ -2188,7 +2188,7 @@ impl<'a> Drawer<'a> {
                 }
                 let side = if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) { 0.0 } else { 1.0 };
                 let reach = match class {
-                    Some(c) => match self.via_reach(w, k, p, plan.layers[i], plan.layers[i + 1], c) {
+                    Some(c) => match self.via_reach_for_price(w, k, p, plan.layers[i], plan.layers[i + 1], c) {
                         (false, _) => continue,
                         (true, r) => self.reach_cost(r, 1.0),
                     },
@@ -2256,6 +2256,27 @@ impl<'a> Drawer<'a> {
     /// Price: the violation amounts of both reach segments ([`Viol::amount`], graded; 0 for a free
     /// reach). O(chord + objects nearby).
     pub fn via_reach(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> (bool, f64) {
+        self.via_reach_(w, k, p, la, lb, crossed, true)
+    }
+
+    /// nd-perf F2: the class verdict of [`Drawer::via_reach`] without its price (the reach
+    /// segments' violations are not measured). O(chord + objects nearby).
+    pub fn via_in_class(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> bool {
+        self.via_reach_(w, k, p, la, lb, crossed, false).0
+    }
+
+    /// nd-perf F2: [`Drawer::via_reach`] where its price is read ([`reach_priced`]: `[vias]
+    /// reach_price` on), else its verdict and 0 (the price `reach_cost` would give then).
+    pub fn via_reach_for_price(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings) -> (bool, f64) {
+        if reach_priced(self.opts) {
+            self.via_reach(w, k, p, la, lb, crossed)
+        } else {
+            (self.via_in_class(w, k, p, la, lb, crossed), 0.0)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn via_reach_(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, crossed: &ClassCrossings, priced: bool) -> (bool, f64) {
         let net = self.st.wires[w].net;
         let chord = self.taut_chord(w, k);
         let q = match chord.len() {
@@ -2290,7 +2311,10 @@ impl<'a> Drawer<'a> {
                     }
                 }
             }
-            price += self.viols_of(&items, &rep).iter().map(Viol::amount).sum::<f64>();
+            // nd-perf F2: the class verdict above reads the report alone.
+            if priced {
+                price += self.viols_of(&items, &rep).iter().map(Viol::amount).sum::<f64>();
+            }
         }
         (ok, price)
     }
@@ -2483,6 +2507,17 @@ impl<'a> Drawer<'a> {
 /// [`Drawer::viols_of`] for any checker and index of accepted copper (D7: the realised diff-pair
 /// tracks are checked against the real model, not the drawing's alias model).
 pub fn viols_with(model: &BoardModel, opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport) -> Vec<Viol> {
+    viols_measured(model, opts, checker, idx, items, rep, true)
+}
+
+/// nd-perf F1: [`viols_with`] without the probes (`probe = false`): every track violation's length at
+/// the floor the measured one is raised to (`tw.min(len.max(tw))`), everything else (kind, depth,
+/// grouping by [`merge_viols`], via lengths) as measured. Each length is at most the measured one
+/// and [`super::factors::violation_amount`] does not fall with the length, so every component of
+/// [`viol_key`] (and the price) of the floor violations is at most the measured one, also in
+/// floating point (the same terms in the same order, each no larger). O(violations) without
+/// probes; with them see [`Drawer::viols_of`].
+pub fn viols_measured(model: &BoardModel, opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport, probe: bool) -> Vec<Viol> {
     {
         let r = &model.rules;
         // Routed copper (`item:N`) is named by its net: "track of SIG (item:12)".
@@ -2540,6 +2575,11 @@ pub fn viols_with(model: &BoardModel, opts: &Options, checker: &Checker, idx: &I
                         let n = (((hi - lo) * len / step).ceil() as usize + 1).clamp(2, cap);
                         (0..n).map(|i| lo + (hi - lo) * i as f64 / (n - 1) as f64).collect()
                     };
+                    if !probe {
+                        let tw = t.width as f64;
+                        out.push(Viol { kind: kind(false), at: (a + b) * 0.5, layer: v.layer, depth_nm: depth, len_nm: tw.min(len.max(tw)), against: name(&v.against), via: false });
+                        continue;
+                    }
                     let coarse = grid(0.0, 1.0, 500_000.0, 48);
                     let hc = below(&coarse);
                     let dt = 1.0 / (coarse.len() - 1) as f64;
@@ -2589,11 +2629,124 @@ pub fn viols_with(model: &BoardModel, opts: &Options, checker: &Checker, idx: &I
     }
 }
 
+/// nd-perf F2: `via_reach` prices its reach segments only when the price is read: `[vias]
+/// reach_price` on (`reach_cost` is 0 while it is off), or the `TOPO_VIADBG` line that prints it.
+pub fn reach_priced(opts: &Options) -> bool {
+    opts.via_reach_price || std::env::var_os("TOPO_VIADBG").is_some()
+}
+
+/// The key a forced candidate is chosen by: `(short amount, total amount, price)` ([`viol_key`]).
+pub type ForcedKey = (f64, f64, f64);
+
+/// The order of [`ForcedKey`]s: shorts first, then the total, then the price (`total_cmp`).
+pub fn forced_key_cmp(a: &ForcedKey, b: &ForcedKey) -> std::cmp::Ordering {
+    a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2))
+}
+
+/// nd-perf F1: the candidate of least exact key, the first index on ties (what `min_by` over the
+/// exact keys returns), where `lbs[j]` is a lower bound of candidate `j`'s key and `exact(j)` its
+/// exact key (computed at most once per `j`, only when the bound cannot rule `j` out). The
+/// candidates are visited in ascending bound order (index on ties); the visit stops at the first
+/// bound above the best exact key (every later one is at least as large, so it cannot win), and a
+/// bound equal to it at a larger index is skipped (equal at best, it loses the tie). A branch and
+/// bound over a finite set: the answer is the exhaustive one whenever `lbs[j] <= exact(j)`.
+/// O(n log n) plus the exact keys it needs.
+pub fn pick_by_bound(lbs: &[ForcedKey], mut exact: impl FnMut(usize) -> ForcedKey) -> Option<usize> {
+    use std::cmp::Ordering;
+    let mut order: Vec<usize> = (0..lbs.len()).collect();
+    order.sort_by(|&a, &b| forced_key_cmp(&lbs[a], &lbs[b]).then(a.cmp(&b)));
+    let mut best: Option<(ForcedKey, usize)> = None;
+    for j in order {
+        if let Some((bk, bi)) = best {
+            match forced_key_cmp(&lbs[j], &bk) {
+                Ordering::Greater => break,
+                Ordering::Equal if j > bi => continue,
+                _ => {}
+            }
+        }
+        let k = exact(j);
+        if best.is_none_or(|(bk, bi)| match forced_key_cmp(&k, &bk) {
+            Ordering::Less => true,
+            Ordering::Equal => j < bi,
+            Ordering::Greater => false,
+        }) {
+            best = Some((k, j));
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// One forced candidate of a run (never drop, M-B1): price, points, items, violations, pad neck,
+/// source, and (nd-perf F1) the checker report while it is not priced yet: then the violations
+/// hold only its graze violations and the price is NaN.
+pub(super) type ForcedCand = (f64, Vec<Vec2>, Vec<Item>, Vec<Viol>, Option<(f64, [f64; 2])>, &'static str, Option<CheckReport>);
+
+pub(super) fn forced_key(vs: &[Viol], price: f64) -> ForcedKey {
+    let k = viol_key(vs);
+    (k.0, k.1, price)
+}
+
 impl<'a> Drawer<'a> {
+    /// nd-perf F1: a forced candidate not priced yet: its graze violations (exact and cheap) and its
+    /// checker report, measured by [`Drawer::price_cand`] only when the selection needs it.
+    pub(super) fn lazy_cand(&self, w: WireId, items: &[Item], rep: &CheckReport) -> (f64, Vec<Viol>, Option<CheckReport>) {
+        (f64::NAN, self.graze_viols(w, items), Some(rep.clone()))
+    }
+
+    /// Price a lazy forced candidate: its measured violations, then its graze ones (the order the
+    /// eager pricing had), and their price. A priced candidate stays as it is.
+    pub(super) fn price_cand(&self, c: &mut ForcedCand) {
+        if let Some(rep) = c.6.take() {
+            let mut vs = self.viols_of(&c.2, &rep);
+            vs.append(&mut c.3);
+            c.0 = vs.iter().map(Viol::amount).sum();
+            c.3 = vs;
+        }
+    }
+
+    /// The lower bound of a forced candidate's key ([`viols_measured`] without probes, plus its
+    /// graze violations); a priced candidate's exact key.
+    pub(super) fn cand_bound(&self, c: &ForcedCand) -> ForcedKey {
+        match &c.6 {
+            None => forced_key(&c.3, c.0),
+            Some(rep) => {
+                let mut v = viols_measured(self.model, self.opts, self.checker, &self.idx, &c.2, rep, false);
+                v.extend(c.3.iter().cloned());
+                let p = v.iter().map(Viol::amount).sum();
+                forced_key(&v, p)
+            }
+        }
+    }
+
+    /// nd-perf F1: the forced candidate to draw (least [`ForcedKey`], the first on ties), pricing
+    /// only the candidates whose bound does not rule them out ([`pick_by_bound`]); the winner is
+    /// priced. `TOPO_FORCED_CHECK=1` (debug) prices every candidate too and reports on stderr
+    /// whether the exhaustive choice is the same and every bound held.
+    fn pick_forced(&self, w: WireId, cands: &mut [ForcedCand]) -> Option<usize> {
+        let lbs: Vec<ForcedKey> = cands.iter().map(|c| self.cand_bound(c)).collect();
+        let pick = pick_by_bound(&lbs, |j| {
+            self.price_cand(&mut cands[j]);
+            forced_key(&cands[j].3, cands[j].0)
+        });
+        debug_assert!(pick.is_none_or(|j| forced_key_cmp(&lbs[j], &forced_key(&cands[j].3, cands[j].0)).is_le()), "nd-perf F1: a forced candidate's bound above its price");
+        if std::env::var_os("TOPO_FORCED_CHECK").is_some() {
+            let mut all: Vec<ForcedCand> = cands.to_vec();
+            for c in all.iter_mut() {
+                self.price_cand(c);
+            }
+            let keys: Vec<ForcedKey> = all.iter().map(|c| forced_key(&c.3, c.0)).collect();
+            let old = (0..all.len()).min_by(|&a, &b| forced_key_cmp(&keys[a], &keys[b]));
+            let same = old == pick;
+            let held = (0..all.len()).all(|j| forced_key_cmp(&lbs[j], &keys[j]).is_le());
+            eprintln!("FORCED CHECK wire {w}: {} candidates, {} priced, pick {pick:?} exhaustive {old:?}: {}, bounds {}", all.len(), cands.iter().filter(|c| c.6.is_none()).count(), if same { "same" } else { "MISMATCH" }, if held { "held" } else { "BROKEN" });
+        }
+        pick
+    }
+
     /// The sliver connections of a run's `items` against pads and vias of its own net (what
     /// [`Drawer::track_own_pad_ok`] refuses), as `connection_width` [`Viol`]s: one per track that
     /// grazes, depth = KiCad's minimum connection width.
-    fn graze_viols(&self, w: WireId, items: &[Item]) -> Vec<Viol> {
+    pub(super) fn graze_viols(&self, w: WireId, items: &[Item]) -> Vec<Viol> {
         let vs = items
             .iter()
             .filter(|it| matches!(it, Item::Track(_)) && !self.track_own_pad_ok(w, std::slice::from_ref(*it)))
@@ -2994,8 +3147,8 @@ impl<'a> Drawer<'a> {
             let mut last_viol: Option<Violation> = None;
             let mut tried: Vec<Vec<Vec2>> = Vec::new();
             // Force mode (M-B1): every attempt's copper with its violations, the cheapest wins.
-            #[allow(clippy::type_complexity)]
-            let mut cands: Vec<(f64, Vec<Vec2>, Vec<Item>, Vec<Viol>, Option<(f64, [f64; 2])>, &'static str)> = Vec::new();
+            // nd-perf F1: a candidate with violations is priced only when the selection needs it.
+            let mut cands: Vec<ForcedCand> = Vec::new();
             // M-C: the plan's necked stretches (width in P2); the drawing realises them.
             let pneck = self.plan_neck(w);
             // M3 `[drawing] realise = "erbs"`: the run's ERBS first (attempt -1), checked like any
@@ -3163,7 +3316,7 @@ impl<'a> Drawer<'a> {
                     last_reason = "drawing: a track grazes a pad or via of its own net (KiCad minimum connection width)".to_string();
                     if self.force {
                         let vs = self.graze_viols(w, &items);
-                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }));
+                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }, None));
                     }
                     continue;
                 }
@@ -3227,7 +3380,7 @@ impl<'a> Drawer<'a> {
                         if self.octi.any_forbidden && !super::octi::breaks(&pts).0.is_empty() {
                             last_reason = "drawing: no octilinear geometry for this run ([drawing] any_angle = \"forbidden\")".to_string();
                             if self.force {
-                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, if attempt < 0 { "erbs" } else { "attempt" }));
+                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, if attempt < 0 { "erbs" } else { "attempt" }, None));
                             }
                             continue;
                         }
@@ -3368,9 +3521,8 @@ impl<'a> Drawer<'a> {
                     break;
                 }
                 if self.force {
-                    let mut vs = self.viols_of(&items, &rep);
-                    vs.extend(self.graze_viols(w, &items));
-                    cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }));
+                    let (price, vs, lazy) = self.lazy_cand(w, &items, &rep);
+                    cands.push((price, pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }, lazy));
                 }
                 let v = &rep.violations[0];
                 last_viol = Some(v.clone());
@@ -3405,9 +3557,8 @@ impl<'a> Drawer<'a> {
                         None => self.run_items(w, layer, &pts),
                     };
                     let rep = self.checker.check_against(&self.idx, &items, &[]);
-                    let mut vs = self.viols_of(&items, &rep);
-                    vs.extend(self.graze_viols(w, &items));
-                    cands.push((vs.iter().map(Viol::amount).sum::<f64>(), pts, items, vs, None, "relaxed"));
+                    let (price, vs, lazy) = self.lazy_cand(w, &items, &rep);
+                    cands.push((price, pts, items, vs, None, "relaxed", lazy));
                     true
                 };
                 let (mut lo, mut hi) = (0.0, f64::NAN);
@@ -3438,21 +3589,19 @@ impl<'a> Drawer<'a> {
                         None => self.run_items(w, layer, &pts),
                     };
                     let rep = self.checker.check_against(&self.idx, &items, &[]);
-                    let mut vs = self.viols_of(&items, &rep);
-                    vs.extend(self.graze_viols(w, &items));
-                    cands.push((vs.iter().map(Viol::amount).sum(), pts, items, vs, None, "funnel"));
+                    let (price, vs, lazy) = self.lazy_cand(w, &items, &rep);
+                    cands.push((price, pts, items, vs, None, "funnel", lazy));
                 }
+                let pick = self.pick_forced(w, &mut cands);
                 if std::env::var("TOPO_FORCEDBG").is_ok() {
                     for c in &cands {
-                        eprintln!("FORCED wire {w} layer {layer} k {k0}..{k1}: {} price {:.1}, {} pts, viols {:?}", c.5, c.0, c.1.len(), c.3.iter().map(|v| (v.kind, v.against.clone(), (v.depth_nm / 1e3).round(), (v.len_nm / 1e3).round())).collect::<Vec<_>>());
+                        // A candidate the bound ruled out is not priced: "unpriced", graze violations only.
+                        eprintln!("FORCED wire {w} layer {layer} k {k0}..{k1}: {} price {}, {} pts, viols {:?}", c.5, if c.6.is_some() { "unpriced".to_string() } else { format!("{:.1}", c.0) }, c.1.len(), c.3.iter().map(|v| (v.kind, v.against.clone(), (v.depth_nm / 1e3).round(), (v.len_nm / 1e3).round())).collect::<Vec<_>>());
                     }
                 }
                 // Shorts first, then the total violation price (a funnel run through a via must
                 // not beat a relaxed run that only grazes clearances).
-                if let Some((price, pts, items, vs, neck, src)) = cands.into_iter().min_by(|a, b| {
-                    let (ka, kb) = (viol_key(&a.3), viol_key(&b.3));
-                    ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1)).then(a.0.total_cmp(&b.0))
-                }) {
+                if let Some((price, pts, items, vs, neck, src, _)) = pick.and_then(|j| cands.into_iter().nth(j)) {
                     // M-45: the forced run octilinear too, where that breaks no rule deeper than
                     // the run itself and costs no more violation price.
                     let (mut pts, mut items, mut vs) = (pts, items, vs);
@@ -4249,9 +4398,9 @@ impl<'a> Drawer<'a> {
         };
         let bumps = last_pts.len().saturating_sub(pre0.len());
         let deep = std::env::var("TOPO_DIAG_DEEP").is_ok();
-        self.only_static.set(deep);
+        self.only_static.store(deep, std::sync::atomic::Ordering::Relaxed);
         let static_infeasible = deep && self.exact_fix(w, k0, k1, layer, pre0.clone(), neck).is_none();
-        self.only_static.set(false);
+        self.only_static.store(false, std::sync::atomic::Ordering::Relaxed);
         if std::env::var("TOPO_DEBUG").is_ok() {
             // Diagnosis (D1): per pass of the run, the room its packed lane promised (`lmin ..
             // rmax`) and what the neighbours drawn so far left of it (`tight_span`).
@@ -4410,6 +4559,75 @@ mod tests {
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }
+    }
+
+    /// nd-perf F1: [`pick_by_bound`] returns what `min_by` over the exact keys returns (the least
+    /// key, the first index on ties) for random candidate sets with many equal keys and bounds at
+    /// or below the exact keys; it prices each candidate at most once, and never one whose bound
+    /// is above the winner's exact key.
+    #[test]
+    fn pick_by_bound_is_the_exhaustive_choice() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        let (mut pruned, mut ties) = (0usize, 0usize);
+        for _ in 0..20_000 {
+            let n = next(12) as usize;
+            let exact: Vec<ForcedKey> = (0..n)
+                .map(|_| {
+                    let (s, t) = (next(3) as f64, next(6) as f64);
+                    (s, s + t, s + t + [0.0, 0.0, 0.5][next(3) as usize])
+                })
+                .collect();
+            let lbs: Vec<ForcedKey> = exact
+                .iter()
+                .map(|k| match next(4) {
+                    0 => *k,
+                    1 => (k.0, k.1 - next(2) as f64, k.2 - next(3) as f64),
+                    2 => (k.0 - next(2) as f64, k.1 - next(4) as f64, k.2 - next(5) as f64),
+                    _ => (0.0, 0.0, 0.0),
+                })
+                .map(|k| (k.0.max(0.0), k.1.max(0.0), k.2.max(0.0)))
+                .collect();
+            for j in 0..n {
+                assert!(lbs[j].0 <= exact[j].0 && lbs[j].1 <= exact[j].1 && lbs[j].2 <= exact[j].2);
+            }
+            let want = (0..n).min_by(|&a, &b| forced_key_cmp(&exact[a], &exact[b]));
+            let mut priced = vec![0usize; n];
+            let got = pick_by_bound(&lbs, |j| {
+                priced[j] += 1;
+                exact[j]
+            });
+            assert_eq!(got, want, "exact {exact:?} bounds {lbs:?}");
+            assert!(priced.iter().all(|&c| c <= 1));
+            if let Some(w) = want {
+                for j in 0..n {
+                    if forced_key_cmp(&lbs[j], &exact[w]).is_gt() {
+                        assert_eq!(priced[j], 0, "candidate {j} priced although its bound is above the winner");
+                        pruned += 1;
+                    }
+                }
+                ties += (0..n).filter(|&j| j != w && forced_key_cmp(&exact[j], &exact[w]).is_eq()).count();
+            }
+        }
+        assert!(pruned > 1000 && ties > 1000, "the sets exercise pruning ({pruned}) and ties ({ties})");
+    }
+
+    /// nd-perf F2: `via_reach` prices its reach exactly when `[vias] reach_price` reads the price.
+    #[test]
+    fn via_reach_is_priced_only_when_the_price_is_read() {
+        if std::env::var_os("TOPO_VIADBG").is_some() {
+            return;
+        }
+        let mut o = Options::default();
+        assert!(!o.via_reach_price);
+        assert!(!reach_priced(&o));
+        o.via_reach_price = true;
+        assert!(reach_priced(&o));
     }
 
     /// M3 length factor: the price is the length up to the band and grows smoothly (quadratic
