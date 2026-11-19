@@ -87,6 +87,51 @@ tests() {
 case ${1:-} in
   lad) shift; lad "$@" ;;
   tests-in) tests ;;
+  r9)  # verify r1 fix round: targeted release tests (every binary that greps for cycle cap / stable / patience /
+       # stop_reason / prof), both latch tests 20x under a 6-job build, targeted + full pytest with a per-test
+       # timeout (pytest-timeout 900), the new mutants
+    cd $ROOT/engine; export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2
+    python -c "import pytest_timeout" 2>/dev/null || pip install -q pytest-timeout > $R/pip.log 2>&1
+    { timeout 3000 cargo test --release --no-fail-fast --lib -- topo::archive topo::table topo::optimise topo::core::tests topo::prof 2>&1; echo "lib rc $?"
+      timeout 3000 cargo test --release --no-fail-fast --test topo_mb0 --test topo_stop_reason --test topo_tw3_table --test topo_tw3_drawonly --test topo_m2_draw_once --test topo_prof --test topo_c0 --test cancel_latency --test time_limit --test loop_local --test dist_props --test via_rules 2>&1; echo "int rc $?"
+    } > $R/tests.log 9>&-
+    grep -E "^test result|rc [0-9]|FAILED|panicked" $R/tests.log | while read -r l; do note "tests: $l"; done
+    LT=/root/tw3-load-$(basename $ROOT)
+    ( while [ ! -f $R/load.stop ]; do CARGO_TARGET_DIR=$LT cargo build --release -j 6 > /dev/null 2>&1; rm -rf $LT; done ) 9>&- & LP=$!
+    sleep 20
+    for t in cancel_at_one_of_two_runs_stable_is_a_cancel cancel_at_one_of_two_runs_stable_under_the_hybrid_is_a_cancel; do
+      pass=0
+      for i in $(seq 1 20); do
+        if cargo test --release --test topo_stop_reason -- $t --exact >> $R/latch-$t.log 2>&1 9>&-; then pass=$((pass+1)); fi
+      done
+      note "latch $t: $pass of 20 passed under load (load $(cut -d' ' -f1 /proc/loadavg))"
+    done
+    touch $R/load.stop; wait $LP; rm -rf $LT
+    cd $ROOT
+    PT=(tests/plugin/test_report.py tests/plugin/test_run_cpu_limit.py tests/plugin/test_run_flow.py tests/plugin/test_run_time_limit.py tests/plugin/test_config.py tests/plugin/test_config_docs.py tests/test_engine_surface.py)
+    CI=1 timeout 5400 python -m pytest -q -p no:cacheprovider --timeout 900 "${PT[@]}" > $R/pytest-targeted.log 2>&1 9>&-
+    note "pytest targeted rc $?: $(tail -1 $R/pytest-targeted.log)"
+    grep -E "^(FAILED|ERROR)|Timeout" $R/pytest-targeted.log | head -20 | while read -r l; do note "pytest-t: $l"; done
+    CI=1 timeout 7200 python -m pytest -q -p no:cacheprovider --timeout 900 --durations=15 tests > $R/pytest-full.log 2>&1 9>&-
+    note "pytest full rc $?: $(tail -1 $R/pytest-full.log)"
+    grep -E "^(FAILED|ERROR)|Timeout" $R/pytest-full.log | head -20 | while read -r l; do note "pytest: $l"; done
+    # mutants (engine in a copy; Python in place, restored after each)
+    D=/root/tw3-mut-$(basename $ROOT); rm -rf $D; mkdir -p $D; cp -a $ROOT/engine $D/; rm -rf $D/engine/target
+    export CARGO_TARGET_DIR=/root/tw3-mut-target-$(basename $ROOT)
+    sub 'if p.stop_at_stable && rep.stable_at.is_some_and(|s| cycle > s + p.stable_patience) {' 'if p.stop_at_stable && rep.stable_at.is_some() {' | mut v1_sync_ignores_patience src/topo/optimise.rs --test topo_mb0
+    sub '    } else if outs.iter().any(|o| o.relay_stop) {' '    } else if false {' | mut d2_relay_is_round_cap src/topo/core.rs --test topo_tw3_table
+    pmut() {  # NAME FILE pytest-args... ; the python snippet on stdin edits FILE in place
+      local n=$1 f=$ROOT/$2; shift 2
+      cp $f $f.orig; python3 - $f; local pr=$?
+      if [ $pr -ne 0 ] || cmp -s $f $f.orig; then note "mutant $n: patch did not apply"; mv $f.orig $f; return; fi
+      ( cd $ROOT && CI=1 timeout 1800 python -m pytest -q -p no:cacheprovider "$@" 9>&- ) > $R/mut-$n.log 2>&1; local rc=$?
+      mv $f.orig $f
+      if [ $rc -ne 0 ]; then note "mutant $n: killed (rc $rc)"; else note "mutant $n: SURVIVED"; fi
+    }
+    sub '        parts.append(("*" if b.get("applied") else "") + f"{roles}: {_crit_text(b.get(' '        parts.append(("" if b.get("applied") else "") + f"{roles}: {_crit_text(b.get(' | pmut v3_no_applied_mark plugin/topor/report.py tests/plugin/test_report.py -k bests
+    sub "{_na(d.get('open'))} | {" "{_na(d.get('shorts'))} | {" | pmut v3_table_open_is_shorts plugin/topor/report.py tests/plugin/test_report.py -k bests
+    sub '    return d.get("stop_when_stable", True) is False and d.get("restart", "hybrid") not in ("stall", "off")' '    return False' | pmut v7_double_never_cancels tests/plugin/test_run_flow.py --timeout 300 tests/plugin/test_run_cpu_limit.py -k "gui_has_no_overrun_cap"
+    note "r9 done" ;;
   r8)  # lead 2026-11-18 test fix round: the latch test 20x on a loaded box (a looped 6-job cargo build of the
        # engine in its own target dir), then with "full" the whole release suite and the full pytest (CI=1)
     shift; cd $ROOT/engine; export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2
