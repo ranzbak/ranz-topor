@@ -79,6 +79,7 @@ pub fn descend_topo(st: &mut State, t: &mut Topo, base: &Registry, seed: u64, fl
 /// Label descent: flips, via shifts and lifts on every wire with a layer change, until a sweep
 /// keeps nothing or the evaluation cap is reached.
 pub fn descend_labels(lb: &mut Labels) -> Tally {
+    let _pg = super::prof::g(super::prof::K::DescendLabels);
     for _ in 0..MAX_SWEEPS {
         let mut kept = 0;
         for w in lb.candidates() {

@@ -44,6 +44,7 @@ pub mod metrize;
 pub mod moves;
 pub mod octi;
 pub mod optimise;
+pub mod prof;
 pub mod pack;
 pub mod padend;
 pub mod joint;
