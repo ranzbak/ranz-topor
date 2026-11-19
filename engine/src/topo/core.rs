@@ -6686,15 +6686,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "reroutes": [rep.stats.kept, rep.stats.tried],
             "via_rose": [rep.stats.relaid_kept, rep.stats.relaid],
             "floating_up": rep.stats.float_kept,
-            "pattern_moves": [rep.stats.pat_kept, rep.stats.pat_moved, rep.stats.pat_found],
-            "pattern_kinds": super::xrules::Kind::ALL.iter().map(|k| (k.name().to_string(), serde_json::json!(rep.stats.pat_kinds[k.idx()]))).collect::<serde_json::Map<_, _>>(),
-            "pattern_share": {
-                "share": opts.pattern_share,
-                "waited": rep.stats.pat_waited,
-                "work": (rep.stats.pat_work * 1e3).round() / 1e3,
-                "other_work": (rep.stats.pat_base * 1e3).round() / 1e3,
-                "measured": if rep.stats.pat_work + rep.stats.pat_base > 0.0 { (1e4 * rep.stats.pat_work / (rep.stats.pat_work + rep.stats.pat_base)).round() / 1e4 } else { 0.0 },
-            },
             "crossing_passes": rep.stats.cross_kept,
             "undone": rep.stats.undone,
             "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
@@ -6715,6 +6706,23 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "shadow": [rep.stats.shadow_n, rep.stats.shadow_agree, rep.stats.shadow_err_graded, rep.stats.shadow_err_vias, rep.stats.shadow_unl_diff, rep.stats.shadow_base_graded],
             },
         }));
+        // TW7 B: the pattern moves' entries, added apart (the block above is at serde_json's
+        // macro recursion limit).
+        if let Some(o) = loop_json.as_mut().and_then(|v| v.as_object_mut()) {
+            let tot = rep.stats.pat_work + rep.stats.pat_base;
+            o.insert("pattern_moves".into(), serde_json::json!([rep.stats.pat_kept, rep.stats.pat_moved, rep.stats.pat_found]));
+            o.insert("pattern_kinds".into(), super::xrules::Kind::ALL.iter().map(|k| (k.name().to_string(), serde_json::json!(rep.stats.pat_kinds[k.idx()]))).collect::<serde_json::Map<_, _>>().into());
+            o.insert(
+                "pattern_share".into(),
+                serde_json::json!({
+                    "share": opts.pattern_share,
+                    "waited": rep.stats.pat_waited,
+                    "work": (rep.stats.pat_work * 1e3).round() / 1e3,
+                    "other_work": (rep.stats.pat_base * 1e3).round() / 1e3,
+                    "measured": if tot > 0.0 { (1e4 * rep.stats.pat_work / tot).round() / 1e4 } else { 0.0 },
+                }),
+            );
+        }
         if !opts.pattern_moves.is_empty() {
             warnings.push(pattern_moves_line(&opts.pattern_moves, super::escape::Share::new(opts.pattern_share).share, &rep.stats));
         }
