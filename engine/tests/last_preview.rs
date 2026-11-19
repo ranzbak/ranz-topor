@@ -287,7 +287,8 @@ fn the_progress_restart_count_is_the_loops_restart_count() {
     }
     let r = route_with(&m, &o, &c2);
     let line = r.warnings.iter().find(|w| w.starts_with("TopoR loop (")).expect("the loop line");
-    let n: u32 = line.split("; ").find_map(|t| t.strip_suffix(" restarts from the archive").map(|x| x.split(|c: char| !c.is_ascii_digit()).next_back().expect("number").parse().expect("count"))).unwrap_or_else(|| panic!("restarts in: {line}"));
+    let head = line.split(" restarts from the archive").next().expect("head");
+    let n: u32 = head.rsplit("; ").next().expect("count").parse().unwrap_or_else(|_| panic!("restarts in: {line}"));
     assert!(n > 0, "the config must restart at least once: {line}");
     let seen = seen.lock().expect("seen");
     assert!(seen.windows(2).all(|w| w[0] <= w[1]), "loop_restarts went back: {seen:?}");
