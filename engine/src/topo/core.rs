@@ -4721,8 +4721,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// vias, [`super::pourplan::plan_items`], KiCad frame), labelled with `crit`. Reads the
             /// state only (the via site cache it may fill is a pure memo). O(passes).
             fn plan_sketch(&self, cycle: usize, crit: &Criteria) -> crate::control::Sketch {
+                let t0 = std::time::Instant::now();
                 let items = super::pourplan::plan_items(self.st, self.packer, self.board, &self.lr.events, self.bottom);
-                sketch_of(self.ctl.run.max(1), cycle, "plan", crit, items)
+                let sk = sketch_of(self.ctl.run.max(1), cycle, "plan", crit, items);
+                let dt = t0.elapsed().as_secs_f64();
+                self.ctl.with_progress(|p| p.sketch_build_s += dt);
+                sk
             }
             /// Debug: the criteria now as one short text.
             fn dbg_crit(&mut self) -> String {

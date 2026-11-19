@@ -220,6 +220,10 @@ pub struct Progress {
     /// per publish, so a change says the caller may fetch a new one).
     #[serde(default)]
     pub sketch_seq: u64,
+    /// last-preview meter: seconds the router spent building sketches (plan items, clones) so far,
+    /// summed over the threads that built one (0 while sketches are off).
+    #[serde(default)]
+    pub sketch_build_s: f64,
 }
 
 /// last-preview: a picture of one result for the progress dialog's board image (user 2026-11-19):

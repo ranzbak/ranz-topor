@@ -79,7 +79,8 @@ def route_once(engine, mj: str, oj: str, base, sketches: bool, interval: float) 
     key = json.dumps([r.get("items"), r.get("connections")], sort_keys=True)
     return {"sketches": sketches, "wall_s": round(wall, 3), "runtime_s": round(float(r.get("runtime_s") or 0.0), 3), "copper_sha": hashlib.sha256(key.encode()).hexdigest()[:16],
             "items": len(r.get("items") or []), "images": built, "svg_s": round(svg_s, 3),
-            "sketch_seq": json.loads(job.progress()).get("sketch_seq", 0)}
+            "sketch_seq": json.loads(job.progress()).get("sketch_seq", 0),
+            "engine_build_s": round(float(json.loads(job.progress()).get("sketch_build_s", 0.0)), 3)}
 
 
 def main(argv=None) -> int:
