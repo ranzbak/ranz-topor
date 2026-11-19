@@ -170,3 +170,27 @@ placings destroy better states faster than the archive's restarts recover them. 
 (16 cycles, seeds 0-9, layering with the answer's 6 vias): O 4/10, O + loop_history 8/10, O + loop_p4 8/10 (every
 round undone: the gain is its history), pre-loop off 0/10, pre-loop off + loop_history 0/10, pre-loop off +
 loop_p4 5/10.
+
+## Escapes offer their state to the variant table (`[optimize] escape_offer`, after the TW3 merge)
+
+Lead 2026-11-19: "escapes offer their result to the table; the table keeps the bests". The state
+after a taken layering escape (b) or a taken in-loop P4 round (f) is offered to the run's archive
+and to the TW3 shared table before the cycle's own end-of-cycle offer, so a best reached there is
+kept even when the rest of the cycle (front re-lays, layer re-optimisation, crossing passes) leaves
+it (Polubasov 2010 «Многовариантная оптимизация»: the table keeps the variants optimal for some
+criterion).
+
+- `Space::offer_floor` (before each cycle: the archive's criteria) and `Space::take_offers`
+  (drained after a finished cycle, before its own offer). A state some held criteria cover is not
+  copied (`mid_covered`); a cycle cut short drops its offers.
+- `SharedTable::offer_mid`: held under the key (cycle, run, seq), the cycle-end offer is seq
+  `usize::MAX`, so the commit order is (cycle, run, order reached) and the table stays a function
+  of the seeds (same rule as TW3). A mid offer whose run never offered that cycle's end is dropped
+  at the commit, not counted.
+- Default true; it acts only with `escape = "layering"` or `loop_p4 = true`, so the defaults keep
+  main's copper. Report: the escapes' warning ("states after escapes / in-loop P4 rounds offered to
+  the variant table N (A taken into this run's archive, C not offered: covered by its rows)") and
+  JSON `escape_offer {on, offered, archived, covered}`.
+- Tests: `table::tests::mid_cycle_offers_commit_with_their_cycle_and_drop_when_unfinished`,
+  `tw5_escape::escape_offer_puts_the_in_loop_round_states_into_the_table` (two runs: the restarts
+  go on from a row that came from a round's state; off: none). Mutants o1-o6 in tools/tw5_mut_f.sh.
