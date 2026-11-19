@@ -593,6 +593,9 @@ pub struct Frame<'a> {
     /// CM1: per wire, the triangles that share a vertex with one of its triangles and the other
     /// wires that traverse them ([`Frame::nstar`]); static for the model's life.
     nstar: Vec<std::sync::OnceLock<std::sync::Arc<NStar>>>,
+    /// tw4-r2 (1) (`[capacity] pad_exits`): per wire its planned pad exits ([`super::padexit`]),
+    /// static for the model's life (state and taut paths are borrowed). Memo.
+    exits: Vec<std::sync::OnceLock<std::sync::Arc<Vec<super::padexit::ExitGeo>>>>,
 }
 
 /// CM1: the neighbourhood of a wire's path ([`Frame::nstar`]).
@@ -851,7 +854,8 @@ impl<'a> Frame<'a> {
         let margins = (0..st.passes.len() * margin_slots(nl)).map(|_| std::sync::atomic::AtomicU64::new(MARGIN_UNSET)).collect();
         let vbase = pr.edges.len() * nl;
         let nstar = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
-        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins, vbase, vfocus: None, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar }
+        let exits = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
+        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins, vbase, vfocus: None, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar, exits }
     }
 
     /// The price of one over-full edge-layer (mm).
@@ -1097,14 +1101,14 @@ impl<'a> Frame<'a> {
         for &x in &ws {
             owners.push(x);
             let ns = self.nstar(x);
-            owners.extend(ns.wires.iter().copied().filter(|&u| m.vpts(u).iter().flatten().any(|&(t, _)| ns.tris.binary_search(&t).is_ok())));
+            owners.extend(ns.wires.iter().copied().filter(|&u| m.vpts(u).iter().flatten().any(|&(t, _)| ns.tris.binary_search(&t).is_ok()) || (self.packer.pad_exits && self.exits(u).iter().any(|g| ns.tris.binary_search(&g.tri).is_ok()))));
         }
         owners.sort_unstable();
         owners.dedup();
         let mut delta = 0.0;
         for u in owners {
             let i = self.vbase + u;
-            let c = self.price * self.via_over(&*m, u).graded;
+            let c = self.price * self.wire_over(&*m, u).graded;
             let (oc, _) = m.cost(i);
             if c != oc {
                 delta += c - oc;
@@ -1124,6 +1128,132 @@ impl<'a> Frame<'a> {
         let s = self.packer.via_static_of(self.st.proj, t, net, p, norm);
         let g = std::sync::Arc::new(viacut::with_crossers(self.st, self.packer, &s, net));
         self.vgeo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(key).or_insert(g).clone()
+    }
+
+    /// The CM1 entry of wire `w`: its via terms ([`Frame::via_over`]) and, with `[capacity]
+    /// pad_exits`, its pad exits' terms ([`Frame::exit_over`]). O(both).
+    pub(crate) fn wire_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> viacut::Over {
+        let a = self.via_over(m, w);
+        if !self.packer.pad_exits {
+            return a;
+        }
+        let b = self.exit_over(m, w);
+        viacut::Over { count: a.count + b.count, graded: a.graded + b.graded }
+    }
+
+    /// tw4-r2 (1): the planned pad exits of wire `w` (empty without `[capacity] pad_exits`). Memo.
+    pub(crate) fn exits(&self, w: WireId) -> std::sync::Arc<Vec<super::padexit::ExitGeo>> {
+        if !self.packer.pad_exits || w >= self.exits.len() {
+            return std::sync::Arc::new(Vec::new());
+        }
+        self.exits[w]
+            .get_or_init(|| {
+                let wi = &self.st.wires[w];
+                let floor = self.packer.exit_floor(wi.net, wi.w);
+                std::sync::Arc::new(if wi.alive { self.packer.exits_of(self.st, w, floor) } else { Vec::new() })
+            })
+            .clone()
+    }
+
+    /// tw4-r2 (1) ([`super::padexit`]): the over-full terms of `w`'s planned pad exits under the
+    /// pass layers and via points of `m`: (a) the stub's static deficit, (b) CM1's gap cuts at the
+    /// stub's middle and tip on the pad's layer with the stub (width `w_e`) as the feature (the
+    /// worse of the two points), (c) a planned via of `w` in the exit zone nearer than its
+    /// clearance to a neighbour pin. Each graded `1 + over / pitch` ([`viacut::price`]). Zero
+    /// outside the via focus, as [`Frame::via_over`]. O(exits x (cuts x crossers + vias x
+    /// neighbours)).
+    pub(crate) fn exit_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> viacut::Over {
+        let mut tot = viacut::Over::default();
+        let Some(norm) = self.packer.via_cuts else { return tot };
+        if self.vfocus.as_ref().is_some_and(|f| !f.get(w).copied().unwrap_or(false)) {
+            return tot;
+        }
+        let geos = self.exits(w);
+        if geos.is_empty() {
+            return tot;
+        }
+        let st = self.st;
+        let wi = &st.wires[w];
+        let ramp = self.packer.via_ramp;
+        let on = |x: WireId, k: usize, l: usize| {
+            let ps = &st.wires[x].passes;
+            let mut any = false;
+            let mut hit = false;
+            for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < ps.len()) {
+                any = true;
+                hit |= m.layer(ps[j]) == l as i32;
+            }
+            hit || (!any && self.bottom == l as i32)
+        };
+        let item = |x: WireId, k: usize| {
+            let xi = &st.wires[x];
+            let j = k.min(xi.passes.len().saturating_sub(1));
+            let wd = xi.passes.get(j).and_then(|&p| st.pass_w.get(p).copied()).unwrap_or(xi.w);
+            super::demand::Item { net: xi.net, w: wd, s: xi.s }
+        };
+        let add = |tot: &mut viacut::Over, o: viacut::Over| {
+            tot.count += o.count;
+            tot.graded += o.graded;
+        };
+        let r = 0.5 * self.wire_d[w];
+        for g in geos.iter() {
+            let pitch = (g.w_e + wi.s).max(1.0);
+            // The pad's layer as a planning layer (a pad off the signal layers prices no cuts).
+            let pl = st.proj.n_layers.min(64);
+            if g.layer >= pl {
+                continue;
+            }
+            // (a)
+            if let Some((f, c)) = viacut::price(g.stat, pitch, ramp) {
+                add(&mut tot, viacut::Over { count: c as usize, graded: f });
+            }
+            // (b)
+            let stub = super::demand::Item { net: wi.net, w: g.w_e, s: wi.s };
+            let mut best = viacut::Over::default();
+            for p in [(g.a + g.b) * 0.5, g.b] {
+                let geo = self.geo(g.tri, wi.net, p, norm);
+                let on_l = |x: WireId, k: usize, l: usize| l == g.layer && on(x, k, l);
+                let o = viacut::over(&geo, stub, ramp, &on_l, &item);
+                if o.graded > best.graded {
+                    best = o;
+                }
+            }
+            add(&mut tot, best);
+            // (c)
+            let zone = (g.b - g.a).len() + r + wi.s + g.w_e;
+            for &(_, p) in m.vpts(w).iter().flatten() {
+                if super::draw::seg_dist(p, g.a, g.b) > zone {
+                    continue;
+                }
+                let def = super::padexit::via_deficit(st, &g.neigh, p, r, wi.s);
+                if let Some((f, c)) = viacut::price(def, (2.0 * r + wi.s).max(1.0), ramp) {
+                    add(&mut tot, viacut::Over { count: c as usize, graded: f });
+                }
+            }
+        }
+        tot
+    }
+
+    /// tw4-r2 (1): the planned pad exits with an over-full term, located: `(wire, end, layer,
+    /// stub a, stub b, graded)` (the compass). O(wires x exits).
+    pub(crate) fn exit_list<M: MemRead + ?Sized>(&self, m: &M) -> Vec<(WireId, u8, usize, Vec2, Vec2, f64)> {
+        if !self.packer.pad_exits {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for w in 0..self.st.wires.len() {
+            let geos = self.exits(w);
+            if geos.is_empty() {
+                continue;
+            }
+            let o = self.exit_over(m, w);
+            if o.graded > 0.0 {
+                for g in geos.iter() {
+                    out.push((w, g.end, g.layer, g.a, g.b, o.graded));
+                }
+            }
+        }
+        out
     }
 
     /// CM1: the over-full amount of the gap cuts of `w`'s planned vias ([`viacut::over`]) and of
@@ -1587,7 +1717,7 @@ impl<'a> CapModel<'a> {
         if packer.via_cuts.is_some() {
             let t0 = std::time::Instant::now();
             for w in (0..nw).filter(|&w| st.wires[w].alive && used(w)) {
-                let c = m.fx.price * m.fx.via_over(&m.a, w).graded;
+                let c = m.fx.price * m.fx.wire_over(&m.a, w).graded;
                 m.a.cost[m.fx.vbase + w] = c;
             }
             meter::add(&meter::VIACUT_NS, &meter::VIACUT, t0);
@@ -1761,7 +1891,7 @@ impl<'a> CapModel<'a> {
     /// CM1: the over-full via cuts (per via the over-full layers of its gap cuts, plus its
     /// over-full via-to-via cuts). O(wires with a priced via cut x their vias x cuts).
     pub fn via_cut_count(&self) -> usize {
-        (0..self.vpts.len()).filter(|&w| self.cost[self.fx.vbase + w] > 0.0).map(|w| self.fx.via_over(&self.a, w).count).sum()
+        (0..self.vpts.len()).filter(|&w| self.cost[self.fx.vbase + w] > 0.0).map(|w| self.fx.wire_over(&self.a, w).count).sum()
     }
 
     /// CM1: the wires with an over-full via cut, each with the wires that cross its gap cuts or
@@ -1787,7 +1917,7 @@ impl<'a> CapModel<'a> {
         let mut bad = 0;
         let mut n = 0;
         for w in 0..self.vpts.len() {
-            let fresh = self.fx.price * self.fx.via_over(&self.a, w).graded;
+            let fresh = self.fx.price * self.fx.wire_over(&self.a, w).graded;
             let c = self.cost[self.fx.vbase + w];
             n += usize::from(c > 0.0 || fresh > 0.0);
             if (fresh - c).abs() > 1e-6 * fresh.abs().max(1.0) {
@@ -1876,6 +2006,17 @@ impl<'a> CapModel<'a> {
             }
         }
         (bad, n)
+    }
+
+    /// tw4-r2 (1): the planned pad exits with an over-full term ([`Frame::exit_list`]): `(wire,
+    /// end, layer, stub start, stub end, graded)`.
+    pub fn exit_items(&self) -> Vec<(WireId, u8, usize, Vec2, Vec2, f64)> {
+        self.fx.exit_list(&self.a)
+    }
+
+    /// tw4-r2 (1): the planned pad exits of wire `w` (empty without `[capacity] pad_exits`).
+    pub fn exits_of(&self, w: WireId) -> Vec<super::padexit::ExitGeo> {
+        self.fx.exits(w).to_vec()
     }
 
     /// CM1: the planned via points of wire `w` in via order (`None`: no point), for tests.

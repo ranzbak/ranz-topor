@@ -10,7 +10,7 @@
 # Every run: harness.score_runs (cpu clock 2400 s unless equal time), optimize.runs=1, --no-png, realise erbs.
 # cfg: K = rounds=1; M = rounds=40; e<k> = equal time (wall 300 s) seed k; suffixes (any order, at the end):
 #   b = [capacity] via_best_point = true; r = [capacity] via_over_ramp = 0.05; R = via_over_ramp = 0.1;
-#   h = [capacity] via_disc_height = true; p = [capacity] pour_cuts = true; q / Q = pour_cut_cells 250000 / 100000 (pour mode: PCFG = the cfgs).
+#   h = [capacity] via_disc_height = true; x = [capacity] pad_exits = true; p = [capacity] pour_cuts = true; q / Q = pour_cut_cells 250000 / 100000 (pour mode: PCFG = the cfgs).
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
@@ -29,6 +29,7 @@ one() {
     elif [ "${c%R}" != "$c" ]; then SETS+=(--set capacity.via_over_ramp=0.1); c=${c%R}
     elif [ "${c%p}" != "$c" ]; then SETS+=(--set capacity.pour_cuts=true); c=${c%p}
     elif [ "${c%h}" != "$c" ]; then SETS+=(--set capacity.via_disc_height=true); c=${c%h}
+    elif [ "${c%x}" != "$c" ]; then SETS+=(--set capacity.pad_exits=true); c=${c%x}
     elif [ "${c%q}" != "$c" ]; then SETS+=(--set capacity.pour_cut_cells=250000); c=${c%q}
     elif [ "${c%Q}" != "$c" ]; then SETS+=(--set capacity.pour_cut_cells=100000); c=${c%Q}
     else break; fi
@@ -47,7 +48,8 @@ one() {
 tests() {
   ( cd engine && cargo test --release --lib -- viacut pourplan optimise::tests::the_pour > $R/test-lib.log 2>&1 9>&-; note "test lib viacut+pour rc $?"
     cargo test --release --test topo_cm1_room > $R/test-cm1.log 2>&1 9>&-; note "test topo_cm1_room rc $?"
-    cargo test --release --test topo_disc_height --test topo_d3 > $R/test-dh.log 2>&1 9>&-; note "test topo_disc_height+d3 rc $?" )
+    cargo test --release --test topo_disc_height --test topo_d3 > $R/test-dh.log 2>&1 9>&-; note "test topo_disc_height+d3 rc $?"
+    cargo test --release --test topo_pad_exit --lib -- padexit topo_pad_exit the_exit exit_tip neck_or_detour pad_exits_are > $R/test-px.log 2>&1 9>&-; note "test pad exits rc $?" )
 }
 case ${1:-} in
   one) one "$2" ;;
@@ -75,6 +77,12 @@ case ${1:-} in
       ( hzq run --threads 4 --name t4r2-h$b -- bash -c "for c in Kh Kbh Krh Kbrh; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-h$b.log 2>&1; note "unit h$b rc $?" ) &
     done
     ( hzq run --threads 4 --name t4r2-hpat -- bash -c "for r in Kh:vgap Kbh:vgap Mh:vgap Mbh:vgap; do bash $ROOT/tools/tw4r2_job.sh one \$r & done; wait" > $R/u-hpat.log 2>&1; note "unit hpat rc $?" ) &
+    wait; note "all done" ;;
+  px)
+    ( hzq run --threads 4 --name t4r2-tests -- bash $ROOT/tools/tw4r2_job.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
+    for b in esp qmtech; do
+      ( hzq run --threads 4 --name t4r2-x$b -- bash -c "for c in K Kx Khx; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-x$b.log 2>&1; note "unit x$b rc $?" ) &
+    done
     wait; note "all done" ;;
   pour)
     for b in esp qmtech; do

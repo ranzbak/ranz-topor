@@ -321,6 +321,16 @@ pub struct Packer<'a> {
     /// tw4-r2 (2b) (`[capacity] via_disc_height`): a planned via's disc packs on its wire's entry
     /// and exit edges at its height off each edge line ([`pair_req`], [`disc_margin`]).
     pub via_disc_h: bool,
+    /// tw4-r2 (1) (`[capacity] pad_exits`): the planned pad exits are terms of the capacity model
+    /// ([`super::padexit`]); with via_cuts only.
+    pub pad_exits: bool,
+    /// tw4-r2 (1): the neck floor of every net (nm, `Drawer::neck_floor` before the `min(w)`); nets
+    /// not listed: `exit_floor0`.
+    pub(crate) exit_floor: FxHashMap<i32, f64>,
+    pub(crate) exit_floor0: f64,
+    /// tw4-r2 (1): [`Packer::exit_static`] per (pad, side, net, width, clearance, floor bits).
+    #[allow(clippy::type_complexity)]
+    pub(crate) exit_cache: Mutex<FxHashMap<(usize, super::padexit::Side, i32, u64, u64, u64), Option<Arc<super::padexit::ExitStatic>>>>,
     /// M-45: the drawing is octilinear; a pass's oblique factor is the octilinear one
     /// ([`super::demand::octi_stretch`]).
     pub octi: bool,
@@ -382,11 +392,25 @@ impl<'a> Packer<'a> {
             via_best: false,
             via_ramp: 0.0,
             via_disc_h: false,
+            pad_exits: false,
+            exit_floor: fxmap(),
+            exit_floor0: 0.0,
+            exit_cache: Mutex::new(fxmap()),
             via_cands: Mutex::new(fxmap()),
             octi: false,
             cuts: None,
             edge_memo: std::sync::Mutex::new(Default::default()),
         }
+    }
+
+    /// The projection the packer packs on.
+    pub(crate) fn proj(&self) -> &'a Projection {
+        self.pr
+    }
+
+    /// tw4-r2 (1): the neck floor of a wire of `net` and width `w` (nm; `Drawer::neck_floor`).
+    pub fn exit_floor(&self, net: i32, w: f64) -> f64 {
+        self.exit_floor.get(&net).copied().unwrap_or(self.exit_floor0).min(w)
     }
 
     /// Whether `pr` is this packer's projection (the build memo's edge ids are its edges). O(1).
@@ -451,6 +475,10 @@ impl<'a> Packer<'a> {
         p.via_best = opts.via_best_point;
         p.via_ramp = opts.via_over_ramp_mm.max(0.0) * 1e6;
         p.via_disc_h = opts.via_disc_height;
+        p.pad_exits = opts.pad_exits && opts.via_cuts;
+        let floor = |net: i32| model.rules.min_track_width.max(model.rules.net_rule(net).min_width).max(2 * model.rules.min_connection) as f64;
+        p.exit_floor0 = floor(0);
+        p.exit_floor = model.nets.iter().map(|n| (n.code, floor(n.code))).collect();
         p.octi = opts.draw_style == "octilinear" && opts.octi_room;
         if opts.capacity_model == "cuts" {
             p.cuts = Some(super::cutmodel::CutCtx::new(super::cutmodel::CutOpts::from_options(opts), opts.cut_vias, p.outline.clone()));

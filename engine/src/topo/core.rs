@@ -4277,7 +4277,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let or = |a: &mut Vec<bool>, b: Vec<bool>| a.iter_mut().zip(b).for_each(|(x, y)| *x |= y);
             let mut vfocus: Vec<bool> = Vec::new();
             if opts.via_cuts {
-                let (m, f) = layers::via_neighbourhood(st, &free, &lr.events);
+                let (m, f) = layers::via_neighbourhood_x(st, &free, &lr.events, opts.pad_exits);
                 or(&mut w_after, m);
                 vfocus = f;
             }
@@ -4287,7 +4287,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let free_b: Vec<bool> = (0..nb).map(|w| free.get(w).copied().unwrap_or(false) || gone.contains(&w)).collect();
             let mut w_before = layers::neighbourhood(st, &free_b);
             if opts.via_cuts {
-                let (m, f) = layers::via_neighbourhood(st, &free_b, &prev.events);
+                let (m, f) = layers::via_neighbourhood_x(st, &free_b, &prev.events, opts.pad_exits);
                 or(&mut w_before, m);
                 // One focus for both states (the union), so a term is priced on both sides or on none.
                 vfocus.resize(vfocus.len().max(f.len()), false);
@@ -6510,7 +6510,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             // drawing (end of this round), outside the time limit.
             // `pad_exits`: with 5.10's stubs on, the planned stubs and the needed exits no legal stub
             // realises (compass::exit_stub_items); off: no pad-exit plan object (not predicted).
-            let px = opts.pad_exit_stubs.then(|| super::compass::exit_stub_items(b, &st, &wc, &lname));
+            let mut px = opts.pad_exit_stubs.then(|| super::compass::exit_stub_items(b, &st, &wc, &lname));
+            // tw4-r2 (1) `[capacity] pad_exits`: the plan's own exits with an over-full term.
+            if packer.pad_exits {
+                px.get_or_insert_with(Vec::new).extend(super::compass::plan_exit_items(&cm_plan.exit_items(), &wc, &lname));
+            }
             let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: px.as_deref() };
             let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);

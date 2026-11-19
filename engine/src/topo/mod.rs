@@ -34,6 +34,7 @@ pub mod layers;
 pub mod learn;
 pub mod planes;
 pub mod pourplan;
+pub mod padexit;
 pub mod reduce;
 pub mod schedule;
 pub mod sheet;

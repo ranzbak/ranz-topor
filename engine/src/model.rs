@@ -1580,6 +1580,16 @@ pub struct Options {
     /// holds what lies on it). The drawing's packing keeps the disc on the line. false (default) =
     /// the disc on the edge line (as before).
     pub via_disc_height: bool,
+    /// tw4-r2 (1) (`[capacity] pad_exits`, docs/dev/design/tw4-r2.md (1)): with via_cuts, every
+    /// wire end at a fine-pitch pad (another net's copper beside it closer than the wire could
+    /// pass) holds its planned exit, read from the plan (the leaving pass, the pad side it leaves
+    /// by, the widest stub width that keeps the clearance, at worst the neck floor), and the
+    /// capacity model prices it: the stub too near a neighbour pin, other nets' wires between the
+    /// stub and a neighbour pin (CM1's gap cuts with the stub as the feature), and a planned via of
+    /// the wire in the exit zone too near a neighbour pin; each over-full term one graded predicted
+    /// violation (TopoR 6.3 manual p. 71, p. 56; Maley 1987 pp. 32-33, 40). false (default) = no
+    /// planned exit (the drawing finds it, as before).
+    pub pad_exits: bool,
     /// tw4-r2 (3) (`[capacity] pour_cuts`): the TopoR loop's measure counts a pour terminal (a
     /// pad that reaches its net only through a pour) that the plan's copper cuts off its pour as
     /// a predicted violation, graded by the pads cut off (`topo::pourplan`). false (default) =
@@ -1811,6 +1821,7 @@ impl Default for Options {
             via_best_point: false,
             via_over_ramp_mm: 0.0,
             via_disc_height: false,
+            pad_exits: false,
             pour_cuts: false,
             pour_cut_cells: 1.0e5,
             stop_after: String::new(),
