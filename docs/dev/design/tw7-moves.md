@@ -209,3 +209,23 @@ topo_tw7_patterns `pattern_share_bounds_the_moves_graded` (y 12.4, every move un
 waits, graded, overdraw at most one move, copper unchanged), `pattern_share_still_takes_the_best_move`;
 lib `the_pattern_moves_line_is_true_for_every_case`. Default: after the equal-time A/B (u / ud / ud + share on
 ccx33 timing slots, esp s0-7 + qmtech s0).
+
+Results (equal time 300 s wall, ccx33 timing slots, 4 threads, tags tw7ta/tw7tb-7dc21366; esp s0-7 sums, ladder_diff
+--json, as drc_new / unconnected / vias / detour>1.5; cycles per minute of loop time):
+
+| cfg | esp s0-7 | cycles/min esp | qmtech s0 | cycles/min qm | measured share |
+|---|---|---|---|---|---|
+| base (batch pass) | 1118/69/473/117 | 13.4 | 253/20/163/23 | 4.8 | - |
+| u (share 1) | 1034/78/428/115 | 6.7 | 401/19/151/20 | 2.8 | 0.58-0.64 (prof 65-72 % of loop time) |
+| ud (share 1, detour 1) | 1289/72/434/109 | 7.1 | 164/20/147/22 | 2.9 | 0.59-0.64 |
+| udh (share 0.25) | 1139/72/453/103 | 15.9 | 146/18/157/22 | 5.6 | 0.250 |
+| udq (share 0.1) | 1131/74/458/113 | 22.0 | 240/20/159/24 | 7.3 | 0.100 |
+
+Paired over the 8 esp seeds only these clear 2 standard errors: u vias -5.6/seed (t -2.0), udh detour>1.5 -1.8/seed
+(t -2.3); drc_new and unconnected are noise everywhere. The work units track the time (measured 0.10 / 0.25 against
+12-17 % / 29-36 % of loop time in the profile). With the budget the loop runs more cycles than the base, because the batch pass
+it replaces costs time too. Per connection over seeds (reports/tw7-moves-data/conn3.json): all pattern configs fix
+IO8_SCL R17.2-U2.13 (base ratio 1.6-2.0 with DRC), +BATT U4.28 (DRC in 6/8 base seeds), +3V3 U4.2 (vias 22 -> 10);
+qmtech JS_CS, ADV_CLK and FPGA_UART1_CTS lose their detours. The detour factor (d) adds a via pair on short
+connections (Net-(D9-Pad4) 0 -> 2 vias in 5/8 seeds for ratio 1.24 -> 1.07; IO8_SCL U4.13-U4.18 in ud), u does not.
+Default pattern_share = 0.25 (pattern_moves stays opt-in, so default copper is unchanged).

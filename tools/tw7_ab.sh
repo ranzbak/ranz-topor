@@ -6,6 +6,7 @@
 #   tw7_ab.sh k <cfgs>       K per cfg on esp + qmtech (deterministic per-connection comparison)
 #   tw7_ab.sh eq <cfgs>      equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults)
 #   tw7_ab.sh all <cfgs>     pyt + tests + off + k <cfgs> + eq - <cfgs>
+#   tw7_ab.sh pytall         the full pytest (CI=1; Python touched, AGENT_RULES)
 #   tw7_ab.sh pyt | tests    targeted pytest (config docs/defaults) | the TW7 cargo tests (release)
 #   tw7_ab.sh tq <unit>...   TIMING slot (hz.sh job --timing, round 3): the units cfg:board:4 one after another, no hzq
 #                            (the slot is the job's 4 threads); "all done" at the end
@@ -60,6 +61,7 @@ case ${1:-} in
       done
     done
     wait ;;
+  pytall) ( CI=1 python -m pytest -q -rs -p no:cacheprovider > $R/pytest-all.log 2>&1 9>&-; note "pytest all rc $?"; tail -3 $R/pytest-all.log >> $R/rc.txt; note "all done" ) ;;
   pyt) ( CI=1 python -m pytest -q -rs -p no:cacheprovider tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py > $R/pytest.log 2>&1 9>&-; note "pytest config rc $?"; tail -2 $R/pytest.log >> $R/rc.txt ) ;;
   tests) ( cd engine && cargo test --release --test topo_tw7_patterns > $R/test-tw7.log 2>&1 9>&-; note "test topo_tw7_patterns rc $?"
            cargo test --release --lib pourplan > $R/test-pourplan.log 2>&1 9>&-; note "test lib pourplan rc $?"

@@ -1019,8 +1019,9 @@ pub struct Options {
     /// TW7 B (`[optimize] pattern_share`, docs/dev/design/tw7-moves.md §11): the share of the
     /// loop's work the pattern moves may take (a graded budget in work units, never the clock:
     /// [`crate::topo::escape::Share`]); found patterns run the most excess length first while the
-    /// budget lasts, the rest wait for a later cycle. 1 (default) = no budget (every pattern, up to
-    /// the loop's rip-up limit).
+    /// budget lasts, the rest wait for a later cycle. 1 = no budget (every pattern, up to the loop's
+    /// rip-up limit). Default 0.25 (round-3 equal-time A/B, docs/dev/design/tw7-moves.md §11:
+    /// the loop keeps its cycle rate and the fewest detours > 1.5).
     pub pattern_share: f64,
     /// TW7 part D (`[factors] detour`): per connection, the length coefficient of its next re-lay
     /// in the TopoR loop is raised by `1 + detour * (r - 1)^2`, `r` = its projected length over
@@ -1765,7 +1766,7 @@ impl Default for Options {
             soft_cuts: true,
             crossing_rules: true,
             pattern_moves: Vec::new(),
-            pattern_share: 1.0,
+            pattern_share: 0.25,
             detour_k: 0.0,
             reroute_rounds: 6,
             via_reduce: true,
