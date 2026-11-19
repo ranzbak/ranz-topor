@@ -144,8 +144,7 @@ case ${1:-} in
       for s_ in 0 1 2 3 4; do l1+="Nr16s$s_:d-$n "; done; for s_ in 5 6 7 8 9; do l2+="Nr16s$s_:d-$n "; done; l1+="Or16s0:d-$n "
     done
     u d 2 "$l1" "$l2"; wait
-    PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns_png $R/d8 $R $R/d8out > $R/d8-png.log 2>&1; note "d8 png rc $? $(tr '\n' ';' < $R/d8-png.log)"
-    note "all done" ;;
+    PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns_png $R/d8 $R $R/d8out > $R/d8-png.log 2>&1; note "d8 png rc $? $(tr '\n' ';' < $R/d8-png.log)" ;;
   r3)
     # Round 3: tests (new tw5_escape + loop_local tests), mutants, inner_layer_room with its declared layers routed
     # (the pattern's KiCad types are all "signal", so topor's 4-layer default makes In1 gnd), O vs N, seeds 0-9.
@@ -156,6 +155,18 @@ case ${1:-} in
     u i 2 "$lo" "$ln"
     u q 4 "Nr16:qmtech:2" "Nr16s1:esp Nr16s2:esp" "Nr16s3:esp Nr16s4:esp"
     u e 2 "Nr16:esp Nr16:wiccon Nr16:eprom" "Nr1:esp Nr1:wiccon Nr1:eprom"
+    wait; note "all done" ;;
+  r4)
+    # Round 4 (tip): tests + mutants; O = main copper at 1 cycle (vs nd2b2-dcf4c0e); N 16 cycles ladder (esp 5 seeds);
+    # inner_layer_room declared layers N seeds 0-9; the D8 proposals (generate, route, PNG).
+    ( hzq run --threads 4 --name tw5-tests -- bash -c "bash $ROOT/tools/tw5_job.sh tests; bash $ROOT/tools/tw5_job.sh mutants" > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
+    gen
+    u o 4 "Or1:esp Or1:eprom" "Or1:wiccon" "Or1:qmtech" "Nr16:wiccon Nr16:eprom"
+    u q 2 "Nr16:qmtech:2"
+    u e 5 "Nr16:esp" "Nr16s1:esp" "Nr16s2:esp" "Nr16s3:esp" "Nr16s4:esp"
+    ln=""; for s_ in 0 1 2 3 4 5 6 7 8 9; do ln+="Nr16s$s_:q-inner_layer_room "; done
+    u i 1 "$ln"
+    ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
   r2)
     # Round 2: O vs N at 16 cycles on the ladder (esp 5 seeds), the patterns O vs N at 16 cycles, targeted tests.

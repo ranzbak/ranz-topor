@@ -667,6 +667,10 @@ fn layering_escapes_change_free_positions_deterministically() {
         // TW5 (c): the loop history is updated after every escape's whole-board measure.
         assert_eq!(n("history_updates"), n("escapes"), "{n_layers} layers: {e}");
         assert_eq!(e, escape_json(&m, &loop_opts(r#""loop_judge": "local""#)), "{n_layers} layers: deterministic per seed");
+        // A dear escape (escape_kappa 10: one escape's work is ten re-lays' per wire): the throttle spaces
+        // the escapes so they stay within the share.
+        let k = escape_json(&m, &loop_opts(r#""loop_judge": "local", "escape_kappa": 10.0"#));
+        assert!(k["escapes"].as_f64().unwrap_or(0.0) > 0.0 && k["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, kappa 10: {k}");
         let t = escape_json(&m, &loop_opts(r#""loop_judge": "local", "escape": "ties""#));
         assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, escape = ties: {t}");
     }
