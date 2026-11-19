@@ -637,7 +637,7 @@ def _abort_locked(busy, ui, out: "RunOutcome", report, log, ctx, t0) -> "RunOutc
     return out
 
 
-def sketch_poll(job, ui, p: Progress, sk: dict, now: float, interval: float, done: bool) -> None:
+def sketch_poll(job, ui, p: Progress, sk: dict, now: float, interval: float, done: bool, log=None) -> None:
     """last-preview, one progress poll: ask the engine for a new last-round sketch every `interval` s while it runs
     (it builds one at the next loop cycle's end), and hand the UI the sketch it shows (``ui.preview_wanted()``) when a
     new one was published (``p.sketch_seq``) or the UI switched kind. `sk` keeps the state between polls. O(1) +
@@ -658,6 +658,9 @@ def sketch_poll(job, ui, p: Progress, sk: dict, now: float, interval: float, don
     if sk["sent"] != (kind, d.get("seq")):
         sk["sent"] = (kind, d.get("seq"))
         ui.sketch(kind, d)
+        if log is not None:  # one line per image shown (at most one per interval and per new best)
+            log.line(f"progress image: {kind}, run {d.get('run')}, round {d.get('cycle')}, {d.get('kind')}, "
+                     f"seq {d.get('seq')}, {len(d.get('items') or [])} items")
 
 
 def post_commit_finding(step: str, e: BaseException) -> Finding:
@@ -1036,7 +1039,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                     state["cancel"] = True
                 if sketching:
                     try:
-                        sketch_poll(job, ui, p, sk, now, interval, done)
+                        sketch_poll(job, ui, p, sk, now, interval, done, log)
                     except Exception as e:  # noqa: BLE001 - the board image never stops a run: off, logged
                         sketching = False
                         log.line(f"progress board image switched off after an error: {type(e).__name__}: {e}")
