@@ -1008,6 +1008,32 @@ pub struct Options {
     /// the two traces locally in the other order (Luzin & Popov 2012; Polubasov 2010), kept when
     /// the plan gets better.
     pub crossing_rules: bool,
+    /// TW7 part B (`[optimize] pattern_moves`, docs/dev/design/tw7-moves.md): the pattern kinds
+    /// that, in every cycle of the TopoR loop, become one targeted move each instead of the batch
+    /// crossing pass: per found pattern its wires are laid again in the rule's order and the move
+    /// is kept when the board's evaluation drops (Luzin 2015 p. 7: "identifying a specific
+    /// topological situation ... takes far less time than finding all possible wire routes").
+    /// Entries: "clinch", "double", "unlayerable", "u_clinch", "evasion". Empty (default) = the
+    /// batch pass as before.
+    pub pattern_moves: Vec<String>,
+    /// TW7 B (`[optimize] pattern_share`, docs/dev/design/tw7-moves.md §11): the share of the
+    /// loop's work the pattern moves may take (a graded budget in work units, never the clock:
+    /// [`crate::topo::escape::Share`]); found patterns run the most excess length first while the
+    /// budget lasts, the rest wait for a later cycle. 1 = no budget (every pattern, up to the loop's
+    /// rip-up limit). Default 0.25 (round-3 equal-time A/B, docs/dev/design/tw7-moves.md §11:
+    /// the loop keeps its cycle rate and the fewest detours > 1.5).
+    pub pattern_share: f64,
+    /// TW7 B (`[optimize] pattern_stuck`, docs/dev/design/tw7-moves.md §12): the weight of a
+    /// pattern's fruitless tries in the moves' order: a pattern runs by its excess length times
+    /// `1 / (1 + pattern_stuck x stuck)`, `stuck` = the tries of its two connections' pattern since
+    /// it was last kept (graded, no cutoff: a pattern that keeps failing moves down, never out).
+    /// 0 = the excess length alone (round 3). Default 1.
+    pub pattern_stuck: f64,
+    /// TW7 part D (`[factors] detour`): per connection, the length coefficient of its next re-lay
+    /// in the TopoR loop is raised by `1 + detour * (r - 1)^2`, `r` = its projected length over
+    /// the straight distance at the cycle's start (Polubasov 2010 «Перекладка»: per-wire
+    /// coefficients from the quality of its path; graded, no threshold). 0 (default) = off.
+    pub detour_k: f64,
     /// Topological core (S3, `topor.toml [search] reroute_rounds`): most rounds of negotiated
     /// rip-up-and-reroute after the first layer assignment (0 = off). With `opt_loop = "topor"`
     /// only when `preloop_p4` is true (the default; TW5 (e) false: the loop does their work).
@@ -1749,6 +1775,10 @@ impl Default for Options {
             history_fade: 0.5,
             soft_cuts: true,
             crossing_rules: true,
+            pattern_moves: Vec::new(),
+            pattern_share: 0.25,
+            pattern_stuck: 1.0,
+            detour_k: 0.0,
             reroute_rounds: 6,
             via_reduce: true,
             stitch_islands: true,
