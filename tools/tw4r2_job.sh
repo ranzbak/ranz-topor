@@ -30,6 +30,9 @@ one() {
     elif [ "${c%p}" != "$c" ]; then SETS+=(--set capacity.pour_cuts=true); c=${c%p}
     elif [ "${c%h}" != "$c" ]; then SETS+=(--set capacity.via_disc_height=true); c=${c%h}
     elif [ "${c%x}" != "$c" ]; then SETS+=(--set capacity.pad_exits=true); c=${c%x}
+    elif [ "${c%A}" != "$c" ]; then export TOPO_PX_TERMS=a; c=${c%A}
+    elif [ "${c%B}" != "$c" ]; then export TOPO_PX_TERMS=b; c=${c%B}
+    elif [ "${c%C}" != "$c" ]; then export TOPO_PX_TERMS=c; c=${c%C}
     elif [ "${c%q}" != "$c" ]; then SETS+=(--set capacity.pour_cut_cells=250000); c=${c%q}
     elif [ "${c%Q}" != "$c" ]; then SETS+=(--set capacity.pour_cut_cells=100000); c=${c%Q}
     else break; fi
@@ -81,7 +84,7 @@ case ${1:-} in
   px)
     ( hzq run --threads 4 --name t4r2-tests -- bash $ROOT/tools/tw4r2_job.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
     for b in esp qmtech; do
-      ( hzq run --threads 4 --name t4r2-x$b -- bash -c "for c in K Kx Khx; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-x$b.log 2>&1; note "unit x$b rc $?" ) &
+      ( hzq run --threads 4 --name t4r2-x$b -- bash -c "for c in ${XCFG:-K Kx Khx}; do bash $ROOT/tools/tw4r2_job.sh one \$c:$b & done; wait" > $R/u-x$b.log 2>&1; note "unit x$b rc $?" ) &
     done
     wait; note "all done" ;;
   pour)

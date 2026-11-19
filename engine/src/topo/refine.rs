@@ -1196,6 +1196,12 @@ impl<'a> Frame<'a> {
             tot.graded += o.graded;
         };
         let r = 0.5 * self.wire_d[w];
+        // Diagnosis hook (`TOPO_PX_TERMS`, letters of the terms priced; default all three "abc").
+        static TERMS: std::sync::OnceLock<[bool; 3]> = std::sync::OnceLock::new();
+        let terms = TERMS.get_or_init(|| {
+            let v = std::env::var("TOPO_PX_TERMS").unwrap_or_else(|_| "abc".into());
+            [v.contains('a'), v.contains('b'), v.contains('c')]
+        });
         for g in geos.iter() {
             let pitch = (g.w_e + wi.s).max(1.0);
             // The pad's layer as a planning layer (a pad off the signal layers prices no cuts).
@@ -1204,13 +1210,13 @@ impl<'a> Frame<'a> {
                 continue;
             }
             // (a)
-            if let Some((f, c)) = viacut::price(g.stat, pitch, ramp) {
+            if let Some((f, c)) = viacut::price(g.stat, pitch, ramp).filter(|_| terms[0]) {
                 add(&mut tot, viacut::Over { count: c as usize, graded: f });
             }
             // (b)
             let stub = super::demand::Item { net: wi.net, w: g.w_e, s: wi.s };
             let mut best = viacut::Over::default();
-            for p in [(g.a + g.b) * 0.5, g.b] {
+            for p in [(g.a + g.b) * 0.5, g.b].into_iter().filter(|_| terms[1]) {
                 let geo = self.geo(g.tri, wi.net, p, norm);
                 let on_l = |x: WireId, k: usize, l: usize| l == g.layer && on(x, k, l);
                 let o = viacut::over(&geo, stub, ramp, &on_l, &item);
@@ -1221,7 +1227,9 @@ impl<'a> Frame<'a> {
             add(&mut tot, best);
             // (c), one self-contained term (TW6 part A redirects it to its site room).
             let vias: Vec<Vec2> = m.vpts(w).iter().flatten().map(|&(_, p)| p).collect();
-            add(&mut tot, super::padexit::exit_via_room(st, g, &vias, r, wi.s, ramp));
+            if terms[2] {
+                add(&mut tot, super::padexit::exit_via_room(st, g, &vias, r, wi.s, ramp));
+            }
         }
         tot
     }

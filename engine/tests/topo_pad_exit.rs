@@ -111,3 +111,43 @@ fn pad_exits_are_opt_in() {
     assert!(!Options::default().pad_exits);
     assert!(Options::from_json(r#"{"pad_exits": true}"#).expect("options parse").pad_exits);
 }
+
+/// The static exit and the via-room term on the 0.5 mm pitch row of exit_tip_from_plan: out of
+/// U1.3's north tip the 0.25 mm wire's stub keeps its clearance at full width (0.35 mm from its
+/// centre line to the neighbours' copper), out of its long side it stands on U1.4 (graded over);
+/// a via of the wire in the exit zone beside U1.4 is over, one clear of the row is not. With the
+/// option on, the capacity model's stored entries equal fresh ones.
+#[test]
+fn the_exit_terms_measure_the_row() {
+    let (m, _) = fixture("exit_tip_from_plan");
+    let b = board::build(&m, &BuildOpts::default()).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    st.route_conn(&conns[0], &InitWeights::default(), (conns[0].w + conns[0].s) / 400_000.0).expect("routes");
+    let packer = Packer::for_model(&m, &opts(true), &b.proj);
+    let wi = st.wires[0].clone();
+    let floor = packer.exit_floor(wi.net, wi.w);
+    let u13 = (0..b.proj.obstacles.len()).find(|&o| (b.proj.obstacles[o].center.x - 4.0e6).abs() < 1e3 && (b.proj.obstacles[o].center.y + 3.1e6).abs() < 1e3).expect("U1.3");
+    let tip = packer.exit_static(u13, Side::TipPlus, wi.net, wi.w, wi.s, floor).expect("fine pitch");
+    assert!((tip.w_e - wi.w).abs() < 1.0 && tip.over <= 0.0, "{tip:?}");
+    assert!(tip.neigh.len() >= 2, "both row neighbours");
+    let side = packer.exit_static(u13, Side::LongPlus, wi.net, wi.w, wi.s, floor).expect("fine pitch");
+    assert!(side.over > 0.1e6, "the side stub stands on U1.4: {side:?}");
+    assert!((side.w_e - floor).abs() < 1.0, "at worst the floor: {side:?}");
+    // The via room term at the exit.
+    let ex = packer.exits_of(&st, 0, floor);
+    let e = ex.iter().find(|g| g.pad == u13).expect("exit");
+    let r = 0.3e6;
+    let beside = topor_engine::geom::Vec2 { x: 4.5e6, y: e.b.y };
+    let clear = topor_engine::geom::Vec2 { x: e.b.x, y: e.b.y + e.dir.y * 3.0e6 };
+    let o = topor_engine::topo::padexit::exit_via_room(&st, e, &[beside], r, wi.s, 0.0);
+    assert!(o.count == 1 && o.graded > 1.0, "{o:?}");
+    let o = topor_engine::topo::padexit::exit_via_room(&st, e, &[clear], r, wi.s, 0.0);
+    assert_eq!(o.count, 0, "{o:?}");
+    // Stored = fresh with the option on (exit entries included).
+    let dirs = packer.taut_dirs(&st);
+    let evl = vec![vec![(0, 0.5, 0)]];
+    let cm = topor_engine::topo::refine::CapModel::new(&st, &packer, &dirs, &evl, 1, 50.0);
+    assert_eq!(cm.via_check().0, 0);
+    assert!(!cm.exits_of(0).is_empty());
+}
