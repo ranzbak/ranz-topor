@@ -67,22 +67,28 @@ def check_state(pads, st):
     for i, w in enumerate(st["wires"]):
         segs = list(zip(w["pts"], w["pts"][1:]))
         gap = math.inf
+        pair = {}
         for j, o in enumerate(st["wires"]):
             if j == i or o["net"] == w["net"] or o["layer"] != w["layer"]:
                 continue
             for a, b in segs:
                 for c, d in zip(o["pts"], o["pts"][1:]):
-                    gap = min(gap, _seg_seg(a, b, c, d) - (w["w"] + o["w"]) / 2)
+                    g = _seg_seg(a, b, c, d) - (w["w"] + o["w"]) / 2
+                    gap = min(gap, g)
+                    pair[o["net"]] = min(pair.get(o["net"], math.inf), g)
         if w["layer"] == "F":
             for p in pads:
                 if p["net"] != w["net"]:
                     for a, b in segs:
-                        gap = min(gap, _seg_rect(a, b, p) - w["w"] / 2)
+                        g = _seg_rect(a, b, p) - w["w"] / 2
+                        gap = min(gap, g)
+                        pair["pad " + p["name"]] = min(pair.get("pad " + p["name"], math.inf), g)
         for v in st.get("vias", []):
             if v["net"] != w["net"]:
                 for a, b in segs:
                     gap = min(gap, _pt_seg(v["at"], a, b) - VIA_D / 2 - w["w"] / 2)
-        out.append({"net": w["net"], "layer": w["layer"], "len": round(seglen(w["pts"]), 2), "min_gap": round(gap, 3)})
+        out.append({"net": w["net"], "layer": w["layer"], "len": round(seglen(w["pts"]), 2), "min_gap": round(gap, 3),
+                    "gaps": {k: round(v, 3) for k, v in sorted(pair.items())}})
     return out
 
 
@@ -90,8 +96,10 @@ def summarise(pads, st, straight):
     rows = check_state(pads, st)
     by = {}
     for r in rows:
-        by.setdefault(r["net"], {"len": 0.0, "min_gap": math.inf})
+        by.setdefault(r["net"], {"len": 0.0, "min_gap": math.inf, "gaps": {}})
         by[r["net"]]["len"] += r["len"]
+        for k, v in r["gaps"].items():
+            by[r["net"]]["gaps"][k] = min(by[r["net"]]["gaps"].get(k, math.inf), v)
         by[r["net"]]["min_gap"] = min(by[r["net"]]["min_gap"], r["min_gap"])
     vias = st.get("vias", [])
     nv = {}
@@ -113,6 +121,19 @@ def around(c, side, w, extra=0.0):
     return {"tl": (x0, y0), "tr": (x1, y0), "bl": (x0, y1), "br": (x1, y1)}[side]
 
 
+def dip_rail(c, y_rail, off, w=PWR, x0=10.0, x1=50.0):
+    """45 deg dip of a horizontal rail (y_rail, x0..x1) under pad c: the innermost rail's legs and bottom are at the
+    clearance from the pad (legs tangent to the clearance circle at the pad's lower corners); `off` = perpendicular
+    offset outward (a parallel rail). Lines x - y = cl (left leg), x + y = cr (right leg), y = yb (bottom)."""
+    g = CLEAR + w / 2
+    r2 = math.sqrt(2.0)
+    lx, rx, by = c["x"] - c["w"] / 2, c["x"] + c["w"] / 2, c["y"] + c["h"] / 2
+    cl = (lx - by) - g * r2 - off * r2
+    cr = (rx + by) + g * r2 + off * r2
+    yb = by + g + off
+    return [(x0, y_rail), (cl + y_rail, y_rail), (cl + yb, yb), (cr - yb, yb), (cr - y_rail, y_rail), (x1, y_rail)]
+
+
 # ---------------------------------------------------------------------------------------------- patterns
 def p_detour_trade():
     """Fig. 21b -> 21c: the via-for-length detour (TW5 / TW4 r2 A/B nets SDRAM_D13, JS1_1, IO7 R10.1-U3.21)."""
@@ -130,11 +151,11 @@ def p_detour_trade():
     # (b) careless: A round the rails' right-hand pads (one single re-lay; fig. 21b).
     tr, br = around(P["B1b"], "tr", SIG), around(P["B2b"], "br", SIG)
     s_b = {"wires": rails + [wire("A", SIG, [(30, 5), tr, br, (30, 19)])], "vias": []}
-    # (c) expected: both rails dip round A2, A straight (fig. 21c; Luzin-Popov 2013 step 8.1).
-    bl1, br1 = around(P["A2"], "bl", PWR), around(P["A2"], "br", PWR)
-    g2 = PWR + CLEAR  # B2 one track pitch outside B1
-    bl2, br2 = (bl1[0] - g2, bl1[1] + g2), (br1[0] + g2, br1[1] + g2)
-    s_c = {"wires": [wire("B1", PWR, [(10, 14), bl1, br1, (50, 14)]), wire("B2", PWR, [(10, 15.5), bl2, br2, (50, 15.5)]),
+    # (c) expected: both rails dip round A2 at 45 deg, A straight (fig. 21c; Luzin-Popov 2013 step 8.1). B1 hugs A2's
+    # pad at exactly the clearance (chamfered hull: the 45 deg legs tangent to the clearance circle at the pad's lower
+    # corners); B2 is B1's true parallel offset at the rails' own pitch (1.5 mm, the pad pitch), so the pair keeps its
+    # spacing through the bends instead of narrowing to the clearance at the V (round-1 sketch: 1.5 -> 0.7, 17 deg legs).
+    s_c = {"wires": [wire("B1", PWR, dip_rail(P["A2"], 14.0, 0.0)), wire("B2", PWR, dip_rail(P["A2"], 15.5, 1.5)),
                      wire("A", SIG, [(30, 5), (30, 19)])], "vias": []}
     return {
         "name": "detour_trade", "fig": "Luzin 2015 p. 9-10 fig. 21a-c; Luzin 2013 p. 104 fig. 21; Luzin-Popov 2013 p. 134 step 8.1",
@@ -142,7 +163,8 @@ def p_detour_trade():
         "text": ("Two 0.5 mm rails B1, B2 (PWR, laid first: wider) cross the line of a 0.25 mm wire A. A's single re-lay "
                  "prefers the way round the rails' ends (b) to two vias (a): a via-for-length detour, ratio > 1.5. No single "
                  "re-lay of B1 or B2 helps (each would cross A's way round). Expected (c): A straight, B1 and B2 dip round A2 "
-                 "together, 0 vias, a few mm. Today's pair_move does not fire: A has no via pair in state (b)."),
+                 "together at 45 deg, B1 at the clearance from A2, B2 parallel at the rails' 1.5 mm pitch (no narrowing at the "
+                 "V), 0 vias, +4.9 mm each. Today's pair_move does not fire: A has no via pair in state (b)."),
         "states": [("(a) via pair, fig. 21a", s_a), ("(b) careless: via-for-length detour, fig. 21b", s_b),
                    ("(c) expected: rails round A2, fig. 21c", s_c)],
     }
