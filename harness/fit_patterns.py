@@ -177,6 +177,10 @@ class Pattern:
     closed: list[dict] = field(default_factory=list)  # other ways across the barrier and what they cost
     extra: dict = field(default_factory=dict)  # neck, wrong-model readings, norm notes
     views: list[list[str]] = field(default_factory=lambda: [["F.Cu", "B.Cu"]])
+    # KiCad layer types (Board Setup -> Board Editor Layers) the pattern declares, e.g. {"In2.Cu": "power"}; the
+    # others stay "signal". Any non-signal type makes topor use the KiCad types (plugin/topor/layers.py) instead of
+    # its default stackup by copper count, so a pattern whose answer needs an inner layer declares it here.
+    layer_types: dict = field(default_factory=dict)
     # existing copper on the problem board too (a hand-started track: tw4 T3); the reference keeps it
     kept_tracks: list[Track] = field(default_factory=list)
 
@@ -749,6 +753,10 @@ def inner_layer_room() -> Pattern:
         size=(W, H), layers=4, nets=nets, fps=[j1, tp1, j2, j3],
         connections=[(n, f"J2.{i + 1}", f"J3.{i + 1}") for i, n in enumerate(nets)],
         cuts=cuts, keepouts=[Keepout(["B.Cu", "In2.Cu"], _strip(W, 0.0, H), tracks=True, vias=False)],
+        # FOR USER REVIEW (TW5, 2026-11-19): with every KiCad type "signal" topor's 4-layer default stackup made In1 a
+        # gnd plane, so the answer (three wires on In1) was unreachable: an invalid routing test. In2.Cu declared
+        # "power" -> the KiCad types are used: F.Cu, In1.Cu, B.Cu signal (B.Cu closed by the rule area), In2.Cu power.
+        layer_types={"In2.Cu": "power"},
         ref_tracks=tracks, ref_vias=vias,
         witness={t.net: (t.layer, t.pts) for t in tracks if len(t.pts) > 2},
         closed=[{"way": "past a pin to the side edge (any layer)", "capacity": 0.5, "demand_one_wire": 0.95},
@@ -925,7 +933,7 @@ def expected_doc(pat: Pattern) -> dict:
     doc = {
         "name": pat.name, "title": pat.title, "kind": pat.kind, "gap_classes": pat.gap_classes,
         "purpose": pat.purpose, "expected": pat.answer, "why": pat.why,
-        "board": {"size_mm": list(pat.size), "copper_layers": pat.layers,
+        "board": {"size_mm": list(pat.size), "copper_layers": pat.layers, "layer_types": dict(pat.layer_types),
                   "keepouts": [{"layers": k.layers, "tracks": k.tracks, "vias": k.vias,
                                 "poly": [[_r(x), _r(y)] for x, y in k.poly]} for k in pat.keepouts]},
         "rules": {"clearance": CLEAR, "track_width": {c["name"]: c["track_width"] for c in pat.classes},
@@ -967,6 +975,8 @@ def build_board(pat: Pattern, *, copper: bool) -> pcbnew.BOARD:
     pcbnew.KIID.SeedGenerator(1)
     b = pcbnew.CreateEmptyBoard()
     b.SetCopperLayerCount(pat.layers)
+    for lname, ltype in getattr(pat, "layer_types", {}).items():  # VPat/DPat reuse build_board
+        b.SetLayerType(LAYER_IDS[lname], getattr(pcbnew, f"LT_{ltype.upper()}"))
     nets = {}
     for name in pat.nets:
         n = pcbnew.NETINFO_ITEM(b, name)

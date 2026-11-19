@@ -83,7 +83,11 @@ struct Inner<V> {
     /// Per run: the last cycle it offered (`None` before its initial plan) and whether its loop ended.
     done: Vec<Option<usize>>,
     ended: Vec<bool>,
-    pending: BTreeMap<(usize, usize), Pending<V>>,
+    /// Held offers by (cycle, run, seq): a run's mid-cycle offers ([`SharedTable::offer_mid`],
+    /// seq 0, 1, ..) commit before its cycle-end offer (seq `usize::MAX`).
+    pending: BTreeMap<(usize, usize, usize), Pending<V>>,
+    /// Per run: the mid-cycle offers held for the cycle it is in.
+    mid_seq: Vec<usize>,
     /// The last cycle whose offers are all committed (`None`: none yet).
     committed: Option<usize>,
     accepted: BTreeSet<(usize, usize)>,
@@ -115,7 +119,7 @@ impl<V> SharedTable<V> {
     pub fn new(runs: usize, cap: usize, obj: Objective, window: usize) -> SharedTable<V> {
         let n = runs.max(1);
         SharedTable {
-            inner: Mutex::new(Inner { arch: Archive::new(cap), done: vec![None; n], ended: vec![false; n], pending: BTreeMap::new(), committed: None, accepted: BTreeSet::new(), fps: BTreeMap::new(), gain: Vec::new(), restarts: Vec::new(), offers: 0, restart_at: BTreeSet::new() }),
+            inner: Mutex::new(Inner { arch: Archive::new(cap), done: vec![None; n], ended: vec![false; n], pending: BTreeMap::new(), mid_seq: vec![0; n], committed: None, accepted: BTreeSet::new(), fps: BTreeMap::new(), gain: Vec::new(), restarts: Vec::new(), offers: 0, restart_at: BTreeSet::new() }),
             cv: Condvar::new(),
             obj,
             window: window.max(1),
@@ -137,11 +141,27 @@ impl<V> SharedTable<V> {
             return;
         }
         g.fps.insert((cycle, run), row.fp);
-        g.pending.insert((cycle, run), Pending { label, crit, row, check });
+        g.pending.insert((cycle, run, usize::MAX), Pending { label, crit, row, check });
+        g.mid_seq[run] = 0;
         g.done[run] = Some(cycle);
         self.commit(&mut g);
         drop(g);
         self.cv.notify_all();
+    }
+
+    /// TW5: run `run` offers a state reached inside cycle `cycle` (after an escape or an in-loop
+    /// P4 round: "escapes offer their result to the table; the table keeps the bests"). Held with
+    /// the run's cycle-end offer of `cycle` and committed before it, in the order offered, so the
+    /// table stays a function of the seeds. Offers of a cycle the run never finishes (cut short)
+    /// are dropped at the commit. O(log pending).
+    pub fn offer_mid(&self, run: usize, cycle: usize, label: String, crit: Criteria, row: Row<V>) {
+        let mut g = self.lock();
+        if run >= g.done.len() || g.ended[run] || g.done[run].is_some_and(|c| c >= cycle) {
+            return;
+        }
+        let seq = g.mid_seq[run];
+        g.mid_seq[run] += 1;
+        g.pending.insert((cycle, run, seq), Pending { label, crit, row, check: CHECK_NONE });
     }
 
     /// Run `run`'s loop ended (also: it never began, or its thread unwinds): it holds no cycle back
@@ -164,16 +184,20 @@ impl<V> SharedTable<V> {
     /// Commit the held offers of every cycle all runs have passed, in (cycle, run) order.
     fn commit(&self, g: &mut Inner<V>) {
         let h = Self::horizon(g);
-        while let Some((c, _)) = g.pending.keys().next().copied() {
+        while let Some((c, _, _)) = g.pending.keys().next().copied() {
             if c >= h {
                 break;
             }
             let before = ident(&g.arch, &self.obj);
             let mut restarted = 0;
             // every offer of cycle c, in run order
-            let keys: Vec<(usize, usize)> = g.pending.range((c, 0)..(c + 1, 0)).map(|(k, _)| *k).collect();
+            let keys: Vec<(usize, usize, usize)> = g.pending.range((c, 0, 0)..(c + 1, 0, 0)).map(|(k, _)| *k).collect();
             for k in keys {
                 let p = g.pending.remove(&k).expect("key");
+                // a mid-cycle offer of a cycle its run never finished (cut short, ended): dropped
+                if k.2 != usize::MAX && !g.pending.contains_key(&(c, k.1, usize::MAX)) {
+                    continue;
+                }
                 restarted += usize::from(p.check >= CHECK_FREE);
                 if p.check == CHECK_RESTART {
                     g.restart_at.insert((k.1, k.0));
@@ -441,5 +465,42 @@ mod tests {
             t.offer(0, cy, format!("a{cy}"), cr, row(0, cy), CHECK_RESTART);
         }
         assert!(!t.summary().2);
+    }
+
+    /// TW5: a state reached inside a cycle ([`SharedTable::offer_mid`]) commits with its run's
+    /// cycle, before that cycle's own offer, whatever order the runs arrive in; one of a cycle its
+    /// run never finished (it ended first) is dropped, not counted.
+    #[test]
+    fn mid_cycle_offers_commit_with_their_cycle_and_drop_when_unfinished() {
+        let obj = Objective::from_options("length_vias", 25.0, "best");
+        let r0 = |t: &SharedTable<usize>| {
+            t.offer(0, 0, "r0c0".into(), c(2, 5, 100.0), row(0, 0), CHECK_NONE);
+            t.offer_mid(0, 1, "r0c1 mid".into(), c(0, 1, 90.0), row(0, 1));
+            t.offer(0, 1, "r0c1".into(), c(1, 4, 95.0), row(0, 1), CHECK_NONE);
+            t.offer_mid(0, 2, "r0c2 mid unfinished".into(), c(0, 0, 10.0), row(0, 2));
+            t.end(0);
+        };
+        let r1 = |t: &SharedTable<usize>| {
+            t.offer(1, 0, "r1c0".into(), c(2, 5, 101.0), row(1, 0), CHECK_NONE);
+            t.offer(1, 1, "r1c1".into(), c(1, 3, 96.0), row(1, 1), CHECK_NONE);
+            t.end(1);
+        };
+        let run_table = |first0: bool| {
+            let t: SharedTable<usize> = SharedTable::new(2, 8, obj, 4);
+            if first0 {
+                r0(&t);
+                r1(&t);
+            } else {
+                r1(&t);
+                r0(&t);
+            }
+            let (rows, n, _) = t.summary();
+            (rows.iter().map(|x| x.label.clone()).collect::<Vec<_>>(), n)
+        };
+        let a = run_table(true);
+        assert_eq!(a, run_table(false), "the arrival order of the runs does not matter");
+        assert!(a.0.iter().any(|l| l == "r0c1 mid"), "the mid-cycle state (best on every criterion) is in the table: {:?}", a.0);
+        assert!(!a.0.iter().any(|l| l.contains("unfinished")), "the unfinished cycle's state is dropped: {:?}", a.0);
+        assert_eq!(a.1, 5, "four cycle offers and the finished cycle's mid offer committed");
     }
 }

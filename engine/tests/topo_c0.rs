@@ -30,6 +30,11 @@ fn plan_lines(r: &RouteResult) -> Vec<serde_json::Value> {
                     l.remove("loop_s");
                     l.remove("layer_share_pct");
                     l.remove("first_variant_s");
+                    // TW5: the escapes' seconds measure the machine too (their work units are the plan's).
+                    if let Some(e) = l.get_mut("escape").and_then(|e| e.as_object_mut()) {
+                        e.remove("layer_s");
+                        e.remove("busy_s");
+                    }
                 }
             }
             v

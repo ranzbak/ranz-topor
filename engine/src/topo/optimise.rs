@@ -76,6 +76,11 @@ impl Emphasis {
     }
 }
 
+/// A seed mixed from two (the loop's streams; TW5 escapes). O(1).
+pub fn mix_seed(a: u64, b: u64) -> u64 {
+    mix(a, b)
+}
+
 fn mix(a: u64, b: u64) -> u64 {
     // SplitMix64 finaliser of a ^ golden-ratio multiple of b.
     let mut z = a ^ b.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -173,6 +178,34 @@ pub struct CycleStats {
     /// The shadow's sum of |graded violations of the whole-board layering - of the present one|
     /// of the state before each sampled move (the offset the global judge would charge).
     pub shadow_base_graded: f64,
+    /// TW5 (b) the layering escapes run (`[optimize] escape = "layering"`), over them the free
+    /// positions (wire, traversal with more than one allowed layer) and how many of them changed
+    /// layer, the board's vias before / after, and escapes after which the predicted violations
+    /// rose (taken all the same with `escape_take = "always"`).
+    pub escapes: usize,
+    pub esc_free: usize,
+    pub esc_diff: usize,
+    pub esc_vias_before: usize,
+    pub esc_vias_after: usize,
+    pub esc_viol_up: usize,
+    /// TW5 (b): domains the plateau walks flipped (a domain may count more than once).
+    pub esc_walked: usize,
+    /// TW5 (d) floating up per wire: tried / kept.
+    pub float_w_tried: usize,
+    pub float_w_kept: usize,
+    /// TW5 (c) loop history updates.
+    pub hist_updates: usize,
+    /// TW5 (f) in-loop P4 rounds: run (taken), wires ripped in them, rounds undone (a wire found
+    /// no path), rounds not run because the work budget was spent.
+    pub p4_rounds: usize,
+    pub p4_ripped: usize,
+    pub p4_undone: usize,
+    pub p4_throttled: usize,
+    /// TW5 (f): rounds undone because the evaluation rose (`escape_take = "not_worse"`).
+    pub p4_worse: usize,
+    /// TW5 `escape_offer`: states after an escape / in-loop P4 round not offered (the archive's
+    /// criteria covered them).
+    pub mid_covered: usize,
 }
 
 impl CycleStats {
@@ -206,6 +239,22 @@ impl CycleStats {
         self.shadow_err_vias += o.shadow_err_vias;
         self.shadow_unl_diff += o.shadow_unl_diff;
         self.shadow_base_graded += o.shadow_base_graded;
+        self.escapes += o.escapes;
+        self.esc_free += o.esc_free;
+        self.esc_diff += o.esc_diff;
+        self.esc_vias_before += o.esc_vias_before;
+        self.esc_vias_after += o.esc_vias_after;
+        self.esc_viol_up += o.esc_viol_up;
+        self.esc_walked += o.esc_walked;
+        self.float_w_tried += o.float_w_tried;
+        self.float_w_kept += o.float_w_kept;
+        self.hist_updates += o.hist_updates;
+        self.p4_rounds += o.p4_rounds;
+        self.p4_ripped += o.p4_ripped;
+        self.p4_undone += o.p4_undone;
+        self.p4_throttled += o.p4_throttled;
+        self.p4_worse += o.p4_worse;
+        self.mid_covered += o.mid_covered;
     }
 }
 
@@ -227,6 +276,15 @@ pub trait Space {
     fn fingerprint(&mut self) -> u64 {
         0
     }
+    /// TW5: before a cycle, the criteria the run's archive holds (a state they cover is not
+    /// offered inside the cycle: its copy is the cost). O(rows).
+    fn offer_floor(&mut self, _crits: Vec<Criteria>) {}
+    /// TW5: the states reached inside the cycle just run (after an escape or an in-loop P4
+    /// round: "escapes offer their result to the table; the table keeps the bests"), in the order
+    /// reached: label, criteria, state, fingerprint. Taken once (drained).
+    fn take_offers(&mut self) -> Vec<(String, Criteria, Self::Var, u64)> {
+        Vec::new()
+    }
 }
 
 /// TW3: how a run takes part in the call's one variant table ([`super::table::SharedTable`]).
@@ -234,6 +292,9 @@ pub trait Shared<V> {
     /// Offer the state after cycle `cycle` (0 = the initial plan).
     #[allow(clippy::too_many_arguments)]
     fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: V, fp: u64, check: u8);
+    /// TW5: offer a state reached inside cycle `cycle` (committed before that cycle's offer).
+    #[allow(clippy::too_many_arguments)]
+    fn offer_mid(&self, _cycle: usize, _label: String, _gen: usize, _crit: Criteria, _var: V, _fp: u64) {}
     /// Read the table at the start of cycle `cycle` (waits for the other runs; `None` = stopped).
     fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::table::View<V>>;
     /// This run's loop ended.
@@ -351,6 +412,10 @@ pub struct LoopReport {
     pub relays: usize,
     /// Restarts: (cycle, origin run of the row) for the "led to a new row" count.
     pub restart_from: Vec<(usize, usize)>,
+    /// TW5: states reached inside a cycle (escapes, in-loop P4 rounds) offered / taken into the
+    /// run's archive (also counted in `offered` / `archived`).
+    pub mid_offered: usize,
+    pub mid_archived: usize,
 }
 
 /// The TopoR loop: offer the current state (generation 0), then up to `p.cycles` cycles; after
@@ -515,6 +580,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             since_gain = 0;
         }
         let ctx = CycleCtx { cycle, seed: mix(p.seed, cycle as u64), amp: sched.width, emphasis: p.emphasis };
+        sp.offer_floor(arch.items.iter().map(|o| o.crit).collect());
         // `inner()` is latched for the cycle: once it said stop the cycle is dropped, also when a
         // raised limit would let the check pass again afterwards.
         let mut hit = false;
@@ -534,6 +600,24 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             break;
         }
         gen += 1;
+        // TW5: the states the cycle's escapes / in-loop P4 rounds reached go to the archive and
+        // the table before the cycle's own state (deterministic: in the order reached)
+        for (label, crit, var, fp) in sp.take_offers() {
+            let _pg = super::prof::g(super::prof::K::Offer);
+            rep.offered += 1;
+            rep.mid_offered += 1;
+            let label = format!("cycle {cycle} {label} (gen {gen})");
+            if let Some(sh) = shared {
+                sh.offer_mid(cycle, format!("run {} {label}", p.run + 1), gen, crit, var.clone(), fp);
+            }
+            if arch.items.iter().any(|o| o.crit.covers(&crit)) {
+                arch.offered += 1;
+            } else if arch.offer(Variant { label, crit, payload: Gen { var, gen, cycle, at_s: clock() } }, &obj) {
+                rep.archived += 1;
+                rep.mid_archived += 1;
+                rep.first_variant_s.get_or_insert_with(clock);
+            }
+        }
         work += (cs.tried + cs.relaid + cs.pair_moved_wires) as f64;
         rep.relays += cs.tried + cs.relaid + cs.pair_moved_wires;
         since_check += 1;

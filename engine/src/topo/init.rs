@@ -279,7 +279,8 @@ pub struct TreeEnd {
 /// A chord `(a, b, net, wire, held, allowed)` of a traversal of a triangle: `held` = the layers
 /// that wire's stretch is held to there ([`State::stretch_layers`]), `allowed` = the layers the
 /// triangle allows it.
-type Chord = (f64, f64, i32, WireId, u64, u64);
+/// (b1, b2, net, wire, held, allowed, crossing price multiplier [`State::cross_k`]).
+type Chord = (f64, f64, i32, WireId, u64, u64, f64);
 
 /// What crossing another net's stretch does to a wire's layers ([`cross_pin`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -450,7 +451,8 @@ impl Search<'_, '_> {
             let net = st.wires[o].net;
             let held = self.held.entry(o).or_insert_with(|| st.held_layers(o))[ok];
             let oall = st.proj.allowed(t, net).map_or(0, |m| m.0);
-            v.extend(st.chords(o, ok).into_iter().map(|(b1, b2)| (b1, b2, net, o, held, oall)));
+            let f = st.cross_k.get(o).copied().unwrap_or(1.0);
+            v.extend(st.chords(o, ok).into_iter().map(|(b1, b2)| (b1, b2, net, o, held, oall, f)));
         }
         self.tc[t] = Some(v);
     }
@@ -462,7 +464,7 @@ impl Search<'_, '_> {
     #[allow(clippy::too_many_arguments)]
     fn arc_chords(tc: &[Chord], wt: &InitWeights, net: i32, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>], vias: bool) -> (f64, u64) {
         let (mut cross, mut pg) = (0.0, pin);
-        for &(b1, b2, onet, o, held, oall) in tc {
+        for &(b1, b2, onet, o, held, oall, f) in tc {
             if skip.contains(&Some(o)) || !interleave(xb, yb, b1, b2) {
                 continue;
             }
@@ -472,7 +474,7 @@ impl Search<'_, '_> {
             }
             let (k, p2) = cross_pin(pg, mine, held, oall, vias);
             pg = p2;
-            cross += wt.cross_mm
+            cross += wt.cross_mm * f
                 + match k {
                     CrossLayer::Free => 0.0,
                     CrossLayer::Via => wt.forced_layer_mm,
@@ -817,8 +819,26 @@ impl<'p> State<'p> {
     /// stretches lie in different layers"; the reroute then lays a wire into that layering).
     /// Without `layers_now` for `w` (or for a wire placed since) the held layers alone. O(passes ·
     /// layers).
+    /// TW5 (4): [`State::cross_k`] and [`State::free_now`] of the layering `events` while
+    /// `free_wire_a` < 1 (a + (1 - a) k/(1 + k) with k a wire's events: its crossings and forced
+    /// layers; free = no event), else both cleared. O(wires).
+    pub fn mark_free_wires(&mut self, events: &[Vec<(usize, f64, i32)>]) {
+        self.cross_k.clear();
+        self.free_now.clear();
+        if self.free_wire_a >= 1.0 {
+            return;
+        }
+        let a = self.free_wire_a.max(0.0);
+        let k = |w: usize| events.get(w).map_or(0, |e| e.len());
+        self.cross_k = (0..self.wires.len()).map(|w| a + (1.0 - a) * k(w) as f64 / (1.0 + k(w) as f64)).collect();
+        self.free_now = (0..self.wires.len()).map(|w| self.wires[w].alive && k(w) == 0).collect();
+    }
+
     pub fn held_layers(&self, w: WireId) -> Vec<u64> {
         let held = self.stretch_layers(w);
+        if self.free_now.get(w).copied().unwrap_or(false) {
+            return held;
+        }
         match self.layers_now.get(w).filter(|now| now.len() == held.len()) {
             Some(now) => held.iter().zip(now).map(|(&h, &n)| if h & n != 0 { h & n } else { h }).collect(),
             None => held,
