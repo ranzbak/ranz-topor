@@ -101,9 +101,11 @@ fn loop_line(r: &RouteResult) -> (usize, Option<usize>, String) {
 
 /// User 2026-11-16 ("don't stop on stable"): with the dialog (`stop_when_stable` false) and the
 /// default `finish_when_stable` (false) the TopoR loop records "stable" but goes on to the cycle cap.
+/// TW3 / D6: the dialog's cycle cap is kept only with `restart = "stall"` (or "off"); with the
+/// default hybrid the dialog loop has no cycle cap at all (topo_stop_reason `stop_reason_dialog_*`).
 #[test]
 fn a_dialog_run_goes_on_past_stable_to_the_cycle_cap() {
-    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 40}"#);
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 40, "restart": "stall"}"#);
     assert!(!o.finish_when_stable, "default: no finish at stable");
     let (n, st, by) = loop_line(&route(&eprom(), &o));
     assert!(st.is_some_and(|s| s < 40), "stable is reached early: {st:?}");
@@ -115,7 +117,8 @@ fn a_dialog_run_goes_on_past_stable_to_the_cycle_cap() {
 /// not END because of it, so its stop reason is "round cap", never "stable" (the plugin shows it).
 #[test]
 fn a_dialog_run_ended_by_the_cycle_cap_is_labelled_round_cap() {
-    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 40}"#);
+    // the cap applies with restart = "stall" (TW3 / D6: none with the default hybrid)
+    let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "stop_when_stable": false, "topo_rounds": 40, "restart": "stall"}"#);
     let r = route(&eprom(), &o);
     let (n, st, by) = loop_line(&r);
     assert!(st.is_some() && n == 40 && by == "cycle", "premise: {n} {st:?} {by}");
@@ -129,6 +132,21 @@ fn a_dialog_run_ended_by_the_cycle_cap_is_labelled_round_cap() {
 fn a_headless_run_waits_stable_patience_not_finish_patience() {
     let o = opts(r#"{"runs": 1, "wall_clock_s": 300.0, "topo_rounds": 60, "stable_patience": 3, "finish_patience": 7}"#);
     let r = route(&eprom(), &o);
+    let (n, st, by) = loop_line(&r);
+    assert_eq!(by, "stable", "{:?}", r.warnings);
+    assert_eq!(Some(n), st.map(|s| s + 3), "stable at {st:?}, ended after cycle {n}");
+    assert_eq!(r.stop_reason, "stable");
+}
+
+/// V1 (verify tw3 r1): the same with two runs, where stable is the shared variant table's (the
+/// default hybrid restart): each run's loop still ends `stable_patience` cycles after its stable.
+#[test]
+fn a_headless_shared_table_run_waits_stable_patience() {
+    let o = opts(r#"{"runs": 2, "wall_clock_s": 300.0, "topo_rounds": 60, "stable_patience": 3, "finish_patience": 7}"#);
+    assert_eq!(o.restart, "hybrid", "premise: the default shares the table");
+    let r = route(&eprom(), &o);
+    let lines: Vec<&String> = r.warnings.iter().filter(|w| w.starts_with("TopoR loop (")).collect();
+    assert!(!lines.is_empty(), "{:?}", r.warnings);
     let (n, st, by) = loop_line(&r);
     assert_eq!(by, "stable", "{:?}", r.warnings);
     assert_eq!(Some(n), st.map(|s| s + 3), "stable at {st:?}, ended after cycle {n}");

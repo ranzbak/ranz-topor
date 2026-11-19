@@ -222,6 +222,52 @@ pub trait Space {
     fn restore(&mut self, v: &Self::Var);
     /// One optimisation cycle on the current state; `stop()` true = end it early (time limit).
     fn cycle(&mut self, c: &CycleCtx, stop: &mut dyn FnMut() -> bool) -> CycleStats;
+    /// TW3: a fingerprint of the current state (equal states give equal values), for "never
+    /// restart to the state the run is in". O(state).
+    fn fingerprint(&mut self) -> u64 {
+        0
+    }
+}
+
+/// TW3: how a run takes part in the call's one variant table ([`super::table::SharedTable`]).
+pub trait Shared<V> {
+    /// Offer the state after cycle `cycle` (0 = the initial plan).
+    #[allow(clippy::too_many_arguments)]
+    fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: V, fp: u64, check: u8);
+    /// Read the table at the start of cycle `cycle` (waits for the other runs; `None` = stopped).
+    fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::table::View<V>>;
+    /// This run's loop ended.
+    fn end(&self);
+    /// This run's pre-loop key ([`super::table::Row::compat`]) and its index.
+    fn me(&self) -> (usize, u64);
+}
+
+/// TW3 `[optimize] restart` (D7; Polubasov 2010 «Многовариантная оптимизация»: "TopoR periodically
+/// stops working on the current variant and picks a variant from the table at random").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restart {
+    /// Never.
+    Off,
+    /// After `restart_after` cycles without a gain of the run's own pick (the rule before TW3).
+    Stall,
+    /// Periodic on the re-lay work clock: see [`optimise`].
+    Periodic,
+    /// TW3 hybrid (lead 2026-11-18, the default): a stall (`restart_after` cycles without a gain
+    /// of the run's own pick, main's trigger, no cycle floor) restarts through the shared table;
+    /// the periodic re-lay check stays as the backstop (with its `restart_min_cycles` floor).
+    Hybrid,
+}
+
+impl Restart {
+    /// `"off"` | `"stall"` | `"periodic"` | anything else = `"hybrid"`.
+    pub fn parse(s: &str) -> Restart {
+        match s {
+            "off" => Restart::Off,
+            "stall" => Restart::Stall,
+            "periodic" => Restart::Periodic,
+            _ => Restart::Hybrid,
+        }
+    }
 }
 
 /// An archived topological variant: the state, its generation (the variant it descends from plus
@@ -260,6 +306,17 @@ pub struct LoopParams {
     pub stop_at_stable: bool,
     pub emphasis: Emphasis,
     pub obj: Objective,
+    /// TW3 `[optimize] restart` and its period: `restart_relays` re-lays tried in the descent (the
+    /// deterministic work clock standing for TopoR's time), never fewer than `restart_min_cycles`
+    /// cycles; `run` of `runs` staggers the first period by `run / runs` of one.
+    pub restart: Restart,
+    pub restart_relays: usize,
+    pub restart_min_cycles: usize,
+    pub run: usize,
+    pub runs: usize,
+    /// TW3 `[optimize] loop_relays`: the run's loop ends after this many re-lays (the work clock;
+    /// 0 = no budget). A work cap like `cycles`: the same settings give the same result anywhere.
+    pub relay_budget: usize,
 }
 
 /// What [`optimise`] did.
@@ -283,6 +340,17 @@ pub struct LoopReport {
     pub lines: Vec<String>,
     /// A running cycle was cut short by `inner()` and dropped (not offered).
     pub dropped: bool,
+    /// TW3 periodic restarts: period checks, of them the descent still gaining (no restart), and
+    /// free with no other row to go to.
+    pub checks: usize,
+    pub kept_gaining: usize,
+    pub no_row: usize,
+    /// TW3 hybrid: restarts the stall trigger started (through the table).
+    pub stall_restarts: usize,
+    /// Re-lays of the run's loop (the work clock, `tried + relaid + pair_moved_wires`).
+    pub relays: usize,
+    /// Restarts: (cycle, origin run of the row) for the "led to a new row" count.
+    pub restart_from: Vec<(usize, usize)>,
 }
 
 /// The TopoR loop: offer the current state (generation 0), then up to `p.cycles` cycles; after
@@ -296,7 +364,33 @@ pub struct LoopReport {
 /// finished cycle with the archive's pick and whether the loop has recorded stable (user
 /// 2026-11-17 "Report stable live": the dialog shows the pick as Best so far and "Routes stable"
 /// while the loop still runs, so OK ends it there).
+///
+/// TW3 (`restart = "periodic"` with a shared table, docs/dev/design/tw3-table.md): every state is
+/// also offered to the call's one table; at every period boundary (`restart_relays` re-lays and at
+/// least `restart_min_cycles` cycles since the last boundary, the first one staggered by run) the
+/// run reads the table and restarts only when it is free: its descent made no new table row since
+/// the last boundary, or its state equals a lower run's. A descent that still gains is never cut.
+/// The row is drawn at random (seeded) among all rows its run can restore, worse ones too, never
+/// one equal to its own state. Headless, the loop ends at "stable" only when the table's four
+/// bests gained nothing for the window and, since their last gain, two period checks found a free
+/// descent (restarted, or no other row to go to; D6). Without a table the
+/// periodic mode never restarts.
+#[allow(clippy::too_many_arguments)]
+pub fn optimise_shared<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64, on_pick: &mut dyn FnMut(usize, &Criteria, bool), shared: Option<&dyn Shared<S::Var>>) -> LoopReport {
+    let rep = optimise_in(sp, arch, p, stop, inner, clock, on_pick, shared);
+    if let Some(sh) = shared {
+        sh.end();
+    }
+    rep
+}
+
+/// [`optimise_shared`] without a shared table.
 pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64, on_pick: &mut dyn FnMut(usize, &Criteria, bool)) -> LoopReport {
+    optimise_in(sp, arch, p, stop, inner, clock, on_pick, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopParams, stop: &mut dyn FnMut() -> bool, inner: &mut dyn FnMut() -> bool, clock: &dyn Fn() -> f64, on_pick: &mut dyn FnMut(usize, &Criteria, bool), shared: Option<&dyn Shared<S::Var>>) -> LoopReport {
     let obj = p.obj;
     let mut rep = LoopReport { stop: "cycle cap".into(), ..LoopReport::default() };
     let mut rng = ChaCha8Rng::seed_from_u64(mix(p.seed, 0x5EED_7090));
@@ -322,21 +416,98 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
         }
         kept
     };
+    // TW3: the state goes to the shared table too (always a copy: whether it is kept is known only
+    // at the commit); returns its fingerprint.
+    let share = |sp: &mut S, label: &str, gen: usize, cycle: usize, check: u8| -> u64 {
+        let Some(sh) = shared else { return 0 };
+        let fp = sp.fingerprint();
+        let crit = sp.criteria();
+        let var = sp.snapshot();
+        sh.offer(cycle, label.to_string(), gen, crit, var, fp, check);
+        fp
+    };
     super::prof::mark("pre-loop");
     offer(sp, arch, "initial plan (gen 0)".into(), 0, 0, &mut rep);
     super::prof::mark("offer0");
+    let mut my_fp = share(sp, &format!("run {} initial plan (gen 0)", p.run + 1), 0, 0, super::table::CHECK_NONE);
     let Some((s0, v0)) = score(arch) else { return rep };
     on_pick(0, &arch.items[arch.pick(&obj).expect("scored")].crit, false);
     meter.push(s0);
     rep.pick_values.push(v0);
     let mut gen = 0usize;
     let mut since_gain = 0usize;
+    let periodic = matches!(p.restart, Restart::Periodic | Restart::Hybrid) && shared.is_some();
+    let hybrid = p.restart == Restart::Hybrid && shared.is_some();
+    // without a table the hybrid falls back to main's stall restart from the run's own archive
+    let own_stall = p.restart == Restart::Stall || (p.restart == Restart::Hybrid && shared.is_none());
+    let period = p.restart_relays.max(1) as f64;
+    // the work clock since the last boundary, the cycles since it, the next boundary's work
+    let (mut work, mut since_check, mut check_from) = (0.0f64, 0usize, 1usize);
+    let mut boundary = period * (1.0 + p.run as f64 / p.runs.max(1) as f64);
+    let mut check = super::table::CHECK_NONE;
     for cycle in 1..=p.cycles.max(1) {
         if stop() {
             rep.stop = "time limit".into();
             break;
         }
-        if p.restart_after > 0 && since_gain >= p.restart_after && !arch.items.is_empty() {
+        if p.relay_budget > 0 && rep.relays >= p.relay_budget {
+            rep.stop = "re-lay budget".into();
+            break;
+        }
+        let stalled = hybrid && p.restart_after > 0 && since_gain >= p.restart_after;
+        let due = periodic && since_check >= p.restart_min_cycles.max(1) && work >= boundary;
+        if stalled || due {
+            let sh = shared.expect("periodic");
+            // the wait ends at Cancel / OK or the limit's cut (`inner`); not `stop`, whose stable
+            // yield needs the compute slot the wait has given back
+            let view = {
+                let _pg = super::prof::g(super::prof::K::TableSync);
+                sh.sync(cycle, inner)
+            };
+            let Some(view) = view else {
+                rep.stop = "time limit".into();
+                break;
+            };
+            rep.checks += 1;
+            if view.stable && rep.stable_at.is_none() {
+                rep.stable_at = Some(cycle - 1);
+            }
+            // V1 (verify tw3 r1): the table's stable only records stable_at (its last committed
+            // cycle); the run ends after stable_patience cycles past it, as with its own meter (the
+            // check at the cycle's end below, which needs no sync); patience 0 ends here
+            if p.stop_at_stable && rep.stable_at.is_some_and(|s| cycle > s + p.stable_patience) {
+                rep.stop = "stable".into();
+                break;
+            }
+            let (me, compat) = sh.me();
+            let gaining = view.mine_accepted.iter().any(|&c| c >= check_from);
+            let duplicate = view.fps_before.iter().any(|&(r, f)| r < me && f == my_fp);
+            if !stalled && gaining && !duplicate {
+                rep.kept_gaining += 1;
+            } else {
+                let cands: Vec<usize> = (0..view.rows.len()).filter(|&i| view.rows[i].2.compat == compat && view.rows[i].2.fp != my_fp).collect();
+                if cands.is_empty() {
+                    rep.no_row += 1;
+                    check = super::table::CHECK_FREE;
+                } else {
+                    let mut rr = ChaCha8Rng::seed_from_u64(mix(p.seed, 0x7AB1_E000 ^ cycle as u64));
+                    let (label, _, row) = &view.rows[cands[rr.gen_range(0..cands.len())]];
+                    sp.restore(&row.var);
+                    gen = row.gen;
+                    rep.restarts.push((cycle, label.clone()));
+                    rep.restart_from.push((cycle, row.run));
+                    check = super::table::CHECK_RESTART;
+                    rep.stall_restarts += usize::from(stalled);
+                }
+            }
+            // a restart (or a free check) starts a new descent: its own stall count and period
+            since_gain = 0;
+            work = 0.0;
+            since_check = 0;
+            check_from = cycle;
+            boundary = period;
+        }
+        if own_stall && p.restart_after > 0 && since_gain >= p.restart_after && !arch.items.is_empty() {
             let i = rng.gen_range(0..arch.items.len());
             sp.restore(&arch.items[i].payload.var);
             gen = arch.items[i].payload.gen;
@@ -363,7 +534,11 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
             break;
         }
         gen += 1;
+        work += (cs.tried + cs.relaid + cs.pair_moved_wires) as f64;
+        rep.relays += cs.tried + cs.relaid + cs.pair_moved_wires;
+        since_check += 1;
         let kept = offer(sp, arch, format!("cycle {cycle} (gen {gen})"), gen, cycle, &mut rep);
+        my_fp = share(sp, &format!("run {} cycle {cycle} (gen {gen})", p.run + 1), gen, cycle, std::mem::take(&mut check));
         if kept {
             rep.first_variant_s.get_or_insert_with(clock);
         }
@@ -372,7 +547,8 @@ pub fn optimise<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopP
         let gained = meter.push(sc);
         since_gain = if gained { 0 } else { since_gain + 1 };
         sched.after_cycle(gained, sc.incomplete > 0);
-        if meter.stable() && rep.stable_at.is_none() {
+        // periodic with a table: stable is the table's (at a sync point, above)
+        if !periodic && meter.stable() && rep.stable_at.is_none() {
             rep.stable_at = Some(cycle);
         }
         on_pick(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, rep.stable_at.is_some());
@@ -731,6 +907,8 @@ mod tests {
     struct Toy {
         len: Vec<i64>,
         starts: Vec<Vec<i64>>,
+        ends: Vec<Vec<i64>>,
+        jitter: Option<u64>,
     }
 
     impl Space for Toy {
@@ -744,7 +922,14 @@ mod tests {
         fn restore(&mut self, v: &Vec<i64>) {
             self.len = v.clone();
         }
+        fn fingerprint(&mut self) -> u64 {
+            self.len.iter().fold(0xABCDu64, |h, &l| (h ^ l as u64).wrapping_mul(0x0100_0000_01B3))
+        }
         fn cycle(&mut self, c: &CycleCtx, _stop: &mut dyn FnMut() -> bool) -> CycleStats {
+            if let Some(j) = self.jitter {
+                // TW3 tests: a run's speed must not change any result
+                std::thread::sleep(std::time::Duration::from_micros(mix(j, c.cycle as u64) % 3000));
+            }
             self.starts.push(self.len.clone());
             let mut rng = ChaCha8Rng::seed_from_u64(c.seed);
             let n = self.len.len();
@@ -761,6 +946,7 @@ mod tests {
                     cs.kept += 1;
                 }
             }
+            self.ends.push(self.len.clone());
             cs
         }
     }
@@ -780,11 +966,17 @@ mod tests {
             stop_at_stable: true,
             emphasis: Emphasis::default(),
             obj: Objective::LengthVias { mm_per_via: 25.0 },
+            restart: Restart::Stall,
+            restart_relays: 2400,
+            restart_min_cycles: 8,
+            relay_budget: 0,
+            run: 0,
+            runs: 1,
         }
     }
 
     fn toy() -> Toy {
-        Toy { len: vec![41, 17, 30, 9, 55, 23, 12, 7], starts: Vec::new() }
+        Toy { len: vec![41, 17, 30, 9, 55, 23, 12, 7], starts: Vec::new(), ends: Vec::new(), jitter: None }
     }
 
     fn run(seed: u64, restart_after: usize) -> (Toy, Archive<Gen<Vec<i64>>>, LoopReport) {
@@ -1027,4 +1219,211 @@ mod tests {
         assert_eq!(rep.offered, 1, "the cut cycle is not offered");
     }
 
+
+    /// TW3: a run's door to a test table.
+    struct TP<'a> {
+        t: &'a super::super::table::SharedTable<Vec<i64>>,
+        k: usize,
+    }
+
+    impl Shared<Vec<i64>> for TP<'_> {
+        fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: Vec<i64>, fp: u64, check: u8) {
+            self.t.offer(self.k, cycle, label, crit, super::super::table::Row { var: std::sync::Arc::new(var), run: self.k, cycle, gen, fp, compat: 0 }, check);
+        }
+        fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::super::table::View<Vec<i64>>> {
+            self.t.sync(self.k, cycle, stop, &|| {}, &|| {})
+        }
+        fn end(&self) {
+            self.t.end(self.k);
+        }
+        fn me(&self) -> (usize, u64) {
+            (self.k, 0)
+        }
+    }
+
+    /// `runs` toy runs on their own threads with one shared table; `jitter` slows the cycles at
+    /// random. Returns per run (restarts, state starts, final state), the table's labels, and the
+    /// reports.
+    #[allow(clippy::type_complexity)]
+    fn shared_run(runs: usize, jitter: Option<u64>, restart: Restart, relays: usize, stable: bool) -> (Vec<(Vec<(usize, String)>, Vec<Vec<i64>>, Vec<Vec<i64>>)>, Vec<String>, Vec<LoopReport>) {
+        let obj = Objective::from_options("length_vias", 25.0, "best");
+        let t = super::super::table::SharedTable::new(runs, 4, obj, 3);
+        let out: Vec<(Vec<(usize, String)>, Vec<Vec<i64>>, Vec<Vec<i64>>, LoopReport)> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..runs)
+                .map(|k| {
+                    let t = &t;
+                    sc.spawn(move || {
+                        let mut sp = toy();
+                        sp.len.iter_mut().for_each(|l| *l += 3 * k as i64);
+                        sp.jitter = jitter.map(|j| j ^ k as u64);
+                        let mut a = Archive::new(6);
+                        let p = LoopParams { restart, restart_relays: relays, restart_min_cycles: 2, run: k, runs, seed: 100 + k as u64, stop_at_stable: stable, ..params(0, 0) };
+                        let port = TP { t, k };
+                        let rep = optimise_shared(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {}, Some(&port));
+                        (rep.restarts.clone(), sp.starts.clone(), sp.ends.clone(), rep)
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().expect("run")).collect()
+        });
+        let (rows, _, _) = t.summary();
+        let reps = out.iter().map(|o| o.3.clone()).collect();
+        (out.into_iter().map(|o| (o.0, o.1, o.2)).collect(), rows.into_iter().map(|r| r.label).collect(), reps)
+    }
+
+    #[test]
+    fn the_shared_loop_does_not_depend_on_the_runs_speed() {
+        // TW3: commit order by cycle id: any thread timing gives the same restarts, states and table.
+        let base = shared_run(3, None, Restart::Periodic, 16, false);
+        assert!(base.2.iter().map(|r| r.restarts.len()).sum::<usize>() > 0, "the toy restarts: {:?}", base.2.iter().map(|r| (r.checks, r.kept_gaining, r.no_row)).collect::<Vec<_>>());
+        for j in 1..4u64 {
+            let r = shared_run(3, Some(j), Restart::Periodic, 16, false);
+            assert_eq!(r.0, base.0, "jitter {j}");
+            assert_eq!(r.1, base.1, "jitter {j}");
+        }
+    }
+
+    #[test]
+    fn a_periodic_restart_never_goes_to_the_runs_own_state() {
+        let (per, _, reps) = shared_run(3, None, Restart::Periodic, 16, false);
+        let mut n = 0;
+        for (k, (restarts, starts, ends)) in per.iter().enumerate() {
+            for (cycle, _) in restarts {
+                // the start of `cycle` is the restored row; the run's state was the end of cycle - 1
+                assert_ne!(starts[cycle - 1], ends[cycle - 2], "run {k} cycle {cycle}: restarted to its own state");
+                n += 1;
+            }
+            assert!(reps[k].restart_from.iter().all(|w| w.0 >= 3), "never before the first period ends (min 2 cycles)");
+        }
+        assert!(n > 0);
+    }
+
+    /// TW3 hybrid (lead 2026-11-18): a stall restarts through the table at once (no cycle floor:
+    /// before the period's 8-cycle floor), never to the run's own state; the same on any timing.
+    #[test]
+    fn a_hybrid_stall_restarts_through_the_table_without_a_floor() {
+        let go = |jitter: Option<u64>| {
+            let obj = Objective::from_options("length_vias", 25.0, "best");
+            let t = super::super::table::SharedTable::new(2, 4, obj, 3);
+            std::thread::scope(|sc| {
+                let hs: Vec<_> = (0..2)
+                    .map(|k| {
+                        let t = &t;
+                        sc.spawn(move || {
+                            let mut sp = toy();
+                            sp.len.iter_mut().for_each(|l| *l += 3 * k as i64);
+                            sp.jitter = jitter.map(|j| j ^ k as u64);
+                            let mut a = Archive::new(6);
+                            let p = LoopParams { restart: Restart::Hybrid, restart_relays: 1_000_000, restart_min_cycles: 8, run: k, runs: 2, seed: 100 + k as u64, ..params(0, 1) };
+                            let rep = optimise_shared(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {}, Some(&TP { t, k }));
+                            (rep, sp.starts.clone(), sp.ends.clone())
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().expect("run")).collect::<Vec<_>>()
+            })
+        };
+        let a = go(None);
+        let mut early = 0;
+        for (k, (rep, starts, ends)) in a.iter().enumerate() {
+            assert_eq!(rep.stall_restarts, rep.restarts.len(), "run {k}: the period (1e6 re-lays) never came: {rep:?}");
+            for (cycle, _) in &rep.restarts {
+                assert_ne!(starts[cycle - 1], ends[cycle - 2], "run {k} cycle {cycle}: restarted to its own state");
+                early += usize::from(*cycle < 8);
+            }
+        }
+        assert!(early > 0, "a stall restarts before the period's floor: {:?}", a.iter().map(|x| &x.0.restarts).collect::<Vec<_>>());
+        // the same restarts whatever the runs' speed
+        let b = go(Some(7));
+        assert_eq!(a.iter().map(|x| x.0.restarts.clone()).collect::<Vec<_>>(), b.iter().map(|x| x.0.restarts.clone()).collect::<Vec<_>>());
+    }
+
+    /// TW3 `loop_relays`: the loop ends at its re-lay budget.
+    #[test]
+    fn the_loop_ends_at_its_relay_budget() {
+        let mut sp = toy();
+        let mut a = Archive::new(6);
+        let p = LoopParams { relay_budget: 10, ..params(0, 0) };
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {});
+        assert_eq!(rep.stop, "re-lay budget", "{rep:?}");
+        assert!(rep.relays >= 10 && rep.cycles < p.cycles, "{rep:?}");
+    }
+
+    /// A toy whose every cycle is a new best (shorter, no vias): its descent always gains.
+    #[derive(Clone)]
+    struct Gainer {
+        len: i64,
+    }
+
+    impl Space for Gainer {
+        type Var = i64;
+        fn criteria(&mut self) -> Criteria {
+            Criteria { length_mm: self.len as f64, ..Criteria::default() }
+        }
+        fn snapshot(&mut self) -> i64 {
+            self.len
+        }
+        fn restore(&mut self, v: &i64) {
+            self.len = *v;
+        }
+        fn fingerprint(&mut self) -> u64 {
+            self.len as u64
+        }
+        fn cycle(&mut self, _c: &CycleCtx, _stop: &mut dyn FnMut() -> bool) -> CycleStats {
+            self.len -= 1;
+            CycleStats { tried: 10, ..CycleStats::default() }
+        }
+    }
+
+    struct GP<'a>(&'a super::super::table::SharedTable<i64>);
+
+    impl Shared<i64> for GP<'_> {
+        fn offer(&self, cycle: usize, label: String, gen: usize, crit: Criteria, var: i64, fp: u64, check: u8) {
+            self.0.offer(0, cycle, label, crit, super::super::table::Row { var: std::sync::Arc::new(var), run: 0, cycle, gen, fp, compat: 0 }, check);
+        }
+        fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::super::table::View<i64>> {
+            self.0.sync(0, cycle, stop, &|| {}, &|| {})
+        }
+        fn end(&self) {
+            self.0.end(0);
+        }
+        fn me(&self) -> (usize, u64) {
+            (0, 0)
+        }
+    }
+
+    #[test]
+    fn a_descent_that_still_gains_is_never_cut() {
+        let obj = Objective::from_options("length_vias", 25.0, "best");
+        let t = super::super::table::SharedTable::new(1, 4, obj, 3);
+        let mut sp = Gainer { len: 1000 };
+        let mut a = Archive::new(4);
+        let p = LoopParams { restart: Restart::Periodic, restart_relays: 20, restart_min_cycles: 2, ..params(0, 0) };
+        let rep = optimise_shared(&mut sp, &mut a, &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {}, Some(&GP(&t)));
+        assert!(rep.checks >= 5, "{}", rep.checks);
+        assert_eq!(rep.kept_gaining, rep.checks, "every check found the descent gaining");
+        assert!(rep.restarts.is_empty());
+        assert_eq!(sp.len, 1000 - 30, "30 cycles, never restored");
+        // stall mode on the same toy never restarts either (it always gains); periodic without a
+        // table never restarts
+        let mut sp = Gainer { len: 1000 };
+        let rep = optimise(&mut sp, &mut Archive::new(4), &p, &mut || false, &mut || false, &|| 0.0, &mut |_, _, _| {});
+        assert!(rep.restarts.is_empty() && rep.checks == 0);
+    }
+
+    #[test]
+    fn headless_stable_needs_two_restarts_in_the_window() {
+        // the toy settles: with restarts off no restart, so the table rule never says stable and the
+        // loop runs to its cap; periodic restarts make it stop at stable
+        let (_, _, reps) = shared_run(2, None, Restart::Periodic, 16, true);
+        let (_, _, off) = shared_run(2, None, Restart::Off, 16, true);
+        assert!(off.iter().all(|r| r.restarts.is_empty()));
+        for r in &reps {
+            if r.stop == "stable" {
+                assert!(r.stable_at.is_some());
+            }
+        }
+        // "off" uses the run's own meter as before (the toy's window is 30 = the cap)
+        assert!(off.iter().all(|r| r.stop != "stable" || r.stable_at.is_some()));
+    }
 }

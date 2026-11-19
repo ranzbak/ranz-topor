@@ -1107,6 +1107,29 @@ pub struct Options {
     /// variant after which the loop goes on from a variant of the archive drawn at random (seeded;
     /// Polubasov 2010 «Многовариантная оптимизация»); 0 = never.
     pub loop_restart: usize,
+    /// TW3 `[optimize] restart` (`loop = "topor"`, docs/dev/design/tw3-table.md, D7): `"periodic"`
+    /// (default) = at every period boundary a run reads the call's one variant table and, when its
+    /// descent is free (made no new table row since the last boundary, or its state equals a lower
+    /// run's), goes on from a row drawn at random (seeded; worse ones too, never its own state); a
+    /// descent that still gains is never cut (Polubasov 2010 «Многовариантная оптимизация»:
+    /// "periodically stops working on the current variant and picks one from the table at
+    /// random"). `"stall"` = after `loop_restart` cycles without a gain of the run's own pick (the
+    /// rule before TW3), `"off"` = never; `"hybrid"` (default, lead 2026-11-18) = a stall
+    /// (`loop_restart` cycles without a gain of the run's own pick, no cycle floor) restarts
+    /// through the shared table, the periodic check stays as the backstop.
+    pub restart: String,
+    /// TW3 `[optimize] restart_relays`: the period of `restart = "periodic"` on the work clock =
+    /// re-lays tried in the descent (deterministic; TopoR's "time" since a re-lay is the unit of
+    /// the loop's time after TW1).
+    pub restart_relays: usize,
+    /// TW3 `[optimize] restart_min_cycles`: a period is never shorter than this many cycles (D7).
+    pub restart_min_cycles: usize,
+    /// TW3 `[optimize] loop_relays`: each run's TopoR loop ends after this many re-lays (the work
+    /// clock; 0 = no budget, the default). For comparisons at an equal amount of loop work.
+    pub loop_relays: usize,
+    /// TW3 `[optimize] best_penalty` (D5): add the graded violation price to the overall best's
+    /// value (`pick = "best"`); off (default) = fewest errors, then length + mm_per_via x vias.
+    pub best_penalty: bool,
     /// `[optimize] loop_stable_window` (`loop = "topor"`): the loop's plan is stable when its pick
     /// gained less than `stable_gain_pct` % over this many loop cycles (a loop cycle costs no
     /// drawing, so the window is longer than the drawn cycles' `stable_window`).
@@ -1239,12 +1262,15 @@ pub struct Options {
     /// `errors_weighted` pick (TopoR: good results at 25 mm/via), also the P4 round pick and the
     /// archive's cap pruning.
     pub mm_per_via: f64,
-    /// Topological core (`topor.toml [optimize] pick`): the final choice between complete results
-    /// (archive variants, seeded runs) for `objective = "length_vias"`: `"errors_vias_length"`
-    /// (default; strictly: fewest errors, then fewest open connections, then fewest vias, then the shortest length, then fewest
-    /// shrinkages) or `"errors_weighted"` (errors, then the least `length + mm_per_via x vias`,
-    /// then shrinkages; the order before 2026-11-10). Only the final pick: the archive's Pareto
-    /// membership and the internal search prices do not change. `objective = "area"` ignores it.
+    /// Topological core (`topor.toml [optimize] pick`, TW3 / D5): the order of the final choice
+    /// and which of the four bests goes to KiCad, for `objective = "length_vias"`. `"best"`
+    /// (default) = the overall best at 100 % drawn: fewest errors (shorts first among equals),
+    /// then the least `length + mm_per_via x vias` (`best_penalty` adds the violation price), then
+    /// shrinkages (TopoR 6.3 manual pp. 72-73). `"errors"` / `"shortest"` / `"vias"` = that drawn
+    /// best instead (fewest errors with the least violation price; shortest / least vias among the
+    /// fewest errors). `"errors_weighted"` = `"best"` with the violation price (the order before
+    /// 2026-11-10); `"errors_vias_length"` = errors, shorts, open, vias, length, shrinkages (the
+    /// default 2026-11-10 to 2026-11-18). `objective = "area"` ignores it.
     pub pick: String,
     /// Topological core (`topor.toml [optimize] pick_shorts`, user 2026-11-12 "shorts should be
     /// in the routing criteria"): connections with a short (copper over another net's copper:
@@ -1340,13 +1366,11 @@ pub struct Options {
     /// segments, the hand boards' style; a stretch where 45 degrees does not fit stays any-angle
     /// and pays the `any_angle` factor) or `"smooth"` (the taut any-angle drawing).
     pub draw_style: String,
-    /// M2 = 6.1 draw once (`[drawing] candidates`): with `opt_loop = "topor"` how many TopoR loop
-    /// picks of the call's runs are drawn: the best `candidates` by their predicted criteria (the
-    /// plan's measure: violations, vias, length, shrinkages; `[optimize] pick`), the best drawn one
-    /// is the result. 1 (default) = only the variant the loop picks is drawn (TopoR 6.3 manual
-    /// pp. 72-73: the variants are judged before any copper; Polubasov 2010: the exact geometry is
-    /// computed on the metric stage). `>= runs` = every run draws its own pick (before M2). After
-    /// Cancel / OK only one pick is drawn. `opt_loop = "cycles"` draws every cycle and ignores it.
+    /// TW3 (`[drawing] candidates`): with `opt_loop = "topor"` how many of the call's four bests
+    /// (overall, fewest errors, shortest, least vias of the one variant table) are drawn; rows that
+    /// hold several bests are drawn once. 4 (default) = all of them, compared at 100 % drawn; 1 =
+    /// the overall best only. After Cancel / OK only the overall best is drawn. `opt_loop =
+    /// "cycles"` draws every cycle and ignores it.
     pub draw_candidates: usize,
     /// M-45 (`[drawing] any_angle`): `"costly"` (default: a stretch that is not at 0/45/90
     /// degrees pays the `any_angle` factor and is reported) or `"forbidden"` (such a run counts
@@ -1589,6 +1613,11 @@ impl Default for Options {
             initial: "once".into(),
             opt_loop: "topor".into(),
             loop_restart: 2,
+            restart: "hybrid".into(),
+            restart_relays: 800,
+            restart_min_cycles: 8,
+            loop_relays: 0,
+            best_penalty: false,
             loop_stable_window: 8,
             loop_via_start: 0.5,
             loop_via_end: 1.5,
@@ -1616,7 +1645,7 @@ impl Default for Options {
             max_expansions: 2_000_000,
             objective: "length_vias".into(),
             mm_per_via: 25.0,
-            pick: "errors_vias_length".into(),
+            pick: "best".into(),
             pick_shorts: true,
             short_weight: 1.0,
             variants: 8,
@@ -1638,7 +1667,7 @@ impl Default for Options {
             neck_from_pad: true,
             pad_exit_stubs: false,
             draw_style: "octilinear".into(),
-            draw_candidates: 1,
+            draw_candidates: 4,
             any_angle: "costly".into(),
             acute: "costly".into(),
             bend_mm: 0.25,

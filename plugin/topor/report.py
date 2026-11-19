@@ -131,6 +131,38 @@ OUTCOME_TEXT = {
 }
 
 
+def _crit_text(c: dict | None) -> str:
+    c = c or {}
+    return (f"{_na(c.get('errors'))} errors / {_na(c.get('vias'))} vias / "
+            f"{_na(c.get('length_mm'), '{:.1f}')} mm")
+
+
+def bests_summary_line(bests) -> str:
+    """TW3: one summary line for the four bests of the TopoR variant table as drawn (result.json
+    ``bests``): per drawn row its roles and its drawn errors / vias / length, the applied one marked
+    (``[optimize] pick``). ``""`` without them. O(rows)."""
+    if not bests:
+        return ""
+    parts = []
+    for b in bests:
+        roles = ", ".join(b.get("roles") or []) or "-"
+        parts.append(("*" if b.get("applied") else "") + f"{roles}: {_crit_text(b.get('drawn'))}")
+    return "Four bests drawn (* = applied, [optimize] pick): " + " · ".join(parts)
+
+
+def bests_table_md(bests) -> list:
+    """TW3: the report.md table of the four bests: roles in the table (predicted) and among the drawn rows,
+    predicted and drawn criteria, applied. O(rows)."""
+    rows = ["| roles (table) | roles (drawn) | row | run | predicted | drawn | shorts | open | applied |",
+            "|---|---|---|---|---|---|---|---|---|"]
+    for b in bests:
+        d = b.get("drawn") or {}
+        rows.append(f"| {', '.join(b.get('roles') or [])} | {', '.join(b.get('drawn_roles') or [])} | {b.get('row')} | "
+                    f"{_na(b.get('run'))} | {_crit_text(b.get('predicted'))} | {_crit_text(d)} | {_na(d.get('shorts'))} | "
+                    f"{_na(d.get('open'))} | {'yes' if b.get('applied') else ''} |")
+    return rows
+
+
 def outcome_text(status: str, code: str = "") -> str:
     if status == "error":
         return f"error {code}".strip()
@@ -206,6 +238,8 @@ class RunReport:
             lines.append(f"Detours {f['detour_line']}")
         if f.get("detour_ghost_line"):
             lines.append(f"Detours vs ghost line {f['detour_ghost_line']}")
+        if (bl := bests_summary_line(f.get("bests"))):
+            lines.append(bl)
         if (cl := compass_summary_line(f.get("compass"))):
             lines.append(cl[0].upper() + cl[1:] + " (report.md → Compass)")
         tl = f.get("time_limit")
@@ -244,6 +278,8 @@ class RunReport:
             md += ["## Notes", "", *[f"- {n}" for n in self.facts["notes"]], ""]
         if self.facts.get("compass"):
             md += ["## Compass (predicted vs drawn vs KiCad DRC)", "", *compass_table_md(self.facts["compass"]), ""]
+        if self.facts.get("bests"):
+            md += ["## Four bests (variant table, drawn)", "", *bests_table_md(self.facts["bests"]), ""]
         if self.facts.get("variants"):
             md += ["## Variants", "", *self._variants(), ""]
         return "\n".join(md)
@@ -544,6 +580,7 @@ def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_st
         "accepted_codes": list(scope.get("accepted_codes") or ()),
         "findings": list(findings or []),
         "variants": result.get("variants") or None, "moves": result.get("moves") or None,
+        "bests": result.get("bests") or None,
         "time_budget_hit": any(str(w).startswith("time budget hit") for w in result.get("warnings") or []) or None,
         "non_defaults": nd, "non_default": len(nd), "defaults_used": len(SETTINGS) - len(nd),
     }

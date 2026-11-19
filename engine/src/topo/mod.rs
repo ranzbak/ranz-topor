@@ -50,6 +50,7 @@ pub mod padend;
 pub mod joint;
 pub mod state;
 pub mod stitch;
+pub mod table;
 pub mod fusepour;
 pub mod tidy;
 pub mod stats;

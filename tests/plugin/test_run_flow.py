@@ -109,10 +109,17 @@ def do_run(eprom, tmp_path, *, ui=None, cfg=CFG, engine=topor_engine, board=None
 
 # ------------------------------------------------------------------ engine doubles
 class ProxyJob:
-    """Delegates to a real RouteJob; `done()` stays False for `hold` polls so the progress loop runs."""
+    """Delegates to a real RouteJob; `done()` stays False for `hold` polls so the progress loop runs.
 
-    def __init__(self, real, hold=1, patch=None):
+    `end_real` (TW3 / D6, lead 2026-11-19): a dialog run has no cycle cap, so the real job ends only by Cancel / OK or
+    its time limit. With it the double presses OK on the real job itself, after `hold` polls, at the first poll whose
+    progress shows "Routes stable" with a pick to keep (the user's OK there: the run ends "stable"). The plugin's own
+    Cancel / OK stays recorded only, as without it (headless runs, and dialog runs that keep the cap: restart =
+    "stall" / "off"), so the real job never ends before it has a plan and the result stays deterministic."""
+
+    def __init__(self, real, hold=1, patch=None, end_real=False):
         self.real, self.hold, self.polls, self.cancelled, self.patch = real, hold, 0, False, patch
+        self.end_real, self.real_cancelled, self.last = end_real, False, {}
         self.reached = False
         self.ok = None  # cancel(ok=...): what the button read
         self.hardened = False
@@ -121,10 +128,15 @@ class ProxyJob:
     def progress(self):
         self.polls += 1
         d = json.loads(self.real.progress())
+        self.last = dict(d)
         d["iteration"] = max(d.get("iteration", 0), 1)
         return json.dumps(d)
 
     def done(self):
+        if self.end_real and self.polls >= self.hold and not self.real_cancelled and self.last.get("stable") \
+                and self.last.get("best_total"):
+            self.real_cancelled = True
+            self.real.cancel(True)  # OK at Routes stable (the progress the plugin polled last)
         return self.polls >= self.hold and self.real.done()
 
     def cancel(self, ok=None):
@@ -157,9 +169,16 @@ class ProxyEngine:
         return topor_engine.default_options()
 
     def route_async(self, m, o):
-        j = ProxyJob(topor_engine.route_async(m, o), self.hold, self.patch)
+        j = ProxyJob(topor_engine.route_async(m, o), self.hold, self.patch, end_real=_dialog_without_cap(o))
         self.jobs.append(j)
         return j
+
+
+def _dialog_without_cap(o):
+    """The run's engine options say: progress dialog (no stop at stable) with a restart mode that has no cycle cap in
+    the dialog (TW3 / D6: hybrid, periodic)."""
+    d = json.loads(o) if isinstance(o, str) else dict(o)
+    return d.get("stop_when_stable", True) is False and d.get("restart", "hybrid") not in ("stall", "off")
 
 
 class ExplodingEngine:
@@ -1114,13 +1133,14 @@ def _engine_warnings(out):
 def test_ok_after_the_engine_ended_at_the_cap_stays_round_cap(app, eprom, tmp_path, reports):
     """An OK that arrives after the engine had already ended at its cycle cap did not end the run: stop_reason stays
     "round cap" (verify-slfx F1: the plugin no longer relabels it "stable"), and it is not a cancel either. The proxy
-    job records the OK and lets the real job run to its cap."""
+    job records the OK and lets the real job run to its cap. TW3 / D6: only restart = "stall" (or "off") keeps the
+    dialog's cycle cap; the default hybrid has none."""
     class OkOnceDrawn(ScriptedUi):  # OK at "Routes stable" (a pick to keep: the log names the best so far)
         def progress(self, p):
             super().progress(p)
             return not (p.stable and p.best_total)
 
-    cfg = CFG.with_values({("optimize", "rounds"): 20})
+    cfg = CFG.with_values({("optimize", "rounds"): 20, ("optimize", "restart"): "stall"})
     ui = OkOnceDrawn(accept=True, ok_at_stable=True)
     eng = ProxyEngine(hold=1)
     board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=cfg)
@@ -1282,8 +1302,9 @@ class _NeverOkDialog(ScriptedUi):
 
 def test_dialog_run_ends_at_the_cycle_cap_not_at_stable(app, eprom, tmp_path, reports):
     """Stop-on-stable fix: with the dialog and the defaults the run goes on after "Routes stable" until the cycle
-    cap, and says so: stop_reason "round cap", never "stable" (patience gap M5/M6 of verify-stable-toml)."""
-    cfg = CFG.with_values({("optimize", "rounds"): 20})
+    cap, and says so: stop_reason "round cap", never "stable" (patience gap M5/M6 of verify-stable-toml). TW3 / D6:
+    the cap is kept only with restart = "stall" (or "off"); the default hybrid has none."""
+    cfg = CFG.with_values({("optimize", "rounds"): 20, ("optimize", "restart"): "stall"})
     ui = _NeverOkDialog(accept=True)
     board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=_RealCancelEngine(), cfg=cfg)
     assert ui.polls_after_stable > 1, "the dialog saw Routes stable and the run went on"

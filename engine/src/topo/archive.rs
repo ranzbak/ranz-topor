@@ -104,6 +104,95 @@ pub enum Objective {
     ErrorsViasLength { mm_per_via: f64 },
     /// Fewest errors, then least occupied area.
     Area,
+    /// TW3 / D5 (user 2026-11-18), `[optimize] pick = "best"` (the default): fewest ranked errors
+    /// (shorts first among equals), then least `length + mm_per_via x vias` (TopoR 6.3 manual
+    /// pp. 72-73: the table sorted by violations, then by length; "good results are achieved at
+    /// the ratio of 25 mm/via", p. 73; `mm_per_via` is the option, never a constant), then fewer
+    /// shrinkages. `penalty` (`[optimize] best_penalty`, default off): the graded violation price
+    /// ([`Criteria::penalty`]) is added to the value, which orders exactly as `LengthVias`.
+    /// The internal prices ([`Objective::value`]) are those of `LengthVias`.
+    Best { mm_per_via: f64, penalty: bool },
+}
+
+/// TW3: the user's four bests of the variant table (topor-way plan, Appendix E). `Overall` is the
+/// objective's pick; the other three are taken among the variants with the fewest errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum Role {
+    /// The objective's order ([`Objective::better`]).
+    Overall,
+    /// Fewest ranked errors, then fewest shorts, then the least violation price (how deep and long
+    /// the violations are), then the objective.
+    Errors,
+    /// Shortest among the fewest errors (ties: the objective).
+    Shortest,
+    /// Least vias among the fewest errors (ties: the objective).
+    Vias,
+}
+
+impl Role {
+    pub const ALL: [Role; 4] = [Role::Overall, Role::Errors, Role::Shortest, Role::Vias];
+    /// The report's name of the role (also the `[optimize] pick` value that applies it).
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Overall => "best",
+            Role::Errors => "errors",
+            Role::Shortest => "shortest",
+            Role::Vias => "vias",
+        }
+    }
+    /// `[optimize] pick` -> the role whose drawn row goes to KiCad: "errors" / "shortest" /
+    /// "vias"; anything else (best, errors_weighted, errors_vias_length) = `Overall`.
+    pub fn of_pick(pick: &str) -> Role {
+        match pick {
+            "errors" => Role::Errors,
+            "shortest" => Role::Shortest,
+            "vias" => Role::Vias,
+            _ => Role::Overall,
+        }
+    }
+}
+
+/// The variants of `crits` that are the four bests ([`Role`]), by index: `[overall, errors,
+/// shortest, vias]`; ties go to the lower index. `None` only for an empty slice. O(n).
+pub fn bests(crits: &[&Criteria], obj: &Objective) -> [Option<usize>; 4] {
+    let n = crits.len();
+    if n == 0 {
+        return [None; 4];
+    }
+    let mut overall = 0;
+    for i in 1..n {
+        if obj.better(crits[i], crits[overall]) {
+            overall = i;
+        }
+    }
+    let key_err = |c: &Criteria| (c.ranked(), c.shorts, c.penalty);
+    let min_err = (0..n).map(|i| crits[i].ranked()).fold(f64::INFINITY, f64::min);
+    let pool: Vec<usize> = (0..n).filter(|&i| (crits[i].ranked() - min_err).abs() <= 1e-9).collect();
+    let min_by = |lt: &dyn Fn(&Criteria, &Criteria) -> std::cmp::Ordering| -> Option<usize> {
+        let mut b: Option<usize> = None;
+        for &i in &pool {
+            if b.is_none_or(|j| {
+                let o = lt(crits[i], crits[j]);
+                o == std::cmp::Ordering::Less || o == std::cmp::Ordering::Equal && obj.better(crits[i], crits[j])
+            }) {
+                b = Some(i);
+            }
+        }
+        b
+    };
+    let errors = (0..n).min_by(|&a, &b| {
+        let (ka, kb) = (key_err(crits[a]), key_err(crits[b]));
+        ka.0.total_cmp(&kb.0).then(ka.1.cmp(&kb.1)).then(ka.2.total_cmp(&kb.2)).then(if obj.better(crits[a], crits[b]) {
+            std::cmp::Ordering::Less
+        } else if obj.better(crits[b], crits[a]) {
+            std::cmp::Ordering::Greater
+        } else {
+            a.cmp(&b)
+        })
+    });
+    let shortest = min_by(&|a, b| if (a.length_mm - b.length_mm).abs() <= 1e-9 { std::cmp::Ordering::Equal } else { a.length_mm.total_cmp(&b.length_mm) });
+    let vias = min_by(&|a, b| a.vias.cmp(&b.vias));
+    [Some(overall), errors, shortest, vias]
 }
 
 impl Objective {
@@ -119,9 +208,20 @@ impl Objective {
     /// The objective of a run: [`Objective::parse`] with the final pick `[optimize] pick`:
     /// `"errors_weighted"` = errors, then `length + mm_per_via x vias`, then shrinkages; anything
     /// else = `errors_vias_length` (errors, vias, length, shrinkages). `area` ignores `pick`.
+    /// TW3 (D5): `"best"` (the default) and the role picks `"errors"` / `"shortest"` / `"vias"`
+    /// order by [`Objective::Best`] (without the penalty; [`Objective::with_best_penalty`]);
+    /// `"errors_vias_length"` is the order of 2026-11-10 to 2026-11-18.
     pub fn from_options(objective: &str, mm_per_via: f64, pick: &str) -> Objective {
         match Objective::parse(objective, mm_per_via) {
-            Objective::LengthVias { mm_per_via } if pick != "errors_weighted" => Objective::ErrorsViasLength { mm_per_via },
+            Objective::LengthVias { mm_per_via } if pick == "errors_vias_length" => Objective::ErrorsViasLength { mm_per_via },
+            Objective::LengthVias { mm_per_via } if pick != "errors_weighted" => Objective::Best { mm_per_via, penalty: false },
+            o => o,
+        }
+    }
+    /// `[optimize] best_penalty`: with `Best`, add the violation price to the ranked value. O(1).
+    pub fn with_best_penalty(self, on: bool) -> Objective {
+        match self {
+            Objective::Best { mm_per_via, .. } => Objective::Best { mm_per_via, penalty: on },
             o => o,
         }
     }
@@ -133,7 +233,7 @@ impl Objective {
     /// The objective's own value, without the violation price (the scale of a relative gain).
     pub fn base(&self, c: &Criteria) -> f64 {
         match *self {
-            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } => c.length_mm + mm_per_via * c.vias as f64,
+            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } | Objective::Best { mm_per_via, .. } => c.length_mm + mm_per_via * c.vias as f64,
             Objective::Area => c.area_mm2,
         }
     }
@@ -167,7 +267,16 @@ impl Objective {
             }
             return a.shrinkages < b.shrinkages;
         }
-        self.value(a) < self.value(b) - 1e-9 || (self.value(a) - self.value(b)).abs() <= 1e-9 && a.shrinkages < b.shrinkages
+        let (va, vb) = (self.ranked_value(a), self.ranked_value(b));
+        va < vb - 1e-9 || (va - vb).abs() <= 1e-9 && a.shrinkages < b.shrinkages
+    }
+    /// The value [`Objective::better`] compares within one ranked error count: `value` (with the
+    /// violation price), for `Best` without it unless `penalty` (D5). O(1).
+    pub fn ranked_value(&self, c: &Criteria) -> f64 {
+        match *self {
+            Objective::Best { penalty: false, .. } => self.base(c),
+            _ => self.value(c),
+        }
     }
     /// The criterion on which [`Objective::better`] decides between `a` and `b`, in the pick
     /// order, with `a` minus `b` on it (`a` is better exactly when that is negative); `None` when
@@ -195,7 +304,7 @@ impl Objective {
                 return Some(("length", a.length_mm - b.length_mm));
             }
         } else {
-            let dv = self.value(a) - self.value(b);
+            let dv = self.ranked_value(a) - self.ranked_value(b);
             if dv.abs() > 1e-9 {
                 return Some((if matches!(self, Objective::Area) { "area" } else { "score" }, dv));
             }
@@ -303,8 +412,10 @@ impl<T> Archive<T> {
             // variant the pick takes goes (the pick's own order has more keys than the
             // champions, e.g. shorts and open: pruning it would hand KiCad a worse variant).
             let pick = self.pick(obj);
+            // TW3: the user's four bests are never pruned (topor-way plan, Appendix F point 9).
+            let four = self.bests(obj);
             let worst = (0..self.items.len())
-                .filter(|&i| Some(i) != pick && self.champions(i).is_empty())
+                .filter(|&i| Some(i) != pick && !four.contains(&Some(i)) && self.champions(i).is_empty())
                 .max_by(|&a, &b| {
                     let (ca, cb) = (&self.items[a].crit, &self.items[b].crit);
                     ca.ranked().total_cmp(&cb.ranked()).then(ca.shorts.cmp(&cb.shorts)).then(obj.value(ca).total_cmp(&obj.value(cb))).then(a.cmp(&b))
@@ -317,6 +428,19 @@ impl<T> Archive<T> {
             }
         }
         true
+    }
+
+    /// TW3: the four bests ([`Role`], [`bests`]) by index: `[overall, errors, shortest, vias]`.
+    /// O(archive).
+    pub fn bests(&self, obj: &Objective) -> [Option<usize>; 4] {
+        let cs: Vec<&Criteria> = self.items.iter().map(|v| &v.crit).collect();
+        bests(&cs, obj)
+    }
+
+    /// The roles ([`Role`]) variant `i` holds. O(archive).
+    pub fn roles(&self, i: usize, obj: &Objective) -> Vec<Role> {
+        let b = self.bests(obj);
+        Role::ALL.iter().zip(b).filter(|(_, x)| *x == Some(i)).map(|(r, _)| *r).collect()
     }
 
     /// Index of the variant the objective picks; `None` when empty.
@@ -371,6 +495,7 @@ pub fn table_text(rows: &[VariantRow], obj: &Objective) -> String {
         Objective::LengthVias { mm_per_via } => format!("length_vias, pick errors_weighted, {mm_per_via} mm/via"),
         Objective::ErrorsViasLength { .. } => "length_vias, pick errors_vias_length (errors, shorts, open, vias, length)".to_string(),
         Objective::Area => "area".to_string(),
+        Objective::Best { mm_per_via, penalty } => format!("length_vias, pick best (errors, shorts, length + {mm_per_via} mm/via{})", if *penalty { " + violation price" } else { "" }),
     };
     let mut s = format!("variants ({} kept, objective {objective}; errors (violations, shorts) / vias / length mm / shrinkages / warnings / area mm2 / mm per via):", rows.len());
     for r in rows {
@@ -485,7 +610,7 @@ mod tests {
         let n = Objective::from_options("length_vias", 25.0, "errors_vias_length");
         assert_eq!(w, Objective::LengthVias { mm_per_via: 25.0 });
         assert_eq!(n, Objective::ErrorsViasLength { mm_per_via: 25.0 });
-        assert_eq!(Objective::from_options("length_vias", 25.0, "anything"), n, "unknown pick = the default");
+        assert_eq!(Objective::from_options("length_vias", 25.0, "anything"), Objective::Best { mm_per_via: 25.0, penalty: false }, "unknown pick = the default (TW3 D5: best)");
         assert_eq!(Objective::from_options("area", 25.0, "errors_vias_length"), Objective::Area, "area ignores pick");
         // (1 error, 0 vias, short) loses to (0 errors, 9 vias, long): errors first, in both modes.
         let (e1, e0) = (c(1, 0, 10.0, 0, 0), c(0, 9, 900.0, 0, 0));
@@ -631,5 +756,61 @@ mod tests {
         }
         let p = a.pick(&n).expect("non-empty");
         assert_eq!(a.items[p].label, "v3", "{:?}", a.items.iter().map(|v| &v.label).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_four_bests_are_never_pruned_at_any_cap() {
+        // TW3 (Appendix F point 9): whatever the cap, after every offer the archive's four bests are
+        // as good as the four bests over everything offered so far (a best leaves only for a
+        // variant that dominates it, which then is at least as good on that role).
+        use rand::{Rng, SeedableRng};
+        let obj = Objective::from_options("length_vias", 25.0, "best");
+        for seed in 0..40u64 {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            let cap = 1 + (seed as usize % 4);
+            let mut a: Archive<usize> = Archive::new(cap);
+            let mut all: Vec<Criteria> = Vec::new();
+            for i in 0..30 {
+                let errors = rng.gen_range(0..4);
+                let x = Criteria { errors, violations: errors, shorts: rng.gen_range(0..=errors.min(1)), penalty: rng.gen_range(0..3) as f64 * 100.0, vias: rng.gen_range(0..8), length_mm: rng.gen_range(80..120) as f64, shrinkages: rng.gen_range(0..2), ..Criteria::default() };
+                all.push(x);
+                a.offer(Variant { label: format!("v{i}"), crit: x, payload: i }, &obj);
+                let refs: Vec<&Criteria> = all.iter().collect();
+                let rb = bests(&refs, &obj);
+                let ab = a.bests(&obj);
+                let (r, b) = (|k: usize| refs[rb[k].unwrap()], |k: usize| &a.items[ab[k].unwrap()].crit);
+                assert!(!obj.better(r(0), b(0)), "seed {seed} cap {cap}: overall lost");
+                let ke = |c: &Criteria| (c.ranked(), c.shorts, c.penalty);
+                let (x0, y0) = (ke(r(1)), ke(b(1)));
+                assert!(y0.0 < x0.0 || y0.0 == x0.0 && (y0.1 < x0.1 || y0.1 == x0.1 && y0.2 <= x0.2), "seed {seed} cap {cap}: fewest errors lost");
+                assert!(b(2).ranked() == r(2).ranked() && b(2).length_mm <= r(2).length_mm + 1e-9, "seed {seed}: shortest lost");
+                assert!(b(3).ranked() == r(3).ranked() && b(3).vias <= r(3).vias, "seed {seed}: least vias lost");
+            }
+        }
+    }
+
+    #[test]
+    fn best_orders_by_errors_then_length_plus_mm_per_via_and_reads_the_option() {
+        // D5: fewest errors, then length + mm_per_via x vias; the penalty only with best_penalty.
+        let b25 = Objective::from_options("length_vias", 25.0, "best");
+        let b10 = Objective::from_options("length_vias", 10.0, "best");
+        let (a, z) = (c(0, 2, 200.0, 0, 0), c(0, 3, 180.0, 0, 0));
+        assert!(b25.better(&a, &z), "250 < 255 at 25 mm/via");
+        assert!(b10.better(&z, &a), "210 < 220 at 10 mm/via: mm_per_via is read, not 25");
+        let deep = Criteria { penalty: 5000.0, ..c(1, 0, 10.0, 0, 0) };
+        let shallow = Criteria { penalty: 100.0, ..c(1, 0, 50.0, 0, 0) };
+        assert!(b25.better(&deep, &shallow), "the penalty is not in the D5 order");
+        let bp = b25.with_best_penalty(true);
+        assert!(bp.better(&shallow, &deep), "best_penalty adds it");
+        let w = Objective::from_options("length_vias", 25.0, "errors_weighted");
+        for (x, y) in [(deep, shallow), (a, z), (z, a)] {
+            assert_eq!(bp.better(&x, &y), w.better(&x, &y), "best + penalty = errors_weighted");
+        }
+        // the four roles: fewest errors keeps the penalty as its second key
+        let rows = [deep, shallow, c(2, 0, 1.0, 0, 0)];
+        let refs: Vec<&Criteria> = rows.iter().collect();
+        assert_eq!(bests(&refs, &b25), [Some(0), Some(1), Some(0), Some(0)]);
+        assert_eq!(Role::of_pick("shortest"), Role::Shortest);
+        assert_eq!(Role::of_pick("errors_weighted"), Role::Overall);
     }
 }

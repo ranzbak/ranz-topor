@@ -228,3 +228,47 @@ def test_draw_grace_text_drops_every_wire_drawn_when_the_cap_then_cut_the_traces
         assert "every wire was drawn" in draw_grace_text(via)
         free = {**tl, "cap_hit": False, "cut": "none", "cut_steps": []}
         assert "every wire was drawn" in draw_grace_text(free)
+
+
+# ------------------------------------------------------------------ TW3: the four bests (verify tw3 r1 V3, DoD 13)
+_ROW = {"roles": ["best", "errors", "shortest", "vias"], "drawn_roles": ["best", "errors", "shortest", "vias"],
+        "row": "cycle 9 (gen 6)", "run": 2, "applied": True,
+        "predicted": {"errors": 3, "vias": 31, "length_mm": 929.34},
+        "drawn": {"errors": 24, "vias": 45, "length_mm": 998.71, "shorts": 6, "open": 0}}
+
+
+def test_bests_summary_line_without_bests_is_empty():
+    from topor.report import bests_summary_line
+    assert bests_summary_line(None) == "" and bests_summary_line([]) == ""
+
+
+def test_bests_summary_line_one_row_with_every_role_is_marked_applied():
+    from topor.report import bests_summary_line
+    line = bests_summary_line([_ROW])
+    assert line == ("Four bests drawn (* = applied, [optimize] pick): "
+                    "*best, errors, shortest, vias: 24 errors / 45 vias / 998.7 mm"), line
+
+
+def test_bests_summary_line_several_rows_and_missing_drawn_fields():
+    from topor.report import bests_summary_line
+    other = {"roles": ["shortest"], "applied": False, "drawn": {"errors": 19}}
+    bare = {}  # no roles, nothing drawn: every value n/a, never a crash
+    line = bests_summary_line([{**_ROW, "roles": ["best", "errors", "vias"]}, other, bare])
+    parts = line.split(": ", 1)[1].split(" · ")
+    assert parts == ["*best, errors, vias: 24 errors / 45 vias / 998.7 mm",
+                     "shortest: 19 errors / n/a vias / n/a mm",
+                     "-: n/a errors / n/a vias / n/a mm"], parts
+    assert sum(x.startswith("*") for x in parts) == 1, "only the applied row is marked"
+
+
+def test_bests_table_md_rows_predicted_drawn_and_applied():
+    from topor.report import bests_table_md
+    other = {"roles": ["shortest"], "drawn_roles": [], "row": "cycle 27 (gen 6)", "run": None,
+             "predicted": {"errors": 0, "vias": 41, "length_mm": 865.6}, "drawn": None}
+    rows = bests_table_md([_ROW, other])
+    assert rows[0].startswith("| roles (table) | roles (drawn) |") and rows[1].startswith("|---|")
+    assert rows[2] == ("| best, errors, shortest, vias | best, errors, shortest, vias | cycle 9 (gen 6) | 2 | "
+                       "3 errors / 31 vias / 929.3 mm | 24 errors / 45 vias / 998.7 mm | 6 | 0 | yes |"), rows[2]
+    assert rows[3] == ("| shortest |  | cycle 27 (gen 6) | n/a | 0 errors / 41 vias / 865.6 mm | "
+                       "n/a errors / n/a vias / n/a mm | n/a | n/a |  |"), rows[3]
+    assert len(rows) == 4 and bests_table_md([]) == rows[:2]

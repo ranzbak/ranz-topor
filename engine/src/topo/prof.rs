@@ -70,6 +70,8 @@ pub enum K {
     PathPrice,
     AnyPath,
     TopoSetup,
+    TableSync,
+    Fingerprint,
 }
 
 const NAMES: &[&str] = &[
@@ -118,6 +120,8 @@ const NAMES: &[&str] = &[
     "path_price",        // Topo::path_price
     "any_path",          // State::any_path
     "topo_setup",        // cycle lap: Topo clone + potentials + sort
+    "table_sync",        // TW3: a run's sync with the shared variant table (wait for the other runs + commit + view)
+    "fingerprint",       // TW3: Sp::fingerprint (the state hash a restart compares)
 ];
 const N: usize = NAMES.len();
 
