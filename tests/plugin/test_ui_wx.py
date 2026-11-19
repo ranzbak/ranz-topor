@@ -82,7 +82,6 @@ def _build_all(tmp_path):
         "preflight": ui_wx.PreflightDialog(FINDINGS, SUMMARY, Config.defaults()),
         "progress": prog,
         "preview": ui_wx.PreviewDialog(png, FakeReport(rd), "eprom"),
-        "report": ui_wx.DoneDialog("accepted", FakeReport(rd), rd),
         "error": ui_wx.ErrorDialog(Finding("KICAD_CLI_MISSING", "error", "kicad-cli was not found.", "Install it.",
                                            ("a", "b")), ctx),
     }
@@ -98,14 +97,13 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel"],
         "preview": ["zoom", "image_before", "image_after", "summary", "findings", "cause", "report_dir",
                     "open_report_folder", "reject", "accept"],
-        "report": ["report_dir", "open_report_folder", "close"],
         "error": ["details", "copy_details", "open_report_folder", "close"],
     }
     mins = {"first_run": (440, 200), "preflight": (640, 420), "progress": (460, 240), "preview": (800, 560),
-            "report": (440, 220), "error": (520, 320)}
+            "error": (520, 320)}
     default = {"first_run": wx.ID_OK, "preflight": wx.ID_OK, "progress": wx.ID_CANCEL, "preview": wx.ID_OK,
-               "report": wx.ID_OK, "error": wx.ID_OK}
-    esc = {**{k: wx.ID_OK for k in ("first_run", "report", "error")}, "preflight": wx.ID_CANCEL,
+               "error": wx.ID_OK}
+    esc = {**{k: wx.ID_OK for k in ("first_run", "error")}, "preflight": wx.ID_CANCEL,
            "progress": wx.ID_CANCEL, "preview": wx.ID_CANCEL}
     try:
         for name, d in dlgs.items():
@@ -156,7 +154,8 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
 
 def test_wx_ui_wording_matches_wireframes(app, tmp_path):
     rows = wording_rows()
-    assert set(rows) == set(ui_wx.WORDING) | {"report"}
+    rows.pop("report", None)  # the note's historical "Finished" section: the window is gone (user 2026-11-19)
+    assert set(rows) == set(ui_wx.WORDING)
     dlgs = _build_all(tmp_path)
     found = 0
     try:
@@ -181,7 +180,7 @@ def test_wx_ui_wording_matches_wireframes(app, tmp_path):
                     found += 1
                 else:
                     assert kind in ("text", "label", "heading", "button", "checkbox") and dname in (
-                        "preflight", "progress", "error", "report", "preview"), (dname, wid)
+                        "preflight", "progress", "error", "preview"), (dname, wid)
                     # buttons / checkboxes must exist as widgets
                     assert kind not in ("button",) or wid in ("copied",), (dname, wid)
         assert found > 70
@@ -401,7 +400,7 @@ def test_accept_checkbox_relabels_and_keeps_state(app):
         d.Destroy()
 
 
-def test_scope_count_follows_radio_and_done_variants(app, tmp_path):
+def test_scope_count_follows_radio(app, tmp_path):
     s = RunSummary(10, 2, 2, "v", board="b", has_selection=True,
                    connections_by_scope={"whole": 10, "between": 4, "touching": 7})
     d = ui_wx.PreflightDialog([], s, Config.defaults())
@@ -415,67 +414,6 @@ def test_scope_count_follows_radio_and_done_variants(app, tmp_path):
         assert d.summary_label.GetLabel().startswith("10 connections")
     finally:
         d.Destroy()
-    rep = FakeReport(tmp_path)
-    rep.stop_reason = "cancel"
-    for outcome, wid in (("accepted", "done_accepted_cancelled"), ("rejected", "done_rejected"),
-                         ("cancelled", "done_cancelled")):
-        dd = ui_wx.DoneDialog(outcome, rep, tmp_path)
-        try:
-            w = dd.widget(wid)
-            assert w is not None, wid
-            assert _regex(ui_wx.WORDING["report"][wid]).match(re.sub(r"\s+", " ", w.GetLabel()))
-        finally:
-            dd.Destroy()
-
-
-def test_done_dialog_refill_hint_and_post_commit_warning(app, tmp_path):
-    """Ruling C28: after Accept the done notice says whether zones were refilled (press B when not); ruling C30:
-    a step that failed after the commit is shown there too."""
-    W = ui_wx.WORDING["report"]
-    cases = (({"zones_refilled": False}, "done_refill_hint"), ({"zones_refilled": True}, "done_refilled"),
-             ({"zones_refilled": False, "zone_fills_committed": 3}, "done_fills_committed"))
-    for facts, wid in cases:
-        rep = FakeReport(tmp_path)
-        rep.facts = facts
-        dd = ui_wx.DoneDialog("accepted", rep, tmp_path)
-        try:
-            w = dd.widget(wid)
-            assert w is not None, wid
-            assert re.sub(r"\s+", " ", w.GetLabel()) == W[wid]
-            for other in {"done_refilled", "done_refill_hint", "done_fills_committed"} - {wid}:
-                assert dd.widget(other) is None
-        finally:
-            dd.Destroy()
-    assert "press B (Edit → Fill All Zones)" in W["done_refill_hint"]
-    # fills that could not be written: the hint (not "zones carry the fill") plus the warning text, per skip reason
-    for why in ("no_copy", "other_items", "not_applied"):
-        rep = FakeReport(tmp_path)
-        rep.facts = {"zones_refilled": False, "zone_fills_committed": 1, "zone_fills_skipped": why,
-                     "post_commit_failed": [Finding("ZONE_FILLS_SKIPPED", "warning",
-                                                    f"The routes were committed, but the zone fills were not written ({why}).",
-                                                    "Refill the zones: KiCad → Edit → Fill All Zones (B).")]}
-        dd = ui_wx.DoneDialog("accepted", rep, tmp_path)
-        try:
-            assert dd.widget("done_refill_hint") is not None and dd.widget("done_fills_committed") is None
-            assert why in re.sub(r"\s+", " ", dd.widget("done_post_commit").GetLabel())
-        finally:
-            dd.Destroy()
-    rep = FakeReport(tmp_path)
-    rep.facts = {"zones_refilled": False, "post_commit_failed": [Finding(
-        "POST_COMMIT_STEP_FAILED", "warning", "The routes were committed, then zone refill failed: AS_BUSY.",
-        "Ctrl+Z (Edit → Undo) removes the routes.")]}
-    dd = ui_wx.DoneDialog("accepted", rep, tmp_path)
-    try:
-        w = dd.widget("done_post_commit")
-        assert w is not None and "zone refill failed: AS_BUSY" in re.sub(r"\s+", " ", w.GetLabel())
-        assert "Ctrl+Z" in re.sub(r"\s+", " ", w.GetLabel())
-    finally:
-        dd.Destroy()
-    dd = ui_wx.DoneDialog("rejected", rep, tmp_path)  # nothing applied: no refill hint
-    try:
-        assert dd.widget("done_refill_hint") is None and dd.widget("done_post_commit") is None
-    finally:
-        dd.Destroy()
 
 
 def test_elapsed_format_hours():
@@ -524,7 +462,7 @@ def test_buttons_never_narrower_than_their_label(app, tmp_path):
     """Live test (K1): a fixed 88 DIP width cut "Open report folder" to "pen report fold"."""
     d = _build_all(tmp_path)
     try:
-        for name in ("preview", "report", "error"):
+        for name in ("preview", "error"):
             for b in d[name].buttons.values():
                 assert b.GetMinSize().width >= b.GetBestSize().width, (name, b.GetLabel())
     finally:
@@ -863,25 +801,6 @@ def test_preview_two_images_summary_hierarchy_and_findings(app, tmp_path):
         assert d.bitmaps["after"] is None and not d.scrollers["after"].GetParent().IsShown()
     finally:
         d.Destroy()
-
-
-def test_done_dialog_names_new_drc_violations_with_a_warning_icon(app, tmp_path):
-    rep = _drc_report(tmp_path)
-    rep.facts.update(zones_refilled=False, zone_fills_committed=1)
-    d = ui_wx.DoneDialog("accepted", rep, tmp_path)
-    try:
-        w = d.widget("done_drc_new")
-        assert w is not None and re.sub(r"\s+", " ", w.GetLabel()) == \
-            "⚠ 9 new DRC violations (clearance 8, shorting_items 1) — run Inspect → Design Rules Checker"
-        assert d.widget("icon").GetToolTipText() == "Warning"
-    finally:
-        d.Destroy()
-    for outcome, n in (("accepted", 0), ("rejected", 9)):  # nothing new, or nothing applied: the info notice
-        d = ui_wx.DoneDialog(outcome, _drc_report(tmp_path, n=n), tmp_path)
-        try:
-            assert d.widget("done_drc_new") is None and d.widget("icon").GetToolTipText() == "Information"
-        finally:
-            d.Destroy()
 
 
 def test_progress_waits_for_round_1_colours_the_verdict_and_never_changes_size(app):

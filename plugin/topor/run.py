@@ -212,9 +212,9 @@ def _zone_fills_fix(cfg) -> str:
 def _routed_fills(cfg, out, state: dict, log) -> tuple:
     """``run.commit_fills``: ``(fills, skip)``. `fills` = the zone fills of the kicad-cli refilled routed copy (the DRC
     round that judged exactly the items being committed), keyed by zone uuid, for the Accept commit. `skip` = None when
-    they are written or nothing was asked for; ``"off"`` when the user turned the setting off (the done notice already
-    says to press B); a key of FILLS_SKIP_TEXT when the fills could not be had: then `fills` is empty and the caller
-    reports it (finding + done notice), never only the log. O(len(board text))."""
+    they are written or nothing was asked for; ``"off"`` when the user turned the setting off (the preview summary and the report
+    already say to press B); a key of FILLS_SKIP_TEXT when the fills could not be had: then `fills` is empty and the caller
+    reports it (finding + error dialog), never only the log. O(len(board text))."""
     if not cfg.get("run", "commit_fills"):
         return {}, "off"
     if out.routed_pcb is None or not Path(out.routed_pcb).is_file():
@@ -1330,16 +1330,26 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         return finish("error", error_code=engine_err.code)
     if engine_err is not None:  # most connections failed on it, some copper exists: listed as an error finding
         findings.append(engine_err)
-    if not out.items:  # nothing to show or apply (cancelled early, or the router discarded everything)
-        if out.routed == 0 and not out.cancelled:
-            findings.append(Finding("NOTHING_ROUTED", "warning", "The router produced no copper.",
-                                    "See the connection reasons in the report; relax a setting or route by hand."))
+    if not out.items and out.routed == 0 and out.total > 0 and not out.cancelled:
+        # fail fast: connections to route and the router produced no copper = a whole-run failure, a loud error dialog
+        # (never a quiet notice). Zero connections is covered by the pre-flight SCOPE_EMPTY warning.
+        msg = messages.MESSAGES["NOTHING_ROUTED"]
+        nr = Finding("NOTHING_ROUTED", msg.severity, msg.cause, msg.fix)
+        log.line(f"error: {nr.message}")
+        out.error = nr
+        findings.append(nr)
+        report.facts["findings"] = findings
+        report.set_outcome("error", nr.code)
+        report.write(result=_facts_result("error", out, rr), drc_src=drc_src)
+        ctx()
+        ui.error(nr)
+        return finish("error", error_code=nr.code)
+    if not out.items:  # nothing to show or apply (cancelled early, or nothing to route): silent, no window
         status = "cancelled" if out.cancelled else "rejected"
         report.write(result=_facts_result(status, out, rr), drc_src=drc_src)
         report.set_outcome(status)
         report.write(result=_facts_result(status, out, rr), drc_src=drc_src)
         ctx()
-        ui.done(status, report, report_dir)
         return finish(status)
 
     # 5. preview (report.md + preview.png exist before the dialog opens)
@@ -1364,14 +1374,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         log.line(f"preview failed: {e}")
         findings.append(Finding("PREVIEW_FAILED", "warning", f"The preview could not be rendered: {e}",
                                 f"See {report_dir / 'log.txt'}; the DRC numbers in the summary are still valid."))
+    report.facts["zone_hint"] = not cfg.get("run", "commit_fills") and not cfg.get("run", "refill_after_accept")
     report.write(result=_facts_result("pending", out, rr), drc_src=drc_src)
     ctx()
     accepted = bool(ui.preview(png, report))
     if not accepted:
         report.set_outcome("rejected")
         report.write(result=_facts_result("rejected", out, rr), drc_src=drc_src)
-        ctx()
-        ui.done("rejected", report, report_dir)
+        ctx()  # no "finished" window (user 2026-11-19): the preview and the progress log already said it all
         return finish("rejected")
 
     # 6. MINOR 11: the board must be exactly what it was when the run started (KiCad stays editable meanwhile)
@@ -1412,7 +1422,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     report.facts["zone_fills_skipped"] = fills_skip or ("not_applied" if getattr(out.commit, "fills_not_applied", None) else "")
     if cfg.get("run", "refill_after_accept"):
         report.facts["zones_refilled"] = after_commit("zone refill", port.refill_zones)
-    # fail fast: fills that were asked for but not written are shown in the done notice and the report, not only the
+    # fail fast: fills that were asked for but not written are shown in an error dialog and the report, not only the
     # log; moot when the live refill above redid every zone
     not_applied = list(getattr(out.commit, "fills_not_applied", None) or [])
     if (fills_skip not in (None, "off") or not_applied) and not report.facts["zones_refilled"]:
@@ -1444,9 +1454,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.wall_s = time.monotonic() - t0
     after_commit("writing the report", lambda: report.write(result=_facts_result(status, out, rr), drc_src=drc_src))
     ctx()
-    if not after_commit("the done notice", lambda: ui.done(status, report, report_dir)):
+    # no "finished" window after Accept (user 2026-11-19): the report folder is in the preview. A step that failed after
+    # the commit stays loud: one error dialog each (the routes are on the board).
+    for w in post_failed:
         try:
-            ui.error(post_failed[-1])  # the notice failed: tell the user the routes are on the board
+            ui.error(w)
         except Exception:  # noqa: BLE001
             log.exc()
     return finish(status)

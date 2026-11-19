@@ -240,28 +240,6 @@ WORDING: dict[str, dict[str, str]] = {
         "reject": "Reject",
         "accept": "Accept",
     },
-    "report": {
-        "title": "Topor — Finished",
-        "done_accepted": "Routed {routed}/{total} connections — applied to the board "
-                         "(Edit → Undo).",
-        "done_accepted_cancelled": "Stopped early by Cancel: routed {routed}/{total} connections — applied to the "
-                                   "board (Edit → Undo).",
-        "done_rejected": "Nothing was changed on the board.",
-        "done_cancelled": "Cancelled — nothing was changed on the board.",
-        "done_refill_hint": "Zones were not refilled: press B (Edit → Fill All Zones) to refill them — a separate "
-                            "undo step. Edit → Undo reverts the routes in one step.",
-        "done_fills_committed": "Zones carry the fill KiCad's own filler made for the new copper (run on a copy), in "
-                                "the same undo step as the routes: Edit → Undo reverts both.",
-        "done_refilled": "Zones were refilled by topor — a second undo step: the first Edit → Undo reverts the refill, "
-                         "the next one the routes.",
-        "done_post_commit": "{message} {fix}",
-        "done_times": "Router time {router}, CPU time {cpu} (all threads).",
-        "done_drc_new": "⚠ {n} new DRC violations ({types}) — run Inspect → Design Rules Checker",
-        "report_dir_label": "Report folder",
-        "report_dir": "{report_dir}",
-        "open_report_folder": "Open report folder",
-        "close": "Close",
-    },
     "error": {
         "title": "Topor — Error",
         "code": "{code}",
@@ -1896,81 +1874,6 @@ class PreviewDialog(_FindingsMixin, _Base):
                     wx.CallAfter(lambda a=src, b=sc: self and b.Scroll(*a.GetViewStart()))
 
 
-# --------------------------------------------------------------------------------------------- (5) done
-class DoneDialog(_Base):
-    _wk = "report"
-    TAB_ORDER = ("report_dir", "open_report_folder", "close")
-
-    def __init__(self, outcome: str, report, report_dir: Path):
-        super().__init__(WORDING["report"]["title"])
-        W = WORDING["report"]
-        self.report_dir = Path(report_dir)
-        routed, total = self._counts(report)
-        if outcome == "accepted":
-            name = ("done_accepted_cancelled" if getattr(report, "stop_reason", None) == "cancel"
-                    else "done_accepted")
-            msg = (W[name].format(routed=routed, total=total) if routed is not None
-                   else "Applied to the board (Edit → Undo).")
-        elif outcome == "cancelled":
-            msg, name = W["done_cancelled"], "done_cancelled"
-        else:
-            msg, name = W["done_rejected"], "done_rejected"
-        # new DRC violations on the board after Accept: a warning icon and one line naming them (user 2026-11-11)
-        n_drc, types = drc_new(report) if outcome == "accepted" else (0, "")
-        warn = n_drc > 0
-        icon = wx.StaticBitmap(self, bitmap=wx.ArtProvider.GetBitmap(
-            wx.ART_WARNING if warn else wx.ART_INFORMATION, wx.ART_MESSAGE_BOX, self.FromDIP(wx.Size(32, 32))),
-            name="icon")
-        icon.SetToolTip("Warning" if warn else "Information")
-        body = wx.BoxSizer(wx.VERTICAL)
-        if warn:
-            tmpl = W["done_drc_new"]
-            line = tmpl.format(n=n_drc, types=types) if types else tmpl.replace(" ({types})", "").format(n=n_drc)
-            self.drc_line = self.text(self, "report", "done_drc_new", text=line, wrap_dip=420, bold=True)
-            self.drc_line.SetForegroundColour(tone_colour("warning"))
-            body.Add(self.drc_line, 0, wx.BOTTOM, self.group)
-        body.Add(self.text(self, "report", name, text=msg, wrap_dip=420), 0, wx.BOTTOM, self.group)
-        facts0 = getattr(report, "facts", None) or {}
-        if facts0.get("router_cpu_s") is not None and facts0.get("elapsed_s") is not None:
-            body.Add(self.text(self, "report", "done_times", wrap_dip=420, text=W["done_times"].format(
-                router=_fmt_time(facts0["elapsed_s"]), cpu=_fmt_time(facts0["router_cpu_s"]))), 0, wx.BOTTOM, self.group)
-        if outcome == "accepted":
-            facts = getattr(report, "facts", None) or {}
-            if "zones_refilled" in facts:  # ruling C28
-                rid = ("done_refilled" if facts["zones_refilled"] else
-                       "done_fills_committed" if facts.get("zone_fills_committed") and
-                       facts.get("zone_fills_skipped") in (None, "") else "done_refill_hint")
-                body.Add(self.text(self, "report", rid, wrap_dip=420), 0, wx.BOTTOM, self.group)
-            for f in facts.get("post_commit_failed") or ():  # ruling C30: committed, then a step failed
-                body.Add(self.text(self, "report", "done_post_commit", wrap_dip=420,
-                                   text=W["done_post_commit"].format(message=f.message, fix=f.fix)),
-                         0, wx.BOTTOM, self.group)
-        body.Add(self.text(self, "report", "report_dir_label"), 0, wx.BOTTOM, self.row)
-        body.Add(self.mono_field(self, "report_dir", str(self.report_dir)), 0, wx.EXPAND)
-        top = wx.BoxSizer(wx.HORIZONTAL)
-        top.Add(icon, 0, wx.RIGHT, self.group)
-        top.Add(body, 1, wx.EXPAND)
-        self.root.Add(top, 1, wx.EXPAND | wx.BOTTOM, self.group)
-        self.root.Add(self.button_row(("close", "close", "c"),
-                                      extras=(("open_report_folder", "open_report_folder", "o"),)), 0, wx.EXPAND)
-        self.buttons["open_report_folder"].Bind(wx.EVT_BUTTON, lambda _e: open_path(self.report_dir))
-        self.A11Y = {"report_dir": W["report_dir_label"]}
-        self.finish((440, 220))
-        self.ok_button.SetFocus()
-
-    @staticmethod
-    def _counts(report):
-        """(routed, total) from the report's summary block ("Routed 27/27 connections ..."), else (None, None)."""
-        try:
-            for line in report.summary_lines():
-                m = re.match(r"Routed (\d+)/(\d+)", line)
-                if m:
-                    return int(m.group(1)), int(m.group(2))
-        except Exception:  # noqa: BLE001
-            pass
-        return None, None
-
-
 # --------------------------------------------------------------------------------------------- (6) error
 class ErrorDialog(_Base):
     _wk = "error"
@@ -2226,9 +2129,6 @@ class WxUi:
 
     def preview(self, png: Path, report) -> bool:
         return self._run_modal(PreviewDialog(png, report, self.ctx.board)) == wx.ID_OK
-
-    def done(self, outcome: str, report, report_dir: Path) -> None:
-        self._run_modal(DoneDialog(outcome, report, report_dir))
 
     def error(self, finding: Finding) -> None:
         self._run_modal(ErrorDialog(finding, self.ctx))

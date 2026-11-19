@@ -309,15 +309,12 @@ class UiPort(Protocol):
     #       """A new sketch of `kind` (the engine's control::Sketch JSON: run, cycle, kind plan|copper, seq, items)."""
 
     def preview(self, png: Path, report: Any) -> bool:
-        """Show the result; True = Accept (apply to the board), False = Reject."""
-
-    def done(self, outcome: str, report: Any, report_dir: Path) -> None:
-        """Post-Accept/Reject notice (wireframe §5). `outcome`: ``accepted`` | ``rejected`` |
-        ``cancelled``."""
+        """Show the result; True = Accept (apply to the board), False = Reject. No "finished" window follows either
+        way (user 2026-11-19): a run without copper or a step that failed after the commit goes through ``error``."""
 
     def error(self, finding: Finding) -> None: ...
 
     def set_context(self, board: str | None = None, report_dir: Any = None, log_path: Any = None,
                     versions: dict | None = None) -> None:
         """Board name, report folder, log.txt path and version strings the dialogs show; the run flow calls
-        it before ``preview`` / ``done`` / ``error``."""
+        it before ``preview`` / ``error``."""
