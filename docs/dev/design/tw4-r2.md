@@ -85,10 +85,20 @@ edge line is on that edge's cut only by the part of its disc the line passes thr
 pp. 117-118: the via is a round pad, and the room of a passage counts what passes it. D3 (wire_discs doc): the
 disc counts on both edges; that stays.
 
-**Code.** The per-pass disc of the capacity model gains the via's height per side, `Disc` = [d0, d1] + h (0 = today).
-- `CapModel::apply` writes h from the via point it already computes (`vpts`). A changed height reprices the pass
-  like a changed disc (`layers_changed`, the build memo key, the undo log).
-- The drawing's packing passes h = 0 and is unchanged.
+**Code.** The per-pass disc of the capacity model gains the via's height, `Disc` = [d0, d1, h] (h = 0 = today), and
+each pack item the track's lean (`PackItem::lean`, `pack::lean_dir` of the pass's taut direction).
+- `CapModel::apply` writes h from the via point it already computes (`vpts`), now before the discs. A changed height
+  reprices the pass like a changed disc (`layers_changed`, the build memo key, the undo log, the lane overlays).
+- V is the **planned** point (`vpts`), also with `via_best_point`: the best point is chosen at price time from the
+  other wires' layers and via points, so heights from it would make one wire's edge items depend on other wires'
+  labelling and break the repricing's exactness. (Implemented 2026-11-19; deviation from the model paragraph above.)
+- A pass next to two vias of its wire takes the height nearer its line (the larger blockage).
+- End margins: `Packer::margin_h` / `margin_all_h` (cache key with the height bits), `pack::disc_margin` shared by
+  `Packer::bounds` and the model's `end_margin`; a disc alone with a height has no track margin.
+- The drawing's packing passes h = 0 and is unchanged (lead condition (1), alternative: drawing_loss on vs off is
+  measured in the A/B; a rise blocks the default).
+- `viacheck` with the option on also compares every live wire's stored discs (heights) and leans with fresh ones, and
+  every edge-layer with a disc at a height: stored price = fresh, and the model's over-fill = `Packer::bounds`'.
 - Option `[capacity] via_disc_height` (default off until the A/B).
 
 **Tests.**

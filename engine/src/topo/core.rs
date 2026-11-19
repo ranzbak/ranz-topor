@@ -6255,7 +6255,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     // Pass layers, via discs and intervals from the placed vias.
     dr.pass_layer = vec![-1; st.passes.len()];
-    dr.pass_disc = vec![[0.0; 2]; st.passes.len()];
+    dr.pass_disc = vec![[0.0; 3]; st.passes.len()];
     for &w in &live {
         let (pl, vs) = (&plans[&w], &placed[&w]);
         let ks: Vec<usize> = vs.iter().map(|v| v.0).collect();

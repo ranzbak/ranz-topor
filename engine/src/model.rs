@@ -1500,6 +1500,14 @@ pub struct Options {
     /// 0 at zero overage, no step there) and counts as a predicted violation only from `over >=
     /// ramp`. 0 (default) = the step at zero (every over-full cut a full violation).
     pub via_over_ramp_mm: f64,
+    /// tw4-r2 (2b) (`[capacity] via_disc_height`, docs/dev/design/tw4-r2.md (2b)): with via_cuts,
+    /// a planned via's disc packs on the two edges its wire crosses round it at the via point's
+    /// height off each edge line, not on the line: against a track crossing at sin θ and leaning
+    /// c towards it, `max(0, (R + h c) / sin θ)`; against another disc, `sqrt(max(0, R^2 - Δh^2))`
+    /// with signed heights; the end margins at the offset centre (Maley 1987 pp. 32-33, 40: a cut
+    /// holds what lies on it). The drawing's packing keeps the disc on the line. false (default) =
+    /// the disc on the edge line (as before).
+    pub via_disc_height: bool,
     /// tw4-r2 (3) (`[capacity] pour_cuts`): the TopoR loop's measure counts a pour terminal (a
     /// pad that reaches its net only through a pour) that the plan's copper cuts off its pour as
     /// a predicted violation, graded by the pads cut off (`topo::pourplan`). false (default) =
@@ -1712,6 +1720,7 @@ impl Default for Options {
             via_cuts: true,
             via_best_point: false,
             via_over_ramp_mm: 0.0,
+            via_disc_height: false,
             pour_cuts: false,
             pour_cut_cells: 1.0e5,
             stop_after: String::new(),

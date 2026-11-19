@@ -15,6 +15,7 @@ V = "engine/src/topo/viacut.rs"
 F = "engine/src/topo/refine.rs"
 P = "engine/src/topo/pourplan.rs"
 O = "engine/src/topo/optimise.rs"
+P2 = "engine/src/topo/pack.rs"
 M = {
     "ramp_step": (V, "    Some(((ov / ramp).min(1.0) * f, ov >= ramp))", "    Some((f, ov >= ramp))"),
     "ramp_count_always": (V, "    Some(((ov / ramp).min(1.0) * f, ov >= ramp))", "    Some(((ov / ramp).min(1.0) * f, true))"),
@@ -29,8 +30,23 @@ M = {
     "pour_base_ignored": (P, "        let new = c.pads.iter().filter(|p| !base.cut_pads.contains(p)).count();", "        let new = c.pads.len();"),
     "pour_part_dropped": (O, ".with_neck(parts.neck).with_pour(parts.pour).shorts_ranked", ".with_neck(parts.neck).shorts_ranked"),
     "pour_no_count": (O, "        Predicted { count: self.count + x.0, graded: self.graded + x.1, parts, ..self }", "        Predicted { count: self.count, graded: self.graded + x.1, parts, ..self }"),
+    # (2b) via_disc_height
+    "dh_pair_off": (P2, "    if ha != 0.0 || hb != 0.0 {", "    if false && (ha != 0.0 || hb != 0.0) {"),
+    "dh_lean_a_sign": (P2, "gap - b.lean * ha", "gap + b.lean * ha"),
+    "dh_lean_b_sign": (P2, "gap + a.lean * hb", "gap - a.lean * hb"),
+    "dh_dd_sum": (P2, "        let dh = ha - hb;", "        let dh = ha + hb;"),
+    "dh_track_terms_kept": (P2, "let (ta, tb) = (!(a.w == 0.0 && da > 0.0), !(b.w == 0.0 && db > 0.0));", "let (ta, tb) = (true, true);"),
+    "dh_margin_on_line": (P2, "        let off = if h != 0.0 {", "        let off = if false {"),
+    "dh_margin_no_early0": (P2, "                if h != 0.0 && poly_dist(at(0.0), &ob.poly) >= req {", "                if false && h != 0.0 && poly_dist(at(0.0), &ob.poly) >= req {"),
+    "dh_disc_alone_track_margin": (P2, "    if i.w == 0.0 {\n        ma\n", "    if false {\n        ma\n"),
+    "dh_lean_unoriented": (P2, "    let u = if ed.cross(u) < 0.0 { -u } else { u };", "    let u = u;"),
+    "dh_heights_off": (F, "            if self.packer.via_disc_h {", "            if false {"),
+    "dh_heights_farther": (F, "            if h.abs() < best[j] {", "            if h.abs() > best[j] {"),
+    "dh_model_margin_on_line": (F, "        if it.disc[2] != 0.0 {\n            return super::pack::disc_margin", "        if false {\n            return super::pack::disc_margin"),
+    "dh_layers_changed_h": (F, " && od[2].to_bits() == nd[2].to_bits();", ";"),
 }
-TESTS = ["--lib", "--test", "topo_cm1_room", "--", "viacut", "pourplan", "optimise::tests::the_pour_part", "best_point", "via_prices_stay_fresh"]
+TESTS = ["--lib", "--test", "topo_cm1_room", "--test", "topo_disc_height", "--", "viacut", "pourplan", "optimise::tests::the_pour_part", "best_point",
+         "via_prices_stay_fresh", "height", "a_disc_against", "a_track_lean", "a_track_with_its_own", "the_end_margin_is"]
 
 
 def run(out: Path) -> int:

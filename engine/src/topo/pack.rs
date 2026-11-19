@@ -43,8 +43,35 @@ pub fn tri_site_points(a: Vec2, b: Vec2, c: Vec2) -> [Vec2; 9] {
 }
 
 /// Via disc next to a pass, as packed on its edge: the diameter on the side towards end 0 and
-/// towards end 1 of the edge (0: none on that side).
-pub type Disc = [f64; 2];
+/// towards end 1 of the edge (0: none on that side), and (tw4-r2 (2b), `[capacity]
+/// via_disc_height`) the signed height of the via centre off the edge line (nm, + on the left of
+/// end 0 -> end 1, [`signed_height`]; 0 = on the line, the model before (2b)).
+pub type Disc = [f64; 3];
+
+/// The signed distance of `v` from the line of edge `e` (nm, + on the left of end 0 -> end 1). O(1).
+pub fn signed_height(pr: &Projection, e: EdgeId, v: Vec2) -> f64 {
+    let [p, q] = pr.edges[e];
+    let (pp, pq) = (pr.pos[p], pr.pos[q]);
+    let ed = (pq - pp) * (1.0 / (pq - pp).len().max(1.0));
+    ed.cross(v - pp)
+}
+
+/// The lean of a pass through edge `e` crossed in direction `d` (tw4-r2 (2b)): the component
+/// along the edge (towards end 1) of the unit crossing direction, oriented into the edge's left
+/// half-plane (+ height). In -1 .. 1; 0 when `d` is shorter than 1 nm (undefined), as
+/// [`infl_dir`] reads it. O(1).
+pub fn lean_dir(pr: &Projection, e: EdgeId, d: Vec2) -> f64 {
+    let [p, q] = pr.edges[e];
+    let (pp, pq) = (pr.pos[p], pr.pos[q]);
+    let ed = (pq - pp) * (1.0 / (pq - pp).len().max(1.0));
+    let dl = d.len();
+    if dl < 1.0 {
+        return 0.0;
+    }
+    let u = d * (1.0 / dl);
+    let u = if ed.cross(u) < 0.0 { -u } else { u };
+    u.dot(ed)
+}
 
 /// One pass to pack: its net, width, clearance and the oblique-chord factor; `disc` is the via
 /// disc of its wire next to the edge (see [`wire_discs`]; zeros: none). A pass whose wire is on
@@ -57,6 +84,8 @@ pub struct PackItem {
     pub s: f64,
     pub infl: f64,
     pub disc: Disc,
+    /// tw4-r2 (2b): the track's [`lean_dir`] (read only next to a disc with a height).
+    pub lean: f64,
 }
 
 impl PackItem {
@@ -70,8 +99,20 @@ impl PackItem {
 /// spacing `gap` between their copper (0 for one net): the tracks stretched by the larger
 /// oblique factor, a via disc facing a track by the track's factor (a disc is round), two discs
 /// by none; the largest of the pairs present.
+///
+/// tw4-r2 (2b): a disc with a height `h` (`disc[2]`) is the via at `h` off the edge line, not on
+/// it. Against a track crossing at sin θ = 1 / infl (the oblique factor's floor 0.4) and leaning
+/// `c` towards the disc in the disc's half-plane, the centre distance `x` along the edge keeps the
+/// copper gap when `x sin θ - h c >= R` (R = d / 2 + gap + w / 2): `max(0, (R + h c) / sin θ)`.
+/// Two discs at signed heights `h1`, `h2` need `sqrt(max(0, R^2 - (h1 - h2)^2))`. A disc-only item
+/// (`w` 0, the wire on another layer here) has no track, so with a height its track terms go.
+/// At `h` = 0 every term is the one before, bit for bit.
 pub fn pair_req(a: &PackItem, b: &PackItem, gap: f64) -> f64 {
     let (da, db) = (a.disc[1], b.disc[0]);
+    let (ha, hb) = (if da > 0.0 { a.disc[2] } else { 0.0 }, if db > 0.0 { b.disc[2] } else { 0.0 });
+    if ha != 0.0 || hb != 0.0 {
+        return pair_req_h(a, b, gap, da, db, ha, hb);
+    }
     let mut r = (0.5 * (a.w + b.w) + gap) * a.infl.max(b.infl);
     if da > 0.0 {
         r = r.max((0.5 * (da + b.w) + gap) * b.infl);
@@ -85,6 +126,31 @@ pub fn pair_req(a: &PackItem, b: &PackItem, gap: f64) -> f64 {
     r
 }
 
+/// [`pair_req`] with a disc height on either side (tw4-r2 (2b)). Continuous in the heights: at
+/// both 0 it is `pair_req`'s value (the dropped track terms of a disc-only item are below its disc
+/// terms there). O(1).
+fn pair_req_h(a: &PackItem, b: &PackItem, gap: f64, da: f64, db: f64, ha: f64, hb: f64) -> f64 {
+    let (ta, tb) = (!(a.w == 0.0 && da > 0.0), !(b.w == 0.0 && db > 0.0));
+    let mut r: f64 = 0.0;
+    if ta && tb {
+        r = (0.5 * (a.w + b.w) + gap) * a.infl.max(b.infl);
+    }
+    // Disc a (nearer end 0) against track b: the via at (-x, ha) from b's crossing; b leaning
+    // towards end 0 (lean < 0) on the via's side comes nearer.
+    if da > 0.0 && tb {
+        r = r.max((0.5 * (da + b.w) + gap - b.lean * ha).max(0.0) * b.infl);
+    }
+    if db > 0.0 && ta {
+        r = r.max((0.5 * (a.w + db) + gap + a.lean * hb).max(0.0) * a.infl);
+    }
+    if da > 0.0 && db > 0.0 {
+        let rr = 0.5 * (da + db) + gap;
+        let dh = ha - hb;
+        r = r.max((rr * rr - dh * dh).max(0.0).sqrt());
+    }
+    r
+}
+
 /// The via discs of the passes of wire `w` with vias at the traversals `ks` (diameters `ds`).
 /// A via in traversal `k` sits on the wire's chord through that triangle, between its crossings
 /// of the edge it enters by (pass `k - 1`) and the edge it leaves by (pass `k`): it is packed as
@@ -94,13 +160,13 @@ pub fn pair_req(a: &PackItem, b: &PackItem, gap: f64) -> f64 {
 /// instead of 190 on a 2-layer badge, so both edges count it. O(passes + vias).
 pub fn wire_discs(st: &State, w: WireId, ks: &[usize], ds: &[f64]) -> Vec<Disc> {
     let n = st.wires[w].passes.len();
-    let mut out: Vec<Disc> = vec![[0.0, 0.0]; n];
+    let mut out: Vec<Disc> = vec![[0.0; 3]; n];
     for (&k, &d) in ks.iter().zip(ds) {
         if d <= 0.0 {
             continue;
         }
         for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < n) {
-            out[j] = [out[j][0].max(d), out[j][1].max(d)];
+            out[j] = [out[j][0].max(d), out[j][1].max(d), 0.0];
         }
     }
     out
@@ -129,10 +195,31 @@ pub fn layer_items(
         } else if pl >= 0 && d[0].max(d[1]) > 0.0 {
             let it = item_of(p);
             ids.push((p, true));
-            items.push(PackItem { net: it.net, w: 0.0, s: it.s, infl: 1.0, disc: d });
+            items.push(PackItem { net: it.net, w: 0.0, s: it.s, infl: 1.0, disc: d, lean: 0.0 });
         }
     }
     (ids, items)
+}
+
+/// The end margin of item `i` at end `end` of edge `e` as [`Packer::bounds`] takes it, given its
+/// track's (or disc-alone item's) margin `m` on its layer: at least its via disc's
+/// [`Packer::margin_all`] where it has one. tw4-r2 (2b): a disc with a height is tested at its
+/// centre (`margin_all_h`), and a disc-only item (`w` 0) then has no track margin. O(1) cached.
+pub fn disc_margin(pk: &Packer, e: EdgeId, end: usize, i: &PackItem, _layer: usize, m: f64) -> f64 {
+    let d = i.disc[end];
+    if d <= 0.0 {
+        return m;
+    }
+    let h = i.disc[2];
+    if h == 0.0 {
+        return m.max(pk.margin_all(e, end, i.net, d, i.s));
+    }
+    let ma = pk.margin_all_h(e, end, i.net, d, i.s, h);
+    if i.w == 0.0 {
+        ma
+    } else {
+        m.max(ma)
+    }
 }
 
 /// The packing numbers of the passes of one edge on one layer.
@@ -167,8 +254,9 @@ impl Bounds {
 /// 2 um (the S2a value) 115 / 60. 10 nm is far below any fab or DRC resolution.
 pub const DRAW_TOL_NM: f64 = 10.0;
 
-/// Margin cache key: edge, end, net, width bits, clearance bits, layer (`u8::MAX`: any layer).
-type MarginKey = (usize, u8, i32, u64, u64, u8);
+/// Margin cache key: edge, end, net, width bits, clearance bits, layer (`u8::MAX`: any layer),
+/// height bits (tw4-r2 (2b): the centre off the edge line; 0 for a centre line on it).
+type MarginKey = (usize, u8, i32, u64, u64, u8, u64);
 
 /// Taut path cache key: the wire's net, width and clearance bits, terminal vertices, turn
 /// corners and the edges of its passes (everything the taut path depends on).
@@ -230,6 +318,9 @@ pub struct Packer<'a> {
     /// tw4-r2 (`[capacity] via_over_ramp`, nm): the over-full via price ramps from 0 over this
     /// overage ([`super::viacut::price`]); 0 = the step at zero.
     pub via_ramp: f64,
+    /// tw4-r2 (2b) (`[capacity] via_disc_height`): a planned via's disc packs on its wire's entry
+    /// and exit edges at its height off each edge line ([`pair_req`], [`disc_margin`]).
+    pub via_disc_h: bool,
     /// M-45: the drawing is octilinear; a pass's oblique factor is the octilinear one
     /// ([`super::demand::octi_stretch`]).
     pub octi: bool,
@@ -290,6 +381,7 @@ impl<'a> Packer<'a> {
             via_cuts: None,
             via_best: false,
             via_ramp: 0.0,
+            via_disc_h: false,
             via_cands: Mutex::new(fxmap()),
             octi: false,
             cuts: None,
@@ -358,6 +450,7 @@ impl<'a> Packer<'a> {
         p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.via_best = opts.via_best_point;
         p.via_ramp = opts.via_over_ramp_mm.max(0.0) * 1e6;
+        p.via_disc_h = opts.via_disc_height;
         p.octi = opts.draw_style == "octilinear" && opts.octi_room;
         if opts.capacity_model == "cuts" {
             p.cuts = Some(super::cutmodel::CutCtx::new(super::cutmodel::CutOpts::from_options(opts), opts.cut_vias, p.outline.clone()));
@@ -438,11 +531,19 @@ impl<'a> Packer<'a> {
     /// Distance from end `end` of edge `e` along the edge at which a centre line of width `w` on
     /// `layer` keeps its clearance to the obstacle at that vertex (0 when none). Cached.
     pub fn margin(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64, layer: usize) -> f64 {
-        let key = (e, end as u8, net, w.to_bits(), s.to_bits(), layer as u8);
+        self.margin_h(e, end, net, w, s, layer, 0.0)
+    }
+
+    /// [`Packer::margin`] for a centre `h` off the edge line (signed, [`signed_height`]; tw4-r2
+    /// (2b)): the first distance along the edge at which the point `h` off it keeps the clearance.
+    /// `h` = 0 is `margin`. Cached.
+    #[allow(clippy::too_many_arguments)]
+    pub fn margin_h(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64, layer: usize, h: f64) -> f64 {
+        let key = (e, end as u8, net, w.to_bits(), s.to_bits(), layer as u8, h.to_bits());
         if let Some(&m) = lock(&self.cache).get(&key) {
             return m;
         }
-        let m = self.margin_raw(e, end, net, w, s, layer);
+        let m = self.margin_raw(e, end, net, w, s, layer, h);
         lock(&self.cache).insert(key, m);
         m
     }
@@ -451,7 +552,7 @@ impl<'a> Packer<'a> {
     /// per layer, and a pass may run on any layer, under an SMD pad of another layer too (a
     /// drilled obstacle is a wall on every layer and keeps its margin). Cached.
     pub fn margin_any(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64) -> f64 {
-        let key = (e, end as u8, net, w.to_bits(), s.to_bits(), u8::MAX);
+        let key = (e, end as u8, net, w.to_bits(), s.to_bits(), u8::MAX, 0);
         if let Some(&m) = lock(&self.cache).get(&key) {
             return m;
         }
@@ -462,11 +563,16 @@ impl<'a> Packer<'a> {
 
     /// [`Packer::margin`] on whichever layer needs the most (a through via's disc). Cached.
     pub fn margin_all(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64) -> f64 {
-        let key = (e, end as u8, net, w.to_bits(), s.to_bits(), u8::MAX - 1);
+        self.margin_all_h(e, end, net, w, s, 0.0)
+    }
+
+    /// [`Packer::margin_all`] of a disc centred `h` off the edge line ([`Packer::margin_h`]). Cached.
+    pub fn margin_all_h(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64, h: f64) -> f64 {
+        let key = (e, end as u8, net, w.to_bits(), s.to_bits(), u8::MAX - 1, h.to_bits());
         if let Some(&m) = lock(&self.cache).get(&key) {
             return m;
         }
-        let m = (0..self.pr.n_layers.max(1)).map(|l| self.margin(e, end, net, w, s, l)).fold(0.0, f64::max);
+        let m = (0..self.pr.n_layers.max(1)).map(|l| self.margin_h(e, end, net, w, s, l, h)).fold(0.0, f64::max);
         lock(&self.cache).insert(key, m);
         m
     }
@@ -622,12 +728,20 @@ impl<'a> Packer<'a> {
         Taut { at, dir }
     }
 
-    fn margin_raw(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64, layer: usize) -> f64 {
+    #[allow(clippy::too_many_arguments)]
+    fn margin_raw(&self, e: EdgeId, end: usize, net: i32, w: f64, s: f64, layer: usize, h: f64) -> f64 {
         let pr = self.pr;
         let v = pr.edges[e][end];
         let u = pr.edges[e][1 - end];
         let (pv, pu) = (pr.pos[v], pr.pos[u]);
         let len = (pu - pv).len();
+        // tw4-r2 (2b): the test point `h` off the line (+ on the left of end 0 -> end 1).
+        let off = if h != 0.0 {
+            let [p, q] = pr.edges[e];
+            ((pr.pos[q] - pr.pos[p]) * (1.0 / (pr.pos[q] - pr.pos[p]).len().max(1.0))).perp() * h
+        } else {
+            Vec2::default()
+        };
         match pr.vkind[v] {
             VertKind::Outline(o) => {
                 let ob = &pr.obstacles[o];
@@ -635,7 +749,10 @@ impl<'a> Packer<'a> {
                     return 0.0;
                 }
                 let req = self.clear_to(ob, e, s) + 0.5 * w + self.eps;
-                let at = |d: f64| pv + (pu - pv) * (d / len.max(1.0));
+                let at = |d: f64| pv + (pu - pv) * (d / len.max(1.0)) + off;
+                if h != 0.0 && poly_dist(at(0.0), &ob.poly) >= req {
+                    return 0.0;
+                }
                 // Whether or not the far end is closer than required as well (the edge is then
                 // too narrow), the bisection finds the first distance that keeps the clearance.
                 let (mut lo, mut hi) = (0.0, len);
@@ -651,7 +768,7 @@ impl<'a> Packer<'a> {
             }
             VertKind::Edge => {
                 let req = self.edge_clear + 0.5 * w + self.eps;
-                let at = |d: f64| pv + (pu - pv) * (d / len.max(1.0));
+                let at = |d: f64| pv + (pu - pv) * (d / len.max(1.0)) + off;
                 let dist = |p: Vec2| self.outline.iter().map(|&(a, b)| seg_dist(p, a, b)).fold(f64::INFINITY, f64::min);
                 // The outline is not convex: take the last sample that is too close.
                 let steps = 24;
@@ -676,14 +793,7 @@ impl<'a> Packer<'a> {
         let regime = pr.regime(e);
         let n = items.len();
         // A via disc is copper on every layer: its end margins are the largest over the layers.
-        let mar = |i: &PackItem, end: usize| {
-            let m = self.margin(e, end, i.net, i.w, i.s, layer);
-            if i.disc[end] > 0.0 {
-                m.max(self.margin_all(e, end, i.net, i.disc[end], i.s))
-            } else {
-                m
-            }
-        };
+        let mar = |i: &PackItem, end: usize| disc_margin(self, e, end, i, layer, self.margin(e, end, i.net, i.w, i.s, layer));
         let lo: Vec<f64> = items.iter().map(|i| mar(i, 0)).collect();
         let hi: Vec<f64> = items.iter().map(|i| len - mar(i, 1)).collect();
         let mut req = Vec::with_capacity(n.saturating_sub(1));

@@ -16,7 +16,7 @@
 //! touches); the search stops after `max_evals` evaluations.
 
 use super::factors::squeeze_amount;
-use super::pack::{infl_dir, layer_items, Disc, PackItem, Packer};
+use super::pack::{infl_dir, layer_items, lean_dir, Disc, PackItem, Packer};
 use super::cutmodel::CutPrice;
 use super::state::{State, TriId, WireId};
 use super::viacut::{self, ViaGeom};
@@ -147,7 +147,7 @@ fn shadow_fault(k: usize, cm: &mut Arrays, evl: &mut [Vec<LEv>], st: &mut Refine
         3 => st.stream ^= 1,
         4 => st.moves += 1,
         5 => cm.pass_layer.push(-1),
-        6 => cm.pass_disc.push([0.0, 0.0]),
+        6 => cm.pass_disc.push([0.0; 3]),
         7 => cm.via_iv.push(Vec::new()),
         8 => cm.via_k.push(Vec::new()),
         9 => cm.nosite.push(0),
@@ -162,7 +162,7 @@ fn shadow_fault(k: usize, cm: &mut Arrays, evl: &mut [Vec<LEv>], st: &mut Refine
 /// [`shadow`]: the first difference between the lanes' result and the reference's, if any.
 fn shadow_diff(a: (&CapModel, &[Vec<LEv>], &RefineStats), b: (&CapModel, &[Vec<LEv>], &RefineStats)) -> Option<String> {
     let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
-    let disc = |v: &[Disc]| v.iter().map(|d| (d[0].to_bits(), d[1].to_bits())).collect::<Vec<_>>();
+    let disc = |v: &[Disc]| v.iter().map(|d| (d[0].to_bits(), d[1].to_bits(), d[2].to_bits())).collect::<Vec<_>>();
     let labels = |e: &[Vec<LEv>]| e.iter().map(|w| w.iter().map(|&(k, s, l)| (k, s.to_bits(), l)).collect::<Vec<_>>()).collect::<Vec<_>>();
     let (ca, ea, sa) = a;
     let (cb, eb, sb) = b;
@@ -490,7 +490,7 @@ type Changed = (usize, i32, Disc);
 fn layers_changed(nl: usize, ol: i32, od: Disc, nl_: i32, nd: Disc) -> u64 {
     let all = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
     let bit = |l: i32| if l >= 0 && (l as usize) < 64 { 1u64 << l } else { 0 };
-    let same = od[0].to_bits() == nd[0].to_bits() && od[1].to_bits() == nd[1].to_bits();
+    let same = od[0].to_bits() == nd[0].to_bits() && od[1].to_bits() == nd[1].to_bits() && od[2].to_bits() == nd[2].to_bits();
     if !same || (od[0].max(od[1]) > 0.0 && (ol < 0 || nl_ < 0)) {
         return all;
     }
@@ -529,7 +529,7 @@ struct MemoEnt {
 
 /// Whether two item lists are equal bit for bit (every field; `-0.0` and `0.0` differ). O(items).
 fn same_items(a: &[PackItem], b: &[PackItem]) -> bool {
-    let bits = |i: &PackItem| (i.net, i.w.to_bits(), i.s.to_bits(), i.infl.to_bits(), i.disc[0].to_bits(), i.disc[1].to_bits());
+    let bits = |i: &PackItem| (i.net, i.w.to_bits(), i.s.to_bits(), i.infl.to_bits(), i.disc[0].to_bits(), i.disc[1].to_bits(), i.disc[2].to_bits(), i.lean.to_bits());
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| bits(x) == bits(y))
 }
 
@@ -844,7 +844,7 @@ impl<'a> Frame<'a> {
         for (w, wi) in st.wires.iter().enumerate().filter(|&(w, wi)| wi.alive && only.is_none_or(|o| o.get(w).copied().unwrap_or(false))) {
             for (k, &p) in wi.passes.iter().enumerate() {
                 let e = st.passes[p].edge;
-                item0[p] = PackItem { net: wi.net, w: st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, dirs[w][k]), disc: [0.0; 2] };
+                item0[p] = PackItem { net: wi.net, w: st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, dirs[w][k]), disc: [0.0; 3], lean: lean_dir(pr, e, dirs[w][k]) };
             }
         }
         let wire_d: Vec<f64> = st.wires.iter().map(|wi| packer.via_d(wi.net)).collect();
@@ -962,10 +962,35 @@ impl<'a> Frame<'a> {
         let wi = &self.st.wires[w];
         let n = wi.passes.len();
         let d = self.wire_d[w];
+        // 5.4 `[vias] between_crossings`: a via of an interval with no traversal between its
+        // events has a site only on its own side of an end event ([`end_site`], 5.2); the others
+        // have one when their traversal does.
+        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
+        // CM1: the planned via points (before the discs: tw4-r2 (2b) packs them at their heights).
+        let pts: Option<Vec<ViaPt>> = (self.packer.via_cuts.is_some() && d > 0.0).then(|| {
+            ks.iter()
+                .enumerate()
+                .map(|(i, &k)| {
+                    let tl = wi.tris.len().checked_sub(1)?;
+                    if between.get(i) == Some(&false) {
+                        if let Some((ke, p)) = self.end_site_of(m, w, ev, i) {
+                            return Some((wi.tris[ke.min(tl)], p));
+                        }
+                    }
+                    let t = wi.tris[k.min(tl)];
+                    Some((t, self.packer.via_point_cached(t, wi.net, d, wi.s)))
+                })
+                .collect()
+        });
         LAY_SCRATCH.with(|sc| {
             let sc = &mut *sc.borrow_mut();
             pass_layers_into(&mut sc.pl, n, ev, self.bottom, ks);
             wire_discs_into(&mut sc.disc, n, ks, d);
+            if self.packer.via_disc_h {
+                if let Some(pts) = &pts {
+                    wire_heights_into(&mut sc.disc, self.st.proj, |j| self.st.passes[wi.passes[j]].edge, ks, pts);
+                }
+            }
             for (k, &p) in wi.passes.iter().enumerate() {
                 let (ol, od) = (m.layer(p), m.disc(p));
                 if ol != sc.pl[k] || od != sc.disc[k] {
@@ -975,10 +1000,6 @@ impl<'a> Frame<'a> {
             }
         });
         let nr = self.need_r(w);
-        // 5.4 `[vias] between_crossings`: a via of an interval with no traversal between its
-        // events has a site only on its own side of an end event ([`end_site`], 5.2); the others
-        // have one when their traversal does.
-        let between = if self.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
         let ns = if nr > 0.0 {
             let mut c = 0;
             for (i, &k) in ks.iter().enumerate() {
@@ -992,21 +1013,7 @@ impl<'a> Frame<'a> {
         m.set_nosite(w, ns);
         m.set_via_k(w, ks);
         let mut moved = false;
-        if self.packer.via_cuts.is_some() && d > 0.0 {
-            let pts: Vec<ViaPt> = ks
-                .iter()
-                .enumerate()
-                .map(|(i, &k)| {
-                    let tl = wi.tris.len().checked_sub(1)?;
-                    if between.get(i) == Some(&false) {
-                        if let Some((ke, p)) = self.end_site_of(m, w, ev, i) {
-                            return Some((wi.tris[ke.min(tl)], p));
-                        }
-                    }
-                    let t = wi.tris[k.min(tl)];
-                    Some((t, self.packer.via_point_cached(t, wi.net, d, wi.s)))
-                })
-                .collect();
+        if let Some(pts) = pts {
             moved = m.vpts(w) != pts.as_slice();
             if moved {
                 m.set_vpts(w, &pts);
@@ -1298,7 +1305,7 @@ impl<'a> Frame<'a> {
                 PackItem { disc: d, ..self.item0[p] }
             } else if pl >= 0 && d[0].max(d[1]) > 0.0 {
                 let i0 = &self.item0[p];
-                PackItem { net: i0.net, w: 0.0, s: i0.s, infl: 1.0, disc: d }
+                PackItem { net: i0.net, w: 0.0, s: i0.s, infl: 1.0, disc: d, lean: 0.0 }
             } else {
                 continue;
             };
@@ -1355,6 +1362,12 @@ impl<'a> Frame<'a> {
         if d <= 0.0 {
             return m;
         }
+        // tw4-r2 (2b): a disc with a height is tested at its centre (the packer's own cache; the
+        // height changes with the labelling), a disc alone then without a track margin
+        // ([`super::pack::disc_margin`], as `Packer::bounds`).
+        if it.disc[2] != 0.0 {
+            return super::pack::disc_margin(self.packer, e, end, it, l, m);
+        }
         let w = self.st.passes[p].wire;
         if d.to_bits() != self.wire_d[w].to_bits() {
             return m.max(self.packer.margin_all(e, end, it.net, d, it.s));
@@ -1387,7 +1400,7 @@ impl<'a> Frame<'a> {
             |p| {
                 let w = self.st.passes[p].wire;
                 let wi = &self.st.wires[w];
-                PackItem { net: wi.net, w: self.st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]), disc: [0.0; 2] }
+                PackItem { net: wi.net, w: self.st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]), disc: [0.0; 3], lean: lean_dir(pr, e, self.dirs[w][self.pass_k[p]]) }
             },
         )
         .1
@@ -1422,13 +1435,36 @@ fn pass_layers_into(out: &mut Vec<i32>, n: usize, ev: &[LEv], bottom: i32, ks: &
 /// (the same values). O(passes + vias).
 fn wire_discs_into(out: &mut Vec<Disc>, n: usize, ks: &[usize], d: f64) {
     out.clear();
-    out.resize(n, [0.0, 0.0]);
+    out.resize(n, [0.0; 3]);
     if d <= 0.0 {
         return;
     }
     for &k in ks {
         for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < n) {
-            out[j] = [out[j][0].max(d), out[j][1].max(d)];
+            out[j] = [out[j][0].max(d), out[j][1].max(d), 0.0];
+        }
+    }
+}
+
+/// tw4-r2 (2b) (`[capacity] via_disc_height`): the heights of the discs `out` of a wire whose
+/// passes cross the edges `edges`, from its via points `pts` (via `i` in traversal `ks[i]` packs
+/// on passes `ks[i] - 1` and `ks[i]`, [`wire_discs_into`]): the via point's signed height off each
+/// edge line ([`super::pack::signed_height`]); a pass next to two vias takes the one nearer its
+/// line (the larger blockage). A via without a point keeps height 0. O(passes + vias).
+fn wire_heights_into(out: &mut [Disc], pr: &super::state::Projection, edges: impl Fn(usize) -> usize, ks: &[usize], pts: &[ViaPt]) {
+    let n = out.len();
+    let mut best = vec![f64::INFINITY; n];
+    for (&k, vp) in ks.iter().zip(pts) {
+        let Some((_, v)) = *vp else { continue };
+        for j in [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|&j| j < n) {
+            if out[j][0].max(out[j][1]) <= 0.0 {
+                continue;
+            }
+            let h = super::pack::signed_height(pr, edges(j), v);
+            if h.abs() < best[j] {
+                best[j] = h.abs();
+                out[j][2] = h;
+            }
         }
     }
 }
@@ -1514,7 +1550,7 @@ impl<'a> CapModel<'a> {
         let nw = st.wires.len();
         let a = Arrays {
             pass_layer: vec![-1; st.passes.len()],
-            pass_disc: vec![[0.0; 2]; st.passes.len()],
+            pass_disc: vec![[0.0; 3]; st.passes.len()],
             via_iv: vec![Vec::new(); nw],
             via_k: vec![Vec::new(); nw],
             nosite: vec![0; nw],
@@ -1761,7 +1797,89 @@ impl<'a> CapModel<'a> {
                 }
             }
         }
+        if self.fx.packer.via_disc_h {
+            let (b, k) = self.disc_height_check();
+            bad += b;
+            n += k;
+        }
         (bad, n)
+    }
+
+    /// tw4-r2 (2b) part of [`CapModel::via_check`] (`[capacity] via_disc_height`): the stored disc
+    /// of every pass of a live wire against one made fresh from its via traversals and points
+    /// (heights included), every pass's stored lean against a fresh [`lean_dir`] of its taut
+    /// direction, and the stored price of every edge-layer with a disc at a height against a fresh
+    /// evaluation. `(mismatches, entries checked)`. O(passes x edge order).
+    fn disc_height_check(&self) -> (usize, usize) {
+        let (fx, st) = (&self.fx, self.fx.st);
+        let pr = st.proj;
+        let (mut bad, mut n) = (0, 0);
+        let mut edges: Vec<usize> = Vec::new();
+        let mut fresh: Vec<Disc> = Vec::new();
+        for (w, wi) in st.wires.iter().enumerate() {
+            if !wi.alive || self.pass_layer.get(wi.passes.first().copied().unwrap_or(usize::MAX)).is_some_and(|&l| l < 0) {
+                continue;
+            }
+            // A loop-local model has no directions (nor items) for the wires outside it.
+            if fx.dirs.get(w).is_none_or(|d| d.len() != wi.passes.len()) {
+                continue;
+            }
+            wire_discs_into(&mut fresh, wi.passes.len(), &self.via_k[w], fx.wire_d[w]);
+            wire_heights_into(&mut fresh, pr, |j| st.passes[wi.passes[j]].edge, &self.via_k[w], &self.vpts[w]);
+            for (k, &p) in wi.passes.iter().enumerate() {
+                let e = st.passes[p].edge;
+                n += 1;
+                let stored = self.pass_disc[p];
+                let lean = lean_dir(pr, e, fx.dirs[w][k]);
+                if stored.map(f64::to_bits) != fresh[k].map(f64::to_bits) || lean.to_bits() != fx.item0[p].lean.to_bits() {
+                    bad += 1;
+                    if bad <= 5 {
+                        eprintln!("VIACHECK disc wire {w} pass {k}: stored {stored:?} lean {} fresh {:?} lean {lean}", fx.item0[p].lean, fresh[k]);
+                    }
+                }
+                if stored[2] != 0.0 {
+                    edges.push(e);
+                }
+            }
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        for &e in &edges {
+            for l in 0..fx.nl {
+                n += 1;
+                // The model's packing (its margin table, `end_margin`) against the packer's own
+                // (`Packer::bounds`, `pack::disc_margin`): the same over-fill.
+                let over = EVAL_SCRATCH.with(|sc| {
+                    let sc = &mut *sc.borrow_mut();
+                    fx.items_in(&self.a, l, &st.edge_order[e], sc);
+                    (!sc.items.is_empty()).then(|| fx.numbers_in(e, l, sc).0)
+                });
+                if let Some(over) = over {
+                    let ob = fx.packer.bounds(e, l, &fx.items(&self.a, e, l, None)).worst();
+                    if (over - ob).abs() > 1e-6 {
+                        bad += 1;
+                        if bad <= 5 {
+                            eprintln!("VIACHECK disc edge {e} layer {l}: model over {over:.3} packer over {ob:.3}");
+                        }
+                    }
+                }
+                let (c, q) = fx.eval(&self.a, e, l);
+                let (oc, oq) = (self.cost[e * fx.nl + l], self.sq[e * fx.nl + l]);
+                if c.to_bits() != oc.to_bits() || q.to_bits() != oq.to_bits() {
+                    bad += 1;
+                    if bad <= 5 {
+                        eprintln!("VIACHECK disc edge {e} layer {l}: stored {oc:.6} fresh {c:.6}");
+                    }
+                }
+            }
+        }
+        (bad, n)
+    }
+
+    /// CM1: the planned via points of wire `w` in via order (`None`: no point), for tests.
+    #[doc(hidden)]
+    pub fn planned_via_points(&self, w: WireId) -> Vec<Option<Vec2>> {
+        self.vpts.get(w).map_or(Vec::new(), |v| v.iter().map(|x| x.map(|(_, p)| p)).collect())
     }
 
     /// CM1: the planned vias with an over-full via cut, located: `(wire, via point)` (the compass).
