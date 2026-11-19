@@ -9357,34 +9357,41 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         let slots = Slots::new(1);
         slots.acquire_as(1, 4, 0); // run 0 computes, 4 cycles finished
-        let (b_ran, a_back) = (AtomicBool::new(false), AtomicBool::new(false));
-        std::thread::scope(|s| {
-            // run 1 waits to go on with 6 cycles finished: ahead of run 0, so no turn
+        let (b_ran, a_back, ahead_late) = (AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false));
+        let (kept, gave, b_first) = std::thread::scope(|s| {
+            // run 1 waits to go on with 6 cycles finished: ahead of run 0, so no turn to it
             let ahead = s.spawn(|| {
                 slots.acquire_as(1, 6, 1);
-                assert!(a_back.load(Ordering::SeqCst), "run 1 (6 cycles) comes after run 0 (5 cycles) is back");
+                ahead_late.store(a_back.load(Ordering::SeqCst), Ordering::SeqCst);
                 slots.release();
             });
             while slots.st.lock().unwrap().queue.len() < 1 {
                 std::thread::yield_now();
             }
-            assert!(!slots.turn(4, 0), "the only waiter is ahead: run 0 keeps its slot");
+            let kept = !slots.turn(4, 0);
             // run 2 waits with 3 cycles finished: behind run 0
             let behind = s.spawn(|| {
                 slots.acquire_as(1, 3, 2);
                 b_ran.store(true, Ordering::SeqCst);
                 slots.release();
             });
-            while slots.st.lock().unwrap().queue.len() < 2 {
+            while !slots.st.lock().unwrap().queue.iter().any(|k| k.2 == 2) {
                 std::thread::yield_now();
             }
-            assert!(slots.turn(5, 0), "run 2 is behind: run 0 gives its slot");
-            assert!(b_ran.load(Ordering::SeqCst), "run 2 computed before run 0 got the slot back");
+            let gave = slots.turn(5, 0);
+            let b_first = b_ran.load(Ordering::SeqCst);
             a_back.store(true, Ordering::SeqCst);
+            // run 0 holds one slot either way: give it back before asserting, so a failed check ends
+            // the test instead of leaving a waiter waiting for ever
             slots.release();
             behind.join().unwrap();
             ahead.join().unwrap();
+            (kept, gave, b_first)
         });
+        assert!(kept, "the only waiter is ahead: run 0 keeps its slot");
+        assert!(gave, "run 2 is behind: run 0 gives its slot");
+        assert!(b_first, "run 2 computed before run 0 got the slot back");
+        assert!(ahead_late.load(Ordering::SeqCst), "run 1 (6 cycles) comes after run 0 (5 cycles) is back");
         assert_eq!(slots.st.lock().unwrap().free, 1);
     }
 
