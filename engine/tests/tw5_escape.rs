@@ -96,6 +96,29 @@ fn loop_p4_round_without_a_path_is_undone() {
     assert!(r.connections.iter().all(|c| !c.layers.is_empty()), "every connection drawn: {}", layers_of(&r));
 }
 
+/// TW5 (f): the rounds draw on the escapes' work budget (`escape_share`, lead 2026-11-19: a stuck
+/// board cannot spend the loop on them): at share 0.05 fewer rounds run than at 0.5, some wait for
+/// the budget, and the measured share stays near the bound.
+#[test]
+fn loop_p4_rounds_are_throttled_by_the_escape_budget() {
+    let m = model("inner_layer_room");
+    let run = |share: f64| route(&m, &opts(&format!(r#""topo_rounds": 16, "stable_patience": 16, "seed": 2, "preloop_p4": false, "loop_p4": true, "escape_share": {share}"#)));
+    let nums = |t: &str| -> Vec<usize> { t.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).filter_map(|x| x.parse().ok()).collect() };
+    let share_of = |r: &RouteResult| -> f64 {
+        let w = r.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).cloned().unwrap_or_default();
+        w.split("work share of the escapes ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(f64::NAN)
+    };
+    let (lo, hi) = (run(0.05), run(0.5));
+    let (tl, th) = (loop_p4_text(&lo), loop_p4_text(&hi));
+    // "<taken> taken (<ripped> wires ripped), <lost> undone (...), <worse> undone (...), <waited> waited ..."
+    let (nl, nh) = (nums(&tl), nums(&th));
+    let ran = |n: &[usize]| n[0] + n[2] + n[3];
+    eprintln!("share 0.05: {tl} (share {} %)\nshare 0.5: {th} (share {} %)", share_of(&lo), share_of(&hi));
+    assert!(ran(&nl) < ran(&nh), "a smaller budget runs fewer rounds: {tl} | {th}");
+    assert!(nl[4] >= 1, "share 0.05: rounds wait for the budget: {tl}");
+    assert!(share_of(&lo) <= 10.0, "share 0.05: the measured share stays near the bound: {} %", share_of(&lo));
+}
+
 /// TW5 (f): a round is kept like the loop's other whole-board moves: `escape_take = "always"`
 /// takes every round (none undone as worse), `"not_worse"` (default) undoes the ones that make the
 /// board worse (on inner_layer_room with the pre-loop rounds on, every round is worse than the

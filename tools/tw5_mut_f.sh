@@ -10,6 +10,7 @@ export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$O/target}
 note() { echo "$*" >> $O/mut.txt; }
 mut() {  # name file test-args... ; the python snippet on stdin edits the file
   local n=$1 f=$O/tree/engine/$2; shift 2
+  if [ -n "${ONLY:-}" ] && ! [[ " $ONLY " == *" ${n%%_*} "* ]]; then cat > /dev/null; return; fi
   cp $f $f.orig; python3 - $f; local pr=$?
   if [ $pr -ne 0 ] || cmp -s $f $f.orig; then note "mutant $n: patch did not apply"; mv $f.orig $f; return; fi
   ( cd $O/tree/engine && cargo test --release "$@" 9>&- > $O/mut-$n.log 2>&1 ); local rc=$?
