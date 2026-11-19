@@ -354,6 +354,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** After Accept, run KiCad → Inspect → Design Rules Checker to see each one; fix them by hand or route again (Reject, then give the router more room or time: run.timeout_s, [optimize] runs).
 
+### DRC_WITHOUT_PROJECT
+
+*Severity: error.*
+
+**Cause.** Self-check after routing: the copy of the routed board that KiCad's DRC checked did not carry the board's project file (.kicad_pro / .kicad_dru), so KiCad judged it with its built-in default rules and the DRC numbers cannot be used. This is not a problem of the design rules (it is not RULES_MISMATCH); nothing is applied to the board. Usual cause: the temporary folder of the run was deleted or written to by another process while the run was going.
+
+**Fix.** Route again (KiCad → File → Save keeps the project file next to the board). If it repeats, check that nothing deletes or fills the folder named in the report's log.txt (the run's temporary folder) and that the disk is not full; then report it at https://github.com/ranzbak/ranz-topor/issues with the report folder.
+
 ### DRILL_OUTSIDE_FILTER
 
 *Severity: warning.*
