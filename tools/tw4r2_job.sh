@@ -6,7 +6,7 @@
 #   tw4r2_job.sh eq <cfgs>   equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults),
 #                            plus eprom/wiccon rounds=1 with the defaults (off = main copper)
 # Every run: harness.score_runs (cpu clock 2400 s unless equal time), optimize.runs=1, --no-png, realise erbs.
-# cfg: K = rounds=1; e<k> = equal time (wall 300 s) seed k; suffixes (any order, at the end):
+# cfg: K = rounds=1; M = rounds=40; e<k> = equal time (wall 300 s) seed k; suffixes (any order, at the end):
 #   b = [capacity] via_best_point = true; r = [capacity] via_over_ramp = 0.05; R = via_over_ramp = 0.1;
 #   p = [capacity] pour_cuts = true; q / Q = pour_cut_cells 250000 / 100000 (pour mode: PCFG = the cfgs).
 set -u
@@ -32,6 +32,7 @@ one() {
   done
   case $c in
     K) SETS+=(--set optimize.rounds=1) ;;
+    M) SETS+=(--set optimize.rounds=40) ;;
     e*) only=${c#e}; SETS+=(--set optimize.rounds=1000 --set optimize.stable_patience=1000); CLK=(--clock wall --timeout 300) ;;
     *) note "unknown cfg $c"; return ;;
   esac
@@ -55,7 +56,7 @@ case ${1:-} in
     wait; note "all done" ;;
   pat)
     python -m harness.tw4r2_patterns $R/pat > $R/gen.log 2>&1; note "gen rc $?"
-    ( hzq run --threads 4 --name t4r2-pat -- bash -c "for r in K:pring Kp:pring K:vgap Kb:vgap Kr:vgap Kbr:vgap; do bash $ROOT/tools/tw4r2_job.sh one \$r & done; wait" > $R/u-pat.log 2>&1; note "unit pat rc $?" ) &
+    ( hzq run --threads 4 --name t4r2-pat -- bash -c "for r in ${PATRUNS:-M:pring Mp:pring M:vgap Mb:vgap Mbr:vgap}; do bash $ROOT/tools/tw4r2_job.sh one \$r & done; wait" > $R/u-pat.log 2>&1; note "unit pat rc $?" ) &
     wait; note "all done" ;;
   pour)
     for b in esp qmtech; do
