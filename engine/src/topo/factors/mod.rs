@@ -578,9 +578,10 @@ mod tests {
         assert_eq!(w(&[("necking", 12.0)]), Some(12.0), "follows the necking setting");
         assert_eq!(w(&[("necking", 12.0), ("shrinkage", 4.0)]), Some(4.0), "its own setting wins");
         // It prices no P2 event (the cut model reads the weight); factors after it are appended
-        // (exist-term: dangling_turn), so the earlier factors' fluctuation draws stay the same.
+        // (exist-term: dangling_turn; tw4: neck_depth; TW6: via_site_social), so the earlier factors'
+        // fluctuation draws stay the same.
         assert_eq!(Registry::standard().price(&ev_cross(), &WireCtx::default()), 20.0);
         let names: Vec<&str> = standard_factors().iter().map(|f| f.name()).collect();
-        assert_eq!(&names[names.len() - 3..], ["shrinkage", "dangling_turn", "neck_depth"]);
+        assert_eq!(&names[names.len() - 4..], ["shrinkage", "dangling_turn", "neck_depth", "via_site_social"]);
     }
 }

@@ -252,6 +252,22 @@ fn bounding_wires_are_the_interval_partners() {
     });
 }
 
+/// A second wire of the crossed wire's own net is never a bounding wire (its crossing is
+/// electrically harmless and lays no via).
+#[test]
+fn bounding_wires_leave_out_the_same_net() {
+    let m = board(true);
+    let b = board::build(&m, &opts()).unwrap();
+    let mut st = State::new(&b.proj);
+    let ob = |r: &str| m.pads.iter().position(|p| p.ref_ == r).map(|i| b.pad_of.iter().position(|&x| x == i).unwrap()).unwrap();
+    let (pa, pb) = (ob("B1"), ob("B2"));
+    let c = Conn { net: 2, pa, pb, a: b.centre[pa].unwrap(), b: b.centre[pb].unwrap(), w: 0.25 * MM, s: 0.2 * MM };
+    let (w1, _) = st.route_conn(&c, &InitWeights::default(), 1.0).expect("B routes");
+    let (w2, _) = st.route_conn(&c, &InitWeights::default(), 1.0).expect("B routes again");
+    let p = vec![None, Some((w2, 0)), Some((w2, 1))];
+    assert!(bounding_wires(&st, w1, &p, 1, &|_| true).is_empty(), "same net");
+}
+
 /// The tee arms of an interval: a branch ending on a turn of the wire inside it, or the wire itself
 /// when its own junction end lies in it; outside the interval or without a connection, none.
 #[test]
