@@ -159,3 +159,68 @@ def test_rules_read_wrong_is_a_loud_error_after_the_drc(app, eprom, tmp_path, re
     res = json.loads((out.report_dir / "result.json").read_text())
     codes = {f["code"] for f in res["findings"]}
     assert {"RULES_MISMATCH", "DRC_NEW_VIOLATIONS"} <= codes
+
+
+def _bad_rules_board(eprom):
+    """eprom whose engine rules are smaller than KiCad's (as in test_rules_read_wrong...: RULES_MISMATCH if judged)."""
+    import copy
+
+    from test_run_flow import make_board
+
+    model = copy.deepcopy(eprom.model)
+    rules = model["rules"]
+    for r in [rules["default"], *rules["per_net"].values()]:
+        r["clearance"] = 100_000
+    rules["min_clearance"] = 100_000
+    board = make_board(eprom)
+    board.model = model
+    return board
+
+
+def test_project_file_deleted_mid_run_the_drc_copies_keep_the_original_rules(app, eprom, tmp_path, reports,
+                                                                           monkeypatch):
+    """drc-project-fix (2026-11-19): a sibling job deleted the save_as copy's dir mid-run; the routed DRC copy had no
+    .kicad_pro, KiCad judged with its defaults and RULES_MISMATCH blamed the rules. Now the project files are read
+    once after the copy and written from memory into every DRC copy: delete the copy's .kicad_pro / .kicad_dru before
+    each DRC, the routed copy still carries the original bytes, the run is not an error and the rules are not
+    blamed."""
+    want = eprom.pcb.with_suffix(".kicad_pro").read_bytes()
+    seen = []
+    real = run_mod.run_drc
+
+    def spy(pcb, *a, **k):
+        seen.append((pcb.parent.name, pcb.with_suffix(".kicad_pro").is_file() and
+                     pcb.with_suffix(".kicad_pro").read_bytes() == want))
+        for ext in (".kicad_pro", ".kicad_dru"):  # the sibling's rm -rf, after this DRC's copy was made
+            (pcb.parent.parent / "current" / pcb.with_suffix(ext).name).unlink(missing_ok=True)
+        return real(pcb, *a, **k)
+
+    monkeypatch.setattr(run_mod, "run_drc", spy)
+    board, ui, out = do_run(eprom, tmp_path, board=_bad_rules_board(eprom), strict=False)
+    assert ("routed", True) in seen and all(ok for _, ok in seen), seen
+    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
+    assert not any(e.code in ("DRC_WITHOUT_PROJECT",) for e in errs)
+    # the DRC saw the board's rules, so the (deliberately wrong) engine rules are still found out
+    assert [e.code for e in errs] == ["RULES_MISMATCH"], [e.code for e in errs]
+
+
+def test_drc_copy_without_project_is_its_own_error_never_rules_mismatch(app, eprom, tmp_path, reports, monkeypatch):
+    """The DRC copy lacks the board's project (written copy lost): DRC_WITHOUT_PROJECT, a loud error, and
+    RULES_MISMATCH (which would fire on these wrong engine rules) is not reported: the DRC did not use the rules."""
+    real = run_mod._variant
+
+    def lossy(src, text, out_dir, project):
+        p = real(src, text, out_dir, project)
+        if out_dir.name == "routed":
+            p.with_suffix(".kicad_pro").unlink()
+        return p
+
+    monkeypatch.setattr(run_mod, "_variant", lossy)
+    board, ui, out = do_run(eprom, tmp_path, board=_bad_rules_board(eprom), strict=False)
+    errs = [c[1][0] for c in ui.calls if c[0] == "error"]
+    assert out.status == "error" and board.commits == []
+    assert [e.code for e in errs] == ["DRC_WITHOUT_PROJECT"], [e.code for e in errs]
+    assert "not a problem of the design rules" in errs[0].message and ".kicad_pro" in errs[0].message
+    assert "preview" not in ui.names() and "done" not in ui.names()
+    res = json.loads((out.report_dir / "result.json").read_text())
+    assert not any(f["code"] == "RULES_MISMATCH" for f in res["findings"])

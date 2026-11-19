@@ -25,6 +25,8 @@ Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md)
     TIME_DRAWING_CUT    the time limit, acting as hard, cut a step of the drawing (part of the board not drawn)
     DRC_NEW_VIOLATIONS  KiCad's DRC of the routed copy finds new violations (counts by type, the first places);
                         a warning: the result can still be accepted ("costly, not failed")
+    DRC_WITHOUT_PROJECT error: KiCad's DRC copy did not carry the board's project file, so its numbers (built-in
+                        KiCad defaults) are void; never reported as RULES_MISMATCH
     RULES_MISMATCH      self-check (error): KiCad's DRC required a larger clearance between two nets than the
                         clearance the engine was given for them, i.e. topor read the design rules wrong
 
@@ -45,7 +47,7 @@ from .messages import MESSAGES
 
 #: every code route_findings can emit (the preview summary names those present)
 POSTRUN_CODES = ("DIFF_PAIRS", "DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
-                 "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT", "TIME_LIMIT_WAIT", "TIME_OVERRUN_CAP", "TIME_DRAWING_CUT", "DRC_NEW_VIOLATIONS", "RULES_MISMATCH",
+                 "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT", "TIME_LIMIT_WAIT", "TIME_OVERRUN_CAP", "TIME_DRAWING_CUT", "DRC_NEW_VIOLATIONS", "RULES_MISMATCH", "DRC_WITHOUT_PROJECT",
                  "ERBS_FALLBACK", "ERBS_TIMEOUT", "ERBS_LONG")
 DIFF_PAIR_REASON = "diff pair: not in the rough version"  # engine/src/topo/core.rs DIFF_PAIR
 DRAWING_CUT_LINE = "WARNING: the drawing was cut by the hard time limit"  # engine/src/topo/core.rs DRAWING_CUT_LINE
@@ -354,6 +356,15 @@ def _engine_clearances(model: dict) -> tuple[dict, dict, int]:
     return by_name, local, default
 
 
+def drc_without_project(files) -> Finding:
+    """DRC_WITHOUT_PROJECT (error): the DRC copy lacked the project file(s) `files` (names). O(1)."""
+    names = ", ".join(files)
+    return _mk("DRC_WITHOUT_PROJECT",
+               f"KiCad's DRC of the routed copy did not see the board's project file ({names}), so it judged the "
+               f"result with KiCad's built-in default rules and its numbers cannot be used. This is not a problem of "
+               f"the design rules. Nothing was applied to the board.", list(files))
+
+
 def rules_mismatch(new_violations, model: dict) -> "Finding | None":
     """Self-check RULES_MISMATCH (error): for every new ``clearance`` violation of KiCad's DRC, the clearance KiCad
     required (parsed from its text, decimal comma or point) against the largest clearance the engine was given for
@@ -371,9 +382,13 @@ def rules_mismatch(new_violations, model: dict) -> "Finding | None":
         req = required_clearance_nm(v.get("description", ""))
         items = v.get("items") or []
         nets = tuple(sorted({n for n in (item_net(i) for i in items) if n}))
-        if req is None or not nets or (len(nets) == 2 and frozenset(nets) in pairs):
+        if req is None or not items or (len(nets) == 2 and frozenset(nets) in pairs):
             continue
-        given = max([by_name.get(n, default) for n in nets]
+        # an item without a net (an unconnected pad, a graphic) is in the Default net class, and KiCad takes the
+        # larger of the two items' clearances (pcbnew manual, "Working with zones -> Zone properties -> Clearances &
+        # pad connections": "if two clearance values are in conflict, the larger clearance value will be used")
+        no_net = [default] if any(not item_net(i) for i in items) else []
+        given = max([by_name.get(n, default) for n in nets] + no_net
                     + [local[i["uuid"]] for i in items if i.get("uuid") in local])
         if req[0] > given + MISMATCH_TOLERANCE_NM:
             prev = worst.get(nets)
