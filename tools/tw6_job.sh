@@ -34,7 +34,8 @@ pat() {
 case ${1:-} in
   one) one "$2" "$3" "${4:-}" ;;
   pat) pat "$2" "$3" ;;
-  repng) python -m harness.tw6_patterns_png /root/runs/$2/tw6p/runs $R/tw6p/png > $R/tw6p-png.log 2>&1; note "png rc $?"; note "all done" ;;
+  repng) python -m harness.tw6_patterns $R/tw6p/boards --drc > $R/tw6p-gen.log 2>&1; note "gen rc $?"
+    python -m harness.tw6_patterns_png /root/runs/$2/tw6p/runs $R/tw6p/png > $R/tw6p-png.log 2>&1; note "png rc $?"; note "all done" ;;
   round1)
     ( hzq run --threads 2 --name tw6-dump -- bash -c "for c in K D; do TOPO_VIADBG=1 TOPO_VIAREL=1 bash $ROOT/tools/tw6_job.sh one \$c planned_crossing_window png; done" > $R/u-dump.log 2>&1; note "unit dump rc $?" ) &
     ( hzq run --threads 2 --name tw6-pat -- bash -c "python -m harness.tw6_patterns $R/tw6p/boards --drc > $R/tw6p-gen.log 2>&1; echo gen rc \$? >> $R/rc.txt; for n in site_or_stay lead_via_end; do for c in K D; do bash $ROOT/tools/tw6_job.sh pat \$c \$n; done; done; python -m harness.tw6_patterns_png $R/tw6p/runs $R/tw6p/png > $R/tw6p-png.log 2>&1; echo png rc \$? >> $R/rc.txt" > $R/u-pat.log 2>&1; note "unit pat rc $?" ) &
