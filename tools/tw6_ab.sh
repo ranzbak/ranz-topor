@@ -7,7 +7,8 @@
 #   tw6_ab.sh eq <cfgs>      equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults)
 #   tw6_ab.sh ac <cfgs>      tests + off + pats + eq <cfgs> (the A+C round)
 # cfg: K = rounds=1; M = rounds=40; e<k> = equal time seed k; suffixes (any order, at the end):
-#   s = [vias] site_price = "graded"; h = [capacity] via_disc_height = true; x = [capacity] pad_exits = true.
+#   s = [vias] site_price = "graded"; h = [capacity] via_disc_height = true; x = [capacity] pad_exits = true;
+#   p = [vias] pair_room = true.
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
@@ -25,6 +26,7 @@ one() {
     if [ "${c%s}" != "$c" ]; then SETS+=(--set 'vias.site_price="graded"'); c=${c%s}
     elif [ "${c%h}" != "$c" ]; then SETS+=(--set capacity.via_disc_height=true); c=${c%h}
     elif [ "${c%x}" != "$c" ]; then SETS+=(--set capacity.pad_exits=true); c=${c%x}
+    elif [ "${c%p}" != "$c" ]; then SETS+=(--set vias.pair_room=true); c=${c%p}
     else break; fi
   done
   case $c in

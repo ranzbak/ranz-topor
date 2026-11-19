@@ -262,6 +262,13 @@ pub struct ViaCtx<'a> {
     /// Centre distance (nm) the vias of two nets need ([`crate::vias::via_via_need`]: copper,
     /// hole clearance and hole to hole; the same net: hole to hole only).
     pub via_via: &'a dyn Fn(i32, i32) -> f64,
+    /// TW6 part D (`[vias] pair_room`): two consecutive vias of one wire keep the room of the
+    /// other nets' wires that cross between them (their widths and clearances on the straight
+    /// line between the vias, Polubasov 2010 «Перекладка проводников» fig. 4: the stretch that
+    /// carries a via is priced for its crossers; Luzin-Popov 2013 p. 135: the via force depends
+    /// on the wires near the vias), and a via whose site predicts a violation moves only for a
+    /// larger smallest gap (no move on the potential alone). false = as before.
+    pub pair_room: bool,
 }
 
 /// One via of the plan as the relocation sees it.
@@ -311,7 +318,7 @@ struct Near {
 /// the free interval"); it is no rule (a via may touch its own pad). `potential` =
 /// `sum(1 / g - 1 / POT_RANGE)` over the force gaps below `POT_RANGE`. O(near items).
 #[allow(clippy::too_many_arguments)]
-fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireId, usize), net: i32, rv: f64, c: f64, p: Vec2) -> (f64, f64, f64) {
+fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], pair: &PairNeed, me: (WireId, usize), net: i32, rv: f64, c: f64, p: Vec2) -> (f64, f64, f64) {
     let st = cx.st;
     let mut grule = f64::INFINITY;
     let mut gforce = f64::INFINITY;
@@ -347,11 +354,22 @@ fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], me: (WireI
         let mut need = (cx.via_via)(net, nu);
         if s.wire == me.0 {
             need = need.max(rv + (cx.via_r)(nu));
+            // TW6 D: the wires that cross between two consecutive vias of the wire keep their room.
+            if s.i + 1 == me.1 || me.1 + 1 == s.i {
+                if let Some(&x) = pair.get(&(me.0, s.i.min(me.1))) {
+                    need = need.max(rv + (cx.via_r)(nu) + c + x);
+                }
+            }
         }
         add((p - s.p).len() - need, true);
     }
     (grule, gforce, pot)
 }
+
+/// TW6 D: per (wire, via `i`) the room (nm) the other nets' wires crossing the wire between its
+/// vias `i` and `i + 1` need on the line between them: the sum of each crosser's width and the
+/// larger of the two clearances (the via side's clearance is added once more by the caller).
+type PairNeed = crate::fxhash::FxHashMap<(WireId, usize), f64>;
 
 /// Where crossing `x` lies along traversal `x.k` of wire `w` on its pass polyline `poly`
 /// ([`State::polyline`]): the fraction the layering's events carry (the same formula as the
@@ -439,6 +457,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
     }
     let mut vs: Vec<V> = Vec::new();
     let mut sites: Vec<Site> = Vec::new();
+    let mut pair: PairNeed = crate::fxhash::map();
     for (&w, pl) in plans.iter() {
         if pl.vias.is_empty() || tracks[w].is_empty() {
             continue;
@@ -451,6 +470,13 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
         let poly = st.polyline(w);
         let wnet = st.wires[w].net;
         let xs: Vec<super::state::Crossing> = st.crossings(w).into_iter().filter(|x| st.wires[x.other].net != wnet).collect();
+        // TW6 D: every crosser's point on the track (arc), for the room between consecutive vias.
+        let x_arcs: Vec<(f64, WireId)> = if cx.pair_room {
+            xs.iter().filter_map(|x| track_crossing(tr, &tracks[x.other], tr.sigma(x.k, 0.0), tr.sigma(x.k, 1.0)).map(|a| (a, x.other))).collect()
+        } else {
+            Vec::new()
+        };
+        let mut bounds: Vec<(f64, f64)> = Vec::new();
         for (i, &(ka, sa, kb, sb)) in ivs.iter().enumerate() {
             let (lo, hi) = (tr.sigma(ka, sa), tr.sigma(kb, sb));
             let (mut lo, mut hi) = (lo.min(hi), lo.max(hi));
@@ -521,6 +547,17 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             let (ka, kb) = pl.vias.get(i).map_or((ka, kb), |&(a, b)| (a, b.max(a)));
             vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires }, pinched });
             sites.push(Site { wire: w, i, k, p });
+            bounds.push((lo, hi));
+        }
+        if cx.pair_room {
+            let c = (cx.clear)(wnet);
+            for i in 1..bounds.len() {
+                let (a, b) = (bounds[i - 1].1.min(bounds[i].0), bounds[i - 1].1.max(bounds[i].0));
+                let x: f64 = x_arcs.iter().filter(|&&(arc, _)| arc >= a - 1.0 && arc <= b + 1.0).map(|&(_, o)| st.wires[o].w + c.max((cx.clear)(st.wires[o].net))).sum();
+                if x > 0.0 {
+                    pair.insert((w, i - 1), x);
+                }
+            }
         }
     }
     rep.vias = vs.len();
@@ -533,7 +570,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             let turn_k: Vec<usize> = st.wires[v.w].turns.iter().map(|t| t.0).collect();
             let ok_k = |k: usize| k >= v.ka && k <= v.kb && !turn_k.contains(&k) && !st.proj.tri_out[st.wires[v.w].tris[k.min(st.wires[v.w].tris.len() - 1)]];
             let cur = sites[vi];
-            let (rc, gc, pc) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, cur.p);
+            let (rc, gc, pc) = gap_at(cx, &tracks, &v.near, &sites, &pair, (v.w, v.i), net, rv, c, cur.p);
             // A site is allowed when it predicts no violation, or none worse than the old site.
             let rule_ok = |r: f64| r >= 0.0 || r >= rc;
             let eval = |s: f64, sites: &[Site]| -> Option<(f64, f64, usize, Vec2)> {
@@ -542,7 +579,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
                     return None;
                 }
                 let p = tr.at(s);
-                let (r, g, pot) = gap_at(cx, &tracks, &v.near, sites, (v.w, v.i), net, rv, c, p);
+                let (r, g, pot) = gap_at(cx, &tracks, &v.near, sites, &pair, (v.w, v.i), net, rv, c, p);
                 rule_ok(r).then_some((g, pot, k, p))
             };
             let better = |a: &(f64, f64, usize, Vec2), b: &(f64, f64, usize, Vec2)| a.0 > b.0 + 1.0 || (a.0 > b.0 - 1.0 && a.1 < b.1 - 1e-12);
@@ -576,6 +613,10 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
                     }
                 }
             }
+            // TW6 D: a via whose site predicts a violation moves only for a larger smallest gap.
+            if cx.pair_room && rc < 0.0 && best.0 <= gc + 1.0 {
+                best = (gc, pc, cur.k, cur.p);
+            }
             sites[vi] = Site { wire: v.w, i: v.i, k: best.2, p: best.3 };
         }
     }
@@ -584,8 +625,8 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
         let s = sites[vi];
         let net = st.wires[v.w].net;
         let (rv, c) = ((cx.via_r)(net), (cx.clear)(net));
-        let (g0, _, _) = gap_at(cx, &tracks, &v.near, &start, (v.w, v.i), net, rv, c, start[vi].p);
-        let (g1, _, _) = gap_at(cx, &tracks, &v.near, &sites, (v.w, v.i), net, rv, c, s.p);
+        let (g0, _, _) = gap_at(cx, &tracks, &v.near, &start, &pair, (v.w, v.i), net, rv, c, start[vi].p);
+        let (g1, _, _) = gap_at(cx, &tracks, &v.near, &sites, &pair, (v.w, v.i), net, rv, c, s.p);
         if (s.p - start[vi].p).len() > 1.0 {
             rep.moved += 1;
             rep.gap_gain += g1 - g0;

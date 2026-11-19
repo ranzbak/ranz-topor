@@ -79,3 +79,26 @@ fn off_is_the_default_copper() {
     assert_eq!(run(""), run(r#", "via_site_price": "off""#));
     let _ = run(r#", "via_site_price": "graded""#);
 }
+
+/// TW6 part D: `[vias] pair_room` is opt-in and parses.
+#[test]
+fn pair_room_is_opt_in_and_parses() {
+    assert!(!Options::default().via_pair_room);
+    assert!(Options::from_json(r#"{"via_pair_room": true}"#).expect("options parse").via_pair_room);
+}
+
+/// TW6 part D on the qmtech USB crop: with pair_room the run completes and the off run equals the
+/// default copper.
+#[test]
+fn pair_room_off_is_the_default_copper() {
+    let m = qmtech_crop();
+    let base = r#""wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 1, "via_cuts": true"#;
+    let run = |extra: &str| {
+        let o = Options::from_json(&format!("{{{base}{extra}}}")).expect("options parse");
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        format!("{:?}", route_with(&m, &o, &ctl).items)
+    };
+    assert_eq!(run(""), run(r#", "via_pair_room": false"#));
+    let _ = run(r#", "via_pair_room": true"#);
+}

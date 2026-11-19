@@ -162,6 +162,12 @@ scratch/agent-wt/reports/tw6-via-sites-data/vsite.py.
     the crossing into the window). D keeps the pair's room once both vias have sites. Side finding: relocation moves a
     via with zero gain (gap −0.6 → −0.6); D keeps a tight via at its plan point (no move without gain).
 
+**D as implemented (round 2; `[vias] pair_room`, default false).** `ViaCtx::pair_room`; `relocate_vias` collects
+per wire the crossers' arcs on the track (`track_crossing`) and, per consecutive via pair, the crossers between the
+first via's interval end and the second's start (Σ width + max clearance); `gap_at` then needs `rv + rv' + c + Σ`
+between the pair. A via whose site predicts a violation (rule gap < 0) moves only for a larger force gap (the side
+finding of the round-1 dump: 7.967 → 6.403 at −0.6 → −0.6).
+
 **E. Loop moves (submode 2).**
 - `site_move`: per via with d > 0, after `pair_move` and at the end-of-cycle via weight:
   - (i) re-lay its own wire, with B's search terms;

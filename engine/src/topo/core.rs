@@ -6612,7 +6612,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             (Some(sa), Some(sb)) => crate::vias::via_via_need(&model.rules, a, sa, b, sb, margin),
             _ => 0.0,
         };
-        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via };
+        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via, pair_room: opts.via_pair_room };
         let (sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
         dr.via_site = sites;
         dr.via_site_tight = rr.tight.iter().copied().collect();

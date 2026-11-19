@@ -1587,6 +1587,11 @@ pub struct Options {
     /// among site-less traversals the plan takes the one with the least deficit. "off" (default)
     /// = the count alone (as before).
     pub via_site_price: String,
+    /// TW6 part D (`[vias] pair_room`, docs/dev/design/tw6-via-sites.md D): the via relocation
+    /// keeps two consecutive vias of a wire far enough apart for the other nets' wires that cross
+    /// between them, and moves a via whose site predicts a violation only for a larger smallest
+    /// gap. false (default) = as before.
+    pub via_pair_room: bool,
     /// tw4-r2 (1) (`[capacity] pad_exits`, docs/dev/design/tw4-r2.md (1)): with via_cuts, every
     /// wire end at a fine-pitch pad (another net's copper beside it closer than the wire could
     /// pass) holds its planned exit, read from the plan (the leaving pass, the pad side it leaves
@@ -1836,6 +1841,7 @@ impl Default for Options {
             via_over_ramp_mm: 0.0,
             via_disc_height: false,
             via_site_price: "off".into(),
+            via_pair_room: false,
             pad_exits: false,
             pad_exit_static: false,
             pour_cuts: false,
