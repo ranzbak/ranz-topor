@@ -610,8 +610,8 @@ def test_progress_routes_stable_turns_cancel_into_ok(app):
     assert dlg.cancel_button.GetLabel().replace("&", "") == "Cancel"
     assert dlg.gain_value.GetLabel() == "2.5 % / 4 rounds"
     assert dlg.runs_value.GetLabel() == "2 of 5 stable"
-    assert _row(dlg, "best") == ["3", "2", "85", "85", "180", "2.310 m"]
-    assert _row(dlg, "last") == ["–"] * 6, "no round judged yet"
+    assert _row(dlg, "best") == ["3", "2", "85", "85", "180", "2.310 m", "drawn"]
+    assert _row(dlg, "last") == ["–"] * 7, "no round judged yet"
     q = Progress("route", 1, 300, 426, 150, 60.0, "topological search", 7, 30, 65.0, stable=True, gain_pct=0.1,
                  runs=5, runs_stable=5, best_routed=346, best_total=426, best_length_mm=2300.0, best_vias=181,
                  best_run=1, best_round=4, best_errors=80, best_open=80)
@@ -620,7 +620,7 @@ def test_progress_routes_stable_turns_cancel_into_ok(app):
     assert dlg.cancel_button.GetLabel().replace("&", "") == "OK"
     assert dlg.GetTitle().endswith("— Routes stable")  # also in the window list (the live test waits for it)
     assert dlg.cancel_button.GetId() == wx.ID_CANCEL  # same button, same action
-    assert _row(dlg, "best") == ["1", "4", "80", "80", "181", "2.300 m"]
+    assert _row(dlg, "best") == ["1", "4", "80", "80", "181", "2.300 m", "drawn"]
     evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
     evt.SetEventObject(dlg.cancel_button)
     dlg.cancel_button.GetEventHandler().ProcessEvent(evt)
@@ -646,8 +646,10 @@ def test_score_rows_mark_worse_and_better_on_the_deciding_criterion():
     """User 2026-11-11: "It would help if I can see the current score, and the best score in the UI". The rows
     follow the pick order; the verdict names the first criterion that differs (why a round is not the best)."""
     rows, verdict = ui_wx.score_rows(_scored())
-    assert rows["last"] == {"run": "3", "round": "2", "errors": "5", "open": "0", "vias": "168", "length": "7.412 m"}
-    assert rows["best"] == {"run": "1", "round": "1", "errors": "3", "open": "0", "vias": "166", "length": "7.384 m"}
+    assert rows["last"] == {"run": "3", "round": "2", "errors": "5", "open": "0", "vias": "168", "length": "7.412 m",
+                            "source": "drawn"}
+    assert rows["best"] == {"run": "1", "round": "1", "errors": "3", "open": "0", "vias": "166", "length": "7.384 m",
+                            "source": "drawn"}
     assert verdict == "Last round is worse than the best: errors +2."
     worse = "Last round is worse than the best: "
     assert ui_wx.score_rows(_scored(last_decider="vias", last_delta=2.0))[1] == worse + "vias +2."
@@ -668,26 +670,26 @@ def test_score_rows_mark_worse_and_better_on_the_deciding_criterion():
         "Last round is worse than the best: weighted score +12.2 mm."
     # nothing judged yet: the rows keep "–", no verdict
     rows, verdict = ui_wx.score_rows(Progress(phase="route", total=426))
-    assert rows == {"last": None, "best": None} and verdict == ""
+    assert rows == {"last": None, "run": None, "best": None} and verdict == ""
 
 
 def test_progress_dialog_shows_the_score_rows_at_its_size(app):
     dlg = ui_wx.ProgressDialog("qmtech", 600.0, 4)
     try:
         size = dlg.GetSize()
-        assert _row(dlg, "last") == ["–"] * 6 and _row(dlg, "best") == ["–"] * 6
+        assert _row(dlg, "last") == ["–"] * 7 and _row(dlg, "best") == ["–"] * 7
         dlg.update(_scored())
-        assert _row(dlg, "last") == ["3", "2", "5", "0", "168", "7.412 m"]
-        assert _row(dlg, "best") == ["1", "1", "3", "0", "166", "7.384 m"]
+        assert _row(dlg, "last") == ["3", "2", "5", "0", "168", "7.412 m", "drawn"]
+        assert _row(dlg, "best") == ["1", "1", "3", "0", "166", "7.384 m", "drawn"]
         assert dlg.score_verdict.GetLabel() == "Last round is worse than the best: errors +2."
         dlg.update(_scored(last_run=2, last_round=3, last_errors=3, last_vias=166, last_length_mm=7350.0,
                            best_run=2, best_round=3, best_length_mm=7350.0, last_vs_best="new best",
                            last_decider="length", last_delta=-34.0))
-        assert _row(dlg, "last") == _row(dlg, "best") == ["2", "3", "3", "0", "166", "7.350 m"]
+        assert _row(dlg, "last") == _row(dlg, "best") == ["2", "3", "3", "0", "166", "7.350 m", "drawn"]
         assert dlg.score_verdict.GetLabel() == "Last round is the new best: length -0.034 m."
         dlg._grow_to_best()
         assert dlg.GetSize() == size, "the score fits the dialog's size"
-        for row in ("last", "best"):  # every cell is shown in full (fixed widths hold the widest values)
+        for row in dlg.SCORE_ROWS:  # every cell is shown in full (fixed widths hold the widest values)
             for c, *_ in dlg.SCORE_COLS:
                 cell = dlg.score_cells[row][c]
                 assert cell.GetSize().width >= cell.GetTextExtent(cell.GetLabel()).width, (row, c)

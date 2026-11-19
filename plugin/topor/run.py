@@ -154,6 +154,17 @@ def round_log_lines(p: Progress, seen: int) -> list[str]:
     return out
 
 
+def cycle_log_lines(p: Progress, seen: int) -> list[str]:
+    """log.txt lines of the TopoR loop cycles the engine logged since line number `seen` (``Progress.cycle_lines``
+    keeps the last few: one line per loop cycle and one per loop end, sync-wait); a gap the engine's list no longer
+    covers is said once. O(len(cycle_lines))."""
+    lines = list(p.cycle_lines)
+    first = p.cycles_logged - len(lines) + 1  # line number of lines[0]
+    out = [f"loop cycle log: {first - seen - 1} cycle lines missed"] if first > seen + 1 else []
+    out += [ln for i, ln in enumerate(lines) if first + i > seen]
+    return out
+
+
 # ---------------------------------------------------------------- seams
 def preflight_findings(cfg: Config, config_findings, copy_text: str, *, model=None, rules=None, sel=None,
                        pro=None, orig_drc=None) -> list:
@@ -637,6 +648,35 @@ def _abort_locked(busy, ui, out: "RunOutcome", report, log, ctx, t0) -> "RunOutc
     return out
 
 
+def sketch_poll(job, ui, p: Progress, sk: dict, now: float, interval: float, done: bool, log=None) -> None:
+    """last-preview, one progress poll: ask the engine for a new last-round sketch every `interval` s while it runs
+    (it builds one at the next loop cycle's end), and hand the UI the sketch it shows (``ui.preview_wanted()``) when a
+    new one was published (``p.sketch_seq``), the UI switched kind or the best / Last run row's run moved. `sk` keeps the state between polls. O(1) +
+    the sketch's JSON when one is fetched."""
+    kind = ui.preview_wanted()
+    if kind is None:
+        return
+    if not done and now - sk["asked"] >= interval:
+        job.request_sketch()
+        sk["asked"] = now
+    # also when the run the "best" / "run" image belongs to moved: the engine publishes a pick's sketch before it
+    # moves best_run / runbest_run (verify-last-preview F5), so the seq alone can leave the old run's image up
+    ctx = (p.best_run, p.runbest_run)
+    if p.sketch_seq == sk["seq"] and kind == sk["kind"] and ctx == sk.get("ctx"):
+        return
+    sk["seq"], sk["kind"], sk["ctx"] = p.sketch_seq, kind, ctx
+    js = job.sketch(kind)
+    if not js:
+        return
+    d = json.loads(js)
+    if sk["sent"] != (kind, d.get("seq")):
+        sk["sent"] = (kind, d.get("seq"))
+        ui.sketch(kind, d)
+        if log is not None:  # one line per image shown (at most one per interval and per new best)
+            log.line(f"progress image: {kind}, run {d.get('run')}, round {d.get('cycle')}, {d.get('kind')}, "
+                     f"seq {d.get('seq')}, {len(d.get('items') or [])} items")
+
+
 def post_commit_finding(step: str, e: BaseException) -> Finding:
     """POST_COMMIT_STEP_FAILED (ruling C30): the routes were committed, then `step` failed. O(1)."""
     return Finding("POST_COMMIT_STEP_FAILED", "warning",
@@ -968,12 +1008,24 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             (d / f"options-{n}.json").write_text(oj)
             log.line(f"engine input written to {d}/model-{n}.json, options-{n}.json (TOPOR_DUMP_ENGINE_INPUT)")
         job = engine.route_async(mj, oj)
+        # last-preview: the progress dialog's board image ([run] progress_preview); a UI without it (headless) or an
+        # engine without sketches never asks, so the engine builds none
+        wanted = getattr(ui, "preview_wanted", None)
+        sketching = (callable(wanted) and wanted() is not None and callable(getattr(job, "enable_sketches", None))
+                     and callable(getattr(ui, "sketch", None)))
+        if sketching:
+            job.enable_sketches()
+            if callable(getattr(ui, "set_board", None)):
+                ui.set_board(m)
+            interval = max(POLL_S, float(getattr(ui, "preview_interval_s", lambda: 2.0)()))
+        sk = {"asked": -1e9, "seq": -1, "kind": None, "sent": None}  # last request, progress seq / kind fetched, sent
         job_t0, router_before = time.monotonic(), state["router_s"]
         cpu_t0, cpu_before = time.process_time(), state["router_cpu_s"]
         # cancelled_at: Cancel / OK was sent (job.cancel(); also the CPU clock's limit for an engine without
         # reach_limit / harden); limit_at: the CPU clock's limit was sent (job.reach_limit(), and job.harden() when hard). Kept apart so a Cancel after the soft limit still reaches the job (verify-m2 F1).
         last_poll, cancelled_at, limit_at = -1e9, None, None
         rounds_seen = 0  # round lines of this job written to log.txt (round_log_lines)
+        cycles_seen = 0  # loop cycle lines of this job written to log.txt (cycle_log_lines)
         # Ends when the job is done (also after an engine panic: B-1). After Cancel / OK / the CPU limit the engine
         # finishes the stage it is in and returns its best result so far; that can take a while on a big board, so
         # the flow waits for it (the progress dialog says so) instead of giving up and losing the result.
@@ -993,6 +1045,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 for line in round_log_lines(p, rounds_seen):
                     log.line(line)
                 rounds_seen = max(rounds_seen, p.rounds_ended)
+                for line in cycle_log_lines(p, cycles_seen):
+                    log.line(line)
+                cycles_seen = max(cycles_seen, p.cycles_logged)
                 # the engine's measurements outside the limit (M1 compass cut test, one thread) do not count
                 if (cpu_clock and 0 < state["limit"] <= p.cpu_s - p.measure_s and not state["limit_hit"] and not done):
                     state["limit_hit"] = "cpu"
@@ -1000,6 +1055,12 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 p.limit_s = state["limit"]
                 if ui.progress(p) is False:
                     state["cancel"] = True
+                if sketching:
+                    try:
+                        sketch_poll(job, ui, p, sk, now, interval, done, log)
+                    except Exception as e:  # noqa: BLE001 - the board image never stops a run: off, logged
+                        sketching = False
+                        log.line(f"progress board image switched off after an error: {type(e).__name__}: {e}")
                 if take_limit() and not done and not cpu_clock:
                     setter = getattr(job, "set_time_limit", None)  # the engine reads its limit live
                     if callable(setter):

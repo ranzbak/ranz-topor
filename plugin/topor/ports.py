@@ -157,15 +157,55 @@ class Progress:
     last_delta: float = 0.0
     rounds_ended: int = 0
     round_lines: list = field(default_factory=list)
+    # sync-wait: TopoR loop cycle lines logged so far over all runs and the last ones (cycle_lines[i] is line number
+    # cycles_logged - len(cycle_lines) + i + 1): one per loop cycle (run, cycle, wall, cycle time, table wait, slot
+    # wait, errors) and one per loop end (the compute slots' idle share); the run flow writes each to log.txt once.
+    cycles_logged: int = 0
+    cycle_lines: list = field(default_factory=list)
     # M2.TL soft time limit (engine): the limit has passed and the step that runs finishes ([run] timeout_mode =
     # soft); the step that ran then; the dialog's line ("time limit reached, waiting for the current step to finish
     # (<step>); press Cancel to stop now").
     limit_reached: bool = False
     limit_step: str = ""
     notice: str = ""
+    # last-preview (user 2026-11-19, "I would like the last round result to be displayed"; engine control::Progress):
+    # the TopoR loop cycle that finished last (any run; cycle 0 = the initial plan) with its own state's PREDICTED
+    # score (the plan, nothing drawn) and the restarts of that run's loop so far; the loop cycles finished over all
+    # runs (never goes back: the dialog's count); when the judged round ended (s since the job started); the run whose
+    # own pick changed last ("Last run": its cycle, "plan" = predicted / "copper" = drawn, its score); per run the
+    # cycle its pick came from; whether the best is predicted ("plan") or drawn ("copper"); the sketches published.
+    loop_run: int = 0
+    loop_cycle: int = 0
+    loop_restarts: int = 0
+    loop_at_s: float = 0.0
+    loop_errors: int = 0
+    loop_open: int = 0
+    loop_violations: int = 0
+    loop_vias: int = 0
+    loop_length_mm: float = 0.0
+    loop_shrinkages: int = 0
+    cycles_total: int = 0
+    last_at_s: float = 0.0
+    runbest_run: int = 0
+    runbest_cycle: int = 0
+    runbest_at_s: float = 0.0
+    runbest_kind: str = ""
+    runbest_errors: int = 0
+    runbest_open: int = 0
+    runbest_violations: int = 0
+    runbest_vias: int = 0
+    runbest_length_mm: float = 0.0
+    runbest_shrinkages: int = 0
+    pick_cycles: list = field(default_factory=list)
+    best_kind: str = ""
+    sketch_seq: int = 0
 
     _INT = ("best_errors", "best_open", "best_shrinkages", "best_round", "last_run", "last_round", "last_errors",
-            "last_open", "last_violations", "last_vias", "last_shrinkages", "last_routed", "rounds_ended")
+            "last_open", "last_violations", "last_vias", "last_shrinkages", "last_routed", "rounds_ended",
+            "loop_run", "loop_cycle", "loop_restarts", "loop_errors", "loop_open", "loop_violations", "loop_vias",
+            "loop_shrinkages", "cycles_total", "runbest_run", "runbest_cycle", "runbest_errors", "runbest_open",
+            "runbest_violations", "runbest_vias", "runbest_shrinkages", "sketch_seq", "cycles_logged")
+    _FLOAT = ("loop_at_s", "loop_length_mm", "last_at_s", "runbest_at_s", "runbest_length_mm")
 
     @staticmethod
     def from_json(d: dict) -> "Progress":
@@ -185,8 +225,12 @@ class Progress:
                         last_decider=str(d.get("last_decider", "") or ""),
                         last_delta=float(d.get("last_delta", 0.0) or 0.0),
                         round_lines=[str(x) for x in (d.get("round_lines") or [])],
+                        cycle_lines=[str(x) for x in (d.get("cycle_lines") or [])],
                         limit_reached=bool(d.get("limit_reached", False)),
                         limit_step=str(d.get("limit_step", "") or ""), notice=str(d.get("notice", "") or ""),
+                        runbest_kind=str(d.get("runbest_kind", "") or ""), best_kind=str(d.get("best_kind", "") or ""),
+                        pick_cycles=[int(x) for x in (d.get("pick_cycles") or [])],
+                        **{k: float(d.get(k, 0.0) or 0.0) for k in Progress._FLOAT},
                         **{k: int(d.get(k, 0) or 0) for k in Progress._INT})
 
 
@@ -251,6 +295,18 @@ class UiPort(Protocol):
     #   def time_limit_request(self) -> float | None:
     #       """A new time limit the user set during the run (seconds on the run's clock, 0 = no limit), or None.
     #       The run flow polls it after every ``progress`` call, applies it and reports it in ``Progress.limit_s``."""
+
+    # Optional (the interactive progress dialog only, last-preview; headless UIs leave them out, so the engine never
+    # builds a sketch for them):
+    #   def preview_wanted(self) -> str | None:
+    #       """Which sketch the board image shows now ("last" | "run" | "best"), None = no image ([run]
+    #       progress_preview = off). Asked after every ``progress`` call."""
+    #   def preview_interval_s(self) -> float:
+    #       """[run] progress_preview_interval_s: how often the run flow asks the engine for a new last-round sketch."""
+    #   def set_board(self, model: dict) -> None:
+    #       """The engine model of the run (KiCad frame): the board image's fixed part (outline, pads, copper)."""
+    #   def sketch(self, kind: str, sketch: dict) -> None:
+    #       """A new sketch of `kind` (the engine's control::Sketch JSON: run, cycle, kind plan|copper, seq, items)."""
 
     def preview(self, png: Path, report: Any) -> bool:
         """Show the result; True = Accept (apply to the board), False = Reject."""

@@ -31,6 +31,31 @@ def test_round_log_lines_writes_each_round_once_and_says_a_gap():
     assert run_mod.round_log_lines(Progress.from_json({"phase": "route"}), 0) == []
 
 
+C1 = ("loop cycle: run 1, cycle 1, at 4.20 s, cycle 3.100 s, table wait 0.000 s, slot wait 0.000 s, errors 9 "
+      "(shorts 0), pick errors 9, pick 1200.0")
+C2 = ("loop cycle: run 2, cycle 1, at 4.90 s, cycle 3.500 s, table wait 0.000 s, slot wait 0.400 s, errors 7 "
+      "(shorts 1), pick errors 7, pick 1100.0")
+C3 = ("loop slots: run 1 ended its loop after 1 cycles; so far 2.5 % of the 4 compute slots' time was idle while "
+      "a loop ran (0.4 slot-s of 4.0 s; [optimize] table_lag = 0)")
+
+
+def test_cycle_log_lines_writes_each_cycle_once_and_says_a_gap():
+    """sync-wait: the per-cycle loop lines reach log.txt once each, a gap is said once, an old engine has none."""
+    p = Progress(cycles_logged=2, cycle_lines=[C1, C2])
+    assert run_mod.cycle_log_lines(p, 0) == [C1, C2]
+    assert run_mod.cycle_log_lines(p, 1) == [C2]
+    assert run_mod.cycle_log_lines(p, 2) == []
+    q = Progress(cycles_logged=6, cycle_lines=[C2, C3])
+    assert run_mod.cycle_log_lines(q, 2) == ["loop cycle log: 2 cycle lines missed", C2, C3]
+    assert run_mod.cycle_log_lines(q, 3) == ["loop cycle log: 1 cycle lines missed", C2, C3]
+    assert run_mod.cycle_log_lines(q, 4) == [C2, C3]
+    assert run_mod.cycle_log_lines(q, 5) == [C3]
+    old = Progress.from_json({"phase": "route"})
+    assert (old.cycles_logged, old.cycle_lines) == (0, []) and run_mod.cycle_log_lines(old, 0) == []
+    r = Progress.from_json({"phase": "route", "cycles_logged": 2, "cycle_lines": [C1, C2]})
+    assert (r.cycles_logged, r.cycle_lines) == (2, [C1, C2])
+
+
 def test_progress_from_json_reads_the_score():
     d = {"phase": "route", "best_run": 1, "best_round": 1, "best_errors": 3, "best_open": 0, "best_vias": 166,
          "best_length_mm": 7384.0, "best_shrinkages": 1, "last_run": 2, "last_round": 1, "last_errors": 5,
@@ -56,9 +81,9 @@ from topor.fake import ScriptedUi  # noqa: E402
 
 # per poll: (rounds_ended, round_lines, score fields)
 SCRIPT = [
-    (1, [L1], dict(best_run=1, best_round=1, best_errors=3, best_vias=166, best_length_mm=7384.0, last_run=1,
+    (1, [L1], dict(cycles_logged=1, cycle_lines=[C1], best_run=1, best_round=1, best_errors=3, best_vias=166, best_length_mm=7384.0, last_run=1,
                    last_round=1, last_errors=3, last_vias=166, last_length_mm=7384.0, last_vs_best="new best")),
-    (3, [L1, L2, L3], dict(best_run=1, best_round=1, best_errors=3, best_vias=166, best_length_mm=7384.0,
+    (3, [L1, L2, L3], dict(cycles_logged=3, cycle_lines=[C1, C2, C3], best_run=1, best_round=1, best_errors=3, best_vias=166, best_length_mm=7384.0,
                            last_run=2, last_round=1, last_errors=5, last_vias=168, last_length_mm=7412.0,
                            last_vs_best="worse", last_decider="errors", last_delta=2.0)),
 ]
@@ -88,6 +113,8 @@ def test_run_flow_logs_every_round_once_and_shows_the_score(app, eprom, tmp_path
     for line in (L1, L2, L3):
         assert log.count(f"round ended: {line}") == 1, log[-3000:]
     assert log.index(L1) < log.index(L2) < log.index(L3)
+    for line in (C1, C2, C3):
+        assert log.count(line) == 1, log[-3000:]
     shown = [c[1][0] for c in ui.calls if c[0] == "progress" and c[1][0].last_round]
     assert shown, "the UI got the score"
     last = shown[-1]

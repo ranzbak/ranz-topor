@@ -247,7 +247,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     if opts.opt_loop == "topor" {
         // stable_gain_pct = 0: no gain is below 0 %, so the table is never stable (as the run's meter)
         let window = if opts.stable_gain_pct <= 0.0 { usize::MAX } else { opts.loop_stable_window.max(1) };
-        coord = coord.with_table(super::table::SharedTable::new(n, opts.variants, obj, window));
+        coord = coord.with_table(super::table::SharedTable::new(n, opts.variants, obj, window).with_lag(opts.table_lag));
     }
     let (mut outs, skipped) = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
     if outs.is_empty() {
@@ -730,6 +730,8 @@ struct Port<'g> {
     k: usize,
     compat: u64,
     slots: &'g Slots,
+    /// sync-wait: the per-cycle log line ([`super::optimise::Shared::cycle_done`]).
+    note: &'g dyn Fn(&super::optimise::CycleNote),
 }
 
 /// TW3 (condition 1 of the lead): who draws which of the four bests' distinct rows. `rows` =
@@ -765,7 +767,11 @@ impl super::optimise::Shared<LoopVar> for Port<'_> {
         self.table.offer_mid(self.k, cycle, label, crit, row);
     }
     fn sync(&self, cycle: usize, stop: &mut dyn FnMut() -> bool) -> Option<super::table::View<LoopVar>> {
-        self.table.sync(self.k, cycle, stop, &|| self.slots.release(), &|| self.slots.acquire())
+        // the wait gives the slot back; it goes on at its place in the fair order (cycles finished)
+        self.table.sync(self.k, cycle, stop, &|| self.slots.release(), &|| self.slots.acquire_as(1, cycle.saturating_sub(1), self.k))
+    }
+    fn cycle_done(&self, note: &super::optimise::CycleNote) {
+        (self.note)(note);
     }
     fn end(&self) {
         self.table.end(self.k);
@@ -777,79 +783,142 @@ impl super::optimise::Shared<LoopVar> for Port<'_> {
 
 /// A counting semaphore: at most `n` runs compute at once (the others' threads wait idle, so the
 /// busy threads stay at the engine's share, `min(runs, rayon threads)`). A run that waits for its
-/// FIRST slot (not begun yet) goes before one that waits to go on: with fewer slots than runs a
-/// TopoR loop that is stable and only waits for OK gives its slot to a run not yet begun
-/// ([`Slots::yield_to_first`], user 2026-11-17 "free the slot"), so "Routes stable" (every run
-/// stable) can come while the loops run. O(1) per call.
+/// FIRST slot (not begun yet) goes before one that waits to go on.
+///
+/// sync-wait (docs/dev/design/sync-wait.md): fair slots. Every waiter has a key (class, clock,
+/// run): class 0 = its first slot, 1 = to go on; clock = the TopoR loop cycles it has finished. A
+/// free slot goes to the waiter with the lowest key, and a loop run at each cycle boundary gives
+/// its slot to a waiter with a lower key ([`Slots::turn`]): more runs than slots then share the
+/// slots round-robin in cycles (no run begins late), a run waiting at the variant table hands its
+/// slot to the run it waits for, and a run that gave its slot (stable or not) gets one back as soon
+/// as it is the lowest. Copper-neutral: a run's cycles depend only on its own state and its table
+/// views, never on when it computes. User 2026-11-17 "free the slot" (a stable loop gives its slot
+/// to a run not yet begun) is the case class 0 < class 1. O(log waiters) per call.
 ///
 /// par-refine (docs/design/47-parallel-refine.md §6): there are as many slots as rayon threads;
 /// a run takes one for its steps and its refinements borrow the free ones as lanes
 /// (`[optimize] refine_lanes = "auto"`, [`super::refine_par::lanes::Pool`]) for one epoch at a
-/// time, never while any run waits for a slot (its first one or one to go on): a slot a stable
-/// loop yields to a run not yet begun is never borrowed as a lane before that run has it.
+/// time, never while any run waits for a slot (its first one or one to go on): a slot a loop
+/// yields to a run not yet begun is never borrowed as a lane before that run has it.
+///
+/// It also measures the slot idle time of the TopoR loops: slot-seconds free while at least one
+/// run is in its loop ([`Slots::enter_loop`], [`Slots::idle`]).
 struct Slots {
     st: std::sync::Mutex<SlotState>,
     cv: std::sync::Condvar,
 }
 
+/// A waiter's place: (class, clock, run, ticket); the ticket keeps keys distinct.
+type SlotKey = (u8, usize, usize, u64);
+
 #[derive(Debug)]
 struct SlotState {
+    /// The slots in all.
+    n: usize,
     /// Free slots; below 0 only for a moment after [`Slots::take_now`] (a slot owed).
     free: isize,
     /// Runs waiting for their first slot ([`Slots::acquire_first`]).
     first: usize,
     /// Runs waiting in [`Slots::acquire`] to go on (par-refine: no lane is lent while one waits).
     waiting: usize,
+    /// Every waiter's key; the lowest takes the next free slot.
+    queue: BTreeSet<SlotKey>,
+    ticket: u64,
+    /// Runs in their TopoR loop now; the free slot-seconds while it is above 0, and those seconds.
+    loops: usize,
+    idle_s: f64,
+    span_s: f64,
+    last: Instant,
+}
+
+impl SlotState {
+    /// Add the free slot-time since the last change (while a loop runs). O(1).
+    fn tick(&mut self) {
+        let now = Instant::now();
+        if self.loops > 0 {
+            let dt = now.duration_since(self.last).as_secs_f64();
+            self.idle_s += self.free.max(0) as f64 * dt;
+            self.span_s += dt;
+        }
+        self.last = now;
+    }
 }
 
 impl Slots {
     fn new(n: usize) -> Slots {
-        Slots { st: std::sync::Mutex::new(SlotState { free: n.max(1) as isize, first: 0, waiting: 0 }), cv: std::sync::Condvar::new() }
+        let n = n.max(1);
+        Slots { st: std::sync::Mutex::new(SlotState { n, free: n as isize, first: 0, waiting: 0, queue: BTreeSet::new(), ticket: 0, loops: 0, idle_s: 0.0, span_s: 0.0, last: Instant::now() }), cv: std::sync::Condvar::new() }
     }
 
-    /// Waits until a slot is free that no run waiting for its first one needs, and takes it.
-    /// O(1) + the wait.
-    fn acquire(&self) {
+    /// Waits until a slot is free and `(class, clock, run)` is the lowest waiter, and takes it.
+    /// O(log waiters) + the wait.
+    fn acquire_as(&self, class: u8, clock: usize, run: usize) {
         let Ok(mut g) = self.st.lock() else { return };
-        if g.free <= g.first as isize {
-            g.waiting += 1;
-            while g.free <= g.first as isize {
-                g = match self.cv.wait(g) {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-            }
-            g.waiting -= 1;
-        }
-        g.free -= 1;
+        g.tick();
+        let key = Self::enqueue(&mut g, class, clock, run);
+        self.wait_for(g, key);
     }
 
-    /// A run's first slot: waits for a free one (before the runs that wait to go on). O(1) + the wait.
-    fn acquire_first(&self) {
-        let Ok(mut g) = self.st.lock() else { return };
-        g.first += 1;
-        while g.free <= 0 {
+    /// Puts `(class, clock, run)` in the waiter queue (lock held). O(log waiters).
+    fn enqueue(g: &mut SlotState, class: u8, clock: usize, run: usize) -> SlotKey {
+        let key = (class, clock, run, g.ticket);
+        g.ticket += 1;
+        g.queue.insert(key);
+        if class == 0 { g.first += 1 } else { g.waiting += 1 }
+        key
+    }
+
+    /// Waits (lock held, queued as `key`) until a slot is free and `key` is the lowest waiter, and
+    /// takes it. O(log waiters) + the wait.
+    fn wait_for(&self, mut g: std::sync::MutexGuard<'_, SlotState>, key: SlotKey) {
+        let class = key.0;
+        while !(g.free > 0 && g.queue.first() == Some(&key)) {
             g = match self.cv.wait(g) {
                 Ok(g) => g,
                 Err(_) => return,
             };
         }
+        g.tick();
+        g.queue.remove(&key);
+        if class == 0 { g.first -= 1 } else { g.waiting -= 1 }
         g.free -= 1;
-        g.first -= 1;
+        let more = g.free > 0 && !g.queue.is_empty();
+        drop(g);
+        if more {
+            // the next lowest waiter may take the next free slot
+            self.cv.notify_all();
+        }
     }
 
-    /// The caller holds a slot: when a run waits for its first slot, gives it to that run and
-    /// waits to go on ([`Slots::acquire`]); returns whether it did. O(1) + the wait.
-    fn yield_to_first(&self) -> bool {
-        {
-            let Ok(mut g) = self.st.lock() else { return false };
-            if g.first == 0 {
-                return false;
-            }
-            g.free += 1;
+    /// Waits to go on (after a wait that gave the slot back), behind every run waiting for its
+    /// first slot. O(log waiters) + the wait.
+    fn acquire(&self) {
+        self.acquire_as(1, 0, usize::MAX);
+    }
+
+    /// A run's first slot: waits for a free one (before the runs that wait to go on). O(log
+    /// waiters) + the wait.
+    fn acquire_first(&self) {
+        self.acquire_as(0, 0, usize::MAX);
+    }
+
+    /// The caller (loop run `run`, `clock` cycles finished) holds a slot: when a lower waiter
+    /// waits (a run not begun, or a loop run with fewer cycles finished, or as many and a lower
+    /// index), gives the slot to it and waits to go on at `(clock, run)`; returns whether it did.
+    /// O(log waiters) + the wait.
+    fn turn(&self, clock: usize, run: usize) -> bool {
+        let Ok(mut g) = self.st.lock() else { return false };
+        let lower = g.queue.first().is_some_and(|k| (k.0, k.1, k.2) < (1, clock, run));
+        if !lower {
+            return false;
         }
+        g.tick();
+        g.free += 1;
+        // queued under the same lock that frees the slot: no waiter behind this run can take the
+        // slot back in between (the lower waiter takes it, then this run is next)
+        let key = Self::enqueue(&mut g, 1, clock, run);
         self.cv.notify_all();
-        self.acquire();
+        self.wait_for(g, key);
         true
     }
 
@@ -857,6 +926,7 @@ impl Slots {
     /// [`DrawGate::offer`], whose [`SlotGuard`] gives the slot back once more. O(1).
     fn take_now(&self) {
         if let Ok(mut g) = self.st.lock() {
+            g.tick();
             g.free -= 1;
         }
     }
@@ -869,10 +939,35 @@ impl Slots {
     /// Gives `k` slots back. O(1).
     fn give_back(&self, k: usize) {
         if let Ok(mut g) = self.st.lock() {
+            g.tick();
             g.free += k as isize;
         }
-        // two kinds of waiters (first slot / go on): wake all, each tests its own condition
+        // waiters of several keys: wake all, each tests whether it is the lowest
         self.cv.notify_all();
+    }
+
+    /// A run begins its TopoR loop (the idle measure runs while one does). O(1).
+    fn enter_loop(&self) {
+        if let Ok(mut g) = self.st.lock() {
+            g.tick();
+            g.loops += 1;
+        }
+    }
+
+    /// A run ended its TopoR loop. O(1).
+    fn leave_loop(&self) {
+        if let Ok(mut g) = self.st.lock() {
+            g.tick();
+            g.loops = g.loops.saturating_sub(1);
+        }
+    }
+
+    /// (free slot-seconds while a loop ran, seconds a loop ran, slots), up to now. O(1).
+    fn idle(&self) -> (f64, f64, usize) {
+        self.st.lock().map_or((0.0, 0.0, 1), |mut g| {
+            g.tick();
+            (g.idle_s, g.span_s, g.n)
+        })
     }
 }
 
@@ -884,6 +979,7 @@ impl super::refine_par::lanes::Pool for Slots {
         if g.waiting > 0 || g.first > 0 || g.free <= 0 {
             return 0;
         }
+        g.tick();
         let t = k.min(g.free as usize);
         g.free -= t as isize;
         t
@@ -1319,6 +1415,8 @@ impl<'a> Coord<'a> {
                 p.best_open = b.crit.open;
                 p.best_shrinkages = b.crit.shrinkages;
                 p.best_round = b.cycle as u32;
+                // last-preview: drawn (a run's drawn pick) or predicted (a TopoR loop's pick)
+                p.best_kind = if self.best_of(&s).is_some() { "copper" } else { "plan" }.into();
             }
             if let Some((cycle, judged, line)) = round {
                 if let Some((j, vs, dec)) = judged {
@@ -1334,11 +1432,64 @@ impl<'a> Coord<'a> {
                     p.last_vs_best = vs.to_string();
                     p.last_decider = dec.map_or(String::new(), |d| d.0.to_string());
                     p.last_delta = dec.map_or(0.0, |d| d.1);
+                    p.last_at_s = self.ctl.since_start_s();
                 }
                 p.push_round_line(line);
             }
         });
     }
+}
+
+/// last-preview: what a run's loop remembers for the progress dialog's sketches: its pick at the
+/// last cycle's end (a change = its new best) and the mid states of the cycle running now that
+/// may become its pick ([`Space::after_cycle`]).
+#[derive(Default)]
+struct SketchBook {
+    pick: Option<Criteria>,
+    mid: Vec<(Criteria, crate::control::Sketch)>,
+}
+
+/// last-preview: a sketch of `items` with `crit`'s numbers. O(1) + the move.
+fn sketch_of(run: u32, cycle: usize, kind: &str, crit: &Criteria, items: Vec<Item>) -> crate::control::Sketch {
+    crate::control::Sketch { run, cycle: cycle as u32, kind: kind.into(), errors: crit.errors, open: crit.open, violations: crit.violations, vias: crit.vias, length_mm: crit.length_mm, items, ..Default::default() }
+}
+
+/// last-preview: loop cycle `cycle` of run `run` (1-based) ended at `at` s with its own state's
+/// predicted criteria `c` (the Last round row while the loop runs). O(1).
+fn note_loop_cycle(p: &mut crate::control::Progress, run: u32, cycle: usize, restarts: usize, at: f64, c: &Criteria) {
+    if cycle > 0 {
+        p.cycles_total += 1;
+    }
+    p.loop_restarts = restarts as u32;
+    p.loop_run = run;
+    p.loop_cycle = cycle as u32;
+    p.loop_at_s = at;
+    p.loop_errors = c.errors;
+    p.loop_open = c.open;
+    p.loop_violations = c.violations;
+    p.loop_vias = c.vias;
+    p.loop_length_mm = c.length_mm;
+    p.loop_shrinkages = c.shrinkages;
+}
+
+/// last-preview: run `run`'s own pick changed (the Last run row): it came from cycle `cycle`,
+/// `kind` "plan" (predicted) or "copper" (drawn). O(1).
+fn note_run_pick(p: &mut crate::control::Progress, run: u32, cycle: usize, at: f64, kind: &str, c: &Criteria) {
+    let k = (run as usize).saturating_sub(1);
+    if p.pick_cycles.len() <= k {
+        p.pick_cycles.resize(k + 1, 0);
+    }
+    p.pick_cycles[k] = cycle as u32;
+    p.runbest_run = run;
+    p.runbest_cycle = cycle as u32;
+    p.runbest_at_s = at;
+    p.runbest_kind = kind.into();
+    p.runbest_errors = c.errors;
+    p.runbest_open = c.open;
+    p.runbest_violations = c.violations;
+    p.runbest_vias = c.vias;
+    p.runbest_length_mm = c.length_mm;
+    p.runbest_shrinkages = c.shrinkages;
 }
 
 /// Seed of run `k` of a best-of-N call: run 0 keeps the configured seed.
@@ -1385,6 +1536,8 @@ struct Run {
     /// TW3: rows of the four bests this run still draws (draw-only rounds) and the ones it drew.
     queue: Vec<Assigned>,
     rows_drawn: Vec<(Assigned, Criteria, RouteResult)>,
+    /// last-preview: the run's drawn pick after its last judged round (a change = its new best).
+    drawn_pick: Option<Criteria>,
 }
 
 impl Run {
@@ -1410,6 +1563,7 @@ impl Run {
             done: false,
             queue: Vec::new(),
             rows_drawn: Vec::new(),
+            drawn_pick: None,
         }
     }
 
@@ -1569,6 +1723,16 @@ impl Run {
                 judged = Some(Judged { crit, routed, total, as_drawn });
             }
         };
+        // last-preview: the copper of the variant the round is judged by (only while the caller
+        // shows sketches: the last round's sketch).
+        // The same choice as `note_judged`: the better of the variants by the objective.
+        let judged_items: std::cell::RefCell<Option<(Criteria, Vec<Item>)>> = std::cell::RefCell::new(None);
+        let keep_items = |c: &Criteria, r: &RouteResult| {
+            let mut ji = judged_items.borrow_mut();
+            if ctl.sketches.enabled() && ji.as_ref().is_none_or(|(b, _)| obj.better(c, b)) {
+                *ji = Some((*c, r.items.clone()));
+            }
+        };
         // The limit cut this cycle's pour stitching (set below; verify-sl3 F1).
         let mut cycle_stitch_cut = false;
         if !interrupted || self.arch.items.is_empty() {
@@ -1641,6 +1805,7 @@ impl Run {
                 let (r, c) = stitched(r, c);
                 if !past() || empty {
                     note_judged(c, r.routed, true);
+                    keep_items(&c, &r);
                     note_row(c, &r);
                     self.arch.offer(Variant { label: format!("round {cycle} as drawn{tag}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
                 }
@@ -1652,6 +1817,7 @@ impl Run {
             (cyc_err, cyc_viol) = (c.errors, c.violations);
             if !past() || self.arch.items.is_empty() {
                 note_judged(c, r.routed, false);
+                keep_items(&c, &r);
                 note_row(c, &r);
                 self.arch.offer(Variant { label: format!("round {cycle}{tag}"), crit: c, payload: Drawn { cycle, result: r } }, &obj);
             }
@@ -1663,6 +1829,31 @@ impl Run {
         let pick = self.arch.pick(&obj).expect("a cycle was offered");
         let pc = self.arch.items[pick].crit;
         coord.publish(pc, !self.arch.items[pick].payload.result.timed_out);
+        // last-preview: the drawn round's copper (the variant it is judged by) is the last round's
+        // sketch, and the run's pick, when it changed, its best one (the Last run row); the copper
+        // is copied only while the caller shows sketches.
+        {
+            let run = ctl.run.max(1);
+            let at = ctl.since_start_s();
+            let changed = self.drawn_pick.as_ref() != Some(&pc);
+            if changed {
+                self.drawn_pick = Some(pc);
+                let bc = self.arch.items[pick].payload.cycle;
+                ctl.with_progress(|p| note_run_pick(p, run, bc, at, "copper", &pc));
+            }
+            if ctl.sketches.enabled() {
+                let items_of = |i: usize| self.arch.items[i].payload.result.items.clone();
+                if let (Some(j), Some((c, items))) = (judged, judged_items.borrow_mut().take()) {
+                    if c == j.crit {
+                        ctl.publish_sketch(sketch_of(run, cycle, "copper", &j.crit, items), crate::control::SketchTo { last: true, best: false });
+                    }
+                }
+                if changed {
+                    let bc = self.arch.items[pick].payload.cycle;
+                    ctl.publish_sketch(sketch_of(run, bc, "copper", &pc, items_of(pick)), crate::control::SketchTo { last: false, best: true });
+                }
+            }
+        }
         // Soft cuts (M-B2, Haas 2026 §VI-E: "every hard cut so far becomes a soft cost"): a cycle
         // worse than the best so far turns the lowered rooms into a price on their passages (edge
         // history, which fades like the rest), so they no longer forbid what the plan needs.
@@ -1844,8 +2035,9 @@ fn run_all(model: &BoardModel, opts: &Options, ctl: &RunControl, coord: &Coord, 
     // M2: with the TopoR loop every run has a thread of its own: a run waits after its loop until
     // every run offered its pick ([`DrawGate`]), so the decision sees all of them and never waits
     // for a run that has no thread. Only `min(runs, rayon threads)` of them compute at once (the
-    // gate's slots; a run waiting at the gate gives its slot back, and so does a stable loop to a run
-    // not yet begun, [`Slots::yield_to_first`]): the busy threads stay as before.
+    // gate's slots; a run waiting at the gate gives its slot back, and a loop run gives its slot at
+    // each cycle boundary to a waiting run that is behind it, [`Slots::turn`]): the busy threads
+    // stay as before.
     let workers = if topor { n } else { n.min(rayon::current_num_threads()).max(1) };
     if workers == 1 {
         worker();
@@ -4757,8 +4949,22 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             tw5: Tw5<'a, 'p>,
             /// TW7 B + D.
             tw7: Tw7,
+            /// last-preview: the board (layers of the plan sketch) and the sketch bookkeeping.
+            board: &'a board::Board,
+            sk: SketchBook,
         }
         impl<'p> Sp<'_, 'p> {
+            /// last-preview: the plan sketch of the current state (its layer stretches and planned
+            /// vias, [`super::pourplan::plan_items`], KiCad frame), labelled with `crit`. Reads the
+            /// state only (the via site cache it may fill is a pure memo). O(passes).
+            fn plan_sketch(&self, cycle: usize, crit: &Criteria) -> crate::control::Sketch {
+                let t0 = std::time::Instant::now();
+                let items = super::pourplan::plan_items(self.st, self.packer, self.board, &self.lr.events, self.bottom);
+                let sk = sketch_of(self.ctl.run.max(1), cycle, "plan", crit, items);
+                let dt = t0.elapsed().as_secs_f64();
+                self.ctl.with_progress(|p| p.sketch_build_s += dt);
+                sk
+            }
             /// Debug: the criteria now as one short text.
             fn dbg_crit(&mut self) -> String {
                 let c = self.criteria();
@@ -5235,6 +5441,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 let fp = self.fingerprint();
                 let var = self.snapshot();
+                // last-preview: a mid state better than everything the archive held may become the
+                // run's pick at the cycle's end; its state is gone by then, so its sketch is taken now
+                // (only while the caller shows sketches)
+                if self.ctl.sketches.enabled() && self.tw5.floor.iter().all(|f| self.obj.better(&crit, f)) {
+                    let sk = self.plan_sketch(0, &crit);
+                    self.sk.mid.push((crit, sk));
+                }
                 self.tw5.floor.push(crit);
                 self.tw5.offers.push((label, crit, var, fp));
             }
@@ -5824,6 +6037,46 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             fn take_offers(&mut self) -> Vec<(String, Criteria, LoopVar, u64)> {
                 std::mem::take(&mut self.tw5.offers)
+            }
+            fn after_cycle(&mut self, cycle: usize, pick: &Criteria, own: &Criteria, restarts: usize) {
+                // last-preview: the cycle's own state goes to the progress (the Last round row, the
+                // cycle counter); a changed pick is the run's new best (the Last run row). Sketches
+                // only while the caller shows them: the run's pick when it changed (its own end
+                // state, or a mid state taken in `offer_mid`), the end state when one is asked for.
+                let run = self.ctl.run.max(1);
+                let at = self.ctl.since_start_s();
+                self.ctl.with_progress(|p| note_loop_cycle(p, run, cycle, restarts, at, own));
+                let mid = std::mem::take(&mut self.sk.mid);
+                let changed = self.sk.pick.as_ref() != Some(pick);
+                if changed {
+                    self.sk.pick = Some(*pick);
+                    self.ctl.with_progress(|p| note_run_pick(p, run, cycle, at, "plan", pick));
+                }
+                if !self.ctl.sketches.enabled() {
+                    return;
+                }
+                let want = self.ctl.sketches.wanted();
+                let mut sent_last = false;
+                if changed {
+                    let sk = if own == pick {
+                        Some(self.plan_sketch(cycle, own))
+                    } else {
+                        mid.into_iter().find(|(c, _)| c == pick).map(|(_, mut sk)| {
+                            sk.cycle = cycle as u32;
+                            sk
+                        })
+                    };
+                    if let Some(sk) = sk {
+                        // the run's new pick is its own end state: the same sketch is the last one
+                        let to_last = want && own == pick;
+                        sent_last = to_last;
+                        self.ctl.publish_sketch(sk, crate::control::SketchTo { last: to_last, best: true });
+                    }
+                }
+                if want && !sent_last {
+                    let sk = self.plan_sketch(cycle, own);
+                    self.ctl.publish_sketch(sk, crate::control::SketchTo { last: true, best: false });
+                }
             }
             fn restore(&mut self, v: &LoopVar) {
                 let _pg = super::prof::g(super::prof::K::SpRestore);
@@ -6457,6 +6710,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             },
             pre: pre_loop.clone(),
             pour_comps: pour_comps_ref,
+            board: b,
+            sk: SketchBook::default(),
         };
         let bounded_osc = opts.oscillation == "bounded";
         // TW3 (D6): the dialog run has no cycle cap (OK, Cancel or the time limit end it); headless
@@ -6498,23 +6753,34 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // cycle finishes and is offered), with `hard` the limits too. A cycle Cancel cut short is
         // not offered (Cancel = the best variant kept so far).
         let loop_over = || loop_deadline.is_some_and(|d| Instant::now() >= d);
-        // Free the slot (user 2026-11-17): once this loop is stable it only waits for OK (a dialog
-        // run never ends by itself at stable), so before each further cycle it gives its compute
-        // slot to a run not yet begun, if one waits, and goes on when a slot is free again; with
-        // fewer engine threads than runs every run can so become stable while the loops run. Its
-        // own result does not change (the cycles depend only on the run's state). Never past the
-        // time limit (limit-wait: bounded waits): the loop stops at this check then, and a yield
-        // would wait for a slot, unbounded by `[run] limit_grace_s`.
+        // Fair slots (sync-wait; user 2026-11-17 "free the slot"): before each cycle the run gives
+        // its compute slot to a waiting run that is behind it (not begun yet, or fewer cycles
+        // finished, [`Slots::turn`]) and goes on when it is the lowest waiter again; with fewer
+        // engine threads than runs the runs so share the slots in cycles, every run begins at once
+        // and every run can become stable while the loops run (a stable loop only waits for OK: a
+        // dialog run never ends by itself at stable). Its own result does not change (the cycles
+        // depend only on the run's state and its table views). Never past the time limit
+        // (limit-wait: bounded waits): the loop stops at this check then, and a yield would wait for
+        // a slot, unbounded by `[run] limit_grace_s`.
         let stable_seen = std::cell::Cell::new(false);
         let (yields, yield_s) = (std::cell::Cell::new(0usize), std::cell::Cell::new(0.0f64));
+        // cycles finished (the fair order's clock) and the slot wait since the last cycle line
+        let (done_cycles, turn_s) = (std::cell::Cell::new(0usize), std::cell::Cell::new(0.0f64));
         let mut stop = || {
-            if stable_seen.get() && !stop_now() {
-                ctl.test_point("stable yield check");
+            if !stop_now() {
+                let stable = stable_seen.get();
+                if stable {
+                    ctl.test_point("stable yield check");
+                }
                 let t_y = Instant::now();
-                if !ctl.over_limit() && gate.1.slots.yield_to_first() {
-                    ctl.test_point("stable slot given");
-                    yields.set(yields.get() + 1);
-                    yield_s.set(yield_s.get() + t_y.elapsed().as_secs_f64());
+                if !ctl.over_limit() && gate.1.slots.turn(done_cycles.get(), gate.0) {
+                    let w = t_y.elapsed().as_secs_f64();
+                    turn_s.set(turn_s.get() + w);
+                    if stable {
+                        ctl.test_point("stable slot given");
+                        yields.set(yields.get() + 1);
+                        yield_s.set(yield_s.get() + w);
+                    }
                 }
             }
             stop_now() || ctl.limit_reached() || loop_over()
@@ -6531,21 +6797,50 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // "stable" by route_topo); a dialog run never ends BY ITSELF at stable (finish_when_stable off).
         let live = gate.3;
         let total = nconn;
-        let mut on_pick = |_: usize, pick: &Criteria, stable: bool| {
+        let mut on_pick = |cycle: usize, pick: &Criteria, stable: bool| {
+            done_cycles.set(cycle);
             stable_seen.set(stable);
             live(&LiveLoop { pick: *pick, planned, total, stable });
         };
+        // sync-wait: one line per cycle to the run log (log.txt): timing and errors, nothing fed back
+        let run_no = gate.0 + 1;
+        let note = |n: &super::optimise::CycleNote| {
+            let from = n.restart_from.map(|(r, c)| format!(", restart from run {} cycle {c}", r + 1)).unwrap_or_default();
+            ctl.cycle_line(format!(
+                "loop cycle: run {run_no}, cycle {}, at {:.2} s, cycle {:.3} s, table wait {:.3} s, slot wait {:.3} s, errors {} (shorts {}), pick errors {}, pick {:.1}{from}",
+                n.cycle,
+                ctl.limit.elapsed_s(),
+                n.cycle_s,
+                n.sync_s,
+                turn_s.replace(0.0),
+                n.errors,
+                n.shorts,
+                n.pick_errors,
+                n.pick_value
+            ));
+        };
         let compat = sp.pre.key();
-        let port = gate.1.table.as_ref().filter(|_| draw_row.is_none()).map(|t| Port { table: t, k: gate.0, compat, slots: &gate.1.slots });
+        let port = gate.1.table.as_ref().filter(|_| draw_row.is_none()).map(|t| Port { table: t, k: gate.0, compat, slots: &gate.1.slots, note: &note });
         let mut rep = if draw_row.is_some() {
             LoopReport { stop: "draw-only".into(), ..LoopReport::default() }
         } else {
-            crate::control::in_loop_scope(|| optimise_shared(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock, &mut on_pick, port.as_ref().map(|p| p as &dyn Shared<LoopVar>)))
+            gate.1.slots.enter_loop();
+            let rep = crate::control::in_loop_scope(|| optimise_shared(&mut sp, &mut arch, &params, &mut stop, &mut inner, &clock, &mut on_pick, port.as_ref().map(|p| p as &dyn Shared<LoopVar>)));
+            gate.1.slots.leave_loop();
+            let (idle_s, span_s, n_slots) = gate.1.slots.idle();
+            ctl.cycle_line(format!(
+                "loop slots: run {run_no} ended its loop after {} cycles; so far {:.1} % of the {n_slots} compute slots' time was idle while a loop ran ({idle_s:.1} slot-s of {:.1} s; [optimize] table_lag = {})",
+                rep.cycles,
+                100.0 * idle_s / (n_slots as f64 * span_s).max(1e-9),
+                span_s,
+                opts.table_lag
+            ));
+            rep
         };
         super::prof::mark("loop-end");
         if yields.get() > 0 {
             warnings.push(format!(
-                "TopoR loop: stable after cycle {}, it gave its compute slot to a run not yet begun {} time(s) (fewer engine threads than runs) and waited {:.1} s for one again",
+                "TopoR loop: stable after cycle {}, it gave its compute slot to a waiting run {} time(s) (fewer engine threads than runs) and waited {:.1} s for one again",
                 rep.stable_at.unwrap_or(0),
                 yields.get(),
                 yield_s.get()
@@ -9935,12 +10230,12 @@ mod tests {
     }
 
     /// User 2026-11-17 "free the slot": a run waiting for its first slot goes before one that
-    /// waits to go on, and a stable run gives its slot to it ([`Slots::yield_to_first`]).
+    /// waits to go on, and a loop run gives its slot to it at a cycle boundary ([`Slots::turn`]).
     #[test]
     fn a_stable_run_gives_its_slot_to_a_run_not_yet_begun() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let slots = Slots::new(1);
-        assert!(!slots.yield_to_first(), "nobody waits: no yield");
+        assert!(!slots.turn(5, 0), "nobody waits: no yield");
         let begun = AtomicUsize::new(0);
         std::thread::scope(|s| {
             slots.acquire_first(); // run 1 computes
@@ -9954,7 +10249,7 @@ mod tests {
             while slots.st.lock().expect("slots").first == 0 {
                 std::thread::yield_now();
             }
-            let gave = slots.yield_to_first();
+            let gave = slots.turn(5, 0);
             let at = begun.load(Ordering::SeqCst);
             // run 1 holds one slot either way: release it before asserting, so a failed check ends
             // the test instead of leaving run 2 waiting for ever
@@ -9965,6 +10260,125 @@ mod tests {
         });
         let g = slots.st.lock().expect("slots");
         assert_eq!((g.free, g.first), (1, 0));
+    }
+
+    /// sync-wait: a free slot goes to the lowest waiter (first slot, then fewest cycles finished,
+    /// then the lower run), whatever order they came in.
+    #[test]
+    fn a_free_slot_goes_to_the_lowest_waiter() {
+        use std::sync::Mutex;
+        let slots = Slots::new(1);
+        slots.acquire_first(); // the holder
+        let order = Mutex::new(Vec::new());
+        let keys = [(1u8, 7usize, 0usize), (1, 3, 2), (0, 0, 9), (1, 3, 1), (1, 9, 0)];
+        std::thread::scope(|s| {
+            for (i, &(c, k, r)) in keys.iter().enumerate() {
+                let (slots, order) = (&slots, &order);
+                s.spawn(move || {
+                    slots.acquire_as(c, k, r);
+                    order.lock().unwrap().push(i);
+                    slots.release();
+                });
+                // each waiter queued before the next one comes (arrival order = index order)
+                while slots.st.lock().unwrap().queue.len() < i + 1 {
+                    std::thread::yield_now();
+                }
+            }
+            slots.release();
+        });
+        assert_eq!(*order.lock().unwrap(), vec![2, 3, 1, 0, 4], "first slot, then (3, run 1), (3, run 2), 7, 9");
+        let g = slots.st.lock().unwrap();
+        assert_eq!((g.free, g.first, g.waiting, g.queue.len()), (1, 0, 0, 0));
+    }
+
+    /// sync-wait (d9402d48): at the moment the lower waiter takes the slot, the run that turns is already
+    /// queued (one lock frees the slot and queues it); with two locks a waiter behind it could take the slot in the gap.
+    /// Observes the invariant at the hand-over, so it catches the two-lock turn (an end-state order test did not).
+    #[test]
+    fn a_turning_run_is_queued_when_the_lower_waiter_takes_its_slot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let missing = AtomicUsize::new(0);
+        for _ in 0..200 {
+            let slots = Slots::new(1);
+            slots.acquire_as(1, 4, 0);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    slots.acquire_as(1, 3, 2);
+                    if !slots.st.lock().unwrap().queue.iter().any(|k| k.2 == 0) {
+                        missing.fetch_add(1, Ordering::SeqCst);
+                    }
+                    slots.release();
+                });
+                while slots.st.lock().unwrap().queue.is_empty() {
+                    std::thread::yield_now();
+                }
+                assert!(slots.turn(5, 0));
+                slots.release();
+            });
+        }
+        assert_eq!(missing.load(Ordering::SeqCst), 0, "the turning run was not queued when its slot was taken");
+    }
+
+    /// sync-wait: a loop run gives its slot at a cycle boundary only to a waiter behind it, and the
+    /// run that gave it gets it back once it is the lowest (the stable yield is not one-way).
+    #[test]
+    fn a_run_that_gave_its_slot_gets_it_back() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let slots = Slots::new(1);
+        slots.acquire_as(1, 4, 0); // run 0 computes, 4 cycles finished
+        let (b_ran, a_back, ahead_late) = (AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false));
+        let (kept, gave, b_first) = std::thread::scope(|s| {
+            // run 1 waits to go on with 6 cycles finished: ahead of run 0, so no turn to it
+            let ahead = s.spawn(|| {
+                slots.acquire_as(1, 6, 1);
+                ahead_late.store(a_back.load(Ordering::SeqCst), Ordering::SeqCst);
+                slots.release();
+            });
+            while slots.st.lock().unwrap().queue.is_empty() {
+                std::thread::yield_now();
+            }
+            let kept = !slots.turn(4, 0);
+            // run 2 waits with 3 cycles finished: behind run 0
+            let behind = s.spawn(|| {
+                slots.acquire_as(1, 3, 2);
+                b_ran.store(true, Ordering::SeqCst);
+                slots.release();
+            });
+            while !slots.st.lock().unwrap().queue.iter().any(|k| k.2 == 2) {
+                std::thread::yield_now();
+            }
+            let gave = slots.turn(5, 0);
+            let b_first = b_ran.load(Ordering::SeqCst);
+            a_back.store(true, Ordering::SeqCst);
+            // run 0 holds one slot either way: give it back before asserting, so a failed check ends
+            // the test instead of leaving a waiter waiting for ever
+            slots.release();
+            behind.join().unwrap();
+            ahead.join().unwrap();
+            (kept, gave, b_first)
+        });
+        assert!(kept, "the only waiter is ahead: run 0 keeps its slot");
+        assert!(gave, "run 2 is behind: run 0 gives its slot");
+        assert!(b_first, "run 2 computed before run 0 got the slot back");
+        assert!(ahead_late.load(Ordering::SeqCst), "run 1 (6 cycles) comes after run 0 (5 cycles) is back");
+        assert_eq!(slots.st.lock().unwrap().free, 1);
+    }
+
+    /// sync-wait: the idle measure counts free slot-time only while a loop runs.
+    #[test]
+    fn slot_idle_counts_free_slots_while_a_loop_runs() {
+        let slots = Slots::new(2);
+        slots.acquire_first();
+        std::thread::sleep(std::time::Duration::from_millis(150)); // no loop yet: not counted
+        slots.enter_loop();
+        std::thread::sleep(std::time::Duration::from_millis(60)); // 1 of 2 slots free
+        slots.leave_loop();
+        std::thread::sleep(std::time::Duration::from_millis(150)); // no loop: not counted
+        let (idle, span, n) = slots.idle();
+        assert_eq!(n, 2);
+        assert!((0.055..0.2).contains(&span), "only the loop's time counts: span {span}");
+        assert!((idle - span).abs() < 0.01, "one free slot over the span: idle {idle} span {span}");
+        slots.release();
     }
 
     /// par-refine x stable-label: a stable yield while lanes hold slots. The lanes borrow free
@@ -10025,7 +10439,7 @@ mod tests {
             }
             let run1 = s.spawn(|| {
                 // run 1 is stable: it gives its slot to run 3 and waits to go on
-                let gave = slots.yield_to_first();
+                let gave = slots.turn(5, 0);
                 // run 1 goes on: it keeps its slot until the lane below has tried (CI 2026-11-18:
                 // a run 1 that went on and ended at once gave the slot back, and the lane rightly
                 // borrowed that free slot)
