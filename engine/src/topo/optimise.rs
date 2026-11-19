@@ -915,6 +915,17 @@ pub fn reroute_set<'p>(st: &mut State<'p>, set: &[WireId], r: &mut dyn Rerouter<
 
 #[cfg(test)]
 mod tests {
+
+    /// tw4-r2 (3): the pour part is a predicted violation per cut-off component (count) with its
+    /// graded amount, kept in the parts so the local judge rebuilds the same prediction.
+    #[test]
+    fn the_pour_part_counts_and_grades() {
+        let p = Predicted::of((2, 2.5), 1, 0).with_pour((1, 1.25));
+        assert_eq!((p.count, p.graded), (4, 4.75));
+        assert_eq!(p.parts.pour, (1, 1.25));
+        assert_eq!(Predicted::from_parts(p.parts, false, 1.0), p);
+        assert_eq!(Predicted::of((2, 2.5), 1, 0).with_pour((0, 0.0)), Predicted::of((2, 2.5), 1, 0));
+    }
     use super::*;
 
     /// A toy topology: per "wire" a length; a wire with an odd length has a via. A cycle shortens

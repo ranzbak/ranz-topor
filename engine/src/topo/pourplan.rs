@@ -126,3 +126,94 @@ pub fn pour_cuts(model: &BoardModel, items: &[Item], base: &PourBase) -> (usize,
     }
     (n, g)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{IVec2, TrackPrim};
+    use crate::model::TrackItem;
+
+    const MM: i64 = 1_000_000;
+
+    fn pad(r: &str, net: i32, x: i64, y: i64) -> String {
+        format!(
+            r#"{{ "uuid": "{r}", "ref": "{r}", "number": "1", "net": {net}, "attr": "pth",
+              "center": [{x}, {y}], "layers": [0, 31], "shapes": {{ "0": {{ "kind": "circle", "d": 1000000 }}, "31": {{ "kind": "circle", "d": 1000000 }} }} }}"#
+        )
+    }
+
+    /// 50 x 40 mm board, GND pour on B.Cu [2, 32] x [2, 32] mm listing U1.1 (4, 15), U2.1 (4, 25)
+    /// and U3.1 (20, 15); SIG pads A (7, 2.3) and B (7, 31.7).
+    fn model() -> BoardModel {
+        let pads = [pad("U1", 1, 4 * MM, 15 * MM), pad("U2", 1, 4 * MM, 25 * MM), pad("U3", 1, 20 * MM, 15 * MM), pad("A", 2, 7 * MM, 2_300_000), pad("B", 2, 7 * MM, 31_700_000)];
+        let s = format!(
+            r#"{{ "layers": [ {{ "id": 0, "name": "F.Cu" }}, {{ "id": 31, "name": "B.Cu" }} ],
+              "nets": [ {{ "code": 1, "name": "GND" }}, {{ "code": 2, "name": "SIG" }} ],
+              "outline": [ {{ "kind": "seg", "a": [0, 0], "b": [50000000, 0] }},
+                {{ "kind": "seg", "a": [50000000, 0], "b": [50000000, 40000000] }},
+                {{ "kind": "seg", "a": [50000000, 40000000], "b": [0, 40000000] }},
+                {{ "kind": "seg", "a": [0, 40000000], "b": [0, 0] }} ],
+              "pads": [ {} ],
+              "pours": [ {{ "uuid": "zz", "net": 1, "layers": [31], "pads": ["U1.1", "U2.1", "U3.1"],
+                "vias": [], "clearance": 200000, "min_thickness": 254000, "thermal_gap": 500000,
+                "spoke_width": 500000, "pad_connection": 1,
+                "fills": [ {{ "layer": 31, "outer": [[2000000, 2000000], [32000000, 2000000],
+                  [32000000, 32000000], [2000000, 32000000]] }} ] }} ],
+              "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0 }} }}"#,
+            pads.join(",")
+        );
+        BoardModel::from_json(&s).unwrap()
+    }
+
+    fn seg(net: i32, a: (i64, i64), b: (i64, i64)) -> Item {
+        let p = |q: (i64, i64)| IVec2 { x: q.0 as i32, y: q.1 as i32 };
+        Item::Track(TrackItem { net, layer: 31, width: 250_000, prim: TrackPrim::Seg { a: p(a), b: p(b) }, group: None, wire: None })
+    }
+
+    #[test]
+    fn no_copper_cuts_nothing() {
+        let m = model();
+        let base = PourBase::new(&m, 1.0e5);
+        assert!(base.any && base.cut_pads.is_empty());
+        assert_eq!(pour_cuts(&m, &[], &base), (0, 0.0));
+    }
+
+    /// A SIG track across the whole fill at x = 7 mm cuts U1.1 and U2.1 (west) off the main side
+    /// (U3.1, east): one cut-off component of two pads, graded 1 + 0.25.
+    #[test]
+    fn a_track_across_the_pour_cuts_off_the_small_side_graded_by_its_pads() {
+        let m = model();
+        let base = PourBase::new(&m, 1.0e5);
+        let cut = [seg(2, (7 * MM, 2_300_000), (7 * MM, 31_700_000))];
+        assert_eq!(pour_cuts(&m, &cut, &base), (1, 1.0 + EXTRA_PAD));
+        // Stopping short of the fill's edge leaves the pour open: nothing.
+        let open = [seg(2, (7 * MM, 2_300_000), (7 * MM, 20 * MM))];
+        assert_eq!(pour_cuts(&m, &open, &base), (0, 0.0));
+        // The same at the check's own raster (4 M cells): the coarse plan raster agrees here.
+        let fine = PourBase::new(&m, crate::pourcheck::CELL_BUDGET);
+        assert_eq!(pour_cuts(&m, &cut, &fine), (1, 1.0 + EXTRA_PAD));
+    }
+
+    /// Pads already cut off before routing are the board's own: the plan pays only for new ones.
+    #[test]
+    fn pads_cut_off_before_routing_do_not_count() {
+        let m = model();
+        let mut base = PourBase::new(&m, 1.0e5);
+        let cut = [seg(2, (7 * MM, 2_300_000), (7 * MM, 31_700_000))];
+        // U1.1 (pad 0) counted as cut before: the component still holds U2.1, priced 1.
+        base.cut_pads.insert(0);
+        assert_eq!(pour_cuts(&m, &cut, &base), (1, 1.0));
+        base.cut_pads.insert(1);
+        assert_eq!(pour_cuts(&m, &cut, &base), (0, 0.0));
+    }
+
+    /// A board without a filled pour never runs the check.
+    #[test]
+    fn no_pour_no_term() {
+        let mut m = model();
+        m.pours.clear();
+        let base = PourBase::new(&m, 1.0e5);
+        assert!(!base.any);
+        assert_eq!(pour_cuts(&m, &[seg(2, (7 * MM, 0), (7 * MM, 40 * MM))], &base), (0, 0.0));
+    }
+}
