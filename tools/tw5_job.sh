@@ -228,7 +228,7 @@ case ${1:-} in
     # mutants (own tree), O at 1 cycle on 4 boards (copper vs main de9e3977, job tw5m3), new A/B baselines at 16
     # cycles: O, Nef / Nefo (loop_p4 with / without the hook), Nb / Nbo (layering escape with / without) on qmtech
     # s0-2 (2 threads) and esp s1-3; the merge trial.
-    ( hzq run --pin --threads 2 --name tw5-tests -- bash -c "bash $ROOT/tools/tw5_job.sh tests; ONLY='o1 o2 o3 o4 o5 o6' bash $ROOT/tools/tw5_mut_f.sh $R/mutf" > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
+    ( hzq run --pin --threads 2 --name tw5-tests -- bash -c "bash $ROOT/tools/tw5_job.sh tests; bash $ROOT/tools/tw5_mut_f.sh $R/mutf" > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
     for s_ in 0 1 2; do u q$s_ 10 "Or16s$s_:qmtech:2" "Nefr16s$s_:qmtech:2" "Nefor16s$s_:qmtech:2" "Nbr16s$s_:qmtech:2" "Nbor16s$s_:qmtech:2"; done
     e=(); for c in O Nef Nefo Nb Nbo; do e+=("${c}r16s1:esp ${c}r16s2:esp ${c}r16s3:esp"); done
     u e 5 "${e[@]}"
