@@ -324,4 +324,9 @@ fn off_is_the_default_copper_and_on_reports() {
     assert!(!r0.warnings.iter().any(|w| w.contains("[optimize] site_move") || w.contains("[optimize] branch_move")));
     let r1 = run(r#", "via_site_price": "graded", "opt_site_move": true, "opt_branch_move": true, "factors": {"weight": {"via_site_social": 50.0}}"#);
     assert!(r1.warnings.iter().any(|w| w.contains("site moves kept") && w.contains("branch moves kept")), "{:?}", r1.warnings);
+    // The crop has a via without a site in the loop: the site move runs (1 of 2 kept at the time
+    // of writing; the count, not the outcome, is asserted).
+    let line = r1.warnings.iter().find(|w| w.contains("site moves kept")).expect("line");
+    let tried: usize = line.split(" site moves kept").next().and_then(|a| a.rsplit(" of ").next()).and_then(|n| n.trim().parse().ok()).expect("count");
+    assert!(tried > 0, "{line}");
 }
