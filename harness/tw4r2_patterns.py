@@ -146,7 +146,7 @@ def pour_ring() -> TPattern:
            Fp("C2", [Pad("2", "GND", g[1], (0.6, 0.8))], "obstacle"),
            Fp("C3", [Pad("2", "GND", g[2], (0.6, 0.8))], "obstacle"),
            Fp("R", [Pad(str(k + 1), None, (x, 8.0), (1.0, 1.0)) for k, x in enumerate(row)], "wall"),
-           Fp("H1", [Pad("1", "GND", (1.2, 1.2), (1.6, 1.6), "circle", drill=0.8)], "obstacle")]
+           Fp("H1", [Pad("1", "GND", (1.5, 1.5), (1.6, 1.6), "circle", drill=0.8)], "obstacle")]
     assert row[0] - 0.5 - (v1[0] + 0.4) >= CLEAR - 1e-9 and v2[0] - 0.4 - (row[-1] + 0.5) >= CLEAR - 1e-9
     # open side: V1-V2 north of the row (between the row and the GND pads), V2-V3 on the east
     yt = 7.5 - CLEAR - W_SIG / 2 - 0.003     # under the row's north side
