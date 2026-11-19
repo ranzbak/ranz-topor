@@ -855,10 +855,23 @@ impl Slots {
     fn acquire_as(&self, class: u8, clock: usize, run: usize) {
         let Ok(mut g) = self.st.lock() else { return };
         g.tick();
+        let key = Self::enqueue(&mut g, class, clock, run);
+        self.wait_for(g, key);
+    }
+
+    /// Puts `(class, clock, run)` in the waiter queue (lock held). O(log waiters).
+    fn enqueue(g: &mut SlotState, class: u8, clock: usize, run: usize) -> SlotKey {
         let key = (class, clock, run, g.ticket);
         g.ticket += 1;
         g.queue.insert(key);
         if class == 0 { g.first += 1 } else { g.waiting += 1 }
+        key
+    }
+
+    /// Waits (lock held, queued as `key`) until a slot is free and `key` is the lowest waiter, and
+    /// takes it. O(log waiters) + the wait.
+    fn wait_for(&self, mut g: std::sync::MutexGuard<'_, SlotState>, key: SlotKey) {
+        let class = key.0;
         while !(g.free > 0 && g.queue.first() == Some(&key)) {
             g = match self.cv.wait(g) {
                 Ok(g) => g,
@@ -894,17 +907,18 @@ impl Slots {
     /// index), gives the slot to it and waits to go on at `(clock, run)`; returns whether it did.
     /// O(log waiters) + the wait.
     fn turn(&self, clock: usize, run: usize) -> bool {
-        {
-            let Ok(mut g) = self.st.lock() else { return false };
-            let lower = g.queue.first().is_some_and(|k| (k.0, k.1, k.2) < (1, clock, run));
-            if !lower {
-                return false;
-            }
-            g.tick();
-            g.free += 1;
+        let Ok(mut g) = self.st.lock() else { return false };
+        let lower = g.queue.first().is_some_and(|k| (k.0, k.1, k.2) < (1, clock, run));
+        if !lower {
+            return false;
         }
+        g.tick();
+        g.free += 1;
+        // queued under the same lock that frees the slot: no waiter behind this run can take the
+        // slot back in between (the lower waiter takes it, then this run is next)
+        let key = Self::enqueue(&mut g, 1, clock, run);
         self.cv.notify_all();
-        self.acquire_as(1, clock, run);
+        self.wait_for(g, key);
         true
     }
 
