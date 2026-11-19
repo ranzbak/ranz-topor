@@ -44,7 +44,7 @@ one() {
   done
   case $c in
     K) SETS+=(--set optimize.rounds=1) ;;
-    e*) only=${c#e}; SETS+=(--set optimize.rounds=1000 --set optimize.stable_patience=1000); CLK=(--clock wall --timeout 300) ;;
+    e*) only=${c#e}; SETS+=(--set optimize.rounds=1000 --set optimize.stable_patience=1000); CLK=(--clock ${TW7_CLOCK:-wall} --timeout ${TW7_TIMEOUT:-300}) ;;
     *) note "unknown cfg $c"; return ;;
   esac
   local t0=$(date +%s)
@@ -68,6 +68,14 @@ case ${1:-} in
       done
     done
     wait ;;
+  ec)  # cpu-clock A/B on the shared VM (fair between cfgs, not a timing run): ec <seeds> <boards> <cfgs...>
+    shift; S=$1 B=$2; shift 2
+    for c in "$@"; do [ "$c" = "-" ] && c=""
+      for b in $B; do for s in $S; do
+        thr; ( TW7_CLOCK=cpu TW7_TIMEOUT=1200 hzq run --threads 4 --name tw7-e$s$c-$b -- env TW7_CLOCK=cpu TW7_TIMEOUT=1200 bash $ROOT/tools/tw7_ab.sh one e$s$c:$b:4 > $R/u-e$s$c-$b.log 2>&1; note "unit e$s$c $b rc $?" ) &
+      done; done
+    done
+    wait; note "all done" ;;
   pytall) ( CI=1 python -m pytest -q -rs -p no:cacheprovider > $R/pytest-all.log 2>&1 9>&-; note "pytest all rc $?"; tail -3 $R/pytest-all.log >> $R/rc.txt; note "all done" ) ;;
   pyt) ( CI=1 python -m pytest -q -rs -p no:cacheprovider tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py > $R/pytest.log 2>&1 9>&-; note "pytest config rc $?"; tail -2 $R/pytest.log >> $R/rc.txt ) ;;
   tests) ( cd engine && cargo test --release --test topo_tw7_patterns > $R/test-tw7.log 2>&1 9>&-; note "test topo_tw7_patterns rc $?"
