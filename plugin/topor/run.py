@@ -154,6 +154,17 @@ def round_log_lines(p: Progress, seen: int) -> list[str]:
     return out
 
 
+def cycle_log_lines(p: Progress, seen: int) -> list[str]:
+    """log.txt lines of the TopoR loop cycles the engine logged since line number `seen` (``Progress.cycle_lines``
+    keeps the last few: one line per loop cycle and one per loop end, sync-wait); a gap the engine's list no longer
+    covers is said once. O(len(cycle_lines))."""
+    lines = list(p.cycle_lines)
+    first = p.cycles_logged - len(lines) + 1  # line number of lines[0]
+    out = [f"loop cycle log: {first - seen - 1} cycle lines missed"] if first > seen + 1 else []
+    out += [ln for i, ln in enumerate(lines) if first + i > seen]
+    return out
+
+
 # ---------------------------------------------------------------- seams
 def preflight_findings(cfg: Config, config_findings, copy_text: str, *, model=None, rules=None, sel=None,
                        pro=None, orig_drc=None) -> list:
@@ -1014,6 +1025,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # reach_limit / harden); limit_at: the CPU clock's limit was sent (job.reach_limit(), and job.harden() when hard). Kept apart so a Cancel after the soft limit still reaches the job (verify-m2 F1).
         last_poll, cancelled_at, limit_at = -1e9, None, None
         rounds_seen = 0  # round lines of this job written to log.txt (round_log_lines)
+        cycles_seen = 0  # loop cycle lines of this job written to log.txt (cycle_log_lines)
         # Ends when the job is done (also after an engine panic: B-1). After Cancel / OK / the CPU limit the engine
         # finishes the stage it is in and returns its best result so far; that can take a while on a big board, so
         # the flow waits for it (the progress dialog says so) instead of giving up and losing the result.
@@ -1033,6 +1045,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 for line in round_log_lines(p, rounds_seen):
                     log.line(line)
                 rounds_seen = max(rounds_seen, p.rounds_ended)
+                for line in cycle_log_lines(p, cycles_seen):
+                    log.line(line)
+                cycles_seen = max(cycles_seen, p.cycles_logged)
                 # the engine's measurements outside the limit (M1 compass cut test, one thread) do not count
                 if (cpu_clock and 0 < state["limit"] <= p.cpu_s - p.measure_s and not state["limit_hit"] and not done):
                     state["limit_hit"] = "cpu"
