@@ -295,6 +295,6 @@ unconnected 1/7 seeds better (+10), qmtech level: `pattern_stuck` 1 stays. d: bo
 completion on both boards (esp vias +33 vs u, 1/7), so D stays (opt-in) with 0.5 the candidate; k 1 (round 3) added
 via pairs. Per connection (conn3 over seeds): u 20 better / 20 worse, um 28 / 21. Systematic worse in every u arm:
 qmtech ADV_CEC / ADV_TXC- / JS2_9 (1-2 DRC in seeds 1-4, base 0): vias dropped into the U3 pin row 14-16
-(shorting_items ADV_CEC via on pad 15 ADV_TXC-) and JS2_4/JS2_9 at RN3; the drawing's via site in a pad row, not the
-moves' plan (parking list). Flip proposal (lead/user): `pattern_moves` = the five kinds with `[factors] detour`
+(shorting_items ADV_CEC via on pad 15 ADV_TXC-) and JS2_4/JS2_9 at RN3; a via site in a pad row, not traced yet to plan or drawing (parking list).
+Flip proposal (lead/user): `pattern_moves` = the five kinds with `[factors] detour`
 0.5 (um) holds over all qmtech seeds on vias and detours and 4/5 on completion.
