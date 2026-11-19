@@ -16,6 +16,7 @@ F = "engine/src/topo/refine.rs"
 P = "engine/src/topo/pourplan.rs"
 O = "engine/src/topo/optimise.rs"
 P2 = "engine/src/topo/pack.rs"
+X = "engine/src/topo/padexit.rs"
 M = {
     "ramp_step": (V, "    Some(((ov / ramp).min(1.0) * f, ov >= ramp))", "    Some((f, ov >= ramp))"),
     "ramp_count_always": (V, "    Some(((ov / ramp).min(1.0) * f, ov >= ramp))", "    Some(((ov / ramp).min(1.0) * f, true))"),
@@ -44,8 +45,14 @@ M = {
     "dh_heights_farther": (F, "            if h.abs() < best[j] {", "            if h.abs() > best[j] {"),
     "dh_model_margin_on_line": (F, "        if it.disc[2] != 0.0 {\n            return super::pack::disc_margin", "        if false {\n            return super::pack::disc_margin"),
     "dh_layers_changed_h": (F, " && od[2].to_bits() == nd[2].to_bits();", ";"),
+    # (1) pad_exits
+    "px_side_flip": (X, "    let (du, dv) = ((at - c).dot(u0), (at - c).dot(v));", "    let (du, dv) = (-(at - c).dot(u0), -(at - c).dot(v));"),
+    "px_we_narrowest": (X, "            let x = ws - (ws - lo) * i as f64 / steps as f64;", "            let x = lo + (ws - lo) * i as f64 / steps as f64;"),
+    "px_via_def_sign": (X, "            r + x.clear.max(s) + x.sag - super::draw::poly_dist(p, &x.poly)", "            r + x.clear.max(s) + x.sag + super::draw::poly_dist(p, &x.poly)"),
+    "px_zone_none": (X, "        if super::draw::seg_dist(p, g.a, g.b) > zone {", "        if true {"),
+    "px_long_filter": (X, "            if long && (x.center - c).dot(dir) <= 0.5 * lv {", "            if long {"),
 }
-TESTS = ["--lib", "--test", "topo_cm1_room", "--test", "topo_disc_height", "--", "viacut", "pourplan", "optimise::tests::the_pour_part", "best_point",
+TESTS = ["--lib", "--test", "topo_cm1_room", "--test", "topo_disc_height", "--test", "topo_pad_exit", "--", "padexit", "the_exit", "exit_tip", "neck_or_detour", "viacut", "pourplan", "optimise::tests::the_pour_part", "best_point",
          "via_prices_stay_fresh", "height", "a_disc_against", "a_track_lean", "a_track_with_its_own", "the_end_margin_is"]
 
 

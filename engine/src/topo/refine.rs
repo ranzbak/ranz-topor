@@ -1210,7 +1210,7 @@ impl<'a> Frame<'a> {
                 continue;
             }
             // (a)
-            if let Some((f, c)) = viacut::price(g.stat, pitch, ramp).filter(|_| terms[0]) {
+            if let Some((f, c)) = viacut::price(g.stat, pitch, ramp).filter(|_| terms[0] && self.packer.pad_exit_static) {
                 add(&mut tot, viacut::Over { count: c as usize, graded: f });
             }
             // (b)

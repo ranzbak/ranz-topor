@@ -30,6 +30,7 @@ one() {
     elif [ "${c%p}" != "$c" ]; then SETS+=(--set capacity.pour_cuts=true); c=${c%p}
     elif [ "${c%h}" != "$c" ]; then SETS+=(--set capacity.via_disc_height=true); c=${c%h}
     elif [ "${c%x}" != "$c" ]; then SETS+=(--set capacity.pad_exits=true); c=${c%x}
+    elif [ "${c%S}" != "$c" ]; then SETS+=(--set capacity.pad_exit_static=true); c=${c%S}
     elif [ "${c%A}" != "$c" ]; then export TOPO_PX_TERMS=a; c=${c%A}
     elif [ "${c%B}" != "$c" ]; then export TOPO_PX_TERMS=b; c=${c%B}
     elif [ "${c%C}" != "$c" ]; then export TOPO_PX_TERMS=c; c=${c%C}

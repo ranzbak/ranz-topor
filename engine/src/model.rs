@@ -1590,6 +1590,13 @@ pub struct Options {
     /// violation (TopoR 6.3 manual p. 71, p. 56; Maley 1987 pp. 32-33, 40). false (default) = no
     /// planned exit (the drawing finds it, as before).
     pub pad_exits: bool,
+    /// tw4-r2 (1) (`[capacity] pad_exit_static`): with pad_exits, also price term (a), the planned
+    /// stub at its width nearer than its clearance to a neighbour pin. Measured 2026-11-19 (rounds=1,
+    /// terms split): (a) alone took KiCad DRC 397 -> 821 on esp + qmtech, (b) 400, (c) 504; the
+    /// side read from the leaving pass also calls a wire that is pulled taut past a pad corner a
+    /// long-side exit, and a real pass through the pin gap is the per-edge model's already. false
+    /// (default) = (b) and (c) only.
+    pub pad_exit_static: bool,
     /// tw4-r2 (3) (`[capacity] pour_cuts`): the TopoR loop's measure counts a pour terminal (a
     /// pad that reaches its net only through a pour) that the plan's copper cuts off its pour as
     /// a predicted violation, graded by the pads cut off (`topo::pourplan`). false (default) =
@@ -1822,6 +1829,7 @@ impl Default for Options {
             via_over_ramp_mm: 0.0,
             via_disc_height: false,
             pad_exits: false,
+            pad_exit_static: false,
             pour_cuts: false,
             pour_cut_cells: 1.0e5,
             stop_after: String::new(),

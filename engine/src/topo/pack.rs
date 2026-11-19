@@ -324,6 +324,8 @@ pub struct Packer<'a> {
     /// tw4-r2 (1) (`[capacity] pad_exits`): the planned pad exits are terms of the capacity model
     /// ([`super::padexit`]); with via_cuts only.
     pub pad_exits: bool,
+    /// tw4-r2 (1): with `pad_exits`, also the static term (a) (`[capacity] pad_exit_static`).
+    pub pad_exit_static: bool,
     /// tw4-r2 (1): the neck floor of every net (nm, `Drawer::neck_floor` before the `min(w)`); nets
     /// not listed: `exit_floor0`.
     pub(crate) exit_floor: FxHashMap<i32, f64>,
@@ -393,6 +395,7 @@ impl<'a> Packer<'a> {
             via_ramp: 0.0,
             via_disc_h: false,
             pad_exits: false,
+            pad_exit_static: false,
             exit_floor: fxmap(),
             exit_floor0: 0.0,
             exit_cache: Mutex::new(fxmap()),
@@ -476,6 +479,7 @@ impl<'a> Packer<'a> {
         p.via_ramp = opts.via_over_ramp_mm.max(0.0) * 1e6;
         p.via_disc_h = opts.via_disc_height;
         p.pad_exits = opts.pad_exits && opts.via_cuts;
+        p.pad_exit_static = opts.pad_exit_static;
         let floor = |net: i32| model.rules.min_track_width.max(model.rules.net_rule(net).min_width).max(2 * model.rules.min_connection) as f64;
         p.exit_floor0 = floor(0);
         p.exit_floor = model.nets.iter().map(|n| (n.code, floor(n.code))).collect();
