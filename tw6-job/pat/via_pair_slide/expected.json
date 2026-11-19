@@ -1,0 +1,373 @@
+{
+  "name": "via_pair_slide",
+  "title": "Two walls in a row: one B.Cu stretch under both, two vias fewer",
+  "expected_summary": "2 vias: A dives on F.Cu before strip 1 (x in [2.83, 7.17], recommended 5.0) and rises after strip 2 (x in [14.82, 19.18], recommended 17.0); one straight B.Cu stretch under both; 18.0 mm, price 68.0. Careless: 4 vias, same length, price 118.0.",
+  "why": "Both strips are F.Cu only and reach the copper-to-edge band at both ends: no route stays on F.Cu, so 2 vias is the minimum. The two inner vias are adjacent and joined by a 3 mm F.Cu wire; the B.Cu stretch under the strips is free, so the wire moves to B.Cu and both vias vanish (Luzin-Popov 2013 steps 4-10).",
+  "board": {
+    "size_mm": [
+      22.0,
+      14.0
+    ],
+    "copper_layers": 2
+  },
+  "rules": {
+    "clearance": 0.2,
+    "track": 0.25,
+    "class_via": [
+      0.8,
+      0.4
+    ],
+    "board_setup": {
+      "min_track": 0.2,
+      "min_via_dia": 0.45,
+      "min_drill": 0.25,
+      "min_annular": 0.1,
+      "copper_to_edge": 0.5
+    },
+    "via_price_mm": 25.0
+  },
+  "pins": {
+    "A1.1": {
+      "net": "A",
+      "pos": [
+        2.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "A2.1": {
+      "net": "A",
+      "pos": [
+        20.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "S1.1": {
+      "net": "WALL1",
+      "pos": [
+        8.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        13.0
+      ]
+    },
+    "S2.1": {
+      "net": "WALL2",
+      "pos": [
+        14.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        13.0
+      ]
+    }
+  },
+  "connections": [
+    {
+      "net": "A",
+      "from": "A1.1",
+      "to": "A2.1"
+    }
+  ],
+  "expected": {
+    "kind": "solvable",
+    "layers": 2,
+    "expected_vias": 2,
+    "via_positions": [
+      {
+        "id": "V1",
+        "x_range": [
+          2.825,
+          7.175
+        ],
+        "y": 7.0,
+        "recommended": [
+          5.0,
+          7.0
+        ],
+        "role": "dive, before strip 1"
+      },
+      {
+        "id": "V2",
+        "x_range": [
+          14.825,
+          19.175
+        ],
+        "y": 7.0,
+        "recommended": [
+          17.0,
+          7.0
+        ],
+        "role": "rise, after strip 2"
+      }
+    ],
+    "tolerance_mm": "any x inside the range (the wire is straight, so the length does not change); recommended = middle of the free interval (equal clearance, see via_force_relocate)",
+    "reference": {
+      "length_mm": 18.0,
+      "per_net": {
+        "A": 18.0
+      },
+      "vias": 2,
+      "price": 68.0
+    },
+    "careless": {
+      "length_mm": 18.0,
+      "per_net": {
+        "A": 18.0
+      },
+      "vias": 4,
+      "price": 118.0
+    },
+    "minimum_vias_proof": "both strips run from copper-to-edge band to copper-to-edge band on F.Cu: no way round, every route from A1 to A2 changes layer; one B.Cu stretch under both needs 2 vias",
+    "interpretation": {
+      "what": "Luzin-Popov local via-pair minimisation applied to the adjacent vias between the strips; the vias 'slide' outward to the dive and rise sites",
+      "moves": "V2, V3 (between the strips) are deleted; V1 and V4 stay"
+    },
+    "judgement_calls": [
+      "strips span the full board height so 2 vias is the proved minimum; 4 vias is the careless per-obstacle answer",
+      "length is the same for both answers (straight 18.0 mm on the pad row); the saving is 2 vias = 50 mm"
+    ],
+    "literature": [
+      "Luzin, Popov, Popov 2013, 'Local minimisation of the number of vias in the topology of a printed circuit' (docs/literature/luzin-popov2013-local-via-minimization.pdf), p. 2 algorithm steps 1-10 (adjacent vias v, u joined by a wire shorter than e.g. 10 mm: copy that wire onto the layers of the wires at v, re-lay wires that block it behind u, delete v), p. 2-3 fig. 2-3 (non-adjacent vias are made adjacent), p. 3: 'afterwards the via positions are corrected by a force algorithm [6]'",
+      "TopoR 6.3 User Manual (docs/literature/eremex2017-topor63-user-manual.pdf) pp. 175-183: FreeStyle, move vias and T-points, delete extra vias"
+    ],
+    "built": {
+      "reference": {
+        "min_clearance": 2.375,
+        "violations": [],
+        "min_edge": 0.5,
+        "edge_ok": true
+      },
+      "careless": {
+        "min_clearance": 0.875,
+        "violations": [],
+        "min_edge": 0.5,
+        "edge_ok": true
+      }
+    }
+  },
+  "reference": {
+    "label": "F.Cu, via, ONE B.Cu stretch under both strips, via, F.Cu: 2 vias",
+    "tracks": [
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            2.0,
+            7.0
+          ],
+          [
+            5.0,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "B.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            5.0,
+            7.0
+          ],
+          [
+            17.0,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            17.0,
+            7.0
+          ],
+          [
+            20.0,
+            7.0
+          ]
+        ]
+      }
+    ],
+    "vias": [
+      {
+        "net": "A",
+        "pos": [
+          5.0,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      },
+      {
+        "net": "A",
+        "pos": [
+          17.0,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      }
+    ]
+  },
+  "careless": {
+    "label": "A hops under each strip separately: 4 vias",
+    "tracks": [
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            2.0,
+            7.0
+          ],
+          [
+            5.0,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "B.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            5.0,
+            7.0
+          ],
+          [
+            9.5,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            9.5,
+            7.0
+          ],
+          [
+            12.5,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "B.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            12.5,
+            7.0
+          ],
+          [
+            17.0,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            17.0,
+            7.0
+          ],
+          [
+            20.0,
+            7.0
+          ]
+        ]
+      }
+    ],
+    "vias": [
+      {
+        "net": "A",
+        "pos": [
+          5.0,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      },
+      {
+        "net": "A",
+        "pos": [
+          9.5,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      },
+      {
+        "net": "A",
+        "pos": [
+          12.5,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      },
+      {
+        "net": "A",
+        "pos": [
+          17.0,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      }
+    ]
+  },
+  "kicad": {
+    "problem_drc": {
+      "violations": 0,
+      "unconnected": 1
+    },
+    "reference_drc": {
+      "violations": 0,
+      "unconnected": 0
+    },
+    "careless_drc": {
+      "violations": 0,
+      "unconnected": 0
+    }
+  },
+  "topor": "see topor50/ (filled by the TopoR run, if any)",
+  "rules_assumed": {
+    "authority": "board",
+    "margin": 0.0,
+    "options": {
+      "vias.size": "board_min"
+    }
+  }
+}

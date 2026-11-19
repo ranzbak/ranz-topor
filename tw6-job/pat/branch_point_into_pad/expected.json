@@ -1,0 +1,232 @@
+{
+  "name": "branch_point_into_pad",
+  "title": "Wide angle at a pad: the junction is the pad, not a free T",
+  "expected_summary": "0 vias, no free junction: the wires meet in pad M (angle 133.6028 >= 120), total 15.232 mm. Careless free T at (10, 3): 17.0 mm (+10.4 %).",
+  "why": "The angle at M between the wires to A and V is 133.6028 degrees (>= 120): the Fermat point would lie outside the triangle's interior, so the shortest tree is the chain through M.",
+  "board": {
+    "size_mm": [
+      20.0,
+      12.0
+    ],
+    "copper_layers": 2
+  },
+  "rules": {
+    "clearance": 0.2,
+    "track": 0.25,
+    "class_via": [
+      0.8,
+      0.4
+    ],
+    "board_setup": {
+      "min_track": 0.2,
+      "min_via_dia": 0.45,
+      "min_drill": 0.25,
+      "min_annular": 0.1,
+      "copper_to_edge": 0.5
+    },
+    "via_price_mm": 25.0
+  },
+  "pins": {
+    "A.1": {
+      "net": "T",
+      "pos": [
+        3.0,
+        3.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "M.1": {
+      "net": "T",
+      "pos": [
+        10.0,
+        6.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "V.1": {
+      "net": "T",
+      "pos": [
+        17.0,
+        3.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    }
+  },
+  "connections": [
+    {
+      "net": "T",
+      "from": "A.1",
+      "to": "M.1"
+    },
+    {
+      "net": "T",
+      "from": "M.1",
+      "to": "V.1"
+    }
+  ],
+  "expected": {
+    "kind": "solvable",
+    "layers": 2,
+    "expected_vias": 0,
+    "via_positions": [],
+    "junction": {
+      "expected": "pad M (no free branch point)",
+      "angle_at_M_deg": 133.6028,
+      "careless": [
+        10.0,
+        3.0
+      ]
+    },
+    "reference": {
+      "length_mm": 15.2315,
+      "per_net": {
+        "T": 15.2315
+      },
+      "vias": 0,
+      "price": 15.2315
+    },
+    "careless": {
+      "length_mm": 17.0,
+      "per_net": {
+        "T": 17.0
+      },
+      "vias": 0,
+      "price": 17.0
+    },
+    "gain_vs_careless_pct": 10.4029,
+    "interpretation": {
+      "rule": "one angle >= 120 degrees: the Steiner tree degenerates, the pad at the wide angle is the junction (TopoR 5.0 E8d: junction deleted into the pad)"
+    },
+    "judgement_calls": [
+      "a wire pair through a pad is a planar contact; whether a router counts that as a 'branch' is its own bookkeeping, the expected answer only says: no free T, total length minimal"
+    ],
+    "literature": [
+      "Popov, Popov 2013, EDN 'Flexible routing' (docs/literature/popov2013-edn-flexible-routing-full.txt): Steiner junctions at < 120 degrees, a pad takes over the junction when an angle is >= 120",
+      "TopoR 5.0 black box E8c / E8d (docs/literature/topor50-blackbox-results.md): Auto move puts a free T at the Fermat point (120 / 120 / 120); at an angle >= 125 the junction is deleted into the pad"
+    ],
+    "built": {
+      "reference": {
+        "min_clearance": 9000000000.0,
+        "violations": [],
+        "min_edge": 2.6,
+        "edge_ok": true
+      },
+      "careless": {
+        "min_clearance": 9000000000.0,
+        "violations": [],
+        "min_edge": 2.6,
+        "edge_ok": true
+      }
+    }
+  },
+  "reference": {
+    "label": "chain A-M-V: the junction is the pad M",
+    "tracks": [
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            3.0,
+            3.0
+          ],
+          [
+            10.0,
+            6.0
+          ]
+        ]
+      },
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            10.0,
+            6.0
+          ],
+          [
+            17.0,
+            3.0
+          ]
+        ]
+      }
+    ],
+    "vias": []
+  },
+  "careless": {
+    "label": "free T on the A-V line above M",
+    "tracks": [
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            3.0,
+            3.0
+          ],
+          [
+            10.0,
+            3.0
+          ],
+          [
+            17.0,
+            3.0
+          ]
+        ]
+      },
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            10.0,
+            3.0
+          ],
+          [
+            10.0,
+            6.0
+          ]
+        ]
+      }
+    ],
+    "vias": []
+  },
+  "kicad": {
+    "problem_drc": {
+      "violations": 0,
+      "unconnected": 2
+    },
+    "reference_drc": {
+      "violations": 0,
+      "unconnected": 0
+    },
+    "careless_drc": {
+      "violations": 0,
+      "unconnected": 0
+    }
+  },
+  "topor": "see topor50/ (filled by the TopoR run, if any)",
+  "rules_assumed": {
+    "authority": "board",
+    "margin": 0.0,
+    "options": {
+      "vias.size": "board_min"
+    }
+  }
+}

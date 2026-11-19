@@ -1,0 +1,363 @@
+{
+  "name": "via_force_relocate",
+  "title": "Vias in tight spots slide to equal clearance (same length)",
+  "expected_summary": "2 vias, same copper length 18.0 mm as the careless answer, but V1 at x = 9.000 and V2 at x = 14.000 (+-0.25) instead of squeezed against the neighbours: gaps 2.38/2.38 and 1.38/1.38 mm instead of 0.25/4.50 and 0.25/2.50.",
+  "why": "A has to be on B.Cu under the F.Cu strip W (edge to edge). V1 cannot sit left of the B.Cu strip N1 (the B.Cu stretch would cross it), V2 cannot sit right of N3. Inside the free intervals the length is the same, so the force balance puts each via where the gaps to the two neighbours are equal.",
+  "board": {
+    "size_mm": [
+      22.0,
+      14.0
+    ],
+    "copper_layers": 2
+  },
+  "rules": {
+    "clearance": 0.2,
+    "track": 0.25,
+    "class_via": [
+      0.8,
+      0.4
+    ],
+    "board_setup": {
+      "min_track": 0.2,
+      "min_via_dia": 0.45,
+      "min_drill": 0.25,
+      "min_annular": 0.1,
+      "copper_to_edge": 0.5
+    },
+    "via_price_mm": 25.0
+  },
+  "pins": {
+    "A1.1": {
+      "net": "A",
+      "pos": [
+        2.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "A2.1": {
+      "net": "A",
+      "pos": [
+        20.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "N1.1": {
+      "net": "NB1",
+      "pos": [
+        6.0,
+        7.0
+      ],
+      "layer": "B.Cu",
+      "size": [
+        0.8,
+        13.0
+      ]
+    },
+    "W.1": {
+      "net": "WALL",
+      "pos": [
+        12.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        13.0
+      ]
+    },
+    "N3.1": {
+      "net": "NB3",
+      "pos": [
+        16.0,
+        7.0
+      ],
+      "layer": "B.Cu",
+      "size": [
+        0.8,
+        13.0
+      ]
+    }
+  },
+  "connections": [
+    {
+      "net": "A",
+      "from": "A1.1",
+      "to": "A2.1"
+    }
+  ],
+  "expected": {
+    "kind": "solvable",
+    "layers": 2,
+    "expected_vias": 2,
+    "via_positions": [
+      {
+        "id": "V1",
+        "recommended": [
+          9.0,
+          7.0
+        ],
+        "tolerance_mm": 0.25,
+        "free_interval_x": [
+          6.825,
+          11.175
+        ],
+        "role": "dive, between B.Cu strip N1 and F.Cu strip W"
+      },
+      {
+        "id": "V2",
+        "recommended": [
+          14.0,
+          7.0
+        ],
+        "tolerance_mm": 0.25,
+        "free_interval_x": [
+          12.825,
+          15.175
+        ],
+        "role": "rise, between F.Cu strip W and B.Cu strip N3"
+      }
+    ],
+    "tolerance_mm": 0.25,
+    "reference": {
+      "length_mm": 18.0,
+      "per_net": {
+        "A": 18.0
+      },
+      "vias": 2,
+      "price": 68.0
+    },
+    "careless": {
+      "length_mm": 18.0,
+      "per_net": {
+        "A": 18.0
+      },
+      "vias": 2,
+      "price": 68.0
+    },
+    "edge_gaps_mm": {
+      "reference": {
+        "V1": [
+          2.375,
+          2.375
+        ],
+        "V2": [
+          1.375,
+          1.375
+        ]
+      },
+      "careless": {
+        "V1": [
+          0.25,
+          4.5
+        ],
+        "V2": [
+          0.25,
+          2.5
+        ]
+      }
+    },
+    "min_gap_mm": {
+      "reference": 1.375,
+      "careless": 0.25
+    },
+    "interpretation": {
+      "objective": "total wire length first (flat here: the wire is straight, any via position inside the interval gives the same length), then equal clearance to the foreign copper on both sides of the via (the force balance: foreign copper repels the via with the same law, the wires only pull it back onto the straight line)",
+      "bounds": "V1 must not cross B.Cu strip N1 (its B.Cu stretch would cross it) nor touch F.Cu strip W; V2 likewise between W and N3. Strips are edge-to-edge, so there is no way round them."
+    },
+    "judgement_calls": [
+      "the neighbours are strips (pads) of single-pad nets, not wires, so they cannot move; the force law (inverse distance, equal weights) is not fixed here - only the symmetric equilibrium is claimed",
+      "tolerance 0.25 mm around the middle of each free interval; clearance gap asymmetry beyond that = not relaxed",
+      "the length does not change between careless and expected (price equal): the gain is clearance, not mm"
+    ],
+    "literature": [
+      "Dayan, Dai 1991, UCSC-CRL-91-40 (docs/literature/dayan-dai1991-ucsc-crl-91-40-force-driven.pdf): force-driven wire/via placement, vias and wires repel foreign copper and the wires pull straight",
+      "Luzin, Popov, Popov 2013, 'Local minimisation of the number of vias in the topology of a printed circuit' (docs/literature/luzin-popov2013-local-via-minimization.pdf), p. 2 algorithm steps 1-10 (adjacent vias v, u joined by a wire shorter than e.g. 10 mm: copy that wire onto the layers of the wires at v, re-lay wires that block it behind u, delete v), p. 2-3 fig. 2-3 (non-adjacent vias are made adjacent), p. 3: 'afterwards the via positions are corrected by a force algorithm [6]'"
+    ],
+    "built": {
+      "reference": {
+        "min_clearance": 1.375,
+        "violations": [],
+        "min_edge": 0.5,
+        "edge_ok": true
+      },
+      "careless": {
+        "min_clearance": 0.25,
+        "violations": [],
+        "min_edge": 0.5,
+        "edge_ok": true
+      }
+    }
+  },
+  "reference": {
+    "label": "vias in the middle of their free intervals (equal clearance)",
+    "tracks": [
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            2.0,
+            7.0
+          ],
+          [
+            9.0,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "B.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            9.0,
+            7.0
+          ],
+          [
+            14.0,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            14.0,
+            7.0
+          ],
+          [
+            20.0,
+            7.0
+          ]
+        ]
+      }
+    ],
+    "vias": [
+      {
+        "net": "A",
+        "pos": [
+          9.0,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      },
+      {
+        "net": "A",
+        "pos": [
+          14.0,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      }
+    ]
+  },
+  "careless": {
+    "label": "vias placed at the first free spot: squeezed against the neighbours",
+    "tracks": [
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            2.0,
+            7.0
+          ],
+          [
+            6.875,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "B.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            6.875,
+            7.0
+          ],
+          [
+            12.875,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            12.875,
+            7.0
+          ],
+          [
+            20.0,
+            7.0
+          ]
+        ]
+      }
+    ],
+    "vias": [
+      {
+        "net": "A",
+        "pos": [
+          6.875,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      },
+      {
+        "net": "A",
+        "pos": [
+          12.875,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      }
+    ]
+  },
+  "kicad": {
+    "problem_drc": {
+      "violations": 0,
+      "unconnected": 1
+    },
+    "reference_drc": {
+      "violations": 0,
+      "unconnected": 0
+    },
+    "careless_drc": {
+      "violations": 0,
+      "unconnected": 0
+    }
+  },
+  "topor": "see topor50/ (filled by the TopoR run, if any)",
+  "rules_assumed": {
+    "authority": "board",
+    "margin": 0.0,
+    "options": {
+      "vias.size": "board_min"
+    }
+  }
+}

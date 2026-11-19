@@ -1,0 +1,250 @@
+{
+  "name": "via_pair_redundant",
+  "title": "A wire hops down and up around a strip it can walk round: 0 vias",
+  "expected_summary": "0 vias. A runs on F.Cu round the lower end of the F.Cu strip: 15.947 mm (straight 14.0, detour 1.95); price 15.9. Careless: hop under the strip, 2 vias, 14.0 mm, price 64.0.",
+  "why": "Two vias cost 50 mm; the detour round the strip end costs 1.95 mm. Going round the upper end costs 2.6 mm more, so the lower end is the optimum. The strip does not reach the board edge, so the way round is open.",
+  "board": {
+    "size_mm": [
+      20.0,
+      14.0
+    ],
+    "copper_layers": 2
+  },
+  "rules": {
+    "clearance": 0.2,
+    "track": 0.25,
+    "class_via": [
+      0.8,
+      0.4
+    ],
+    "board_setup": {
+      "min_track": 0.2,
+      "min_via_dia": 0.45,
+      "min_drill": 0.25,
+      "min_annular": 0.1,
+      "copper_to_edge": 0.5
+    },
+    "via_price_mm": 25.0
+  },
+  "pins": {
+    "A1.1": {
+      "net": "A",
+      "pos": [
+        3.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "A2.1": {
+      "net": "A",
+      "pos": [
+        17.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "S1.1": {
+      "net": "OBST",
+      "pos": [
+        10.0,
+        6.5
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        5.0
+      ]
+    }
+  },
+  "connections": [
+    {
+      "net": "A",
+      "from": "A1.1",
+      "to": "A2.1"
+    }
+  ],
+  "expected": {
+    "kind": "solvable",
+    "layers": 2,
+    "expected_vias": 0,
+    "via_positions": [],
+    "tolerance_mm": null,
+    "reference": {
+      "length_mm": 15.9468,
+      "per_net": {
+        "A": 15.9468
+      },
+      "vias": 0,
+      "price": 15.9468
+    },
+    "careless": {
+      "length_mm": 14.0,
+      "per_net": {
+        "A": 14.0
+      },
+      "vias": 2,
+      "price": 64.0
+    },
+    "straight_mm": 14.0,
+    "break_even": {
+      "via_pair_price_mm": 50.0,
+      "detour_mm": 1.9468,
+      "note": "going round wins for every detour up to 2 x 25 = 50 mm"
+    },
+    "interpretation": {
+      "what": "a layer-change pair (F->B->F) that exists only to pass an obstacle which can be passed on the wire's own layer for less than the vias cost",
+      "minimiser_move": "Luzin-Popov step 8: copy the wire between the two vias onto the layer of the wires at the first via and delete the via; the second via then joins two wires of one layer and goes too"
+    },
+    "judgement_calls": [
+      "the strip is a foreign pad on F.Cu only (single-pad net OBST, no connection): 'something that does not need it on that layer' is read as an F.Cu obstacle that has an end inside the board; with a copper-to-edge-to-edge strip the two vias would be needed (that is via_pair_slide)",
+      "price 25 mm per via is the user rule; the expected answer holds for every via price above 1.0 mm"
+    ],
+    "literature": [
+      "Luzin, Popov, Popov 2013, 'Local minimisation of the number of vias in the topology of a printed circuit' (docs/literature/luzin-popov2013-local-via-minimization.pdf), p. 2 algorithm steps 1-10 (adjacent vias v, u joined by a wire shorter than e.g. 10 mm: copy that wire onto the layers of the wires at v, re-lay wires that block it behind u, delete v), p. 2-3 fig. 2-3 (non-adjacent vias are made adjacent), p. 3: 'afterwards the via positions are corrected by a force algorithm [6]'",
+      "TopoR 6.3 User Manual (docs/literature/eremex2017-topor63-user-manual.pdf) pp. 175-183: FreeStyle, move vias and T-points, delete extra vias"
+    ],
+    "built": {
+      "reference": {
+        "min_clearance": 0.225,
+        "violations": [],
+        "min_edge": 2.6,
+        "edge_ok": true
+      },
+      "careless": {
+        "min_clearance": 0.525,
+        "violations": [],
+        "min_edge": 2.6,
+        "edge_ok": true
+      }
+    }
+  },
+  "reference": {
+    "label": "A round the strip end on F.Cu, 0 vias",
+    "tracks": [
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            3.0,
+            7.0
+          ],
+          [
+            5.35,
+            9.35
+          ],
+          [
+            14.65,
+            9.35
+          ],
+          [
+            17.0,
+            7.0
+          ]
+        ]
+      }
+    ],
+    "vias": []
+  },
+  "careless": {
+    "label": "A hops under the strip: F.Cu, via, B.Cu, via, F.Cu",
+    "tracks": [
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            3.0,
+            7.0
+          ],
+          [
+            8.85,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "B.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            8.85,
+            7.0
+          ],
+          [
+            11.15,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "A",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            11.15,
+            7.0
+          ],
+          [
+            17.0,
+            7.0
+          ]
+        ]
+      }
+    ],
+    "vias": [
+      {
+        "net": "A",
+        "pos": [
+          8.85,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      },
+      {
+        "net": "A",
+        "pos": [
+          11.15,
+          7.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      }
+    ]
+  },
+  "kicad": {
+    "problem_drc": {
+      "violations": 0,
+      "unconnected": 1
+    },
+    "reference_drc": {
+      "violations": 0,
+      "unconnected": 0
+    },
+    "careless_drc": {
+      "violations": 0,
+      "unconnected": 0
+    }
+  },
+  "topor": "see topor50/ (filled by the TopoR run, if any)",
+  "rules_assumed": {
+    "authority": "board",
+    "margin": 0.0,
+    "options": {
+      "vias.size": "board_min"
+    }
+  }
+}

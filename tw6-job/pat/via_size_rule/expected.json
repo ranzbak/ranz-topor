@@ -1,0 +1,518 @@
+{
+  "name": "via_size_rule",
+  "title": "Via size from the Board Setup, not from the net class",
+  "expected_summary": "3 vias, one per net, sizes dia/drill: SIG (0.2 mm) 0.45/0.25, PWR (1.0 mm) 0.52/0.32, HEAVY (2.0 mm) 0.84/0.64. Same copper length 51.0 mm as the careless answer; the careless vias are all the class 0.80/0.40.",
+  "why": "Board Setup minimum 0.45/0.25 (annular 0.10): pi x 0.25 = 0.785 carries 0.2 mm; 1.0 mm needs drill >= 0.318 -> 0.32 (dia 0.52); 2.0 mm needs >= 0.637 -> 0.64 (dia 0.84). The net class via 0.80/0.40 is deliberately different: a router that uses it is wrong for SIG (too big) and for HEAVY (too small: pi x 0.40 = 1.26 < 2.0).",
+  "board": {
+    "size_mm": [
+      26.0,
+      21.0
+    ],
+    "copper_layers": 2
+  },
+  "rules": {
+    "clearance": 0.2,
+    "track": 0.25,
+    "class_via": [
+      0.8,
+      0.4
+    ],
+    "board_setup": {
+      "min_track": 0.2,
+      "min_via_dia": 0.45,
+      "min_drill": 0.25,
+      "min_annular": 0.1,
+      "copper_to_edge": 0.5
+    },
+    "via_price_mm": 25.0
+  },
+  "pins": {
+    "SIG_1.1": {
+      "net": "SIG",
+      "pos": [
+        4.5,
+        3.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "SIG_2.1": {
+      "net": "SIG",
+      "pos": [
+        21.5,
+        3.0
+      ],
+      "layer": "B.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "PWR_1.1": {
+      "net": "PWR",
+      "pos": [
+        4.5,
+        9.5
+      ],
+      "layer": "F.Cu",
+      "size": [
+        2.0,
+        2.0
+      ]
+    },
+    "PWR_2.1": {
+      "net": "PWR",
+      "pos": [
+        21.5,
+        9.5
+      ],
+      "layer": "B.Cu",
+      "size": [
+        2.0,
+        2.0
+      ]
+    },
+    "HEAVY_1.1": {
+      "net": "HEAVY",
+      "pos": [
+        4.5,
+        16.5
+      ],
+      "layer": "F.Cu",
+      "size": [
+        3.0,
+        3.0
+      ]
+    },
+    "HEAVY_2.1": {
+      "net": "HEAVY",
+      "pos": [
+        21.5,
+        16.5
+      ],
+      "layer": "B.Cu",
+      "size": [
+        3.0,
+        3.0
+      ]
+    }
+  },
+  "connections": [
+    {
+      "net": "SIG",
+      "from": "SIG_1.1",
+      "to": "SIG_2.1"
+    },
+    {
+      "net": "PWR",
+      "from": "PWR_1.1",
+      "to": "PWR_2.1"
+    },
+    {
+      "net": "HEAVY",
+      "from": "HEAVY_1.1",
+      "to": "HEAVY_2.1"
+    }
+  ],
+  "expected": {
+    "kind": "solvable",
+    "layers": 2,
+    "expected_vias": 3,
+    "via_positions": [
+      {
+        "net": "SIG",
+        "x_range": "anywhere on the straight row clear of both pads",
+        "recommended": [
+          13.0,
+          3.0
+        ],
+        "via": "0.45 / 0.25"
+      },
+      {
+        "net": "PWR",
+        "x_range": "anywhere on the straight row clear of both pads",
+        "recommended": [
+          13.0,
+          9.5
+        ],
+        "via": "0.52 / 0.32"
+      },
+      {
+        "net": "HEAVY",
+        "x_range": "anywhere on the straight row clear of both pads",
+        "recommended": [
+          13.0,
+          16.5
+        ],
+        "via": "0.84 / 0.64"
+      }
+    ],
+    "via_sizes": {
+      "SIG": {
+        "width": 0.2,
+        "need_circumference_drill": 0.0637,
+        "drill": 0.25,
+        "dia": 0.45,
+        "annular": 0.1,
+        "pi_drill": 0.7854,
+        "class_via": [
+          0.8,
+          0.4
+        ]
+      },
+      "PWR": {
+        "width": 1.0,
+        "need_circumference_drill": 0.3183,
+        "drill": 0.32,
+        "dia": 0.52,
+        "annular": 0.1,
+        "pi_drill": 1.0053,
+        "class_via": [
+          0.8,
+          0.4
+        ]
+      },
+      "HEAVY": {
+        "width": 2.0,
+        "need_circumference_drill": 0.6366,
+        "drill": 0.64,
+        "dia": 0.84,
+        "annular": 0.1,
+        "pi_drill": 2.0106,
+        "class_via": [
+          0.8,
+          0.4
+        ]
+      }
+    },
+    "reference": {
+      "length_mm": 51.0,
+      "per_net": {
+        "SIG": 17.0,
+        "PWR": 17.0,
+        "HEAVY": 17.0
+      },
+      "vias": 3,
+      "price": 126.0
+    },
+    "careless": {
+      "length_mm": 51.0,
+      "per_net": {
+        "SIG": 17.0,
+        "PWR": 17.0,
+        "HEAVY": 17.0
+      },
+      "vias": 3,
+      "price": 126.0
+    },
+    "board_setup": {
+      "min_via_diameter": 0.45,
+      "min_through_hole": 0.25,
+      "min_annular": 0.1,
+      "class_via": [
+        0.8,
+        0.4
+      ]
+    },
+    "interpretation": {
+      "rule": "drill = smallest value >= Board Setup minimum drill with pi x drill >= the trace width it carries; diameter = drill + 2 x minimum annular ring, but not below the minimum via diameter",
+      "grid": "drill rounded UP to 0.01 mm (0.3183 -> 0.32, 0.6366 -> 0.64)"
+    },
+    "judgement_calls": [
+      "drill grid 0.01 mm is mine (a fab usually offers 0.05 steps: 0.35 and 0.65); configurable",
+      "one bigger via per net is expected; several minimum vias in parallel (sum of circumferences, power-via rule 2) would also carry 1.0 mm (2 x 0.785 = 1.57) - not drawn, the 5.4 text asks for 'the smallest drill with pi x drill >= width'",
+      "each net has one pad on F.Cu and one on B.Cu, so exactly one via is topologically required per net; the via sits mid-row (any x clear of the pads gives the same length)",
+      "the 2.0 mm HEAVY trace is an extreme to show the rule scales; a via annulus narrower than the trace is accepted (the circumference criterion, not the diameter, is the rule)"
+    ],
+    "literature": [
+      "memory power-via-rules rule 0 (user 2026-11-10): smallest via of the Board Setup minimums with pi * drill >= the trace width, not the net class via"
+    ],
+    "built": {
+      "reference": {
+        "min_clearance": 4.5,
+        "violations": [],
+        "min_edge": 2.6,
+        "edge_ok": true
+      },
+      "careless": {
+        "min_clearance": 4.5,
+        "violations": [],
+        "min_edge": 2.6,
+        "edge_ok": true
+      }
+    }
+  },
+  "reference": {
+    "label": "smallest via the Board Setup allows with pi x drill >= width",
+    "tracks": [
+      {
+        "net": "SIG",
+        "layer": "F.Cu",
+        "width": 0.2,
+        "pts": [
+          [
+            4.5,
+            3.0
+          ],
+          [
+            13.0,
+            3.0
+          ]
+        ]
+      },
+      {
+        "net": "SIG",
+        "layer": "B.Cu",
+        "width": 0.2,
+        "pts": [
+          [
+            13.0,
+            3.0
+          ],
+          [
+            21.5,
+            3.0
+          ]
+        ]
+      },
+      {
+        "net": "PWR",
+        "layer": "F.Cu",
+        "width": 1.0,
+        "pts": [
+          [
+            4.5,
+            9.5
+          ],
+          [
+            13.0,
+            9.5
+          ]
+        ]
+      },
+      {
+        "net": "PWR",
+        "layer": "B.Cu",
+        "width": 1.0,
+        "pts": [
+          [
+            13.0,
+            9.5
+          ],
+          [
+            21.5,
+            9.5
+          ]
+        ]
+      },
+      {
+        "net": "HEAVY",
+        "layer": "F.Cu",
+        "width": 2.0,
+        "pts": [
+          [
+            4.5,
+            16.5
+          ],
+          [
+            13.0,
+            16.5
+          ]
+        ]
+      },
+      {
+        "net": "HEAVY",
+        "layer": "B.Cu",
+        "width": 2.0,
+        "pts": [
+          [
+            13.0,
+            16.5
+          ],
+          [
+            21.5,
+            16.5
+          ]
+        ]
+      }
+    ],
+    "vias": [
+      {
+        "net": "SIG",
+        "pos": [
+          13.0,
+          3.0
+        ],
+        "dia": 0.45,
+        "drill": 0.25
+      },
+      {
+        "net": "PWR",
+        "pos": [
+          13.0,
+          9.5
+        ],
+        "dia": 0.52,
+        "drill": 0.32
+      },
+      {
+        "net": "HEAVY",
+        "pos": [
+          13.0,
+          16.5
+        ],
+        "dia": 0.84,
+        "drill": 0.64
+      }
+    ]
+  },
+  "careless": {
+    "label": "net class via 0.80 / 0.40 on every net",
+    "tracks": [
+      {
+        "net": "SIG",
+        "layer": "F.Cu",
+        "width": 0.2,
+        "pts": [
+          [
+            4.5,
+            3.0
+          ],
+          [
+            13.0,
+            3.0
+          ]
+        ]
+      },
+      {
+        "net": "SIG",
+        "layer": "B.Cu",
+        "width": 0.2,
+        "pts": [
+          [
+            13.0,
+            3.0
+          ],
+          [
+            21.5,
+            3.0
+          ]
+        ]
+      },
+      {
+        "net": "PWR",
+        "layer": "F.Cu",
+        "width": 1.0,
+        "pts": [
+          [
+            4.5,
+            9.5
+          ],
+          [
+            13.0,
+            9.5
+          ]
+        ]
+      },
+      {
+        "net": "PWR",
+        "layer": "B.Cu",
+        "width": 1.0,
+        "pts": [
+          [
+            13.0,
+            9.5
+          ],
+          [
+            21.5,
+            9.5
+          ]
+        ]
+      },
+      {
+        "net": "HEAVY",
+        "layer": "F.Cu",
+        "width": 2.0,
+        "pts": [
+          [
+            4.5,
+            16.5
+          ],
+          [
+            13.0,
+            16.5
+          ]
+        ]
+      },
+      {
+        "net": "HEAVY",
+        "layer": "B.Cu",
+        "width": 2.0,
+        "pts": [
+          [
+            13.0,
+            16.5
+          ],
+          [
+            21.5,
+            16.5
+          ]
+        ]
+      }
+    ],
+    "vias": [
+      {
+        "net": "SIG",
+        "pos": [
+          13.0,
+          3.0
+        ],
+        "dia": 0.8,
+        "drill": 0.4
+      },
+      {
+        "net": "PWR",
+        "pos": [
+          13.0,
+          9.5
+        ],
+        "dia": 0.8,
+        "drill": 0.4
+      },
+      {
+        "net": "HEAVY",
+        "pos": [
+          13.0,
+          16.5
+        ],
+        "dia": 0.8,
+        "drill": 0.4
+      }
+    ]
+  },
+  "kicad": {
+    "problem_drc": {
+      "violations": 0,
+      "unconnected": 3
+    },
+    "reference_drc": {
+      "violations": 0,
+      "unconnected": 0
+    },
+    "careless_drc": {
+      "violations": 0,
+      "unconnected": 0
+    }
+  },
+  "topor": "see topor50/ (filled by the TopoR run, if any)",
+  "rules_assumed": {
+    "authority": "board",
+    "margin": 0.0,
+    "options": {
+      "vias.size": "board_min"
+    }
+  }
+}

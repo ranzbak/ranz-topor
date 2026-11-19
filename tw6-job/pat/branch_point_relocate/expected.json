@@ -1,0 +1,266 @@
+{
+  "name": "branch_point_relocate",
+  "title": "3-terminal net: the T junction belongs at the Steiner point",
+  "expected_summary": "0 vias, junction at the Fermat point [5.8868, 7.0] (angles [119.9992, 120.0004, 120.0004]), total 22.660 mm. Careless T on the P-Q wire at (3, 7): 24.0 mm (+5.6 %); pad chain 24.87.",
+  "why": "All three angles of the pad triangle are below 120 degrees (P 72.6, Q 72.6, R 39.8), so the shortest tree has a free branch point where the three wires meet at 120 degrees. No other copper is on the board.",
+  "board": {
+    "size_mm": [
+      20.0,
+      14.0
+    ],
+    "copper_layers": 2
+  },
+  "rules": {
+    "clearance": 0.2,
+    "track": 0.25,
+    "class_via": [
+      0.8,
+      0.4
+    ],
+    "board_setup": {
+      "min_track": 0.2,
+      "min_via_dia": 0.45,
+      "min_drill": 0.25,
+      "min_annular": 0.1,
+      "copper_to_edge": 0.5
+    },
+    "via_price_mm": 25.0
+  },
+  "pins": {
+    "P.1": {
+      "net": "T",
+      "pos": [
+        3.0,
+        2.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "Q.1": {
+      "net": "T",
+      "pos": [
+        3.0,
+        12.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    },
+    "R.1": {
+      "net": "T",
+      "pos": [
+        17.0,
+        7.0
+      ],
+      "layer": "F.Cu",
+      "size": [
+        0.8,
+        0.8
+      ]
+    }
+  },
+  "connections": [
+    {
+      "net": "T",
+      "from": "P.1",
+      "to": "Q.1"
+    },
+    {
+      "net": "T",
+      "from": "Q.1",
+      "to": "R.1"
+    }
+  ],
+  "expected": {
+    "kind": "solvable",
+    "layers": 2,
+    "expected_vias": 0,
+    "via_positions": [],
+    "junction": {
+      "expected": [
+        5.8868,
+        7.0
+      ],
+      "tolerance_mm": 0.15,
+      "angles_deg": [
+        119.9992,
+        120.0004,
+        120.0004
+      ],
+      "careless": [
+        3.0,
+        7.0
+      ]
+    },
+    "reference": {
+      "length_mm": 22.6603,
+      "per_net": {
+        "T": 22.6603
+      },
+      "vias": 0,
+      "price": 22.6603
+    },
+    "careless": {
+      "length_mm": 24.0,
+      "per_net": {
+        "T": 24.0
+      },
+      "vias": 0,
+      "price": 24.0
+    },
+    "mst_pad_chain_mm": 24.8661,
+    "gain_vs_careless_pct": 5.5821,
+    "octilinear_note": {
+      "steiner_junction": [
+        8.0,
+        7.0
+      ],
+      "length_mm": 23.1421,
+      "text": "in the 45-degree style the 120 degree junction does not exist; the octilinear optimum (two 45-degree legs from P and Q to a trunk on y = 7, trunk to R) is the same family of answers: junction x = 8.0, length informational, not drawn"
+    },
+    "interpretation": {
+      "rule": "all three angles < 120: a free branch point at the Fermat point, 120 / 120 / 120 (Popov 2013 EDN; TopoR 5.0 E8c Auto move)"
+    },
+    "judgement_calls": [
+      "any-angle (smooth) style is drawn; an octilinear board would use the 45-degree variant (length in the note)",
+      "TopoR 5.0 autorouting builds pad-to-pad chains (E3b); its Auto move in FreeStyle moves a pre-routed T to the Fermat point (E8c). The TopoR run therefore pre-routes the careless T and applies Auto move"
+    ],
+    "literature": [
+      "Popov, Popov 2013, EDN 'Flexible routing' (docs/literature/popov2013-edn-flexible-routing-full.txt): Steiner junctions at < 120 degrees, a pad takes over the junction when an angle is >= 120",
+      "TopoR 5.0 black box E8c / E8d (docs/literature/topor50-blackbox-results.md): Auto move puts a free T at the Fermat point (120 / 120 / 120); at an angle >= 125 the junction is deleted into the pad",
+      "TopoR 6.3 User Manual (docs/literature/eremex2017-topor63-user-manual.pdf) pp. 175-183: FreeStyle, move vias and T-points, delete extra vias"
+    ],
+    "built": {
+      "reference": {
+        "min_clearance": 9000000000.0,
+        "violations": [],
+        "min_edge": 1.6,
+        "edge_ok": true
+      },
+      "careless": {
+        "min_clearance": 9000000000.0,
+        "violations": [],
+        "min_edge": 1.6,
+        "edge_ok": true
+      }
+    }
+  },
+  "reference": {
+    "label": "T junction at the Steiner (Fermat) point",
+    "tracks": [
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            3.0,
+            2.0
+          ],
+          [
+            5.8868,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            3.0,
+            12.0
+          ],
+          [
+            5.8868,
+            7.0
+          ]
+        ]
+      },
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            5.8868,
+            7.0
+          ],
+          [
+            17.0,
+            7.0
+          ]
+        ]
+      }
+    ],
+    "vias": []
+  },
+  "careless": {
+    "label": "T junction on the P-Q wire (R joined to the nearest point of the existing wire)",
+    "tracks": [
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            3.0,
+            2.0
+          ],
+          [
+            3.0,
+            7.0
+          ],
+          [
+            3.0,
+            12.0
+          ]
+        ]
+      },
+      {
+        "net": "T",
+        "layer": "F.Cu",
+        "width": 0.25,
+        "pts": [
+          [
+            3.0,
+            7.0
+          ],
+          [
+            17.0,
+            7.0
+          ]
+        ]
+      }
+    ],
+    "vias": []
+  },
+  "kicad": {
+    "problem_drc": {
+      "violations": 0,
+      "unconnected": 2
+    },
+    "reference_drc": {
+      "violations": 0,
+      "unconnected": 0
+    },
+    "careless_drc": {
+      "violations": 0,
+      "unconnected": 0
+    }
+  },
+  "topor": "see topor50/ (filled by the TopoR run, if any)",
+  "rules_assumed": {
+    "authority": "board",
+    "margin": 0.0,
+    "options": {
+      "vias.size": "board_min"
+    }
+  }
+}
