@@ -281,6 +281,11 @@ pub struct RouteResult {
     pub compass: Option<crate::topo::compass::Compass>,
     /// M2.TL: the time limit of the call and what it did (`None`: no limit set).
     pub limit: Option<LimitReport>,
+    /// TW3: the four bests of the TopoR loop's one variant table as drawn (`role` = the roles the
+    /// row held in the table by its predicted criteria; `drawn_roles` = the roles it holds among
+    /// the drawn rows; `applied` = the row handed back; `predicted` / `drawn` criteria). Empty
+    /// without the TopoR loop.
+    pub bests: Vec<serde_json::Value>,
     /// TW2: how the ERBS drawing drew its runs (`[drawing] realise = "erbs"`; `None` otherwise).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub erbs: Option<ErbsRunReport>,
@@ -876,6 +881,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         diff_pairs: Vec::new(),
         compass: None,
         limit: None,
+        bests: Vec::new(),
         erbs: None,
     }
 }

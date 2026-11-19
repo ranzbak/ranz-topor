@@ -124,7 +124,7 @@ def test_cpu_clock_hard_limit_cancels_an_engine_without_reach(app, eprom, tmp_pa
     class Eng(RecordingEngine):
         def route_async(self, m, o):
             job = super().route_async(m, o)
-            old = Old(job.real, job.hold, job.patch)
+            old = Old(job.real, job.hold, job.patch, end_real=job.end_real)
             self.jobs[-1] = old
             return old
 
@@ -159,7 +159,7 @@ def test_soft_limit_overrun_leaves_out_the_measurements(app, eprom, tmp_path, re
     class Eng(RecordingEngine):
         def route_async(self, m, o):
             job = super().route_async(m, o)
-            mj = Measuring(job.real, job.hold, job.patch)
+            mj = Measuring(job.real, job.hold, job.patch, end_real=job.end_real)
             self.jobs[-1] = mj
             return mj
 

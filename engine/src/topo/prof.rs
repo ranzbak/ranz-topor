@@ -73,6 +73,8 @@ pub enum K {
     Escape,
     FloatWire,
     LoopP4,
+    TableSync,
+    Fingerprint,
 }
 
 const NAMES: &[&str] = &[
@@ -124,6 +126,8 @@ const NAMES: &[&str] = &[
     "escape",            // TW5 Sp::escape: one layering escape (whole-board layering, history, via-rose front)
     "float_wire",        // TW5 Sp::float_up: floating up of one wire (inside the sweep)
     "loop_p4",           // TW5 (f) Sp::loop_p4: one in-loop P4 rip-up round (victims, placing, layering)
+    "table_sync",        // TW3: a run's sync with the shared variant table (wait for the other runs + commit + view)
+    "fingerprint",       // TW3: Sp::fingerprint (the state hash a restart compares)
 ];
 const N: usize = NAMES.len();
 
