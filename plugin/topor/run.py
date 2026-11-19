@@ -640,7 +640,7 @@ def _abort_locked(busy, ui, out: "RunOutcome", report, log, ctx, t0) -> "RunOutc
 def sketch_poll(job, ui, p: Progress, sk: dict, now: float, interval: float, done: bool, log=None) -> None:
     """last-preview, one progress poll: ask the engine for a new last-round sketch every `interval` s while it runs
     (it builds one at the next loop cycle's end), and hand the UI the sketch it shows (``ui.preview_wanted()``) when a
-    new one was published (``p.sketch_seq``) or the UI switched kind. `sk` keeps the state between polls. O(1) +
+    new one was published (``p.sketch_seq``), the UI switched kind or the best / Last run row's run moved. `sk` keeps the state between polls. O(1) +
     the sketch's JSON when one is fetched."""
     kind = ui.preview_wanted()
     if kind is None:
@@ -648,9 +648,12 @@ def sketch_poll(job, ui, p: Progress, sk: dict, now: float, interval: float, don
     if not done and now - sk["asked"] >= interval:
         job.request_sketch()
         sk["asked"] = now
-    if p.sketch_seq == sk["seq"] and kind == sk["kind"]:
+    # also when the run the "best" / "run" image belongs to moved: the engine publishes a pick's sketch before it
+    # moves best_run / runbest_run (verify-last-preview F5), so the seq alone can leave the old run's image up
+    ctx = (p.best_run, p.runbest_run)
+    if p.sketch_seq == sk["seq"] and kind == sk["kind"] and ctx == sk.get("ctx"):
         return
-    sk["seq"], sk["kind"] = p.sketch_seq, kind
+    sk["seq"], sk["kind"], sk["ctx"] = p.sketch_seq, kind, ctx
     js = job.sketch(kind)
     if not js:
         return

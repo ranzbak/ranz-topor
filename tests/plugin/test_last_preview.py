@@ -129,6 +129,23 @@ def test_sketch_poll_asks_at_the_interval_and_hands_over_each_new_sketch_once():
     assert (job.requests, len(job.fetched)) == n
 
 
+def test_sketch_poll_refetches_when_the_best_or_last_run_moves_without_a_new_sketch():
+    """verify-last-preview F5: the engine publishes a pick's sketch (seq 5) before it moves best_run / runbest_run, so the
+    poll in between fetched the old run's sketch; when the run moves, the image of the Best so far / Last run row follows
+    though sketch_seq did not change."""
+    job = FakeJob({"best": {"seq": 4, "kind": "plan"}, "run": {"seq": 4, "kind": "plan"}})
+    sk = {"asked": -1e9, "seq": -1, "kind": None, "sent": None}
+    for kind, field in (("best", "best_run"), ("run", "runbest_run")):
+        ui = FakeUi(kind)
+        run_mod.sketch_poll(job, ui, Progress(sketch_seq=5, **{field: 1}), sk, 0.0, 2.0, False)
+        assert ui.got == [(kind, 4)]
+        job.sketches[kind] = {"seq": 5, "kind": "plan"}  # the moved run's sketch, same sketch_seq
+        run_mod.sketch_poll(job, ui, Progress(sketch_seq=5, **{field: 1}), sk, 0.1, 2.0, False)
+        assert ui.got == [(kind, 4)], "nothing moved: no refetch"
+        run_mod.sketch_poll(job, ui, Progress(sketch_seq=5, **{field: 2}), sk, 0.2, 2.0, False)
+        assert ui.got == [(kind, 4), (kind, 5)], f"{field} moved: the new run's image"
+
+
 # ---------------------------------------------------------------------------------------------- the live image (pure)
 
 MODEL = {
@@ -318,6 +335,48 @@ def test_wx_ui_preview_plumbing(app, monkeypatch):
     assert ui._progress.preview_kind is None and not hasattr(ui._progress, "preview_image")
     ui.sketch("last", _sketch(6))  # ignored without an image
     ui._close_progress()
+
+
+@pytest.mark.parametrize("unreleased", [False, True])
+def test_wx_preflight_reads_the_preview_settings_only_when_available(app, monkeypatch, unreleased):
+    """since-gate in WxUi.preflight (verify-last-preview F2): the pinned topor.toml values (off, 7 s) reach the dialog
+    only with TOPOR_UNRELEASED_SETTINGS=1; in this version (0.4.x) the image stays on its defaults (last, 2 s)."""
+    from topor.ports import Decision, RunSummary
+    if unreleased:
+        monkeypatch.setenv("TOPOR_UNRELEASED_SETTINGS", "1")
+    else:
+        monkeypatch.delenv("TOPOR_UNRELEASED_SETTINGS", raising=False)
+    cfg = Config.defaults().with_values({("run", "progress_preview"): "off", ("run", "progress_preview_interval_s"): 7.0})
+
+    class Pre:
+        def __init__(self, *a):
+            pass
+
+        def ShowModal(self):
+            return wx.ID_OK
+
+        def decision(self, proceed):
+            return Decision(True)
+
+        def Destroy(self):
+            pass
+
+    monkeypatch.setattr(ui_wx, "PreflightDialog", Pre)
+
+    class Quiet(ui_wx.WxUi):
+        def _present(self, dlg):
+            pass
+
+        def _pump(self):
+            pass
+
+    ui = Quiet()
+    ui.preflight([], RunSummary(board="b"), cfg)
+    ui._limit_editable = True
+    if unreleased:
+        assert ui.preview_wanted() is None and ui.preview_interval_s() == 7.0
+    else:
+        assert ui.preview_wanted() == "last" and ui.preview_interval_s() == 2.0
 
 
 def test_post_run_preview_says_the_result_is_what_accept_writes():

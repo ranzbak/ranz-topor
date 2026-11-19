@@ -13,6 +13,11 @@ use topor_engine::control::{RunControl, Sketch};
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::route::{route_with, RouteResult};
 
+/// A run's pick sketch with the Last run row's (errors, vias, length) at the same moment.
+type PickAt = (Sketch, (usize, usize, f64));
+/// A last sketch with the hook point it was read at and the Last run row's numbers then.
+type MidSeen = (Sketch, String, (usize, usize, f64));
+
 const EPROM: &str = "eprom-to-kernal-ripped.json";
 
 fn fixture_text(name: &str) -> String {
@@ -143,7 +148,7 @@ fn plan_sketches_are_in_the_kicad_frame_and_follow_the_loop() {
     // the test hook stops at the loop's end: the sketches of the loop, before the drawing replaces them
     let seen: Arc<std::sync::Mutex<Vec<Sketch>>> = Arc::default();
     // the run's pick sketch at the loop's end and the Last run row then
-    let picks: Arc<std::sync::Mutex<Vec<(Sketch, (usize, usize, f64))>>> = Arc::default();
+    let picks: Arc<std::sync::Mutex<Vec<PickAt>>> = Arc::default();
     let mut c2 = ctl.clone();
     {
         let (c3, s2, p2) = (ctl.clone(), seen.clone(), picks.clone());
@@ -225,7 +230,7 @@ fn the_pick_sketch_is_the_pick_also_for_mid_cycle_states() {
         let ctl = RunControl::new();
         ctl.limit.init(o.wall_clock_s);
         ctl.sketches.enable();
-        let seen: Arc<std::sync::Mutex<Vec<(Sketch, String, (usize, usize, f64))>>> = Arc::default();
+        let seen: Arc<std::sync::Mutex<Vec<MidSeen>>> = Arc::default();
         let mut c2 = ctl.clone();
         {
             let (c3, s2) = (ctl.clone(), seen.clone());
@@ -260,4 +265,32 @@ fn the_last_sketch_is_the_judged_copper() {
     let last = ctl.sketches.get(false, 0).expect("a last sketch");
     assert_eq!(last.kind, "copper", "the last sketch after the drawing");
     assert_eq!((last.errors, last.vias, last.length_mm), (p.last_errors, p.last_vias, p.last_length_mm), "last sketch vs the Last round row");
+}
+
+/// verify-last-preview F4: the dialog's restart count (`Progress::loop_restarts`, shown in the round
+/// context "run 2, restart 3, round 17") is the count the loop's own report names ("N restarts from
+/// the archive"); a stall restart config (`restart = "stall"`, `loop_restart = 2`) makes it > 0.
+#[test]
+fn the_progress_restart_count_is_the_loops_restart_count() {
+    let m = BoardModel::from_json(&fixture_text(EPROM)).expect("fixture parses");
+    let o = Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 30, "runs": 1, "restart": "stall", "loop_restart": 2}"#).expect("options parse");
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let seen: Arc<std::sync::Mutex<Vec<u32>>> = Arc::default();
+    let mut c2 = ctl.clone();
+    {
+        let (c3, s2) = (ctl.clone(), seen.clone());
+        c2.set_test_hook(move |_| {
+            s2.lock().expect("seen").push(c3.snapshot().loop_restarts);
+            false
+        });
+    }
+    let r = route_with(&m, &o, &c2);
+    let line = r.warnings.iter().find(|w| w.starts_with("TopoR loop (")).expect("the loop line");
+    let n: u32 = line.split("; ").find_map(|t| t.strip_suffix(" restarts from the archive").map(|x| x.split(|c: char| !c.is_ascii_digit()).next_back().expect("number").parse().expect("count"))).unwrap_or_else(|| panic!("restarts in: {line}"));
+    assert!(n > 0, "the config must restart at least once: {line}");
+    let seen = seen.lock().expect("seen");
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "loop_restarts went back: {seen:?}");
+    assert_eq!(seen.iter().copied().max().unwrap_or(0), n, "progress {seen:?} vs the loop report: {line}");
+    assert_eq!(ctl.snapshot().loop_restarts, n);
 }
