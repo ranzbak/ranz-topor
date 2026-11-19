@@ -3,7 +3,7 @@
 #   tw6_ab.sh one <cfg>:<board>[:<threads>]
 #   tw6_ab.sh tests          the TW6 tests + the tw4-r2 tests the parts touch (release)
 #   tw6_ab.sh off            defaults rounds=1 on eprom/wiccon/esp/qmtech (off = main copper; compare with ladder_diff)
-#   tw6_ab.sh pats           planned_crossing_window + site_or_stay + lead_via_end, K and M per cfg in PCFG (default "- s sh")
+#   tw6_ab.sh pats           planned_crossing_window + site_or_stay + lead_via_end, K and M per cfg in PCFG (default "- s p sh shp")
 #   tw6_ab.sh eq <cfgs>      equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults)
 #   tw6_ab.sh ac <cfgs>      tests + off + pats + eq <cfgs> (the A+C round)
 # cfg: K = rounds=1; M = rounds=40; e<k> = equal time seed k; suffixes (any order, at the end):
@@ -57,7 +57,7 @@ case ${1:-} in
     for b in eprom wiccon esp qmtech; do bash $ROOT/tools/tw6_ab.sh one K:$b & done; wait ;;
   pats)
     python -m harness.tw6_patterns $R/tw6p > $R/tw6p-gen.log 2>&1; note "gen rc $?"
-    for c in ${PCFG:-- s sh}; do [ "$c" = "-" ] && c=""; for k in K M; do for b in pcw sos lve; do bash $ROOT/tools/tw6_ab.sh one $k$c:$b & done; wait; done; done ;;
+    for c in ${PCFG:-- s p sh shp}; do [ "$c" = "-" ] && c=""; for k in K M; do for b in pcw sos lve; do bash $ROOT/tools/tw6_ab.sh one $k$c:$b & done; wait; done; done ;;
   eq)
     shift
     for c in "$@"; do
