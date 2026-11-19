@@ -29,7 +29,7 @@ def test_rows_partition_the_run_and_the_loop_split_adds_up():
     assert side["prof_sum_share_pct"] == 100.0
     assert abs(sum(s for _, s in b["loop_split"]) - b["loop_s"]) < 1e-9
     split = dict(b["loop_split"])
-    assert split["judge (whole-board layering + measure per re-lay)"] == 18.0
+    assert split["judge (loop_judge=global only: whole-board layering + measure per re-lay; the local judge is in search)"] == 18.0
     assert split["search (sweep minus judge: price, place, keep)"] == 6.0  # sweep 24 - judge 18
     assert split["layering (uncross, layer re-optimisation, via-rose, floating up)"] == 8.0
     assert split["other (offer, archive, snapshot, gen 0, picking)"] == 2.0  # 40 - 38 in laps
