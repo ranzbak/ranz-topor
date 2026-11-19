@@ -1580,6 +1580,13 @@ pub struct Options {
     /// holds what lies on it). The drawing's packing keeps the disc on the line. false (default) =
     /// the disc on the edge line (as before).
     pub via_disc_height: bool,
+    /// TW6 part A (`[vias] site_price`, docs/dev/design/tw6-via-sites.md A): "graded" = a planned
+    /// via without a site pays, besides its count, the graded deficit of its room at its point
+    /// (`(r - room) / (d + s)` at the violation weight, `topo::pack::Packer::site_room`, one
+    /// measure for the plan, the drawing and the pad exits' via term, which it then replaces), and
+    /// among site-less traversals the plan takes the one with the least deficit. "off" (default)
+    /// = the count alone (as before).
+    pub via_site_price: String,
     /// tw4-r2 (1) (`[capacity] pad_exits`, docs/dev/design/tw4-r2.md (1)): with via_cuts, every
     /// wire end at a fine-pitch pad (another net's copper beside it closer than the wire could
     /// pass) holds its planned exit, read from the plan (the leaving pass, the pad side it leaves
@@ -1828,6 +1835,7 @@ impl Default for Options {
             via_best_point: false,
             via_over_ramp_mm: 0.0,
             via_disc_height: false,
+            via_site_price: "off".into(),
             pad_exits: false,
             pad_exit_static: false,
             pour_cuts: false,

@@ -103,6 +103,23 @@ scratch/agent-wt/reports/tw6-via-sites-data/vsite.py.
   on together (the tw4-r2 (2b) nets: IO6, ENABLE, IO7, IO5, IO10_SDA on esp; ADV_DVDD, JS1_1, Net-(U7-PVSS) on qmtech
   are re-measured by name).
 
+**A + C as implemented (round 2, on main 12699012 = tw4-r2 merged; `[vias] site_price`, default "off").**
+- `Packer::site_room(t, net, s)` = the cached max free over `tri_site_points` (`via_site` = room >= r, unchanged);
+  `Packer::site_deficit(room, d)` = min(d, max(0, d/2 - room)).
+- Plan: `Frame::site_over` adds Σ deficit / (d + s) at each planned via point (`cutflow::point_free` there, the
+  same measure) to the wire's CM1 entry (`Frame::wire_over`), so the undo log, lane overlays, `viacheck` and the
+  local judge's focus cover it; the count stays `nosite`'s. `Frame::rank` orders site-less traversals by deficit (the
+  optimise key has it inside its price already).
+- Pad exits: term (c) is off when the site price is on (one count; the site price is the same room at the same point).
+- Drawing: `Drawer::set_wire_layers` packs the via discs at the height of their via point (planned site before the
+  vias are placed, drawn point after) whenever `[capacity] via_disc_height` is on; `Drawer::relayer` keeps a kept
+  via's height. This is the plan/draw agreement of tw4-r2 (2b) and applies to `via_disc_height` alone too.
+- C: `Packer::lead_ends` (set in `route_round` with the option) and `Frame::lead_via`: a layer change at a lead end
+  (the drawing's `lead_via_site` rule) takes the lead's via end as its point and has a site.
+- Not done in A: the drawing's `via_candidates` ranking stays the drawing's own (its checker is KiCad's rule).
+- Tests: engine/tests/topo_site_price.rs (opt-in, graded and capped deficit, stored = fresh and focus exact with
+  site_price + via_disc_height + pad_exits on the qmtech USB crop, off = default copper).
+
 **B. The no-via alternative priced against it.**
 - Layering: each domain-graph edge weighs `via_mm + viol_mm·amount(d_edge)`.
   - d_edge is static per stretch, cached in `StretchCache` and keyed by the option.

@@ -321,6 +321,15 @@ pub struct Packer<'a> {
     /// tw4-r2 (2b) (`[capacity] via_disc_height`): a planned via's disc packs on its wire's entry
     /// and exit edges at its height off each edge line ([`pair_req`], [`disc_margin`]).
     pub via_disc_h: bool,
+    /// TW6 part A (`[vias] site_price = "graded"`): a via without a site pays the graded deficit
+    /// of its room besides the count ([`Packer::site_room`]); the pad exits' via term (c) is then
+    /// that price (counted once).
+    pub site_price: bool,
+    /// TW6 part C (with `site_price`): the continued dangling ends whose lead has a via end
+    /// ([`super::board::KeptEndOut::via_end`], exist-term r4): the plan takes the via end as the
+    /// site of a layer change at the lead end, as the drawing's `lead_via_site` does. Set by the
+    /// router after [`Packer::for_model`].
+    pub lead_ends: Vec<super::board::KeptEndOut>,
     /// tw4-r2 (1) (`[capacity] pad_exits`): the planned pad exits are terms of the capacity model
     /// ([`super::padexit`]); with via_cuts only.
     pub pad_exits: bool,
@@ -394,6 +403,8 @@ impl<'a> Packer<'a> {
             via_best: false,
             via_ramp: 0.0,
             via_disc_h: false,
+            site_price: false,
+            lead_ends: Vec::new(),
             pad_exits: false,
             pad_exit_static: false,
             exit_floor: fxmap(),
@@ -436,13 +447,23 @@ impl<'a> Packer<'a> {
     /// of which the drawing placed 7, and P4 rerouted their wires for it.) Cached per
     /// (triangle, net, s). O(obstacles) per new key.
     pub fn via_site(&self, t: super::state::TriId, net: i32, r: f64, s: f64) -> bool {
+        self.site_room(t, net, s) >= r
+    }
+
+    /// TW6 part A: the site room of triangle `t` for a via of `net` with clearance `s` (nm): the
+    /// largest radius a via disc can have at one of the triangle's static candidate points
+    /// ([`tri_site_points`]) against every other net's obstacle (its clearance, at least `s`) and
+    /// the via keepouts; `-inf` outside the board or with an obstacle inside. One measure for the
+    /// plan ([`Packer::via_site`] = room >= r, the graded site price), the drawing and the pad
+    /// exits' via term. Cached per (triangle, net, s). O(obstacles) per new key.
+    pub fn site_room(&self, t: super::state::TriId, net: i32, s: f64) -> f64 {
         let pr = self.pr;
         if pr.tri_out[t] || !pr.tri_obs[t].is_empty() {
-            return false;
+            return f64::NEG_INFINITY;
         }
         let key = (t, net ^ ((s as i64 as i32) << 8));
         if let Some(&f) = lock(&self.free_cache).get(&key) {
-            return f >= r;
+            return f;
         }
         let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
         let pts = tri_site_points(a, b, c);
@@ -462,7 +483,15 @@ impl<'a> Packer<'a> {
         }
         let f = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         lock(&self.free_cache).insert(key, f);
-        f >= r
+        f
+    }
+
+    /// TW6 part A (`[vias] site_price = "graded"`): how far a via of diameter `d` falls short of
+    /// room where the room is `room` (nm, 0: it fits), capped at `d` (inside an obstacle). The
+    /// graded site price is `1 + deficit / (d + s)` per via without a site (Luzin-Popov 2013
+    /// p. 133: S = sum k_i x_i; graded, no threshold). O(1).
+    pub fn site_deficit(room: f64, d: f64) -> f64 {
+        (0.5 * d - room).max(0.0).min(d)
     }
 
     /// The packer of `model` over the projection `pr`, with the drawing's tolerance and edge rule.
@@ -478,6 +507,7 @@ impl<'a> Packer<'a> {
         p.via_best = opts.via_best_point;
         p.via_ramp = opts.via_over_ramp_mm.max(0.0) * 1e6;
         p.via_disc_h = opts.via_disc_height;
+        p.site_price = opts.via_site_price == "graded";
         p.pad_exits = opts.pad_exits && opts.via_cuts;
         p.pad_exit_static = opts.pad_exit_static;
         let floor = |net: i32| model.rules.min_track_width.max(model.rules.net_rule(net).min_width).max(2 * model.rules.min_connection) as f64;

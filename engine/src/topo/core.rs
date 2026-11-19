@@ -3579,6 +3579,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let sub = super::capacity::subset_check(&st);
     let mut packer = Packer::for_model(model, opts, proj);
     packer.via_squeeze = reg.price(&Event::ViaSqueeze { wire: 0, at: Vec2::default(), slack_nm: 0.0, via_nm: 1.0 }, &WireCtx::default());
+    if packer.site_price {
+        packer.lead_ends = b.kept_ends.iter().filter(|k| k.lead.is_some() && k.via_end.is_some()).cloned().collect();
+    }
     let packer = packer;
     // P3 with the junctions' tee rule: the trunk keeps one layer through a junction and the
     // branch ends on it. Two layers: inside P3, a tee is one layer domain (D6b); more layers: a
@@ -6758,7 +6761,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // where the packing left them room: on their wire's nominal chord.
     for (&w, pl) in &plans {
         let d = packer.via_d(st.wires[w].net);
-        dr.set_wire_layers(w, pl, &pl.at, &vec![d; pl.at.len()]);
+        let pts: Vec<super::refine::ViaPt> = (0..pl.at.len()).map(|i| dr.via_site.get(&(w, i)).copied()).collect();
+        dr.set_wire_layers(w, pl, &pl.at, &vec![d; pl.at.len()], &pts);
     }
     dr.compute_intervals();
     // 5.4 task 2: the vias the plan hands to the drawing (the plan vs drawn summary below).
@@ -6836,7 +6840,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let ks: Vec<usize> = vs.iter().map(|v| v.0).collect();
         // The disc as its reach (5.4 task 1: the drill's hole clearance where it reaches further).
         let ds: Vec<f64> = vs.iter().map(|v| 2.0 * crate::vias::via_reach(&model.rules, st.wires[w].net, v.2)).collect();
-        dr.set_wire_layers(w, pl, &ks, &ds);
+        let pts: Vec<super::refine::ViaPt> = vs.iter().map(|v| Some((v.0, v.1))).collect();
+        dr.set_wire_layers(w, pl, &ks, &ds, &pts);
     }
     dr.compute_intervals();
     // edge-clear: a pad end whose centre breaks a static clearance (a track wider than its pad
