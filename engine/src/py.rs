@@ -177,6 +177,32 @@ impl RouteJob {
         self.job.done()
     }
 
+    /// last-preview: build sketches for the progress dialog's board image from now on
+    /// (`control::Sketches`; never enabled, nothing is built). O(1).
+    fn enable_sketches(&self) {
+        self.ctl.sketches.enable();
+    }
+
+    /// last-preview: ask for a sketch of the last round at the next loop cycle's end (or drawn
+    /// round's end); `progress().sketch_seq` grows when it is there. O(1).
+    fn request_sketch(&self) {
+        self.ctl.sketches.request();
+    }
+
+    /// last-preview: the sketch JSON (`control::Sketch`) of `which`: `"last"` (the last round),
+    /// `"run"` (the pick of the run whose pick changed last, `progress().runbest_run`) or `"best"`
+    /// (the pick of the best run, `progress().best_run`); `None` = none yet. O(items).
+    fn sketch(&self, which: &str) -> PyResult<Option<String>> {
+        let p = self.ctl.snapshot();
+        let sk = match which {
+            "last" => self.ctl.sketches.get(false, 0),
+            "run" => self.ctl.sketches.get(true, p.runbest_run),
+            "best" => self.ctl.sketches.get(true, p.best_run),
+            other => return Err(PyValueError::new_err(format!("sketch: unknown kind {other:?} (last, run, best)"))),
+        };
+        sk.map(|s| serde_json::to_string(&*s).map_err(|e| PyValueError::new_err(e.to_string()))).transpose()
+    }
+
     fn wait(&self, py: Python<'_>) -> PyResult<String> {
         py.allow_threads(|| self.job.wait()).map_err(|e| match e {
             JobError::Failed(m) => PyValueError::new_err(m),

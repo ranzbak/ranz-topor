@@ -364,6 +364,22 @@ class E2E:
             return None
         return np.asarray(Image.open(io.BytesIO(r.stdout)).convert("RGB"), dtype=np.int16)
 
+    def board_image(self, win: str):
+        """last-preview: the progress dialog's board image as pixels: the bounding box of its ground colour
+        (plugin/topor/preview.py LIVE_BOARD_RGB), None when the window shows none (fewer than 4000 such pixels)."""
+        import numpy as np
+
+        sys.path.insert(0, str(ROOT / "plugin"))
+        from topor.preview import LIVE_BOARD_RGB
+        px = self.grab(win)
+        if px is None:
+            return None
+        mask = (np.abs(px - np.array(LIVE_BOARD_RGB, dtype=np.int16)).max(axis=2) <= 3)
+        if mask.sum() < 4000:
+            return None
+        ys, xs = np.nonzero(mask)
+        return px[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+
     def settle(self, win: str, timeout: float, *, done, quiet: float = 3.0, on_other=None) -> bool:
         """Wait until `done(pixels)` of the window `win` holds and pcbnew uses < 5 % of a core, both for `quiet`
         seconds (the whole image is not compared: a blinking text caret changes it). `on_other()` is called every poll (answers dialogs that pop up; True when one
@@ -866,13 +882,22 @@ def run(a) -> int:
         fills_before = e.zone_fills()
         e.log(f"zones before the run: {len(fills_before)}")
         t_route = time.monotonic()
-        state = {"last": -10.0, "cancelled": False}
+        state = {"last": -10.0, "cancelled": False, "img_t": -10.0, "imgs": []}
 
         def tick(dt):
             prog = e.find("Topor — Routing")
             if prog and dt - state["last"] >= 10:
                 state["last"] = dt
                 e.shot(f"progress-{int(dt):04d}s", prog[1])
+            if prog and a.preview_check and not state["cancelled"] and dt - state["img_t"] >= 2.5:
+                # last-preview: the progress dialog's board image (its ground is preview.LIVE_BOARD_RGB): one crop
+                # every 2.5 s; the image must change between rounds
+                state["img_t"] = dt
+                crop = e.board_image(prog[1])
+                if crop is not None:
+                    state["imgs"].append((round(dt, 1), hash(crop.tobytes())))
+                    if len(state["imgs"]) <= 2 or len({h for _, h in state["imgs"]}) == 2:
+                        e.shot(f"progress-image-{int(dt):04d}s", prog[1])
             if prog and a.ok_at_stable and not state["cancelled"] and "Routes stable" in prog[0]:
                 # M-B0: the dialog says "Routes stable" and its Cancel button reads OK; press it (Enter)
                 time.sleep(1.0)  # let the label repaint for the screenshot
@@ -905,6 +930,12 @@ def run(a) -> int:
                 break
             time.sleep(0.5)
         result["route_wall_s"] = round(time.monotonic() - t_route, 1)
+        if a.preview_check:
+            hashes = [h for _, h in state["imgs"]]
+            result["progress_images"] = state["imgs"]
+            e.check("progress dialog shows a board image", bool(hashes), f"{len(hashes)} crops")
+            e.check("the board image changes between rounds", len(set(hashes)) >= 2,
+                    f"{len(set(hashes))} different images in {len(hashes)} crops")
         if a.ok_at_stable:
             e.check("progress dialog showed Routes stable (Cancel reads OK)", bool(state.get("ok")))
         if state["cancelled"]:
@@ -1012,6 +1043,13 @@ def run(a) -> int:
         m = board_metrics(live, orig_input, hand.pcb, work=out / f"{name}-metrics-work", report_dir=report_dir,
                           png=out / f"{name}-gui-compare.png", name=name)
         result["metrics"] = m
+        if a.preview_check and report_dir is not None:
+            log_txt = (report_dir / "log.txt").read_text() if (report_dir / "log.txt").is_file() else ""
+            shown = [ln.split("progress image: ", 1)[1] for ln in log_txt.splitlines() if "progress image: last" in ln]
+            rounds = {tuple(x.split(", ")[1:3]) for x in shown}
+            result["progress_image_lines"] = shown[:50]
+            e.check("the run flow handed over last-round images of different rounds (log.txt)", len(rounds) >= 2,
+                    f"{len(shown)} images, {len(rounds)} distinct run/round")
         if a.ok_at_stable and report_dir is not None:
             # the board is the best result the dialog showed at OK (run.py logs it), and OK is not a cancel
             import re as _re
@@ -1062,6 +1100,8 @@ def main(argv=None) -> int:
     ap.add_argument("--ok-at-stable", action="store_true",
                     help="press OK as soon as the progress dialog says Routes stable (M-B0) and check the result")
     ap.add_argument("--max-wait", type=float, default=1800, help="longest wait for the preview after Route (s)")
+    ap.add_argument("--preview-check", action="store_true",
+                    help="last-preview: check the progress dialog's board image (shown, changes between rounds; log)")
     ap.add_argument("--harness", default=None, help="route_board metrics JSON of the same board to compare with")
     ap.add_argument("--from-hand", action="store_true",
                     help="open a copy of the hand-routed board and Rip up and re-route (default: the stripped copy)")

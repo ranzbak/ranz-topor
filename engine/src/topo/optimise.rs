@@ -299,6 +299,11 @@ pub trait Space {
     fn take_offers(&mut self) -> Vec<(String, Criteria, Self::Var, u64)> {
         Vec::new()
     }
+    /// last-preview: after the initial plan (cycle 0) and after every finished cycle, with the
+    /// archive's pick now, the criteria of the cycle's own end state (the state the space is in)
+    /// and the restarts so far. The core's space reports the cycle to the progress and builds the
+    /// progress dialog's sketches there when the caller asked for them; it never changes the state.
+    fn after_cycle(&mut self, _cycle: usize, _pick: &Criteria, _own: &Criteria, _restarts: usize) {}
 }
 
 /// TW3: how a run takes part in the call's one variant table ([`super::table::SharedTable`]).
@@ -499,7 +504,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         let c = a.items[a.pick(&obj)?].crit;
         Some((Score { incomplete: c.errors, shorts: c.shorts, ranked: c.ranked(), value: obj.value(&c), scale: obj.base(&c) }, obj.value(&c)))
     };
-    let offer = |sp: &mut S, arch: &mut Archive<Gen<S::Var>>, label: String, gen: usize, cycle: usize, rep: &mut LoopReport| -> bool {
+    let offer = |sp: &mut S, arch: &mut Archive<Gen<S::Var>>, label: String, gen: usize, cycle: usize, rep: &mut LoopReport| -> (bool, Criteria) {
         let _pg = super::prof::g(super::prof::K::Offer);
         let crit = sp.criteria();
         rep.offered += 1;
@@ -513,7 +518,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         if kept {
             rep.archived += 1;
         }
-        kept
+        (kept, crit)
     };
     // TW3: the state goes to the shared table too (always a copy: whether it is kept is known only
     // at the commit); returns its fingerprint.
@@ -526,10 +531,12 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         (fp, crit)
     };
     super::prof::mark("pre-loop");
-    offer(sp, arch, "initial plan (gen 0)".into(), 0, 0, &mut rep);
+    let (_, own0) = offer(sp, arch, "initial plan (gen 0)".into(), 0, 0, &mut rep);
     super::prof::mark("offer0");
     let mut my_fp = share(sp, &format!("run {} initial plan (gen 0)", p.run + 1), 0, 0, super::table::CHECK_NONE).0;
     let Some((s0, v0)) = score(arch) else { return rep };
+    // last-preview: before `on_pick` (its report to the progress then sees this cycle's pick cycle)
+    sp.after_cycle(0, &arch.items[arch.pick(&obj).expect("scored")].crit, &own0, 0);
     on_pick(0, &arch.items[arch.pick(&obj).expect("scored")].crit, false);
     meter.push(s0);
     rep.pick_values.push(v0);
@@ -662,7 +669,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         work += (cs.tried + cs.relaid + cs.pair_moved_wires) as f64;
         rep.relays += cs.tried + cs.relaid + cs.pair_moved_wires;
         since_check += 1;
-        let kept = offer(sp, arch, format!("cycle {cycle} (gen {gen})"), gen, cycle, &mut rep);
+        let (kept, own) = offer(sp, arch, format!("cycle {cycle} (gen {gen})"), gen, cycle, &mut rep);
         let (fp, crit_now) = share(sp, &format!("run {} cycle {cycle} (gen {gen})", p.run + 1), gen, cycle, std::mem::take(&mut check));
         my_fp = fp;
         if kept {
@@ -680,6 +687,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         if !periodic && meter.stable() && rep.stable_at.is_none() {
             rep.stable_at = Some(cycle);
         }
+        sp.after_cycle(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, &own, rep.restarts.len());
         on_pick(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, rep.stable_at.is_some());
         super::prof::cycle(cycle, cs.tried, cs.kept, cs.relaid, cs.pair_moved, cs.pair_relaid, kept);
         rep.lines.push(format!(

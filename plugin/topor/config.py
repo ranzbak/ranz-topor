@@ -262,6 +262,13 @@ def unavailable_overrides(keys) -> list:
     return out
 
 
+def plugin_value(cfg: Config, section: str, key: str):
+    """The value of a plugin-side setting as the run uses it: its default while the setting is not available in this
+    version (schema ``since``; CFG_NOT_YET_AVAILABLE said so at load), unless TOPOR_UNRELEASED_SETTINGS=1. O(1)."""
+    s = SETTINGS_BY_KEY[(section, key)]
+    return cfg.get(section, key) if available(s) or unreleased_allowed() else s.default
+
+
 def _since_note(s: Setting) -> str:
     return f"  (available from {s.since})"
 

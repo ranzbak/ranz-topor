@@ -161,6 +161,157 @@ pub struct Progress {
     /// these steps, not only the stage text the last run set (verify-m2 F6).
     #[serde(default)]
     pub run_steps: Vec<String>,
+    /// last-preview (user 2026-11-19, "I would like the last round result to be displayed"): the
+    /// TopoR loop cycle that finished last (any run): run (1-based; 0 = none yet), cycle (0 = the
+    /// initial plan), when it finished (seconds since the job started) and its own state's
+    /// *predicted* criteria (the plan's measure, nothing drawn; not the archive's pick).
+    /// TopoR loop cycles finished so far over all runs (never goes back: the dialog's count).
+    #[serde(default)]
+    pub cycles_total: u64,
+    /// Restarts of `loop_run`'s loop so far (TW3 table / stall restarts) at its last cycle.
+    #[serde(default)]
+    pub loop_restarts: u32,
+    #[serde(default)]
+    pub loop_run: u32,
+    #[serde(default)]
+    pub loop_cycle: u32,
+    #[serde(default)]
+    pub loop_at_s: f64,
+    #[serde(default)]
+    pub loop_errors: usize,
+    #[serde(default)]
+    pub loop_open: usize,
+    #[serde(default)]
+    pub loop_violations: usize,
+    #[serde(default)]
+    pub loop_vias: usize,
+    #[serde(default)]
+    pub loop_length_mm: f64,
+    #[serde(default)]
+    pub loop_shrinkages: usize,
+    /// last-preview (user 2026-11-19, the "Last run" row): the run whose own pick changed last
+    /// (of the N seeded runs; a run's pick = the best of its own variants, predicted in the TopoR
+    /// loop, as judged once drawn): run (1-based; 0 = none yet), the cycle its pick came from, when
+    /// it changed (seconds since the job started), `"plan"` (predicted) or `"copper"` (drawn) and
+    /// the pick's criteria.
+    /// Per run (index = run - 1) the loop cycle (TopoR loop) or round (drawn) its pick came from.
+    #[serde(default)]
+    pub pick_cycles: Vec<u32>,
+    /// `best_*` is `"plan"` (a TopoR loop's predicted pick: no run has drawn yet) or `"copper"`
+    /// (a drawn pick); `""` before the first.
+    #[serde(default)]
+    pub best_kind: String,
+    #[serde(default)]
+    pub runbest_run: u32,
+    #[serde(default)]
+    pub runbest_cycle: u32,
+    #[serde(default)]
+    pub runbest_at_s: f64,
+    #[serde(default)]
+    pub runbest_kind: String,
+    #[serde(default)]
+    pub runbest_errors: usize,
+    #[serde(default)]
+    pub runbest_open: usize,
+    #[serde(default)]
+    pub runbest_violations: usize,
+    #[serde(default)]
+    pub runbest_vias: usize,
+    #[serde(default)]
+    pub runbest_length_mm: f64,
+    #[serde(default)]
+    pub runbest_shrinkages: usize,
+    /// When the round judged last (`last_*`) ended, seconds since the job started (0 = none yet).
+    #[serde(default)]
+    pub last_at_s: f64,
+    /// last-preview: how many sketches ([`Sketch`]) were published so far (0 = none; it grows by one
+    /// per publish, so a change says the caller may fetch a new one).
+    #[serde(default)]
+    pub sketch_seq: u64,
+    /// last-preview meter: seconds the router spent building sketches (plan items, clones) so far,
+    /// summed over the threads that built one (0 while sketches are off).
+    #[serde(default)]
+    pub sketch_build_s: f64,
+}
+
+/// last-preview: a picture of one result for the progress dialog's board image (user 2026-11-19):
+/// `kind = "plan"`: the state of a TopoR loop cycle (per wire its layer stretches and planned vias,
+/// [`crate::topo::pourplan::plan_items`]: the plan, not drawn copper); `kind = "copper"`: the items
+/// of a drawn round. Items in the KiCad frame, as the result's `items`. Built only when the caller
+/// enabled sketches ([`Sketches::enable`]); it never feeds back into the run.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Sketch {
+    /// Run (1-based) and round / loop cycle (0 = the initial plan) it shows.
+    pub run: u32,
+    pub cycle: u32,
+    /// `"plan"` or `"copper"`.
+    pub kind: String,
+    /// Its publish number ([`Progress::sketch_seq`] at the publish) and when (seconds since the job
+    /// started).
+    pub seq: u64,
+    pub at_s: f64,
+    /// Its criteria (predicted for a plan, as judged for copper).
+    pub errors: usize,
+    pub open: usize,
+    pub violations: usize,
+    pub vias: usize,
+    pub length_mm: f64,
+    pub items: Vec<crate::model::Item>,
+}
+
+/// last-preview: the sketches a run publishes for the caller ([`RunControl::sketches`]): `enabled`
+/// (set once by the caller, the plugin's progress dialog; off = nothing is ever built: headless,
+/// harness, MCP), `want` (the caller asks for the next last-round sketch; cleared when one is
+/// published, so at most one is built per request), the last one and the best one per run. One
+/// mutex for both slots: a reader gets a whole sketch (an `Arc`), never a torn one. O(1) per call.
+#[derive(Debug, Default)]
+pub struct Sketches {
+    enabled: AtomicBool,
+    want: AtomicBool,
+    slot: Mutex<SketchSlot>,
+}
+
+#[derive(Debug, Default)]
+struct SketchSlot {
+    seq: u64,
+    last: Option<Arc<Sketch>>,
+    best: Vec<Option<Arc<Sketch>>>,
+}
+
+impl Sketches {
+    /// Build sketches from now on (the caller shows them). O(1).
+    pub fn enable(&self) {
+        self.enabled.store(true, Ordering::Relaxed);
+    }
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+    /// Ask for a last-round sketch at the next cycle's end (only while enabled). O(1).
+    pub fn request(&self) {
+        if self.enabled() {
+            self.want.store(true, Ordering::Relaxed);
+        }
+    }
+    /// A last-round sketch is asked for (enabled and requested). One relaxed load when off. O(1).
+    pub fn wanted(&self) -> bool {
+        self.enabled() && self.want.load(Ordering::Relaxed)
+    }
+    /// The last sketch (`best = false`) or the best one of run `best_run` (1-based). O(1).
+    pub fn get(&self, best: bool, best_run: u32) -> Option<Arc<Sketch>> {
+        let s = self.slot.lock().ok()?;
+        if best {
+            s.best.get((best_run as usize).checked_sub(1)?).cloned().flatten()
+        } else {
+            s.last.clone()
+        }
+    }
+}
+
+/// Which slot a published sketch goes to ([`RunControl::publish_sketch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SketchTo {
+    pub last: bool,
+    pub best: bool,
 }
 
 /// The soft time limit's line for the progress dialog and the run log ([`Progress::notice`]). O(len).
@@ -780,6 +931,8 @@ pub struct RunControl {
     pub run: u32,
     /// Test-only injection point (see [`TestHook`]); `None` in every real run.
     pub test_hook: TestHook,
+    /// last-preview: the sketches for the caller's board image, shared by every run of the call.
+    pub sketches: Arc<Sketches>,
 }
 
 /// A test-only hook: the engine asks it at a few named points (`RunControl::test_point`); a test
@@ -941,7 +1094,7 @@ impl RunControl {
 
     /// The same cancel flag and progress, as run `run` (1-based) of a best-of-N call. O(1).
     pub(crate) fn for_run(&self, run: u32) -> RunControl {
-        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), stop_kind: self.stop_kind.clone(), run, test_hook: self.test_hook.clone() }
+        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), stop_kind: self.stop_kind.clone(), run, test_hook: self.test_hook.clone(), sketches: self.sketches.clone() }
     }
 
     /// sync-wait: a TopoR loop cycle's line for the run log ([`Progress::push_cycle_line`]). O(CYCLE_LINES).
@@ -954,6 +1107,40 @@ impl RunControl {
         if let Ok(mut p) = self.progress.lock() {
             f(&mut p);
         }
+    }
+
+    /// Seconds since the job started (the time limit's clock). O(1).
+    pub fn since_start_s(&self) -> f64 {
+        self.limit.elapsed_s()
+    }
+
+    /// last-preview: publish `sk` (its `seq` and `at_s` are set here) to the slots `to` (the best
+    /// slot of its own run). Clears the request when it goes to the last slot. Under the slot's
+    /// lock, then the progress's `sketch_seq` (never both locks at once). O(1) + the move.
+    pub(crate) fn publish_sketch(&self, mut sk: Sketch, to: SketchTo) {
+        if !self.sketches.enabled() || !(to.last || to.best) {
+            return;
+        }
+        sk.at_s = self.since_start_s();
+        let seq = {
+            let Ok(mut s) = self.sketches.slot.lock() else { return };
+            s.seq += 1;
+            sk.seq = s.seq;
+            let k = (sk.run as usize).saturating_sub(1);
+            let sk = Arc::new(sk);
+            if to.best {
+                if s.best.len() <= k {
+                    s.best.resize(k + 1, None);
+                }
+                s.best[k] = Some(sk.clone());
+            }
+            if to.last {
+                s.last = Some(sk);
+                self.sketches.want.store(false, Ordering::Relaxed);
+            }
+            s.seq
+        };
+        self.with_progress(|p| p.sketch_seq = p.sketch_seq.max(seq));
     }
 
     /// Update the progress; counters only ever grow (high-water marks). O(1).
@@ -1180,6 +1367,34 @@ mod tests {
     }
 
     use super::*;
+
+    /// last-preview: a request is honoured only while enabled and is cleared by the publish to the
+    /// last slot (at most one build per request); a best-only publish keeps it; best slots are per
+    /// run; every publish raises `sketch_seq` by one.
+    #[test]
+    fn sketch_request_publish_and_slots() {
+        let ctl = RunControl::new();
+        ctl.sketches.request();
+        assert!(!ctl.sketches.wanted(), "a request before enable is ignored");
+        ctl.publish_sketch(Sketch { run: 1, ..Default::default() }, SketchTo { last: true, best: true });
+        assert!(ctl.sketches.get(false, 0).is_none() && ctl.snapshot().sketch_seq == 0, "published while disabled");
+        ctl.sketches.enable();
+        ctl.sketches.request();
+        assert!(ctl.sketches.wanted());
+        let r2 = ctl.for_run(2);
+        r2.publish_sketch(Sketch { run: 2, cycle: 7, ..Default::default() }, SketchTo { last: false, best: true });
+        assert!(ctl.sketches.wanted(), "a best-only publish answers no request");
+        assert_eq!(ctl.snapshot().sketch_seq, 1);
+        r2.publish_sketch(Sketch { run: 2, cycle: 8, kind: "plan".into(), ..Default::default() }, SketchTo { last: true, best: false });
+        assert!(!ctl.sketches.wanted(), "the last-slot publish clears the request");
+        let last = ctl.sketches.get(false, 0).expect("last");
+        assert_eq!((last.run, last.cycle, last.seq, last.kind.as_str()), (2, 8, 2, "plan"));
+        assert_eq!(ctl.sketches.get(true, 2).expect("run 2's best").cycle, 7);
+        assert!(ctl.sketches.get(true, 1).is_none() && ctl.sketches.get(true, 0).is_none() && ctl.sketches.get(true, 9).is_none());
+        ctl.publish_sketch(Sketch { run: 1, cycle: 3, ..Default::default() }, SketchTo { last: false, best: false });
+        assert_eq!(ctl.snapshot().sketch_seq, 2, "a publish to no slot is no publish");
+        assert!(ctl.sketches.get(false, 0).expect("last").at_s >= 0.0);
+    }
 
     #[test]
     fn the_soft_limit_lets_the_moves_run_on_and_cancel_still_stops_them() {

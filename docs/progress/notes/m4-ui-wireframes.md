@@ -581,17 +581,35 @@ title/label/button/checkbox/choice/heading/text).
 | progress | score_head_vias | label | Vias |
 | progress | score_head_length | label | Length |
 | progress | score_last | label | Last round |
+| progress | score_run | label | Last run |
 | progress | score_best | label | Best so far |
 | progress | score_length | text | {length} m |
 | progress | score_pending | text | – |
 | progress | score_waiting | text | Waiting for round 1… |
-| progress | score_hint | text | Scores compare in the pick order: fewest errors (open connections and connections with rule violations), then fewest connections with a short, then fewest open, fewest vias, the shortest length ([optimize] pick). The best so far is the board OK or Cancel keeps. |
+| progress | score_hint | text | Scores compare in the pick order: fewest errors (open connections and connections with rule violations), then fewest connections with a short, then fewest open, fewest vias, the shortest length ([optimize] pick). The best so far is the board OK or Cancel keeps. Last round = the round that finished last, whatever its score; Last run = the newest best of the run whose own best changed last. Predicted = a plan of the TopoR loop (nothing drawn yet), drawn = copper. |
 | progress | vs_first | text | The first result is the best so far. |
 | progress | vs_new_best | text | Last round is the new best: {delta}. |
 | progress | vs_worse | text | Last round is worse than the best: {delta}. |
 | progress | vs_same | text | Last round scores the same as the best; the earlier result stays. |
 | progress | vs_tie | text | Last round scores the same as the best and is the best now (ties go to the lower run). |
 | progress | vs_better | text | Last round is better ({delta}), but the variant table kept the best. |
+| progress | score_head_source | label | Source |
+| progress | source_predicted | text | predicted |
+| progress | source_drawn | text | drawn |
+| progress | drawn_round | text | draw {n} |
+| progress | round_total_tip | text | Rounds finished over all runs (TopoR loop cycles; each run counts its own rounds and may restart from a variant of the shared table): this number never goes back. |
+| progress | round_context | text | Last round finished {time} ({ago} s ago): run {run}{restart}, round {cycle} |
+| progress | round_context_restart | text | , restart {n} |
+| progress | vs_predicted | text | Last round is a plan (predicted, not drawn yet); drawn rounds are compared with the best when the loop draws. |
+| progress | preview_show | label | Show: |
+| progress | preview_last | label | Last round |
+| progress | preview_run | label | Last run |
+| progress | preview_best | label | Best so far |
+| progress | preview_caption | text | {which}: run {run}, round {round} — {what} |
+| progress | preview_plan | text | predicted plan, not drawn copper |
+| progress | preview_copper | text | drawn copper |
+| progress | preview_received | text | Image of {time}; OK / Cancel keeps the best so far. |
+| progress | preview_waiting | text | Waiting for the first image… |
 | progress | delta_errors | text | errors {d} |
 | progress | delta_open | text | open {d} |
 | progress | delta_vias | text | vias {d} |
@@ -611,7 +629,7 @@ title/label/button/checkbox/choice/heading/text).
 | preview | zoom_200 | choice | 200 % |
 | preview | legend_label | label | Legend: F.Cu · B.Cu · new copper (highlighted) |
 | preview | before_heading | heading | Current board |
-| preview | after_heading | heading | Result |
+| preview | after_heading | heading | Result: the best so far, what Accept writes |
 | preview | summary_heading | heading | Summary |
 | preview | drc_alert | text | ⚠ DRC new {n} ({types}) — see findings |
 | preview | no_image | text | Preview could not be rendered (see log.txt in the report folder) |
