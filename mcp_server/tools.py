@@ -123,9 +123,11 @@ def route(board_copy: str, options: dict | None = None) -> dict:
         cmd.append("--whole-project")
     for k, v in sets.items():
         cmd += ["--set", f"{k}={json.dumps(v)}"]
-    env = dict(os.environ, TOPOR_REPORT_ROOT=str(out_dir / "reports"))
+    from .drc import _cli_env
+    # pcbnew / kicad-cli of the route run in an isolated KiCad home (they rewrite the user's config otherwise)
+    env = dict(_cli_env(out_dir / "kicad-home", keep_display=True), TOPOR_REPORT_ROOT=str(out_dir / "reports"))
     try:
-        cp = subprocess.run(cmd, capture_output=True, text=True, env=env,
+        cp = subprocess.run(cmd, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
                             timeout=float(opts.get("run_timeout_s", 3600)), cwd=REPO)
     except subprocess.TimeoutExpired:
         raise ToolError(f"route did not finish within run_timeout_s; partial files in {out_dir}") from None
@@ -578,9 +580,9 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
                     if not rec["match"]:
                         rec["why"] = ("the dialog selection is not this row" if not ok_sel else
                                       f"KiCad focused {d_mm} mm from the marker (> {FOCUS_TOL_MM} mm)")
-                except G.GuiError as ex:  # this row failed: say so, go on with the next row in the same session
-                    rec.update(match=False, error=str(ex))
-                    errors.append(f"{r['id']} (row {k}): {ex}")
+                except G.STEP_ERRORS as ex:  # this row failed: say so, go on with the next row in the same session
+                    rec.update(match=False, error=G.describe(ex))
+                    errors.append(f"{r['id']} (row {k}): {G.describe(ex)}")
                     if not s.alive():
                         errors.append("KiCad exited: the remaining rows were not visited")
                         recs.append(rec)
@@ -595,9 +597,9 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
                        "complete": not errors, "kicad_starts_this_call": G.GuiSession.starts_total - starts0,
                        "session": {"display": s.display, "pcbnew_pid": s.pid(), "board": str(s.board)},
                        "session_steps": s.steps[-60:], "shots_dir": str(shots)}
-        except G.GuiError as ex:
+        except G.STEP_ERRORS as ex:
             G.stop_session()
-            raise ToolError(f"drc_spots: {ex}") from None
+            raise ToolError(f"drc_spots: {G.describe(ex)}") from None
         finally:
             if not keep_session:
                 G.stop_session()
@@ -686,9 +688,9 @@ def cleanup(run_id: str, options=None, replay: bool = False, keep_session: bool 
             s.step("saved", str(live))
             s.board_state = f"after cleanup {stamp}"
             res["shot_board"] = str(s.e.shot("board-after-cleanup", s.main))
-        except G.GuiError as ex:
+        except G.STEP_ERRORS as ex:
             G.stop_session()
-            raise ToolError(f"cleanup: {ex}") from None
+            raise ToolError(f"cleanup: {G.describe(ex)}") from None
         finally:
             if not keep_session:
                 G.stop_session()

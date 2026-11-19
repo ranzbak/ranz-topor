@@ -8,7 +8,6 @@ of those nets; the board's .kicad_pro. Synthetic boards below cover the clearanc
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -324,7 +323,8 @@ class _FakeSession:
         pass
 
 
-def test_one_drc_spots_call_over_n_rows_starts_one_kicad(tmp_path, monkeypatch):
+def _spots(tmp_path, monkeypatch, off_mm=0.0):
+    """tools.drc_spots over the 2 recorded rows with a fake session; KiCad 'centres' off_mm away from the track."""
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     from PIL import Image
     Image.new("RGB", (20, 20)).save(tmp_path / "shot.png")
@@ -338,7 +338,7 @@ def test_one_drc_spots_call_over_n_rows_starts_one_kicad(tmp_path, monkeypatch):
         starts.append(board)
         s = _FakeSession(board, rows)
         geom = D.board_items((FIX / "wiccon-routed-mini.kicad_pcb").read_text())  # a point on each row's track
-        s.marks = [geom[r["ours"][0]["uuid"]]["pts"]["start"] for r in idx["rows"]]
+        s.marks = [(lambda p: (p[0], p[1] + off_mm))(geom[r["ours"][0]["uuid"]]["pts"]["start"]) for r in idx["rows"]]
         s.e.shot = lambda tag, win=None: tmp_path / "shot.png"
         G._SESSION = s
         return s
@@ -351,11 +351,23 @@ def test_one_drc_spots_call_over_n_rows_starts_one_kicad(tmp_path, monkeypatch):
                                                          FIX / "wiccon-routed-mini.kicad_pcb"))
     monkeypatch.setattr(G, "copy_board", lambda src, dst, stem=None: dst / src.name)
     G._SESSION = None
-    r = tools.drc_spots("r")
+    try:
+        return tools.drc_spots("r"), starts, idx
+    finally:
+        G._SESSION = None
+
+
+def test_one_drc_spots_call_over_n_rows_starts_one_kicad(tmp_path, monkeypatch):
+    r, starts, idx = _spots(tmp_path, monkeypatch)
     assert len(starts) == 1 and r["wanted"] == len(idx["rows"]) == 2
     assert [x["match"] for x in r["records"]] == [True, True] and r["complete"]
     assert all(Path(x["board_png"]).is_file() for x in r["records"])
-    G._SESSION = None
+
+
+def test_spot_match_needs_kicads_focus_on_the_marker(tmp_path, monkeypatch):
+    r, _, _ = _spots(tmp_path, monkeypatch, off_mm=tools.FOCUS_TOL_MM + 2)
+    assert [x["match"] for x in r["records"]] == [False, False]
+    assert all(x["selected_ok"] and "focused" in x["why"] for x in r["records"])
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -410,3 +422,142 @@ def test_marker_dist_is_to_the_nearest_item_not_the_mean():
     assert D.marker_dist((5, 0.4), row, items) == 0.4
     assert D.marker_dist((50, 53), {"items": [{"uuid": "pad"}], "x": 50.0, "y": 50.0}, items) == 3.0
     assert D.marker_dist((0, 0), {"items": [], "x": None}, items) is None
+
+
+# ------------------------------------------------------------------ fix round 2 (verify-mcp-drc-20261119-1900)
+
+ISOLATED = ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "KICAD_CONFIG_HOME")
+
+
+def _assert_isolated(env, root):
+    assert env is not None, "a KiCad process started with the user's environment"
+    for k in ISOLATED:
+        assert Path(env[k]).resolve().is_relative_to(Path(root).resolve()), (k, env[k])
+
+
+def test_every_kicad_process_of_the_tools_gets_an_isolated_home(tmp_path, monkeypatch):
+    """`kicad-cli version` once rewrote the user's ~/.config/kicad/10.0/kicad_common.json (no env=)."""
+    import subprocess
+    calls = []
+
+    def rec(cmd, *a, **kw):
+        calls.append((cmd, kw.get("env")))
+        if "-o" in cmd:
+            Path(cmd[cmd.index("-o") + 1]).write_text('{"violations": []}')
+        return subprocess.CompletedProcess(cmd, 1 if "route_board.sh" in str(cmd) else 0, "10.0.8", "")
+    monkeypatch.setattr(subprocess, "run", rec)
+    monkeypatch.setattr(D, "_VERSION", {})
+    monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
+    pcb = _board_dir(tmp_path)
+    D.run_checked(pcb, tmp_path / "w", "routed")  # kicad-cli version + kicad-cli pcb drc
+    with pytest.raises(tools.ToolError):
+        tools.route(str(pcb), {"png": False})  # route_board.sh (pcbnew + kicad-cli inside)
+    assert [c[0][1] for c in calls[:2]] == ["version", "pcb"] and "route_board.sh" in str(calls[2][0])
+    _assert_isolated(calls[0][1], tmp_path / "w")
+    _assert_isolated(calls[1][1], tmp_path / "w")
+    _assert_isolated(calls[2][1], pcb.parent.parent)
+    # and no subprocess call in the MCP server code without an env=
+    import re
+    for f in (ROOT / "mcp_server").glob("*.py"):
+        for m in re.finditer(r"subprocess\.(?:run|Popen|call|check_output|check_call)\(", f.read_text()):
+            body = f.read_text()[m.end():m.end() + 400]
+            assert "env=" in body[:body.find("\n\n") if "\n\n" in body else 400], f"{f.name}: {m.group()} without env="
+
+
+def _tree_state(d: Path) -> dict:
+    import hashlib
+    return {p: (p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest())
+            for p in sorted(d.rglob("*")) if p.is_file()} if d.is_dir() else {}
+
+
+@pytest.mark.skipif(not Path(D.kicad_cli_path()).is_file(), reason="needs kicad-cli")
+def test_real_kicad_cli_leaves_the_users_kicad_config_untouched(tmp_path, monkeypatch):
+    from _helpers import eprom_dir
+    user = Path.home() / ".config" / "kicad"
+    before = _tree_state(user)
+    monkeypatch.setattr(D, "_VERSION", {})
+    src = eprom_dir()
+    shutil.copytree(src, tmp_path / "b")
+    pcb = next((tmp_path / "b").glob("*.kicad_pcb"))
+    r = D.run_checked(pcb, tmp_path / "w", "input")
+    assert r["proof"]["project_used"] and not r["cached"]
+    assert D._VERSION  # the real `kicad-cli version` ran too
+    assert _tree_state(user) == before
+
+
+def test_no_project_beside_the_input_is_drc_without_project(tmp_path):
+    pcb = _board_dir(tmp_path)
+    with pytest.raises(D.DrcError) as ei:
+        D.run_checked(pcb, tmp_path / "w", "input", project={}, runner=_runner({"violations": []}))
+    assert ei.value.code == "DRC_WITHOUT_PROJECT"
+
+
+def test_drc_tool_refuses_an_input_copy_without_its_project(tmp_path, monkeypatch):
+    monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
+    d = tmp_path / "r"
+    (d / "w-input").mkdir(parents=True)
+    (d / "w-topor").mkdir()
+    shutil.copy(FIX / "wiccon-input-mini.kicad_pcb", d / "w-input/2023.kicad_pcb")
+    shutil.copy(FIX / "wiccon-routed-mini.kicad_pcb", d / "w-topor/2023.kicad_pcb")
+    shutil.copy(FIX / "wiccon.kicad_pro", d / "w-topor/2023.kicad_pro")  # only the routed copy has one
+    tools._remember("r", {"run_id": "r", "board_copy": str(d / "w-topor/2023.kicad_pcb"), "out_dir": str(d),
+                          "report_dir": None, "status": "ok", "name": "w"})
+    monkeypatch.setattr(D, "run_kicad_cli", _runner({"violations": []}))
+    with pytest.raises(tools.ToolError, match="DRC_WITHOUT_PROJECT"):
+        tools.drc("r")
+
+
+def test_violation_identity_is_type_and_uuids_never_the_text():
+    a = _v("clearance", [("u1", "Track [A] on F.Cu, length 1,0000 mm", 0, 0), ("u2", "Pad 1 [B] of U1", 0, 0)],
+           "Clearance violation (clearance 0,2000 mm; actual 0,1000 mm)")
+    b = _v("clearance", [("u2", "Pad 1 [B] of U1", 0, 0), ("u1", "Track [A] on F.Cu, length 2,5000 mm", 0, 0)],
+           "Clearance violation (clearance 0,2000 mm; actual 0,0500 mm)")
+    c = _v("clearance", [("u3", "Track [A] on F.Cu, length 1,0000 mm", 0, 0), ("u2", "Pad 1 [B] of U1", 0, 0)],
+           a["description"])
+    assert D.vkey(a) == D.vkey(b) and D.vkey(a) != D.vkey(c)
+    # end to end: the same pair with other measured values is pre-existing, the same text on new copper is new
+    board = "(kicad_pcb\n" + _seg("u1", "A", (0, 0), (1, 0)) + _seg("u3", "A", (0, 1), (1, 1)) + ")"
+    idx = D.index("(kicad_pcb\n" + _seg("u1", "A", (0, 0), (1, 0)) + ")", {"violations": [a]}, board,
+                  {"violations": [b, c]}, None)
+    assert [r["items"][0]["uuid"] for r in idx["rows"]] in (["u2"], ["u3"]) and len(idx["rows"]) == 1
+    assert {i["uuid"] for i in idx["rows"][0]["items"]} == {"u2", "u3"}
+
+
+def test_cache_key_carries_the_project_bytes(tmp_path):
+    pcb = _board_dir(tmp_path)
+    run = _runner({"violations": []})
+    snap = D.project_snapshot(pcb)
+    D.run_checked(pcb, tmp_path / "w", "routed", project=snap, runner=run)
+    other = dict(PRO, board={"design_settings": {"rules": {"min_clearance": 0.12}}})
+    r = D.run_checked(pcb, tmp_path / "w", "routed", project={".kicad_pro": json.dumps(other).encode()}, runner=run)
+    assert not r["cached"] and len(run.calls) == 2  # other rules = another DRC, never the cached numbers
+
+
+def test_sigterm_stops_the_session_by_pid_then_chains(monkeypatch):
+    stopped, chained = [], []
+    fake = type("S", (), {"stop": lambda self: stopped.append(1)})()
+    monkeypatch.setattr(G, "_SESSION", fake)
+    monkeypatch.setattr(G, "_PREV_HANDLERS", {15: lambda s, f: chained.append(s)})
+    G._on_signal(15, None)
+    assert stopped == [1] and chained == [15]
+    monkeypatch.setattr(G, "_PREV_HANDLERS", {15: None})
+    with pytest.raises(SystemExit) as ei:
+        G._on_signal(15, None)
+    assert ei.value.code == 143 and stopped == [1, 1]
+
+
+def test_install_signal_stop_hooks_sigterm_and_sighup(monkeypatch):
+    import signal
+    seen = {}
+    monkeypatch.setattr(signal, "signal", lambda s, h: seen.__setitem__(s, h))
+    monkeypatch.setattr(G, "_PREV_HANDLERS", {})
+    assert G.install_signal_stop()
+    assert seen == {signal.SIGTERM: G._on_signal, signal.SIGHUP: G._on_signal}
+
+
+def test_a_timed_out_x_tool_is_a_step_error_with_the_command():
+    import subprocess
+    ex = subprocess.TimeoutExpired(["xdotool", "windowactivate", "--sync", "0x1"], 30)
+    assert isinstance(ex, G.STEP_ERRORS) and "xdotool windowactivate --sync" in G.describe(ex)
+    from harness import gui_e2e
+    assert gui_e2e.X_TIMEOUT_S <= 60 and gui_e2e.E2E.x.__kwdefaults__["timeout"] == gui_e2e.X_TIMEOUT_S

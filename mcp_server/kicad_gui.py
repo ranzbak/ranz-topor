@@ -53,6 +53,18 @@ class GuiError(RuntimeError):
     """A GUI step failed; the message names the step and the screenshot."""
 
 
+#: what a GUI step can raise: our GuiError, a bounded X tool / IPC client call that timed out
+#: (harness.gui_e2e X_TIMEOUT_S, ipc 600 s), an IPC client failure (RuntimeError), a missing tool (OSError)
+STEP_ERRORS = (RuntimeError, subprocess.TimeoutExpired, OSError)
+
+
+def describe(ex: BaseException) -> str:
+    if isinstance(ex, subprocess.TimeoutExpired):
+        cmd = ex.cmd if isinstance(ex.cmd, str) else " ".join(map(str, ex.cmd[:3]))
+        return f"{cmd[:120]!r} did not finish within {ex.timeout:.0f} s"
+    return str(ex) if isinstance(ex, GuiError) else f"{type(ex).__name__}: {ex}"
+
+
 def free_display() -> str:
     for n in DISPLAYS:
         if not Path(f"/tmp/.X11-unix/X{n}").exists() and not Path(f"/tmp/.X{n}-lock").exists():
@@ -438,6 +450,38 @@ def session_status() -> dict:
 
 
 atexit.register(stop_session)
+
+
+_PREV_HANDLERS: dict = {}  # signum -> the handler install_signal_stop replaced (callable or None)
+
+
+def _on_signal(signum, frame):
+    """SIGTERM / SIGHUP: stop our KiCad + Xephyr by pid (without _LOCK: a tool thread may hold it), then the
+    previous handler, else exit 128 + signum (atexit does not run on a signal)."""
+    s = _SESSION
+    if s is not None:
+        try:
+            s.stop()
+        except Exception:  # noqa: BLE001 - dying anyway; the pids are gone or going
+            pass
+    prev = _PREV_HANDLERS.get(signum)
+    if callable(prev):
+        prev(signum, frame)
+    else:
+        raise SystemExit(128 + signum)
+
+
+def install_signal_stop() -> bool:
+    """Install _on_signal for SIGTERM and SIGHUP (main thread only; the MCP server calls it at start)."""
+    import signal  # noqa: PLC0415
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        prev = signal.getsignal(sig)
+        if prev is not _on_signal:
+            _PREV_HANDLERS[sig] = prev if callable(prev) else None
+            signal.signal(sig, _on_signal)
+    return True
 
 
 # ------------------------------------------------------------------ crops

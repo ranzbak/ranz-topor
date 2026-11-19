@@ -60,9 +60,12 @@ CACHE_VERSION = "2"
 TEMPLATE = Path("/usr/share/kicad/template")
 
 
-def _cli_env(home: Path) -> dict:
-    """kicad-cli with its own HOME/XDG dirs (the user's KiCad config is never read or written) and KiCad's default
-    global library tables (as harness.gui_e2e.E2E.make_home: else every footprint is a lib_footprint_issues)."""
+def _cli_env(home: Path, keep_display: bool = False) -> dict:
+    """kicad-cli / pcbnew with their own HOME/XDG dirs (the user's KiCad config is never read or written: even
+    `kicad-cli version` rewrites kicad_common.json) and KiCad's default global library tables (as
+    harness.gui_e2e.E2E.make_home: else every footprint is a lib_footprint_issues). EVERY KiCad process the MCP
+    tools start gets this env (tests/mcp_server/test_mcp_drc.py asserts it)."""
+    home = Path(home)
     cfg = home / ".config" / "kicad" / "10.0"
     cfg.mkdir(parents=True, exist_ok=True)
     for n in ("fp-lib-table", "sym-lib-table"):
@@ -72,7 +75,8 @@ def _cli_env(home: Path) -> dict:
     e = {k: v for k, v in os.environ.items() if not k.startswith(("KICAD_API", "XDG_"))}
     e.update(HOME=h, XDG_CONFIG_HOME=f"{h}/.config", XDG_DATA_HOME=f"{h}/.local/share", XDG_CACHE_HOME=f"{h}/.cache",
              XDG_STATE_HOME=f"{h}/.local/state", KICAD_CONFIG_HOME=f"{h}/.config/kicad")
-    e.pop("DISPLAY", None)
+    if not keep_display:
+        e.pop("DISPLAY", None)
     return e
 
 
@@ -80,11 +84,19 @@ def kicad_cli_path() -> str:
     return os.environ.get("KICAD_CLI", "/usr/bin/kicad-cli")
 
 
-def kicad_cli_version() -> str:
-    try:
-        return subprocess.run([kicad_cli_path(), "version"], capture_output=True, text=True, timeout=60).stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        return "?"
+_VERSION: dict = {}
+
+
+def kicad_cli_version(home: Path) -> str:
+    """`kicad-cli version` (isolated env `home`), once per kicad-cli path."""
+    cli = kicad_cli_path()
+    if cli not in _VERSION:
+        try:
+            _VERSION[cli] = subprocess.run([cli, "version"], capture_output=True, text=True, timeout=60,
+                                           env=_cli_env(Path(home)), stdin=subprocess.DEVNULL).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return "?"
+    return _VERSION[cli]
 
 
 def run_kicad_cli(pcb: Path, out_json: Path, home: Path, timeout_s: float = KICAD_CLI_TIMEOUT_S) -> None:
@@ -112,8 +124,11 @@ def run_checked(pcb: Path, work: Path, tag: str, *, project: dict | None = None,
     pcb = Path(pcb)
     runner = run_kicad_cli if runner is None else runner  # looked up per call (tests patch the module name)
     project = project_snapshot(pcb) if project is None else project
+    if ".kicad_pro" not in project:  # no project = KiCad's built-in rules: numbers that cannot be used
+        raise DrcError("DRC_WITHOUT_PROJECT", drc_without_project([pcb.with_suffix(".kicad_pro").name]).message +
+                       f" (no {pcb.with_suffix('.kicad_pro').name} beside the board the rules come from)")
     board = pcb.read_bytes()
-    ver = (kicad_cli_version() if runner is _REAL_CLI else "runner") + "/" + CACHE_VERSION
+    ver = (kicad_cli_version(Path(work) / "cli-home") if runner is _REAL_CLI else "runner") + "/" + CACHE_VERSION
     key = sha256(board + b"".join(project.get(e, b"") for e in PROJECT_EXTS) + ver.encode())[:16]
     d = Path(work) / f"{tag}-{key}"
     meta = d / "drc-proof.json"

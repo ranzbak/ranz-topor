@@ -93,6 +93,8 @@ def build_server():
 
 
 def main() -> None:
+    from . import kicad_gui
+    kicad_gui.install_signal_stop()  # a SIGTERM'd server stops its KiCad session (no orphaned Xephyr / pcbnew)
     build_server().run("stdio") if _is_v2() else build_server().run()
 
 
