@@ -37,7 +37,7 @@ one() {
   ( cd $tree && TOPOR_VENV=$venv TOPOR_TREE=$tree $py -m harness.score_runs $o "$(board_path $b)" --only $seed --no-png \
       --threads $th "${CLK[@]}" "${SETS[@]}" > $R/$c-$b-s$seed-t$th.log 2>&1 9>&- )
   note "run $c $b s$seed t$th rc $? wall $(( $(date +%s) - t0 )) s"
-  rm -rf $o/*/s*/work 2>/dev/null
+  rm -rf $o/*/s$seed/work 2>/dev/null  # only this run's own work dir (a glob over s* deleted sibling seeds' .kicad_pro mid-run: reports/rules-mismatch-forensic-20261119-1408.md)
 }
 lane() { for x in "$@"; do one "$x"; done; }
 u() {  # name threads "lane1 runs" "lane2 runs" ...
@@ -98,6 +98,14 @@ case ${1:-} in
     nproc > $R/nproc.txt; uptime >> $R/nproc.txt
     for l in 0 1 2; do one "wt$l:$2:0:4"; done
     note "all done" ;;
+  pair)
+    # TIMING, ONE job (one ccx33 slot's hold): lag 0 and lag 1 run at the same time, 4 threads each, same board/seed order
+    # in both lanes, 600 s wall. usage: pair <board:seed,board:seed,...>
+    nproc > $R/nproc.txt; uptime >> $R/nproc.txt
+    for l in 0 1; do
+      ( for bs in ${2//,/ }; do one "wt$l:${bs}:4"; uptime >> $R/nproc.txt; done ) &
+    done
+    wait; note "all done" ;;
   lagseq)
     # TIMING pair half: lag $2 on the boards given, one after another; the other slot runs the other lag at the same
     # time (same neighbour load in both slots: the ccx33's 2 slots share its 4 cores' hyperthreads)
