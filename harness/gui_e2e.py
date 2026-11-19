@@ -954,19 +954,20 @@ def run(a) -> int:
         e.check("preview after routing", True, f"{result['route_wall_s']} s after Route")
         before = e.counts()
         fills0 = fills_before
+        if a.reject:  # Esc = Reject: the dialog closes, no finished window, the board is untouched
+            e.key(nxt[1], "Escape")
+            e.check("Reject closes the preview", e.wait_gone("Topor — Preview", 30))
+            time.sleep(4)  # a finished window would show up within this
+            stray = [t for t in e.windows() if t.startswith(("Topor — Finished", "Topor — Error"))]
+            e.check("Reject: no 'Topor — Finished' / error window", not stray, str(stray))
+            e.shot("after-reject")
+            e.check("Reject leaves the copper unchanged", e.counts() == before, f"{before} -> {e.counts()}")
+            return 0 if all(c["ok"] for c in e.checks) else 1
         e.key(nxt[1], "Return")  # Enter = Accept
-        fin = e.wait("Topor — Finished", 60)
-        e.check("Enter in the preview = Accept -> finished notice", bool(fin))
-        if not fin:
-            prev = e.find("Topor — Preview")
-            if prev:  # fall back to the Accept mnemonic so the rest of the test still runs
-                e.key(prev[1], "alt+a")
-                fin = e.wait("Topor — Finished", 60)
-        if not fin:
-            return 1
-        e.shot("finished", fin[1])
-        e.key(fin[1], "Return")
-        e.wait_gone("Topor — Finished", 10)
+        e.check("Accept closes the preview", e.wait_gone("Topor — Preview", 60))
+        time.sleep(4)  # no finished window (user 2026-11-19): nothing "Topor — ..." may appear after the commit
+        stray = [t for t in e.windows() if t.startswith(("Topor — Finished", "Topor — Error"))]
+        e.check("Accept: no 'Topor — Finished' / error window", not stray, str(stray))
         after = e.counts()
         e.check("Accept changed the copper", after != before, f"{before} -> {after}")
         refill_on = bool(eff_cfg.get("run", "refill_after_accept"))
@@ -1097,6 +1098,7 @@ def main(argv=None) -> int:
     ap.add_argument("--display", default=":6")
     ap.add_argument("--wheel", default=None, help="prebuilt topor_engine wheel (default: tools/build.sh builds one)")
     ap.add_argument("--cancel-after", type=float, default=None, help="press Cancel this many seconds after Route")
+    ap.add_argument("--reject", action="store_true", help="press Esc (Reject) in the preview and check the board is untouched")
     ap.add_argument("--ok-at-stable", action="store_true",
                     help="press OK as soon as the progress dialog says Routes stable (M-B0) and check the result")
     ap.add_argument("--max-wait", type=float, default=1800, help="longest wait for the preview after Route (s)")

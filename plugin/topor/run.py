@@ -1287,7 +1287,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         report.set_outcome(status)
         report.write(result=_facts_result(status, out, rr), drc_src=drc_src)
         ctx()
-        ui.done(status, report, report_dir)
+        if status != "cancelled":  # the user pressed Cancel: nothing to explain; a run that produced nothing says so
+            ui.done(status, report, report_dir)
         return finish(status)
 
     # 5. preview (report.md + preview.png exist before the dialog opens)
@@ -1318,8 +1319,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     if not accepted:
         report.set_outcome("rejected")
         report.write(result=_facts_result("rejected", out, rr), drc_src=drc_src)
-        ctx()
-        ui.done("rejected", report, report_dir)
+        ctx()  # no "finished" window (user 2026-11-19): the preview and the progress log already said it all
         return finish("rejected")
 
     # 6. MINOR 11: the board must be exactly what it was when the run started (KiCad stays editable meanwhile)
@@ -1392,9 +1392,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.wall_s = time.monotonic() - t0
     after_commit("writing the report", lambda: report.write(result=_facts_result(status, out, rr), drc_src=drc_src))
     ctx()
-    if not after_commit("the done notice", lambda: ui.done(status, report, report_dir)):
+    # no "finished" window after Accept (user 2026-11-19): the report folder is in the preview. A step that failed after
+    # the commit stays loud: one error dialog each (the routes are on the board).
+    for w in post_failed:
         try:
-            ui.error(post_failed[-1])  # the notice failed: tell the user the routes are on the board
+            ui.error(w)
         except Exception:  # noqa: BLE001
             log.exc()
     return finish(status)

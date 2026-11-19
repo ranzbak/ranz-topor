@@ -659,9 +659,11 @@ the nets and both values, and nothing is applied. Please report it.
 - **Reject** (Esc) writes nothing; the board is exactly as before and Undo has nothing new.
 - **topor's copper survives Cleanup Tracks & Vias.** KiCad → Edit → Cleanup Tracks & Vias, with every option
   on, removes and changes nothing of what topor wrote ([below](#topors-copper-survives-cleanup-tracks--vias)).
-- **Topor — Finished** confirms what happened, says whether the zones were refilled (press B when not) and
-  shows the report folder. With new DRC violations on the board it shows a warning icon and starts with
-  *⚠ N new DRC violations (types) — run Inspect → Design Rules Checker*.
+- There is no "finished" window after Accept or Reject: the preview already showed the result (with the report
+  folder and **Open report folder**), and the progress dialog the log. `report.md` *Outcome* says whether the
+  zones were refilled (press B when not). A step that failed after the commit (zone refill, cleanup, writing the
+  report) opens an error dialog; the routes stay on the board. Only a run that produced no copper at all ends in
+  a short **Topor — Finished** notice (Cancel before any copper is silent).
 - Then run **Inspect → Design Rules Checker** in KiCad.
 
 ### topor's copper survives Cleanup Tracks & Vias
@@ -689,7 +691,7 @@ few of 39 000 outline points from a live refill); refilling changes nothing the 
 
 ## Report folder
 
-Every run writes a folder (also when you reject or cancel), shown in the preview, the finished notice and
+Every run writes a folder (also when you reject or cancel), shown in the preview and
 the error dialog, with **Open report folder**:
 
 | File | Content |

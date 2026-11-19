@@ -306,8 +306,9 @@ class UiPort(Protocol):
         """Show the result; True = Accept (apply to the board), False = Reject."""
 
     def done(self, outcome: str, report: Any, report_dir: Path) -> None:
-        """Post-Accept/Reject notice (wireframe §5). `outcome`: ``accepted`` | ``rejected`` |
-        ``cancelled``."""
+        """Notice for a run that ended with nothing to preview (``rejected``: the router produced no copper;
+        ``cancelled`` is silent). After the preview there is none: Accept / Reject close the run without a "finished"
+        window (user 2026-11-19); a step that failed after the commit goes through ``error``."""
 
     def error(self, finding: Finding) -> None: ...
 

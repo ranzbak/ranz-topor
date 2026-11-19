@@ -297,9 +297,7 @@ def test_run_accept_single_commit(accepted, tmp_path):
     assert pcbfile.parse_zone_fills(board.text) == {**pcbfile.parse_zone_fills(board.text), **req.zone_fills}
     assert "same undo step" in (out.report_dir / "report.md").read_text()
     assert board.actions == ["pcbnew.GlobalEdit.cleanupTracksAndVias", "pcbnew.GlobalEdit.editTeardrops"]
-    names = ui.names()
-    assert names.index("preview") < names.index("done")
-    assert [c for c in ui.calls if c[0] == "done"][0][1][0] == "accepted"
+    assert "preview" in ui.names() and "done" not in ui.names()  # no finished window after Accept (2026-11-19)
     # the second save_copy holds the commit; kicad-cli judges it (M4b gate numbers)
     copy, rep = _result(board, out, tmp, "after")
     spans = pcbfile.find_items(copy.read_text())
@@ -338,8 +336,7 @@ def test_run_reject_leaves_board_untouched(rejected, eprom):
     assert board.commits == [] and board.refills == 0 and board.actions == []
     assert board.text.count(MARKER) == 1 and eprom.text == eprom.pcb.read_text()
     assert not any(c[0] in ("commit", "refill_zones", "run_action") for c in board.calls)
-    done = [c for c in ui.calls if c[0] == "done"]
-    assert len(done) == 1 and done[0][1][0] == "rejected" and done[0][1][2] == out.report_dir
+    assert "done" not in ui.names()  # no finished window after Reject (user 2026-11-19)
     assert "rejected" in (out.report_dir / "report.md").read_text()
 
 
@@ -405,7 +402,7 @@ def test_run_cancel_with_nothing_routed_is_cancelled(app, eprom, tmp_path, repor
     board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng)
     assert out.status == "cancelled" and board.commits == []
     assert "preview" not in ui.names()
-    assert [c[1][0] for c in ui.calls if c[0] == "done"] == ["cancelled"]
+    assert "done" not in ui.names()  # Cancel before any copper: silent (the user pressed it)
 
 
 def test_run_aborts_on_error_finding(app, eprom, tmp_path, reports):
@@ -554,7 +551,7 @@ class FailingBoard(FakeBoard):
             raise RuntimeError(f"unknown action {action}")
 
 
-@pytest.mark.parametrize("step", ["refill", "action", "report", "done"])
+@pytest.mark.parametrize("step", ["refill", "action", "report"])
 def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, monkeypatch, step):
     """Ruling C30 (gate review I-1): a failure after the successful commit (refill, KiCad action, report write,
     the done dialog) keeps status "accepted" and adds the POST_COMMIT_STEP_FAILED warning; never INTERNAL /
@@ -576,11 +573,7 @@ def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, 
 
         monkeypatch.setattr(run_mod.RunReport, "write", write)
 
-    class Ui(ScriptedUi):
-        def done(self, outcome, report, report_dir):
-            super().done(outcome, report, report_dir)
-            if step == "done":
-                raise RuntimeError("wx: dialog could not be created")
+    Ui = ScriptedUi
 
     text = eprom.text.rstrip()
     board = FailingBoard(eprom.pcb, eprom.model, live_text=text[:-1].rstrip("\n") + "\n" + LIVE_EDIT + ")\n",
@@ -594,11 +587,8 @@ def test_run_failure_after_commit_stays_accepted(app, eprom, tmp_path, reports, 
     assert "committed" in pc[0].message and "Ctrl+Z" in pc[0].fix and "Edit → Undo" in pc[0].fix
     assert not any(f.code == "INTERNAL" for f in out.findings) and out.error is None
     errs = [c[1][0] for c in ui.calls if c[0] == "error"]
-    if step == "done":
-        assert [e.code for e in errs] == ["POST_COMMIT_STEP_FAILED"]
-    else:
-        assert errs == []
-        assert [c[1][0] for c in ui.calls if c[0] == "done"] == ["accepted"]
+    # the failed step is loud (one error dialog, the routes are on the board); no finished window
+    assert [e.code for e in errs] == ["POST_COMMIT_STEP_FAILED"] and "done" not in ui.names()
     if step in ("refill", "action"):
         res = json.loads((out.report_dir / "result.json").read_text())
         assert res["status"] == "accepted" and "POST_COMMIT_STEP_FAILED" in (out.report_dir / "report.md").read_text()
