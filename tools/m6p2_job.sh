@@ -146,6 +146,7 @@ for m in ms:
     p74 = [p for p in u6 if str(p.get("number")) == "74"][:1]
     print(m, "U6 pads", len(u6), "local_clearance values", lc, "pad 74", p74[0].get("local_clearance") if p74 else None,
           "net rules clearance", (d.get("rules") or {}).get("clearance"))
+import harness  # noqa: F401  (isolated KiCad home before pcbnew; cwd = repo root)
 import pcbnew
 pcbs = sorted(glob.glob(out + "/model/*-work/*.kicad_pcb"))
 print("work copy:", pcbs)
