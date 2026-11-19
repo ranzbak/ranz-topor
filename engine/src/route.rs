@@ -124,19 +124,22 @@ pub struct ViolationReport {
 }
 
 /// The class of a violation (see [`ViolationReport::class`]) from what it is against, its cause
-/// and the connection's terminal labels (`REF.NUM`).
-pub fn violation_class(against: &str, cause: &str, from: &str, to: &str) -> &'static str {
-    let ref_of = |l: &str| l.rsplit_once('.').map(|x| x.0.to_string()).unwrap_or_default();
-    let own = [ref_of(from), ref_of(to)];
-    // Against a neighbour pin of its own terminal's part, or forced because its drawing first
-    // failed there (the logged cause names the first check that failed).
-    let own_pad = |t: &str| {
+/// and the exit pins of the connection's terminal pads (`exits`: `REF:NUM` keys,
+/// [`exit_pins`]). `pad_exit` only against a neighbour pin of a terminal pad (its own pad exit,
+/// planned in M-C / 5.10), directly or as the pad its drawing first failed at; any other pad of
+/// the terminal's part is a planner matter (cm1-room, wiccon gui27: RST against U1.15 / U1.20,
+/// 13-15 mm from its terminal U1.1, was hidden as pad_exit).
+pub fn violation_class(against: &str, cause: &str, exits: &[String]) -> &'static str {
+    // `pad:REF:NUM` anywhere in `t` naming an exit pin.
+    let exit_pad = |t: &str| {
         t.split("pad:").skip(1).any(|rest| {
-            let r = rest.split(':').next().unwrap_or("");
-            !r.is_empty() && own.iter().any(|o| o == r)
+            let mut it = rest.splitn(3, ':');
+            let (r, n) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
+            let n = n.split(|c: char| c.is_whitespace() || c == ')' || c == ',').next().unwrap_or("");
+            !r.is_empty() && exits.iter().any(|e| e.split_once(':') == Some((r, n)))
         })
     };
-    if against.starts_with("pad:") && own_pad(against) || cause.starts_with("drawing:") && own_pad(cause) {
+    if against.starts_with("pad:") && exit_pad(against) || cause.starts_with("drawing:") && exit_pad(cause) {
         return "pad_exit";
     }
     if cause.contains("no site") {
@@ -150,6 +153,21 @@ pub fn violation_class(against: &str, cause: &str, from: &str, to: &str) -> &'st
     } else {
         "static"
     }
+}
+
+/// The exit pins of a terminal pad (`REF:NUM` keys): the other pads of its footprint whose centre
+/// lies within 1.5 x the terminal pad's nearest same-footprint pitch (its row and diagonal
+/// neighbours: sqrt 2 < 1.5 < 2, so a BGA ball's eight neighbours and nothing two pitches away).
+/// `pads`: `(ref, number, centre)` of the board; `term`: the terminal pad's index. A pad alone on
+/// its part has none. O(pads of the part).
+pub fn exit_pins(pads: &[(&str, &str, crate::geom::Vec2)], term: usize) -> Vec<String> {
+    let (r, n, c) = pads[term];
+    let mates: Vec<(usize, f64)> = (0..pads.len()).filter(|&i| pads[i].0 == r && pads[i].1 != n).map(|i| (i, (pads[i].2 - c).len())).collect();
+    let Some(pitch) = mates.iter().map(|x| x.1).filter(|&d| d > 0.0).min_by(f64::total_cmp) else { return Vec::new() };
+    let mut out: Vec<String> = mates.iter().filter(|x| x.1 <= 1.5 * pitch).map(|x| format!("{}:{}", r, pads[x.0].1)).collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// A connection the zero-slack retry routed with margin 0 against its corridor (R6).
@@ -864,16 +882,45 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
 
 #[cfg(test)]
 mod tests {
-    use super::violation_class;
+    use super::{exit_pins, violation_class};
+    use crate::geom::Vec2;
 
     #[test]
     fn violation_classes() {
-        // A neighbour pin of its own part, directly or as the first failed check (M-C).
-        assert_eq!(violation_class("pad:U1:58", "drawing: clearance gap", "U1.57", "U4.U444"), "pad_exit");
-        assert_eq!(violation_class("track of D10 (item:3)", "drawing: clearance gap 0.097 mm < 0.150 mm against pad:U1:58 on layer F.Cu", "U1.57", "U4.U444"), "pad_exit");
-        assert_eq!(violation_class("track of X (item:3)", "via 1 of 2: no site in its interval", "U1.5", "J1.2"), "via_site");
-        assert_eq!(violation_class("via of X (item:3)", "drawing: passes a via of another net on the wrong side (topology)", "U1.5", "J1.2"), "crossing");
-        assert_eq!(violation_class("track of X (item:3)", "drawing: clearance gap 0.1 mm against item:9", "U1.5", "J1.2"), "foreign_copper");
-        assert_eq!(violation_class("pad:R3:1", "drawing: clearance gap 0.1 mm against pad:R3:1", "U1.5", "J1.2"), "static");
+        let ex = vec!["U1:56".to_string(), "U1:58".to_string()];
+        // A neighbour pin of its own terminal, directly or as the first failed check (M-C).
+        assert_eq!(violation_class("pad:U1:58", "drawing: clearance gap", &ex), "pad_exit");
+        assert_eq!(violation_class("track of D10 (item:3)", "drawing: clearance gap 0.097 mm < 0.150 mm against pad:U1:58 on layer F.Cu", &ex), "pad_exit");
+        // cm1-room: another pin of the same part, not next to the terminal, is no pad exit.
+        assert_eq!(violation_class("pad:U1:15", "drawing: clearance gap", &ex), "static");
+        assert_eq!(violation_class("pad:U1:580", "drawing: clearance gap", &ex), "static", "a number is matched whole");
+        assert_eq!(violation_class("track of D10 (item:3)", "drawing: clearance gap 0.097 mm < 0.150 mm against pad:U1:15 on layer F.Cu", &ex), "foreign_copper");
+        assert_eq!(violation_class("track of X (item:3)", "via 1 of 2: no site in its interval", &ex), "via_site");
+        assert_eq!(violation_class("via of X (item:3)", "drawing: passes a via of another net on the wrong side (topology)", &ex), "crossing");
+        assert_eq!(violation_class("track of X (item:3)", "drawing: clearance gap 0.1 mm against item:9", &ex), "foreign_copper");
+        assert_eq!(violation_class("pad:R3:1", "drawing: clearance gap 0.1 mm against pad:R3:1", &ex), "static");
+        assert_eq!(violation_class("pad:U1:58", "drawing: clearance gap", &[]), "static", "no exit pins: no pad exit");
+    }
+
+    /// cm1-room: the exit pins of a terminal are its row and diagonal neighbours on its own part.
+    #[test]
+    fn exit_pins_are_the_row_and_diagonal_neighbours() {
+        let v = |x: f64, y: f64| Vec2 { x, y };
+        // A 3 x 3 ball grid at pitch 1 (centre ball "5"), a pin two pitches away, another part.
+        let mut pads: Vec<(&str, &str, Vec2)> = Vec::new();
+        let names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+        for (i, n) in names.iter().enumerate() {
+            pads.push(("U1", n, v((i % 3) as f64, (i / 3) as f64)));
+        }
+        pads.push(("U1", "10", v(3.0, 1.0)));
+        pads.push(("R1", "1", v(1.0, 2.0)));
+        let ex = exit_pins(&pads, 4);
+        assert_eq!(ex, ["U1:1", "U1:2", "U1:3", "U1:4", "U1:6", "U1:7", "U1:8", "U1:9"]);
+        // A corner ball: three neighbours, not the far corner (2 sqrt 2).
+        assert_eq!(exit_pins(&pads, 0), ["U1:2", "U1:4", "U1:5"]);
+        // Pin 10 (2 pitches from 5, 1 from 6): only 3, 6, 9 are within 1.5 of it.
+        assert_eq!(exit_pins(&pads, 9), ["U1:3", "U1:6", "U1:9"]);
+        // A part with one pad: none.
+        assert!(exit_pins(&pads, 10).is_empty());
     }
 }

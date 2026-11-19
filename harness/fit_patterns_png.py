@@ -79,6 +79,40 @@ def _frame(ax, pat, layers, title):
     ax.set_title(title, fontsize=11)
 
 
+def _kept(ax, pat, layers):
+    """Existing copper of the problem (a hand-started track, tw4 T3), hatched, on both panels."""
+    for t in getattr(pat, "kept_tracks", ()):
+        if t.layer not in layers:
+            continue
+        poly = LineString(t.pts).buffer(t.width / 2, cap_style="round", join_style="round", quad_segs=16)
+        ax.add_patch(Polygon(list(poly.exterior.coords), closed=True, fc=_color(pat, t.net), ec="k", lw=0.4,
+                             alpha=0.6, hatch="xx", zorder=4, label=f"existing (hand) track {t.net}"))
+
+
+def _lead_note(ax, pat, *, detail: bool):
+    """tw4 T3: the dangling end's lead, its start points (with the turn and the cost of each) and the expected one."""
+    dl = pat.extra.get("dangling_lead")
+    if not dl:
+        return
+    (x0, y0), L = dl["hand_end"], dl["lead_mm"]
+    ax.plot([x0, x0 + L], [y0, y0], ls=(0, (1, 1)), lw=2.2, color="#d08c00", zorder=6, label="planned lead (1.5 mm)")
+    for r in dl["starts"]:
+        x, y = r["at"]
+        best = r["start"] == dl["expected_start"]
+        ax.plot([x], [y], "o", ms=6 if best else 4, color=OK if best else "#d08c00", zorder=8)
+        if detail:
+            dy = -0.35 - 0.42 * (["hand end", "1/3", "2/3", "lead end"].index(r["start"]))
+            ax.annotate(f"{r['start']}: turn {r['turn_deg']:.1f} deg, cost {r['total']:.2f}", xy=(x, y),
+                        xytext=(x + 0.25, y + dy), fontsize=7.5, color=OK if best else "#8a5d00", zorder=9,
+                        bbox=dict(fc="white", ec="none", alpha=0.85, pad=0.3),
+                        arrowprops=dict(arrowstyle="-", color="#999999", lw=0.5))
+    if detail:
+        x1, y1 = x0 + L, y0
+        r2 = pat.witness[pat.nets[0]][1][-1]
+        ax.plot([x1, x1, r2[0]], [y1, y1 + 2.3, r2[1]], ls=(0, (3, 2)), lw=1.0, color=BAD, zorder=5,
+                label="today: full lead, then back")
+
+
 def _tracks(ax, pat, layers):
     for t in pat.ref_tracks:
         if t.layer not in layers:
@@ -187,6 +221,9 @@ def neck_title(pat):
     neck = pat.extra.get("neck")
     if not neck:
         return ""
+    if "detour_ratio" in neck:
+        return (f"\nfull width {neck['nominal_width']:.2f}, no neck: {neck['reference_length']:.2f} mm = "
+                f"{neck['detour_ratio']:.3f} x straight; N1 would need the {neck['floor']:.2f} floor")
     if "reference" in neck:
         return (f"\nneck {neck['max_neck_width']:.2f} (floor {neck['floor']:.2f}) from U2.1 to "
                 f"{neck['full_width_clear_from_pin_line']:.4f} past the pins: {neck['neck_length_from_pad_centre']:.4f}")
@@ -221,11 +258,15 @@ def _detail(ax, pat, doc, layers, octi):
     and every copper-free stretch along the cut, labelled with its length (red when below the 0.20 clearance)."""
     cuts = [c for c in pat.cuts if c.layer in layers and c.role == "binding"] or \
         [c for c in pat.cuts if c.layer in layers]
-    xs = [x for c in cuts for x in (c.p[0], c.q[0])]
-    ys = [y for c in cuts for y in (c.p[1], c.q[1])]
-    m = 0.9
-    x0, x1, y0, y1 = min(xs) - m, max(xs) + m, min(ys) - m, max(ys) + m
+    if cuts:
+        xs = [x for c in cuts for x in (c.p[0], c.q[0])]
+        ys = [y for c in cuts for y in (c.p[1], c.q[1])]
+        m = 0.9
+        x0, x1, y0, y1 = min(xs) - m, max(xs) + m, min(ys) - m, max(ys) + m
+    else:
+        x0, y0, x1, y1 = pat.extra["dangling_lead"]["detail_box"]
     _frame(ax, pat, layers, "")
+    _kept(ax, pat, layers)
     if pat.solvable:
         _tracks(ax, pat, layers)
         lt = [(t.width, t.pts) for t in pat.ref_tracks if t.layer in layers]
@@ -272,8 +313,14 @@ def _detail(ax, pat, doc, layers, octi):
             ax.text((c.p[0] + c.q[0]) / 2, yb + 0.08, f"dx = {abs(c.q[0] - c.p[0]):.2f} = octagonal capacity:\n"
                     "the room of 90 deg wires (need 1.55)", fontsize=7.5, color=BAD, ha="center", va="top",
                     zorder=9, bbox=dict(fc="white", ec="none", alpha=0.85, pad=0.3))
+    _lead_note(ax, pat, detail=True)
     ax.set_xlim(x0, x1)
     ax.set_ylim(y1, y0)
+    if pat.extra.get("dangling_lead"):
+        ax.legend(loc="lower right", fontsize=7, framealpha=0.9)
+        ax.set_title(f"detail {'/'.join(layers)}: {what};\nthe lead's start points: turn off +x, length + "
+                     "dangling_turn 4 x 0.45 x (1 - cos a)", fontsize=9)
+        return
     ax.set_title(f"detail {'/'.join(layers)}: {what};\ncopper-free lengths along the cut (mm)" + neck_title(pat), fontsize=9)
 
 
@@ -297,11 +344,14 @@ def render(pat, doc: dict, out: Path) -> Path:
     all_layers = sorted({ly for v in views for ly in v} | {"F.Cu"})
     octi = pat.name == "diagonal_cut_norm"
     _frame(ax_p, pat, all_layers, "problem: pads, rule areas, ratsnest; critical cuts")
+    _kept(ax_p, pat, all_layers)
+    _lead_note(ax_p, pat, detail=False)
     _ratsnest(ax_p, pat)
     _cuts(ax_p, pat, doc, all_layers, labels=False, octi=False)
     lname = "/".join(all_layers)
     if pat.solvable:
         _frame(ax_r, pat, all_layers, f"reference copper ({lname}), KiCad DRC 0 / 0")
+        _kept(ax_r, pat, all_layers)
         _tracks(ax_r, pat, all_layers)
         _neck_note(ax_r, pat)
     else:

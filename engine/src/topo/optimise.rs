@@ -438,6 +438,13 @@ pub struct Predicted {
     pub parts: MeasureParts,
 }
 
+/// tw4 fix round 2 (verifier F2, test hook): the neck-depth part (`[factors] neck_depth` / violation
+/// weight x Σ d²) of the last whole-board measure of the TopoR loop, as f64 bits.
+pub mod neckcheck {
+    use std::sync::atomic::AtomicU64;
+    pub static LAST: AtomicU64 = AtomicU64::new(0);
+}
+
 /// The parts of a [`Predicted`] (loop-local).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MeasureParts {
@@ -445,6 +452,9 @@ pub struct MeasureParts {
     pub unlayerable: usize,
     pub forced: usize,
     pub foreign: (usize, f64, usize),
+    /// tw4 T1: the neck-depth part of `graded` (`[factors] neck_depth` / violation weight x the
+    /// state's Σ d², [`super::state::State::neck_depth`]); no count.
+    pub neck: f64,
 }
 
 /// Equal predictions: the same numbers; how they were made ([`Predicted::parts`]) is not
@@ -460,20 +470,28 @@ impl Predicted {
     /// connections. O(1).
     pub fn of(cap: (usize, f64), unlayerable: usize, forced: usize) -> Predicted {
         let n = unlayerable + forced;
-        let parts = MeasureParts { cap, unlayerable, forced, foreign: (0, 0.0, 0) };
+        let parts = MeasureParts { cap, unlayerable, forced, foreign: (0, 0.0, 0), neck: 0.0 };
         Predicted { count: cap.0 + n, graded: cap.1 + n as f64, shrink_n: 0, shrink_mm: 0.0, shorts: unlayerable, short_extra: 0.0, parts }
     }
     /// loop-local: the prediction of `parts` (the per-edge model; no shrinkages), shorts ranked
     /// as [`Predicted::shorts_ranked`]. Equal to the measure's own prediction of the same parts.
     /// O(1).
     pub fn from_parts(parts: MeasureParts, pick_shorts: bool, short_weight: f64) -> Predicted {
-        Predicted::of(parts.cap, parts.unlayerable, parts.forced).with_foreign(parts.foreign).shorts_ranked(pick_shorts, short_weight)
+        Predicted::of(parts.cap, parts.unlayerable, parts.forced).with_foreign(parts.foreign).with_neck(parts.neck).shorts_ranked(pick_shorts, short_weight)
     }
     /// Plus the traversals through foreign copper `(count, graded, shorts)` ([`foreign_copper`]:
     /// the ones through a no-tracks rule area are violations but no shorts). O(1).
     pub fn with_foreign(self, f: (usize, f64, usize)) -> Predicted {
         let parts = MeasureParts { foreign: (self.parts.foreign.0 + f.0, self.parts.foreign.1 + f.1, self.parts.foreign.2 + f.2), ..self.parts };
         Predicted { count: self.count + f.0, graded: self.graded + f.1, shorts: self.shorts + f.2, parts, ..self }
+    }
+    /// tw4 T1: plus the neck-depth part `x` (graded only, no count; 0 leaves it as it was). O(1).
+    pub fn with_neck(self, x: f64) -> Predicted {
+        if x == 0.0 {
+            return self;
+        }
+        let parts = MeasureParts { neck: self.parts.neck + x, ..self.parts };
+        Predicted { graded: self.graded + x, parts, ..self }
     }
     /// The same prediction with the shorts ranked at weight `k` (`[optimize] short_weight`, at
     /// least 1) when `on` (`[optimize] pick_shorts`); off: not ranked (they stay in `count` and

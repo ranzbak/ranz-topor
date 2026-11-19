@@ -1193,6 +1193,16 @@ pub struct Options {
     /// track-only length. Default on; off = the via goes to the plan's site, the lead keeps its
     /// track-only length.
     pub dangling_lead_via: bool,
+    /// Topological core (tw4 T3, `topor.toml [search] dangling_lead_choice`): the lead of a
+    /// continued dangling end is a plan choice: the search may also start at 0, 1/3 or 2/3 of
+    /// its length (`topo::board::KeptEndOut::choices`), each leaving along the hand track's
+    /// direction; the search prices the length from it and the `dangling_turn` factor of the turn
+    /// there (the lead up to it is free, as the fixed lead is), and the drawing draws the lead up
+    /// to the chosen point. A lead that points past its target gets shorter. Default off (the
+    /// lead's end only). With it on, `dangling_turn` defaults to 4 (unless `[factors] weight` sets
+    /// it; `topo::factors::with_lead_choice_turn`). The unused part of the lead still blocks other
+    /// nets in the plan.
+    pub dangling_lead_choice: bool,
     /// Topological core (D6b, `topor.toml [search] fuse_branches`): after the drawing, a trace
     /// that leaves a junction or a pad beside another trace of its net leaves that trace's copper
     /// where the two part instead (one copper, a T there), when that is cheaper by length and the
@@ -1446,6 +1456,14 @@ pub struct Options {
     /// "cuts", and since M0 model = "edges" with edges_test = "price") may add vias where they
     /// remove more over-full price than the vias cost (false: only moves that keep the via price).
     pub cut_vias: bool,
+    /// CM1 (`[capacity] via_cuts`): a planned via is a feature of the capacity test in both
+    /// capacity models: its gap cuts (from the closest point of each nearby obstacle through the
+    /// via to the obstacle across, Maley 1987 pp. 32-33, 40; `topo::viacut`) hold the via and
+    /// every other net's wire that crosses them, so a via planned in a pad gap that another wire
+    /// passes too is predicted over-full. false = the model before CM1 (a via counted only on the
+    /// two edges its own wire crosses / on static cuts within reach). Default true since the tw4
+    /// equal-time A/B (2026-11-19: esp 5 seeds + qmtech at wall 300 s, KiCad DRC -23 % / -28 %).
+    pub via_cuts: bool,
     /// C0 (`[run] stop_after`, measurement): `"plan"` ends every run of the topological core
     /// after the plan of its first cycle (later cycles need the drawing's feedback), before the
     /// drawing; the result has no copper and its warnings carry the plan metrics line. `""`
@@ -1589,6 +1607,7 @@ impl Default for Options {
             junction_pad_mm: 0.0,
             dangling_lead_mm: 0.0,
             dangling_lead_via: true,
+            dangling_lead_choice: false,
             fuse_branches: true,
             fuse_pour_check: true,
             fuse_pour_rounds: 2,
@@ -1641,6 +1660,7 @@ impl Default for Options {
             edges_test: "price".into(),
             overflow_softness: 0.1,
             cut_vias: true,
+            via_cuts: true,
             stop_after: String::new(),
             diffpair_route: true,
             diffpair_zip_max_nm: 3_000_000,

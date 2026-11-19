@@ -11,7 +11,7 @@
 
 use super::cuts;
 use super::init::Conn;
-use super::state::{point_in_poly, point_in_segments, LayerMask, ObsId, ObsKind, Obstacle, Projection, VertId, VertKind};
+use super::state::{centre_vertices, point_in_poly, point_in_segments, LayerMask, ObsId, ObsKind, Obstacle, Projection, VertId, VertKind};
 use crate::geom::quant::TrackPrim;
 use crate::geom::{Arc, Skeleton, Vec2};
 use crate::model::{BoardModel, PadAttr};
@@ -57,11 +57,17 @@ pub struct BuildOpts {
     /// (`margin_nm` + [`super::pack::DRAW_TOL_NM`], 10 nm by default; erbs-margin), so the lead's
     /// end is no zero-slack vertex the drawing's packer cannot leave (r1 verifier F4).
     pub lead_margin_nm: f64,
+    /// tw4 T3 (`[search] dangling_lead_choice`): the lead of a continued dangling end offers the
+    /// points at 0, 1/3 and 2/3 of its (cut) length as start points too, besides its end
+    /// ([`KeptEndOut::choices`]): extra centre vertices of the lead's terminal obstacle, so the
+    /// search takes the cheapest (the length from it and the `dangling_turn` price there) and the
+    /// drawing draws the lead only up to the chosen one. Off: the lead's end only.
+    pub lead_choice: bool,
 }
 
 impl Default for BuildOpts {
     fn default() -> Self {
-        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16, existing_vias: false, keepouts: false, plane_layers: false, copper_shapes: false, kept_tracks: false, lead_margin_nm: super::pack::DRAW_TOL_NM }
+        BuildOpts { steiner_mm: 2.0, steiner_clear_mm: 0.6, lct_mm: 3.0, lct_eps_mm: 0.01, round_steps: 16, existing_vias: false, keepouts: false, plane_layers: false, copper_shapes: false, kept_tracks: false, lead_margin_nm: super::pack::DRAW_TOL_NM, lead_choice: false }
     }
 }
 
@@ -108,6 +114,16 @@ pub enum Extra {
 /// exist-term: a lead shorter than this (nm) is degenerate; the end is a plain disc terminal.
 pub const LEAD_MIN_NM: f64 = 10_000.0;
 
+/// tw4 T3 ([`BuildOpts::lead_choice`]): the start points a built lead offers besides its end,
+/// `(point, t)` on its axis at `t` = 0 (the hand end itself), 1/3 and 2/3 of its length; an inner
+/// point nearer than [`LEAD_MIN_NM`] to the hand end or the lead's end is left out. Empty without
+/// a lead. O(1).
+pub fn lead_choice_points(k: &KeptEndOut) -> Vec<(Vec2, f64)> {
+    let Some((q, d)) = k.lead else { return Vec::new() };
+    let l = (q - k.at).len();
+    [0.0, l / 3.0, 2.0 * l / 3.0].into_iter().filter(|&t| t == 0.0 || (t >= LEAD_MIN_NM && l - t >= LEAD_MIN_NM)).map(|t| (k.at + d * t, t)).collect()
+}
+
 /// exist-term: one terminal on existing copper ([`Extra::KeptEnd`]) as built: its obstacle, the
 /// end point `at` on the kept track and, for a lead, the lead's end (the centre vertex) and its
 /// direction. `note`: why a requested lead was not built.
@@ -126,6 +142,24 @@ pub struct KeptEndOut {
     /// via room on the lead for any size, or the option is off.
     pub via_end: Option<(Vec2, crate::vias::ViaSize)>,
     pub note: Option<String>,
+    /// tw4 T3 ([`BuildOpts::lead_choice`]): the start points the lead offers, `(vertex, t)` with
+    /// `t` the distance (nm) from `at` along the lead, ascending, the lead's end (the obstacle's
+    /// main centre vertex) last. Every one is a centre vertex of `obs`. Empty: the option is off
+    /// or the end has no lead (the end vertex is the only start point).
+    pub choices: Vec<(VertId, f64)>,
+}
+
+impl KeptEndOut {
+    /// tw4 T3: the distance (nm) from `at` along the lead of the start point at `p` (one of
+    /// [`KeptEndOut::choices`] or the lead's end), within 1 nm; `None` for any other point or
+    /// without a lead. Off ([`BuildOpts::lead_choice`]) only the lead's end matches.
+    pub fn lead_point_t(&self, proj: &Projection, p: Vec2) -> Option<f64> {
+        let (q, _) = self.lead?;
+        if (p - q).len() < 1.0 {
+            return Some((q - self.at).len());
+        }
+        self.choices.iter().find(|&&(v, _)| (proj.pos[v] - p).len() < 1.0).map(|&(_, t)| t)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +181,10 @@ pub struct Board {
     pub notes: Vec<String>,
     /// 5.10: the exit stubs of the build (`Extra::Exit`): `(obstacle, pad index)`.
     pub exit_stubs: Vec<(ObsId, usize)>,
+    /// 5.10 / TW4 meter: the exits that needed a stub (fine pitch towards the target) but got
+    /// none, because the rectangle would break a clearance: `(pad obstacle, pad index)`, once per
+    /// pad. The compass predicts each as a `pad_exit`.
+    pub exit_blocked: Vec<(ObsId, usize)>,
     /// exist-term: the obstacle of each existing via (index into `BoardModel::vias`).
     pub via_obs: BTreeMap<usize, ObsId>,
     /// exist-term: the terminals on existing copper (`Extra::KeptEnd`), in `extra` order.
@@ -396,12 +434,21 @@ fn poly_poly_dist(p: &[Vec2], q: &[Vec2]) -> f64 {
 /// O(obstacles x polygon sizes) per call.
 /// `more`: copper that is no obstacle of the build yet but must keep the stub's clearance too (the
 /// kept tracks, exist-term r2: they are added after the stubs; none on a board without them).
+/// Why [`exit_stub`] gave no stub (TW4 meter: the compass predicts the second as a `pad_exit`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StubNo {
+    /// No planned exit needed (no elongated SMD pad, or no other net's copper beside it).
+    NotNeeded,
+    /// Needed (fine pitch towards the target) but the rectangle would break a clearance.
+    Illegal,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, toward: Vec2, w: f64, s: f64, outline: &[(Vec2, Vec2)], edge_clear: f64) -> Option<(Vec<Vec2>, bool)> {
+fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, toward: Vec2, w: f64, s: f64, outline: &[(Vec2, Vec2)], edge_clear: f64) -> Result<(Vec<Vec2>, bool), StubNo> {
     let ob = &obstacles[oi];
-    let net = ob.net?;
+    let Some(net) = ob.net else { return Err(StubNo::NotNeeded) };
     if ob.drilled || ob.layers.0.count_ones() != 1 || ob.poly.len() < 3 || w <= 0.0 {
-        return None;
+        return Err(StubNo::NotNeeded);
     }
     let c = ob.center;
     let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
@@ -418,7 +465,7 @@ fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, 
     let ext = |v: Vec2| ob.poly.iter().map(|&p| (p - c).dot(v)).fold(f64::MIN, f64::max);
     let (lu, lv) = (ext(u0) + ext(-u0), ext(u0.perp()) + ext(-u0.perp()));
     if lu < 1.2 * lv {
-        return None;
+        return Err(StubNo::NotNeeded);
     }
     let plus = (toward - c).dot(u0) >= 0.0;
     let u = if plus { u0 } else { -u0 };
@@ -459,7 +506,7 @@ fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, 
         near(plo, phi, &o.poly, gap) && poly_poly_dist(&ob.poly, &o.poly) - o.sag < gap
     });
     if !fine {
-        return None;
+        return Err(StubNo::NotNeeded);
     }
     // From where the whole width has left the pad to `s + width` past its tip.
     let nrm = u.perp() * (0.5 * ws);
@@ -472,7 +519,7 @@ fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, 
     }
     let t1 = tip + s + ws;
     if t1 - t <= step {
-        return None;
+        return Err(StubNo::Illegal);
     }
     let (a, b) = (c + u * t, c + u * t1);
     // Legal: the clearance to every other net's copper, rule area and the board edge.
@@ -483,13 +530,13 @@ fn exit_stub(obstacles: &[Obstacle], more: &[Obstacle], src: &[Src], oi: usize, 
         }
         let req = need(j, o) + 0.5 * ws + o.sag;
         if near(slo, shi, &o.poly, req) && seg_poly_dist(a, b, &o.poly) < req - 1.0 {
-            return None;
+            return Err(StubNo::Illegal);
         }
     }
     if outline.iter().any(|&(p, q)| super::draw::seg_seg_dist(a, b, p, q) < edge_clear + 0.5 * ws - 1.0) {
-        return None;
+        return Err(StubNo::Illegal);
     }
-    Some((vec![a - nrm, b - nrm, b + nrm, a + nrm], plus))
+    Ok((vec![a - nrm, b - nrm, b + nrm, a + nrm], plus))
 }
 
 /// The board outline as segments (arcs split to 0.05 mm sagitta).
@@ -954,7 +1001,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
             if poly.len() < 3 {
                 continue;
             }
-            kept_ends.push(KeptEndOut { obs: obstacles.len(), net, at, w, lead: led, via_end, note });
+            kept_ends.push(KeptEndOut { obs: obstacles.len(), net, at, w, lead: led, via_end, note, choices: Vec::new() });
             term_obs.push(obstacles.len());
             pad_of.push(usize::MAX);
             src.push(Src::Extra(xi));
@@ -1010,6 +1057,7 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     // 5.10: the exit stubs, after every other obstacle (each keeps its clearance to all of them
     // and to the stubs placed before it); one per pad and tip.
     let mut exit_stubs: Vec<(ObsId, usize)> = Vec::new();
+    let mut exit_blocked: Vec<(ObsId, usize)> = Vec::new();
     if extra.iter().any(|x| matches!(x, Extra::Exit { .. })) {
         let osegs = outline_segments(m);
         let obs_of: BTreeMap<usize, usize> = pad_of.iter().enumerate().filter(|(_, &p)| p != usize::MAX).map(|(o, &p)| (p, o)).collect();
@@ -1017,7 +1065,16 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
         for x in extra {
             let Extra::Exit { pad, toward, w, s } = *x else { continue };
             let Some(&oi) = obs_of.get(&pad) else { continue };
-            let Some((poly, plus)) = exit_stub(&obstacles, &kept_obs, &src, oi, toward, w, s, &osegs, m.rules.edge_clearance as f64) else { continue };
+            let (poly, plus) = match exit_stub(&obstacles, &kept_obs, &src, oi, toward, w, s, &osegs, m.rules.edge_clearance as f64) {
+                Ok(x) => x,
+                Err(StubNo::NotNeeded) => continue,
+                Err(StubNo::Illegal) => {
+                    if !exit_blocked.contains(&(oi, pad)) {
+                        exit_blocked.push((oi, pad));
+                    }
+                    continue;
+                }
+            };
             if !done.insert((pad, plus)) {
                 continue;
             }
@@ -1055,6 +1112,13 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     // 4.4: a pour terminal is a terminal like a pad.
     for &i in &term_obs {
         points.push((obstacles[i].center, VertKind::Centre(i)));
+    }
+    // tw4 T3 (`lead_choice`): the lead's other start points (0, 1/3, 2/3 of its length) on its
+    // axis, extra centre vertices of its terminal obstacle (after every main centre, so a
+    // coincident terminal keeps its own kind and the point is dropped below).
+    let lead_pts: Vec<(usize, Vec2, f64)> = if o.lead_choice { kept_ends.iter().enumerate().flat_map(|(ki, k)| lead_choice_points(k).into_iter().map(move |(p, t)| (ki, p, t))).collect() } else { Vec::new() };
+    for &(ki, p, _) in &lead_pts {
+        points.push((p, VertKind::Centre(kept_ends[ki].obs)));
     }
     // LCT cuts (see `cuts`): the feet of obstacle / outline vertices on facing sides, so that the
     // nearest copper of every sector is a vertex. Sides: obstacle polygon sides, then the outline.
@@ -1192,15 +1256,34 @@ pub fn build_full_checked(m: &BoardModel, o: &BuildOpts, nodes: &[Vec2], extra: 
     // The projection is one CDT over every layer: a region bound to some layers only is left to
     // the drawing and its checker (which see layers).
     proj.set_regions(m.rules.clearance_regions.iter().filter(|r| r.layers.is_empty()).map(|r| (r.poly.iter().map(|p| p.to_vec2()).collect(), r.clearance as f64)).collect());
-    let mut centre = vec![None; proj.obstacles.len()];
-    for (v, k) in proj.vkind.iter().enumerate() {
-        if let VertKind::Centre(o) = *k {
-            centre[o] = Some(v);
+    let centre = centre_vertices(&proj);
+    // tw4 T3: the lead's start points as built (a point the CDT merged into another terminal is
+    // dropped), the lead's end (the main centre) last.
+    if o.lead_choice {
+        for (ki, k) in kept_ends.iter_mut().enumerate() {
+            let (Some(vq), Some((q, _))) = (centre[k.obs], k.lead) else { continue };
+            let mut ch: Vec<(VertId, f64)> = lead_pts
+                .iter()
+                .filter(|x| x.0 == ki)
+                .filter_map(|&(_, p, t)| proj.vertex_at(p, 1.0).filter(|&v| v != vq && proj.vkind[v] == VertKind::Centre(k.obs)).map(|v| (v, t)))
+                .collect();
+            if std::env::var_os("TOPO_T3DBG").is_some() {
+                for &(_, p, t) in lead_pts.iter().filter(|x| x.0 == ki) {
+                    let hit = proj.vertex_at(p, 1.0);
+                    let near = (0..proj.pos.len()).filter(|&v| proj.vkind[v] == VertKind::Centre(k.obs)).map(|v| ((proj.pos[v] - p).len(), v)).min_by(|a, b| a.0.total_cmp(&b.0));
+                    eprintln!("T3DBG build lead pt t {:.0} nm at ({:.1}, {:.1}) vertex_at {:?} kind {:?} nearest own centre {:?} main {vq} path {:?}", t, p.x, -p.y, hit, hit.map(|v| proj.vkind[v]), near, proj.cdt.path);
+                }
+            }
+            if ch.is_empty() {
+                continue;
+            }
+            ch.push((vq, (q - k.at).len()));
+            k.choices = ch;
         }
     }
     let poured = m.pours.iter().map(|p| p.net).collect();
     notes.extend(kept_ends.iter().filter_map(|k| k.note.clone()));
-    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured, notes, exit_stubs, via_obs, kept_ends, kept_bodies })
+    Ok(Board { proj, signal_layers, n_signal, centre, pad_of, poured, notes, exit_stubs, exit_blocked, via_obs, kept_ends, kept_bodies })
 }
 
 impl Board {
@@ -1760,5 +1843,45 @@ mod tests {
             }
         }
         assert!(b.exit_stubs.is_empty(), "no legal stub across the kept track: {:?}", b.exit_stubs);
+    }
+
+    /// tw4 T3 (`lead_choice`): a dangling end's lead (net A's kept track (2, 5) -> (5, 5) mm, its
+    /// end continued 1.5 mm along +x) offers the hand end and 1/3, 2/3 of its length as start
+    /// points besides its end: centre vertices of the lead's obstacle on its axis, the end (the
+    /// main centre) last, every `lead_point_t` exact; a point between them is none. Off: no
+    /// choices and the same projection as before (one centre per obstacle).
+    #[test]
+    fn a_lead_offers_its_start_points_with_lead_choice() {
+        let s = r#"{"units":"nm","board":"t","layers":[{"id":0,"name":"F.Cu","kind":"signal"},{"id":2,"name":"B.Cu","kind":"signal"}],
+            "nets":[{"code":1,"name":"A"}],"pads":[],"kept":[{"uuid":"t","net":1,"layer":0,"width":250000,"prim":{"kind":"seg","a":[2000000,5000000],"b":[5000000,5000000]}}],
+            "outline":[],"rules":{"default":{"clearance":200000,"width":250000},"min_connection":127000,"max_error":5000,"per_net":{}}}"#;
+        let m = BoardModel::from_json(s).expect("model");
+        let at = v(5e6, -5e6);
+        let x = [Extra::KeptEnd { net: 1, layer: 0, at, w: 250_000.0, s: 200_000.0, lead: Some((v(1.0, 0.0), 1.5e6)), via: Vec::new() }];
+        let off = build_full(&m, &BuildOpts { kept_tracks: true, ..BuildOpts::default() }, &[], &x).expect("build");
+        let on = build_full(&m, &BuildOpts { kept_tracks: true, lead_choice: true, ..BuildOpts::default() }, &[], &x).expect("build");
+        assert!(off.kept_ends[0].choices.is_empty(), "off: no choices");
+        assert_eq!(off.proj.vkind.iter().filter(|k| matches!(k, VertKind::Centre(_))).count(), 1, "off: one centre vertex");
+        let k = &on.kept_ends[0];
+        let (q, _) = k.lead.expect("a lead");
+        assert!((q - v(6.5e6, -5e6)).len() < 1.0, "the full 1.5 mm lead: {q:?}");
+        let ts: Vec<f64> = k.choices.iter().map(|c| c.1).collect();
+        assert_eq!(ts.len(), 4, "0, 1/3, 2/3 and the end: {ts:?}");
+        for (t, want) in ts.iter().zip([0.0, 0.5e6, 1.0e6, 1.5e6]) {
+            assert!((t - want).abs() < 1.0, "{ts:?}");
+        }
+        assert_eq!(k.choices.last().map(|c| c.0), on.centre[k.obs], "the end is the main centre, last");
+        for &(vx, t) in &k.choices {
+            assert_eq!(on.proj.vkind[vx], VertKind::Centre(k.obs));
+            assert!((on.proj.pos[vx] - (at + v(t, 0.0))).len() < 1.0, "on the lead's axis");
+            assert_eq!(k.lead_point_t(&on.proj, on.proj.pos[vx]), Some(t));
+        }
+        assert_eq!(k.lead_point_t(&on.proj, v(5.25e6, -5e6)), None, "no start point between two");
+        assert_eq!(super::super::state::centre_vertices(&on.proj), on.centre, "the state's centres are the board's");
+        // degenerate: a lead too short for inner points offers the hand end only
+        let x = [Extra::KeptEnd { net: 1, layer: 0, at, w: 250_000.0, s: 200_000.0, lead: Some((v(1.0, 0.0), 20_000.0)), via: Vec::new() }];
+        let short = build_full(&m, &BuildOpts { kept_tracks: true, lead_choice: true, ..BuildOpts::default() }, &[], &x).expect("build");
+        let ts: Vec<f64> = short.kept_ends[0].choices.iter().map(|c| c.1).collect();
+        assert_eq!(ts.len(), 2, "the hand end and the end: {ts:?}");
     }
 }

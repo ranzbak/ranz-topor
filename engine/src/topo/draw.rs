@@ -2368,6 +2368,12 @@ impl<'a> Drawer<'a> {
             }
             let Some(k) = self.b.kept_ends.iter().find(|k| k.obs == ob) else { continue };
             if let (Some(_), Some(ve)) = (k.lead, k.via_end) {
+                // tw4 T3: a wire that starts short of the lead's end has its via end only where
+                // it lies on the part of the lead it draws
+                let p = self.b.proj.pos[if end == 0 { wi.a } else { wi.b }];
+                if !k.choices.is_empty() && k.lead_point_t(&self.b.proj, p).is_some_and(|t| (ve.0 - k.at).len() > t + 1.0) {
+                    continue;
+                }
                 return Some((end, ve));
             }
         }
@@ -3756,13 +3762,24 @@ impl<'a> Drawer<'a> {
         let bd = self.b;
         for (end, ob) in [(0usize, wi.pa), (1, wi.pb)] {
             let Some(k) = bd.kept_ends.iter().find(|k| k.obs == ob && ob != super::state::NO_OBS) else { continue };
-            let Some((q, _)) = k.lead else { continue };
+            let Some((q, d)) = k.lead else { continue };
+            // tw4 T3 (`dangling_lead_choice`): up to the start point the plan chose on the lead
+            // (its end without the option).
+            let q = if k.choices.is_empty() { q } else { k.lead_point_t(&bd.proj, bd.proj.pos[if end == 0 { wi.a } else { wi.b }]).map_or(q, |t| k.at + d * t) };
             // r4: up to the via the plan's layer change put on the lead (none: it is the hand
             // end itself). r5: when another wire starts at the same end, the full lead (the
             // other wire's lead goes on to `q`; two collinear leads from one end, one shorter,
-            // are copper KiCad's Cleanup merges, badge I2C_SDA); the via sits on it.
+            // are copper KiCad's Cleanup merges, badge I2C_SDA); the via sits on it. T3: the
+            // farthest of the sharing wires' start points.
             let shared = self.st.wires.iter().enumerate().any(|(x, o)| x != w && o.alive && (o.pa == ob || o.pb == ob));
-            let q = if shared { q } else { self.lead_via.get(&(w, end)).copied().unwrap_or(q) };
+            let q = if shared && !k.choices.is_empty() {
+                let far = self.st.wires.iter().filter(|o| o.alive).flat_map(|o| [(o.pa, o.a), (o.pb, o.b)]).filter(|&(x, _)| x == ob).filter_map(|(_, v)| k.lead_point_t(&bd.proj, bd.proj.pos[v])).fold(0.0, f64::max);
+                k.at + d * far.max((q - k.at).len())
+            } else if shared {
+                q
+            } else {
+                self.lead_via.get(&(w, end)).copied().unwrap_or(q)
+            };
             if (q - k.at).len() < super::board::LEAD_MIN_NM {
                 continue;
             }

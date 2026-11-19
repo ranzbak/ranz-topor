@@ -214,6 +214,50 @@ pub fn foreign_items(v: &PlanView) -> Vec<CompassItem> {
     out
 }
 
+/// The plan's necked stretches, located (TW4 meter: before, `shrinkage` items came only from the
+/// cut model's "fits only necked" cuts with the cuts as the plan's authority, so a drawn violation
+/// on a planned neck of the default per-edge plan could never be classified `neck_loss`). One item
+/// per run of necked passes (an end run, `neck_from_pad`, starts at the pad's centre): segs = the
+/// chords of the wire from the point before the run's first pass to the point after its last,
+/// layers = the layers its triangles are on in the plan's layering (empty: not layered),
+/// `over_nm` = how far the narrowest pass of the run is below the wire's width. Counted as before
+/// (`predicted["shrinkage"]`); the items only locate them. O(passes).
+pub fn neck_items(v: &PlanView) -> Vec<CompassItem> {
+    let st = v.st;
+    let pr = st.proj;
+    let layers = layers_now(st, &v.lr.events, v.bottom);
+    let all = if pr.n_layers >= 64 { u64::MAX } else { (1u64 << pr.n_layers) - 1 };
+    let mut out = Vec::new();
+    for (w, wi) in st.wires.iter().enumerate() {
+        if !wi.alive || wi.passes.is_empty() {
+            continue;
+        }
+        let n = wi.passes.len();
+        let lw = layers.get(w).filter(|l| l.len() == wi.tris.len() && !l.is_empty());
+        // Point i of the wire: 0 = end a, i in 1..=n = pass i - 1, n + 1 = end b.
+        let pt = |i: usize| if i == 0 { pr.pos[wi.a] } else if i > n { pr.pos[wi.b] } else { st.pass_point(wi.passes[i - 1]) };
+        let mut k = 0;
+        while k < n {
+            if !st.necked(wi.passes[k]) {
+                k += 1;
+                continue;
+            }
+            let k0 = k;
+            while k < n && st.necked(wi.passes[k]) {
+                k += 1;
+            }
+            // Necked passes k0..k = points k0 + 1..=k; the stretch runs from point k0 to point
+            // k + 1, through triangles k0..=k (triangle t lies between pass t - 1 and pass t).
+            let segs = (k0..=k).map(|i| seg(pt(i), pt(i + 1))).collect();
+            let bits = lw.map_or(0, |l| (k0..=k.min(l.len() - 1)).fold(0u64, |m, t| m | l[t]) & all);
+            let ls = (0..pr.n_layers.min(64)).filter(|&l| bits & (1u64 << l) != 0).map(|l| (v.layer)(l)).collect();
+            let wmin = wi.passes[k0..k].iter().map(|&p| st.pass_w[p]).fold(f64::INFINITY, f64::min);
+            out.push(CompassItem { class: "shrinkage".into(), layers: ls, conns: conns_of(v, [w]), segs, over_nm: (wi.w - wmin).max(0.0).round() as i64, members: 1 });
+        }
+    }
+    out
+}
+
 /// Shopping list 5.10 hook: the plan's pad-exit items ([`PlanView::pad_exits`]); `None` on a
 /// build without a pad-exit plan object (main). What 5.10 (`padexit-510`) must add when it
 /// merges: in `core.rs` at the compass hand-off, with `[search] pad_exit_stubs` on, one
@@ -224,6 +268,36 @@ pub fn foreign_items(v: &PlanView) -> Vec<CompassItem> {
 /// for both "not needed" and "not legal": it must tell them apart).
 pub fn pad_exit_items(v: &PlanView) -> Option<Vec<CompassItem>> {
     v.pad_exits.map(|x| x.to_vec())
+}
+
+/// The items of [`PlanView::pad_exits`] for a build with `[search] pad_exit_stubs` on (the caller
+/// passes `None` with it off): one `pad_exit_stub` per `Board::exit_stubs` entry (segs = the stub
+/// rectangle's sides) and one `pad_exit` per `Board::exit_blocked` entry (segs = the pad's sides:
+/// the needed exit that no legal stub realises, a violation the plan predicts). Layers = the
+/// pad's, conns = the connections of the wires ending at that pad (`conn`). O(stubs x wires).
+pub fn exit_stub_items(b: &super::board::Board, st: &State, conn: &dyn Fn(WireId) -> Option<usize>, layer: &dyn Fn(usize) -> String) -> Vec<CompassItem> {
+    let pr = &b.proj;
+    let at_pad = |pad: usize| -> Vec<usize> {
+        let mut c: Vec<usize> = (0..st.wires.len())
+            .filter(|&w| st.wires[w].alive && [st.wires[w].pa, st.wires[w].pb].iter().any(|&o| b.pad_of.get(o) == Some(&pad)))
+            .filter_map(conn)
+            .collect();
+        c.sort_unstable();
+        c.dedup();
+        c
+    };
+    let sides = |o: usize| -> Vec<[[i64; 2]; 2]> {
+        let p = &pr.obstacles[o].poly;
+        (0..p.len()).map(|i| seg(p[i], p[(i + 1) % p.len()])).collect()
+    };
+    let lay = |o: usize| -> Vec<String> {
+        let m = pr.obstacles[o].layers.0;
+        (0..pr.n_layers.min(64)).filter(|&l| m & (1u64 << l) != 0).map(layer).collect()
+    };
+    let one = |class: &str, o: usize, sides_of: usize, pad: usize| CompassItem { class: class.into(), layers: lay(o), conns: at_pad(pad), segs: sides(sides_of), over_nm: 0, members: 1 };
+    let mut out: Vec<CompassItem> = b.exit_stubs.iter().map(|&(so, pad)| one("pad_exit_stub", so, so, pad)).collect();
+    out.extend(b.exit_blocked.iter().map(|&(po, pad)| one("pad_exit", po, po, pad)));
+    out
 }
 
 /// Distance between segments `a` and `b` (nm; 0 when they cross or touch). O(1).
@@ -352,7 +426,14 @@ pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> 
     let edge_over = edge_items(v, v.cm_edge, "planner_overfull");
     let cut_over = v.cm_cut.map(|c| cut_items(v, c, true, "planner_overfull")).unwrap_or_default();
     let over_items = if v.cut_is_plan && v.cm_cut.is_some() { cut_over.clone() } else { edge_over.clone() };
-    let g = bottlenecks(over_items);
+    let mut g = bottlenecks(over_items);
+    // CM1 (tw4 T2, `[capacity] via_cuts`): the planned vias with an over-full gap or via-to-via
+    // cut, located at the via (any layer), with the via's connection and its cuts' crossers.
+    let xs: BTreeMap<WireId, Vec<WireId>> = auth.via_cut_list().into_iter().collect();
+    for (w, p) in auth.via_cut_points() {
+        let ws = std::iter::once(w).chain(xs.get(&w).into_iter().flatten().copied());
+        g.push(CompassItem { class: "planner_overfull".into(), layers: Vec::new(), conns: conns_of(v, ws), segs: vec![seg(p, p)], over_nm: 0, members: 1 });
+    }
     bn.insert("planner_overfull".to_string(), g.len());
     items.extend(g);
     if v.cut_is_plan {
@@ -361,6 +442,8 @@ pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> 
             items.extend(g);
         }
     }
+    // The plan's necked stretches, located (every model; the cut items above are their cuts).
+    items.extend(neck_items(v));
     if v.cm_cut.is_some() {
         compare(&edge_over, &cut_over, &mut items, &mut predicted, &mut bn);
     } else {
