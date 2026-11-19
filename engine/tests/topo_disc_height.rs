@@ -111,10 +111,14 @@ fn two_discs_use_their_signed_height_difference() {
 
 #[test]
 fn a_track_with_its_own_disc_keeps_its_track_terms() {
-    // A track item with a via disc at a height still packs its track against the neighbour.
+    // A track item with a via disc at a height still packs its track against the neighbour: the
+    // neighbour leans away from the disc far enough that the disc needs nothing, the tracks do.
     let a = PackItem { disc: [D, D, 2.0 * MM], ..track(1, 1.0, 0.0) };
-    let b = track(2, 1.0, 0.0);
-    assert!((pair_req(&a, &b, GAP) - (W + GAP)).abs() < 1e-6);
+    let b = track(2, 0.8, 0.6);
+    assert!((pair_req(&a, &b, GAP) - (W + GAP) / 0.8).abs() < 1e-6, "{}", pair_req(&a, &b, GAP));
+    // A perpendicular neighbour passes the via at its distance along the edge whatever the height.
+    let p = track(2, 1.0, 0.0);
+    assert!((pair_req(&a, &p, GAP) - (0.5 * (D + W) + GAP)).abs() < 1e-6);
 }
 
 fn board() -> BoardModel {

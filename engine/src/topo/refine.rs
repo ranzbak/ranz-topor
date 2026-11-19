@@ -1865,10 +1865,12 @@ impl<'a> CapModel<'a> {
                 }
                 let (c, q) = fx.eval(&self.a, e, l);
                 let (oc, oq) = (self.cost[e * fx.nl + l], self.sq[e * fx.nl + l]);
-                if c.to_bits() != oc.to_bits() || q.to_bits() != oq.to_bits() {
+                // By value (an empty sum is -0.0, an unset entry 0.0; `reprice` keeps equal values).
+                let off = |x: f64, y: f64| (x - y).abs() > 1e-6 * x.abs().max(1.0);
+                if off(c, oc) || off(q, oq) {
                     bad += 1;
                     if bad <= 5 {
-                        eprintln!("VIACHECK disc edge {e} layer {l}: stored {oc:.6} fresh {c:.6}");
+                        eprintln!("VIACHECK disc edge {e} layer {l}: stored {oc:.6} / {oq:.6} fresh {c:.6} / {q:.6}");
                     }
                 }
             }
