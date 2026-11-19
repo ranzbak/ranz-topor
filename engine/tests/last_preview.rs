@@ -124,6 +124,10 @@ fn copper_is_the_same_with_sketches_enabled_at_every_thread_count() {
         let rb = ctl.sketches.get(true, p.runbest_run).expect("a run sketch");
         assert_eq!((rb.errors, rb.vias), (p.runbest_errors, p.runbest_vias), "run sketch vs progress runbest");
         assert!(last.seq <= p.sketch_seq && best.seq <= p.sketch_seq);
+        // the last sketch is the copper the last round was judged by (its Last round row)
+        if last.run == p.last_run {
+            assert_eq!((last.errors, last.vias, last.length_mm), (p.last_errors, p.last_vias, p.last_length_mm), "{threads} threads: last sketch vs the Last round row");
+        }
     }
 }
 
@@ -138,13 +142,19 @@ fn plan_sketches_are_in_the_kicad_frame_and_follow_the_loop() {
     ctl.sketches.enable();
     // the test hook stops at the loop's end: the sketches of the loop, before the drawing replaces them
     let seen: Arc<std::sync::Mutex<Vec<Sketch>>> = Arc::default();
+    // the run's pick sketch at the loop's end and the Last run row then
+    let picks: Arc<std::sync::Mutex<Vec<(Sketch, (usize, usize, f64))>>> = Arc::default();
     let mut c2 = ctl.clone();
     {
-        let (c3, s2) = (ctl.clone(), seen.clone());
+        let (c3, s2, p2) = (ctl.clone(), seen.clone(), picks.clone());
         c2.set_test_hook(move |point| {
             if point == "loop ended" {
                 if let Some(sk) = c3.sketches.get(false, 0) {
                     s2.lock().expect("seen").push((*sk).clone());
+                }
+                if let Some(sk) = c3.sketches.get(true, 1) {
+                    let p = c3.snapshot();
+                    p2.lock().expect("picks").push(((*sk).clone(), (p.runbest_errors, p.runbest_vias, p.runbest_length_mm)));
                 }
             } else {
                 c3.sketches.request();
@@ -164,6 +174,11 @@ fn plan_sketches_are_in_the_kicad_frame_and_follow_the_loop() {
     }
     let p = ctl.snapshot();
     assert!(sk.cycle >= 1 && sk.cycle <= p.loop_cycle.max(6), "plan sketch cycle {} (loop cycle {})", sk.cycle, p.loop_cycle);
+    // the Last run / best sketch is the run's pick (not its end state when an earlier state is the pick)
+    let picks = picks.lock().expect("picks");
+    let (pk, row) = picks.first().expect("a pick sketch at the loop's end");
+    assert_eq!(pk.kind, "plan");
+    assert_eq!((pk.errors, pk.vias, pk.length_mm), *row, "pick sketch vs the Last run row");
 }
 
 /// User 2026-11-19 ("the run/round displayed goes back to 1 / 1 after a while"): with the TopoR
