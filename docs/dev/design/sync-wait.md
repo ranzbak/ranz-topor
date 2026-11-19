@@ -70,3 +70,16 @@ Simulated on the round-slow per-cycle logs (main r5, 4 slots, 300 s loop, sync p
   Timing (idle share, cycles/min) only from ccx33 slots; also the idle share of L = 0 + fair alone.
 - Q2: fair rotation without an option, provided it is copper-neutral: copper hash = main at L = 0 on 4 boards
   and the same copper at 1/2/4 threads (= slots) in a test.
+
+## Measured (2026-11-19, report scratch/agent-wt/reports/sync-wait-20261119-1400.md)
+- Copper: tip at L = 0 equals main (524465c2 and 7ae8024c) on eprom, wiccon, esp and qmtech at fixed rounds. L = 0
+  and L = 2 each give the same copper at 1, 2 and 4 threads.
+- Slot idle share on a ccx33 timing slot (runs 5, 600 s wall), for L = 0 / 1 / 2:
+  - esp: 10.9-11.2 % / 3.7 % / 1.6-3.1 %;
+  - qmtech: 3.9-5.4 % / 1.9 % / 2.5-3.8 %.
+  - Main's table wait was 35-36 %.
+- Cycles/min on these slots depend on the neighbour slot's load (shared hyperthreads), so they are not comparable
+  between runs that did not overlap.
+- On esp, L = 2 runs fewer cycles than L = 0, each with about twice the predicted errors: staler restart rows.
+- Quality at an equal 600 s wall (5 seeds, per connection): main, L = 0, 1 and 2 are level within seed noise.
+- Proposal: default L = 1. It is not flipped in this branch.
