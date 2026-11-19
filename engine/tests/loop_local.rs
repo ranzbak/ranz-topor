@@ -291,7 +291,19 @@ fn stretch_cache_sees_each_input_alone() {
 
 /// The fan's wires laid (A, B, C, F, E, G) on `n_layers`.
 fn laid(n_layers: usize) -> (BoardModel, &'static Board, State<'static>) {
-    let (m, b) = fan_layers(n_layers);
+    laid_on(n_layers, false)
+}
+
+/// [`laid`]; `both` = every fan pad on both layers (as THT pads: no event is fixed to a layer).
+fn laid_on(n_layers: usize, both: bool) -> (BoardModel, &'static Board, State<'static>) {
+    let (m, b) = if both {
+        let pads: Vec<_> = fan_pads().into_iter().map(|(r, n, x, y, w, h, _)| (r, n, x, y, w, h, 99)).collect();
+        let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
+        let b = board::build(&m, &BuildOpts { existing_vias: true, keepouts: true, copper_shapes: true, ..BuildOpts::default() }).unwrap();
+        (m, b)
+    } else {
+        fan_layers(n_layers)
+    };
     let b: &'static Board = Box::leak(Box::new(b));
     let wt = InitWeights::default();
     let mut st = State::new(&b.proj);
@@ -662,12 +674,14 @@ fn layering_escapes_change_free_positions_deterministically() {
 
 /// TW5 (b) at the layering itself: `LayerParams.walk` > 0 with random ties moves the whole-board
 /// layering to another one (2 layers: the plateau walk on the domain graph; 4 layers: one random
-/// layer pair re-solved with the walk) for some seeds, the same per seed. (The walk keeps the
-/// domain graph's via optimum: escape::/layers:: unit tests; here the capacity refinement follows.)
+/// layer pair re-solved with the walk) for some seeds, the same per seed. The fan's pads on both
+/// layers (THT-like): no SMD pad fixes an event, so equal layerings exist (with the SMD fan the
+/// 2-layer optimum is unique: 0 of 24 walked). (The walk keeps the domain graph's via optimum:
+/// escape::/layers:: unit tests; here the capacity refinement follows.)
 #[test]
 fn the_layering_walk_moves_to_other_layerings_per_seed() {
     for n_layers in [2, 4] {
-        let (_m, b, st) = laid(n_layers);
+        let (_m, b, st) = laid_on(n_layers, true);
         let smd = |o: usize| b.smd_layer(o);
         let base = LayerParams { via_between: true, via_site_r: 0.5e6, ..LayerParams::default() };
         let (mut moved, mut walked) = (0, 0);

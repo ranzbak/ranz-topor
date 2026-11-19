@@ -5,7 +5,8 @@
 #   tw5_job.sh one <run>       one run; <run> = <cfg>:<board>[:<threads>]
 #   tw5_job.sh tests           targeted release tests (lib escape/layers, loop integration binaries)
 # Every board run: tools/route_board.sh (as the main baseline nd2b2-dcf4c0e), cpu clock 2400 s, optimize.runs=1, --no-png.
-# <board> = eprom|wiccon|esp|qmtech|bornhack, p-<pattern> (generated into $HZ_RUN_DIR/pat), q-<pattern> = p- with --declared-layers (In1.Cu routed).
+# <board> = eprom|wiccon|esp|qmtech|bornhack, p-<pattern> (generated into $HZ_RUN_DIR/pat), q-<pattern> = p- with --declared-layers (In1.Cu routed),
+#           d-<pattern> = a PROPOSED D8 pattern (harness/tw5_patterns.py, generated into $HZ_RUN_DIR/d8).
 # cfg = <opts><rounds>[s<seed>]:
 #   opts  O = every TW5 option at its old value (must give main's copper), N = the TW5 defaults,
 #         Na/Nb/Nc/Nd/Ne = O with only that part on (a oscillation, b escape+take, c loop history, d float_wire, e no pre-loop P4)
@@ -19,7 +20,7 @@ W=scratch/boards/wiccon-2023/2d3063e70ed5/2023.kicad_pcb
 E=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 Q=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
 B=scratch/boards/bornhack2026/21c5f478f1af/bornhack2026-hardware.kicad_pcb
-board_path() { case $1 in eprom) echo $P;; wiccon) echo $W;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; p-*|q-*) echo $R/pat/${1#?-}/problem/${1#?-}.kicad_pcb;; esac; }
+board_path() { case $1 in eprom) echo $P;; wiccon) echo $W;; esp) echo $E;; qmtech) echo $Q;; bornhack) echo $B;; p-*|q-*) echo $R/pat/${1#?-}/problem/${1#?-}.kicad_pcb;; d-*) echo $R/d8/${1#d-}/problem/${1#d-}.kicad_pcb;; esac; }
 VIA="via_pair_redundant via_pair_slide via_force_relocate branch_point_relocate branch_point_into_pad via_size_rule"
 gen() {  # the synthetic patterns (fit all, via approved 6, radii all) into $R/pat, as looplocal_job.sh
   [ -d $R/pat ] && return
@@ -120,7 +121,7 @@ mutants() {  # the TW5 changed lines; each mutant against the tests that guard i
 tests() {
   cd $ROOT/engine
   cargo test --release --lib -- escape:: layers::tests 9>&- > $R/cargo-lib.log 2>&1; note "cargo lib rc $? $(grep 'test result' $R/cargo-lib.log | tail -1)"
-  cargo test --release --test topo_p5_loop --test loop_local --test topo_g0 --test tw5_escape -- --nocapture 9>&- > $R/cargo-int.log 2>&1; note "cargo int rc $? $(grep -c 'test result: ok' $R/cargo-int.log) ok binaries"
+  cargo test --release --no-fail-fast --test topo_p5_loop --test loop_local --test topo_g0 --test tw5_escape -- --nocapture 9>&- > $R/cargo-int.log 2>&1; note "cargo int rc $? $(grep -c 'test result: ok' $R/cargo-int.log) ok binaries"
   cd $ROOT
 }
 case ${1:-} in
@@ -134,6 +135,17 @@ case ${1:-} in
     ( hzq run --threads 2 --name tw5-tests -- bash $ROOT/tools/tw5_job.sh tests > $R/tests.log 2>&1; note "tests unit rc $?" ) & sleep 1
     wait; note "all done" ;;
   mutants) mutants ;;
+  d8)
+    # The PROPOSED D8 patterns (not in the suite): generate with KiCad DRC of the reference, route N (16 cycles) seeds 0-9
+    # and O seed 0, PNG expected | topor + per-seed reach table.
+    mkdir -p $R/d8; PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns $R/d8 --drc > $R/d8-gen.log 2>&1; note "d8 gen rc $?"
+    l1=""; l2=""
+    for n in layering_zero_vias oscillating_cross layering_escape_fig8; do
+      for s_ in 0 1 2 3 4; do l1+="Nr16s$s_:d-$n "; done; for s_ in 5 6 7 8 9; do l2+="Nr16s$s_:d-$n "; done; l1+="Or16s0:d-$n "
+    done
+    u d 2 "$l1" "$l2"; wait
+    PYTHONPATH=$ROOT:$ROOT/plugin python -m harness.tw5_patterns_png $R/d8 $R $R/d8out > $R/d8-png.log 2>&1; note "d8 png rc $? $(tr '\n' ';' < $R/d8-png.log)"
+    note "all done" ;;
   r3)
     # Round 3: tests (new tw5_escape + loop_local tests), mutants, inner_layer_room with its declared layers routed
     # (the pattern's KiCad types are all "signal", so topor's 4-layer default makes In1 gnd), O vs N, seeds 0-9.
