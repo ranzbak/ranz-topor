@@ -77,20 +77,29 @@ fn vias_of(r: &RouteResult) -> usize {
 fn loop_p4_rounds_fold_the_preloop_rounds_into_the_loop() {
     let m = model("inner_layer_room");
     let errors = |r: &RouteResult| r.variants.first().map_or(usize::MAX, |v| v.errors);
-    let mut answer = 0;
+    let (mut answer, mut better) = (0, 0);
     for seed in 0u64..6 {
         let base = format!(r#""topo_rounds": 16, "stable_patience": 16, "seed": {seed}, "preloop_p4": false"#);
         let e = route(&m, &opts(&base));
         let f = route(&m, &opts(&format!(r#"{base}, "loop_p4": true"#)));
-        eprintln!("seed {seed}\n  off: vias {} errors {} {}\n  on:  vias {} errors {} {} | {}", vias_of(&e), errors(&e), layers_of(&e), vias_of(&f), errors(&f), layers_of(&f), loop_p4_text(&f));
+        // loop_p4 also turns the loop history on: the history alone is the fair reference.
+        let h = route(&m, &opts(&format!(r#"{base}, "loop_history": true"#)));
+        eprintln!("seed {seed}\n  off: vias {} errors {} {}\n  history only: vias {} errors {} {}\n  on:  vias {} errors {} {} | {}", vias_of(&e), errors(&e), layers_of(&e), vias_of(&h), errors(&h), layers_of(&h), vias_of(&f), errors(&f), layers_of(&f), loop_p4_text(&f));
         assert_eq!(loop_p4_text(&e), "off", "loop_p4 off: the warning says so");
         let t = loop_p4_text(&f);
         let taken: usize = t.split(' ').next().and_then(|x| x.parse().ok()).unwrap_or(0);
         assert!(taken >= 1 && t.contains(" taken (") && t.contains("undone (a wire found no path)") && t.contains("undone (worse, escape_take \"not_worse\")") && t.contains("waited for the work budget"), "loop_p4 on: at least one round taken, every count named: {t}");
         assert_eq!(vias_of(&e), 0, "seed {seed}: without the in-loop rounds no wire leaves F.Cu: {}", layers_of(&e));
         assert!(vias_of(&f) >= 4 && errors(&f) < errors(&e), "seed {seed}: with them two wires or more reach In1, fewer drawn errors: {} errors {} vs {}", layers_of(&f), errors(&f), errors(&e));
+        // The round itself, not the history it switches on: it rips wires (a "no rip" round is the history alone) and
+        // is no worse than the history alone on any seed.
+        let ripped: usize = t.split('(').nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(0);
+        assert!(ripped >= 1, "seed {seed}: the rounds rip wires: {t}");
+        assert!(vias_of(&f) >= vias_of(&h) && errors(&f) <= errors(&h), "seed {seed}: the rounds are no worse than the history alone: {} errors {} vs {} errors {}", vias_of(&f), errors(&f), vias_of(&h), errors(&h));
+        better += usize::from(vias_of(&f) > vias_of(&h) || errors(&f) < errors(&h));
         answer += usize::from(vias_of(&f) == 6 && errors(&f) == 0);
     }
+    assert!(better >= 1, "on some seed the rounds beat the history alone");
     assert!(answer >= 1, "some seed reaches the answer (three wires on In1, no error)");
 }
 
@@ -130,6 +139,26 @@ fn loop_p4_rounds_are_throttled_by_the_escape_budget() {
     assert!(ran(&nl) < ran(&nh), "a smaller budget runs fewer rounds: {tl} | {th}");
     assert!(nl[4] >= 1, "share 0.05: rounds wait for the budget: {tl}");
     assert!(share_of(&lo) <= 10.0, "share 0.05: the measured share stays near the bound: {} %", share_of(&lo));
+}
+
+/// TW5 (f): with `escape = "layering"` on too the rounds still run (a shared budget was spent by the
+/// escapes inside the sweep and `due()` was false after it: 0 rounds, every one waited): the two get
+/// half of `escape_share` each.
+#[test]
+fn loop_p4_rounds_run_beside_the_layering_escapes() {
+    let m = model("inner_layer_room");
+    let base = r#""topo_rounds": 16, "stable_patience": 16, "seed": 2, "preloop_p4": false, "loop_p4": true"#;
+    let both = route(&m, &opts(&format!(r#"{base}, "escape": "layering""#)));
+    let t = loop_p4_text(&both);
+    let w = both.warnings.iter().find(|w| w.starts_with("TopoR loop escapes")).cloned().unwrap_or_default();
+    eprintln!("{t}\n{w}");
+    let ran: usize = t.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).filter_map(|x| x.parse::<usize>().ok()).collect::<Vec<_>>().iter().enumerate().filter(|(i, _)| [0, 2, 3].contains(i)).map(|(_, n)| n).sum();
+    assert!(ran >= 1, "with the layering escapes on, in-loop rounds run: {t}");
+    let escapes: usize = w.split("layering escape \"layering\": ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(0);
+    assert!(escapes >= 1, "the escapes run beside the rounds: {w}");
+    // both parts together stay inside the one `escape_share` (0.35 by default): half of it each
+    let share: f64 = w.split("work share of the escapes ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(f64::NAN);
+    assert!(share <= 35.0 + 1.0, "escapes and rounds together stay near escape_share: {share} %: {w}");
 }
 
 /// TW5 (f): a round is kept like the loop's other whole-board moves: `escape_take = "always"`

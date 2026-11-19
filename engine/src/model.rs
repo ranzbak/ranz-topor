@@ -1222,7 +1222,7 @@ pub struct Options {
     /// inside the loop, after the sweep (docs/dev/design/tw5-escape.md (f)): the wires of the
     /// over-full cuts, vias without a site and over-full via cuts ripped together and placed again
     /// at the cycle's coefficients, taken as `escape_take` says ("not_worse": undone when the
-    /// evaluation rises), undone when a wire finds no path; throttled by the escapes' work budget
+    /// evaluation rises), undone when a wire finds no path; throttled by its own work budget
     /// (`escape_share`); turns the loop history (c) on. Default false (before TW5 (f)).
     pub loop_p4: bool,
     /// TW5 `[optimize] escape_offer` (`loop = "topor"`): the state after a taken layering escape

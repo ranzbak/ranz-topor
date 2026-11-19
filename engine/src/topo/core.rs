@@ -4500,6 +4500,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             escape: bool,
             assign_e: AssignFn<'a, 'p>,
             throttle: super::escape::Throttle,
+            /// (f) the in-loop P4 rounds' own budget: with the layering escapes on too, each of the
+            /// two gets half of `escape_share` (a shared budget starved the rounds: the escapes spent
+            /// it in the sweep and `due()` was false after it).
+            p4_throttle: super::escape::Throttle,
             take_always: bool,
             /// The re-lay counter's fading price per connection (`relay_count_fade` < 1; None =
             /// the plain counter, as before TW5).
@@ -4938,11 +4942,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// when a wire finds no path the state before comes back (costly, not failed: no wire is
             /// dropped). Runs only when the escapes' work budget allows ([`super::escape::Throttle`]),
             /// and draws on it. Whether a round ran.
-            fn loop_p4(&mut self, c: &CycleCtx, cs: &mut CycleStats) -> bool {
+            fn loop_p4(&mut self, c: &CycleCtx, cs: &mut CycleStats, stop: &mut dyn FnMut() -> bool) -> bool {
                 if !self.tw5.loop_p4 {
                     return false;
                 }
-                if !self.tw5.throttle.due() {
+                if !self.tw5.p4_throttle.due() {
                     cs.p4_throttled += 1;
                     return false;
                 }
@@ -4980,6 +4984,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let via_w = c.emphasis.via_at(1.0);
                 let mut lost = false;
                 for (k, &ci) in cis.iter().enumerate() {
+                    // A stop (Cancel, time limit) during the up to (alive/4).max(10) placings undoes
+                    // the round like a lost wire does: the state before comes back.
+                    if stop() {
+                        lost = true;
+                        break;
+                    }
                     self.forced.borrow_mut().remove(&self.conn_of[ci]);
                     let (reg_w, _) = self.conn_reg(ci, seed, c.amp, via_w);
                     // A placing fails only when the wire has no path at all ([`State::any_path`]
@@ -5017,8 +5027,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // Its work: the counted layering and measuring, plus each placing at the mean
                 // re-lay's work so far (a placing is a re-lay's search without its local judge).
                 let relays = self.relays.max(1) as f64;
-                let w = self.work_since(k0) + vw.len() as f64 * self.tw5.throttle.relay_work / relays;
-                self.tw5.throttle.ran_work(w);
+                let w = self.work_since(k0) + vw.len() as f64 * self.tw5.p4_throttle.relay_work / relays;
+                self.tw5.p4_throttle.ran_work(w);
                 if self.dbg {
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} loop P4: {} wires ripped, {}: {t}", self.dbg_tag, c.cycle, vw.len(), if lost { "undone (a wire found no path)" } else if worse { "undone (worse)" } else { "taken" });
@@ -5460,6 +5470,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                     let units = self.work_since(k0);
                     self.tw5.throttle.add(units);
+                    self.tw5.p4_throttle.add(units);
                     if self.tw5.escape && self.tw5.throttle.due() && !stop() {
                         self.escape(c, &mut cs, &mut front, &mut fronted);
                     }
@@ -5470,7 +5481,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
                 // TW5 (f): one P4 rip-up round on what stays over-full after the sweep.
                 if ripped < self.max_ripped && !stop() {
-                    self.loop_p4(c, &mut cs);
+                    self.loop_p4(c, &mut cs, stop);
                 }
                 // limit_grace_s: the cycle's later steps are not begun once the loop is to stop (the
                 // caller drops a cycle cut short, so the state it leaves is never offered).
@@ -5806,7 +5817,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 amp_hi: opts.osc_amp_max,
                 escape: opts.escape == "layering",
                 assign_e: assign_esc_ref,
-                throttle: super::escape::Throttle::new(opts.escape_share, opts.escape_kappa, st_alive),
+                throttle: super::escape::Throttle::new(if opts.escape == "layering" && opts.loop_p4 { opts.escape_share * 0.5 } else { opts.escape_share }, opts.escape_kappa, st_alive),
+                p4_throttle: super::escape::Throttle::new(if opts.escape == "layering" && opts.loop_p4 { opts.escape_share * 0.5 } else { opts.escape_share }, opts.escape_kappa, st_alive),
                 take_always: opts.escape_take == "always",
                 relay_w: (opts.relay_count_fade < 1.0).then(|| (reroutes0.iter().map(|&r| f64::from(r)).collect(), opts.relay_count_fade.max(0.0))),
                 // TW5 (f): the in-loop P4 rounds price with the loop history, so it is on with them.
@@ -5958,8 +5970,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             sp.restore(&arch.items[pick].payload.var);
             why
         };
-        let esc_share = sp.tw5.throttle.measured_share();
-        let esc_work = (sp.tw5.throttle.esc_work, sp.tw5.throttle.relay_work, sp.st.wires.iter().filter(|w| w.alive).count());
+        let esc_share = {
+            let (t, p) = (&sp.tw5.throttle, &sp.tw5.p4_throttle);
+            if t.relay_work > 0.0 { (t.esc_work + p.esc_work) / (t.esc_work + p.esc_work + t.relay_work) } else { 0.0 }
+        };
+        let esc_work = (sp.tw5.throttle.esc_work + sp.tw5.p4_throttle.esc_work, sp.tw5.throttle.relay_work, sp.st.wires.iter().filter(|w| w.alive).count());
         drop(sp);
         if std::env::var_os("TOPO_LOOPDBG").is_some() {
             let dirs = dirs_of(&st);
