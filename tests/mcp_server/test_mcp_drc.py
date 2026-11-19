@@ -434,9 +434,37 @@ def test_gui_drc_filter_unticks_warnings_and_rereads_the_list(tmp_path):
 
 
 def test_spot_match_needs_kicads_focus_on_the_marker(tmp_path, monkeypatch):
-    r, _, _ = _spots(tmp_path, monkeypatch, off_mm=tools.FOCUS_TOL_MM + 2)
+    r, _, _ = _spots(tmp_path, monkeypatch, off_mm=50.0)
     assert [x["match"] for x in r["records"]] == [False, False]
-    assert all(x["selected_ok"] and "focused" in x["why"] for x in r["records"])
+    assert all(x["selected_ok"] and "focus_score" in x["why"] and x["focus_score"] < r["match_min"]
+               for x in r["records"])
+
+
+def test_spot_focus_score_is_graded_not_a_cutoff(tmp_path, monkeypatch):
+    """verify r4 F3: the focus check is a smooth score of the distance, scaled by the row's geometry extent."""
+    scores = []
+    for off in (0.0, 0.5, 1.5, 3.0, 6.0):
+        (tmp_path / f"o{off}").mkdir()
+        r, _, _ = _spots(tmp_path / f"o{off}", monkeypatch, off_mm=off)
+        scores.append(r["records"][0]["focus_score"])
+        assert r["records"][0]["focus_scale_mm"] >= tools.FOCUS_TOL_MM
+    # these rows hold a 58 / 69 mm track + a mask polygon point: a large scale, the score falls slowly but surely
+    assert scores[0] == 1.0 and all(a >= b for a, b in zip(scores, scores[1:])) and scores[-1] < scores[1], scores
+    assert tools.focus_score(1.0, 1.0) == 0.5 and tools.focus_score(None, 1.0) == 1.0
+    # a long track: the same 4 mm offset scores far better than on a short one
+    long_row = {"items": [{"uuid": "t", "x": 0, "y": 0}]}
+    short_row = {"items": [{"uuid": "s", "x": 0, "y": 0}]}
+    geom = {"t": {"kind": "track", "pts": {"start": (0, 0), "end": (20, 0)}},
+            "s": {"kind": "track", "pts": {"start": (0, 0), "end": (0.5, 0)}}}
+    sc = lambda row: tools.FOCUS_TOL_MM + tools.FOCUS_EXTENT_SHARE * D.row_extent(row, geom)  # noqa: E731
+    assert tools.focus_score(4.0, sc(long_row)) > 0.8 > 0.2 > tools.focus_score(4.0, sc(short_row))
+
+
+def test_marker_dist_counts_pads_and_polygons_at_their_points():
+    row = {"items": [{"uuid": "t", "x": 0, "y": 0}, {"uuid": "zone-1", "x": 10, "y": 0}], "x": 5, "y": 0}
+    geom = {"t": {"kind": "track", "pts": {"start": (0, 0), "end": (1, 0)}}}
+    assert D.marker_dist((10, 1), row, geom) == 1.0  # the polygon's point, not the far track
+    assert D.row_extent(row, geom) == 10.0
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -645,3 +673,53 @@ def test_escaped_net_names_match_the_drc_text():
         {"uuid": "p2", "description": "Pad 2 [D out/in] of U2 on F.Cu", "pos": {"x": 5, "y": 0}}]}]}
     out = D.newly_unconnected({"unconnected_items": []}, after, conns, items, {"s1"}, D.conn_map(items, {"s1"}, conns))
     assert out["D out/in"]["new"][0]["conns"][0]["conn"] == 4 and out["D out/in"]["lost_copper"][0]["conns"] == [4]
+
+
+def _walk_session(tmp_path, model, shown, click_line=0):
+    """GuiSession whose dialog shows `shown` (a flat list of line texts) while drc_rows (the model read) is `model`;
+    keys move a cursor over `shown`, a click on the first line selects shown[click_line]."""
+    s = G.GuiSession(tmp_path / "b.kicad_pcb", tmp_path / "s", display=":29")
+    s.drc_rows = model
+    cur = {"i": None}
+
+    def call(cmd, **a):
+        if cmd == "drc_selected":
+            return {"selected": None if cur["i"] is None else shown[cur["i"]]}
+        if cmd == "drc_list_rect":
+            return {"rect": [0, 0, 100, 100]}
+        raise AssertionError(cmd)
+
+    def x(*args, **kw):
+        if args[:2] == ("xdotool", "key"):
+            cur["i"] = max(0, min(len(shown) - 1, cur["i"] + (1 if args[2] == "Down" else -1)))
+
+    def click(*a):
+        cur["i"] = click_line
+    s.call, s.activate, s.alive = call, (lambda t: None), (lambda: True)
+    s.e = type("E", (), {"x": staticmethod(x), "click_abs": staticmethod(click), "log": staticmethod(lambda m: None),
+                            "shot": staticmethod(lambda *a, **k: None)})()
+    return s
+
+
+def test_drc_walk_relocates_when_the_dialog_shows_other_item_lines(tmp_path, monkeypatch):
+    """verify r4 F2: the dialog lists row 0 with ONE item line where the model read two (Down lands on row 1's
+    headline): the walk relocates by text and still reaches every row; nothing ends the call."""
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    model = [{"k": 0, "text": "A", "items": ["a1", "a2"]}, {"k": 1, "text": "B", "items": ["b1"]},
+             {"k": 2, "text": "C", "items": ["c1"]}]
+    shown = ["A", "a1", "B", "b1", "C", "c1"]
+    s = _walk_session(tmp_path, model, shown)
+    assert list(s.drc_walk([0, 1, 2])) == [(0, "A", None), (1, "B", None), (2, "C", None)]
+    assert any(st["step"] == "drc walk resync" for st in s.steps)
+
+
+def test_drc_walk_unreachable_row_is_reported_and_the_walk_goes_on(tmp_path, monkeypatch):
+    """A first-line click that selects nothing known, or a selection no line has, fails that row only."""
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    model = [{"k": 0, "text": "A", "items": ["a1"]}, {"k": 1, "text": "B", "items": ["b1"]}]
+    s = _walk_session(tmp_path, model, ["A", "zz", "B", "b1"])  # line 1 shows a text the model never read
+    out = list(s.drc_walk([0, 1]))
+    assert out[0] == (0, "A", None) and out[1][0] == 1 and out[1][1] is None and "'zz'" in out[1][2]
+    s = _walk_session(tmp_path, model, ["?", "A", "a1", "B", "b1"], click_line=0)  # the click lands on '?'
+    out = list(s.drc_walk([0, 1]))
+    assert [o[0] for o in out] == [0, 1] and all(o[1] is None and o[2] for o in out)

@@ -227,3 +227,41 @@ def test_e2e_session_env_uses_its_own_home_not_the_shared_one(tmp_path):
     assert K.is_isolated(e)
     iso = K.isolated_env(tmp_path / "h")
     assert all(iso.get(k, str(tmp_path / "h")).startswith(str(tmp_path / "h")) for k in K.PROCESS_VARS)
+
+
+_PCBNEW = re.compile(r"^\s*(import pcbnew\b|from pcbnew import)")
+_HARNESS = re.compile(r"^\s*(import harness\b|from harness(\.| import))")
+
+
+def pcbnew_before_harness(text: str, shell: bool) -> list:
+    """Line numbers of in-process `import pcbnew` with no `import harness` before it: in a Python file anywhere
+    above, in a shell script within the same inline program (heredoc / python -c, from its `<<` / `-c` line on)."""
+    lines = text.splitlines()
+    bad = []
+    for n, line in enumerate(lines):
+        if not _PCBNEW.search(line.split('"', 1)[-1] if shell and "-c" in line else line):
+            continue
+        start = 0
+        if shell:
+            start = next((i for i in range(n, -1, -1) if "<<" in lines[i] or " -c " in lines[i]), 0)
+        if not any(_HARNESS.search(x) for x in lines[start:n]):
+            bad.append(n + 1)
+    return bad
+
+
+def test_tool_scripts_import_harness_before_in_process_pcbnew():
+    """tools/ scripts (Python, and inline Python in shell jobs) run outside the harness package: an in-process
+    pcbnew there creates ~/.config/kicad/10.0 unless `import harness` set KiCad's location variables first
+    (verify r3 V4 / r4 F5: tools/fx_hash.py, tools/m6p2_job.sh)."""
+    found = {}
+    for p in sorted((ROOT / "tools").iterdir()):
+        if p.suffix in (".py", ".sh") and p.is_file():
+            text = p.read_text(errors="replace")
+            if "pcbnew" in text:
+                found[p.name] = pcbnew_before_harness(text, p.suffix == ".sh")
+    assert {"fx_hash.py", "m6p2_job.sh", "drc_tiles.py"} <= set(found)
+    assert not {k: v for k, v in found.items() if v}, found
+    # the checker itself: a pcbnew import with harness only AFTER it, or in another inline program, is caught
+    assert pcbnew_before_harness("import pcbnew\nimport harness\n", False) == [1]
+    assert pcbnew_before_harness("python - <<'EOF'\nimport harness\nEOF\npython - <<'EOF'\nimport pcbnew\nEOF\n",
+                                 True) == [5]

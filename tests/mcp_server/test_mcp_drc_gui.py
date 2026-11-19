@@ -56,6 +56,18 @@ def add_short(pcb: Path, skip: set = frozenset()) -> tuple[str, str]:
     return a[4], seg
 
 
+def need_wiccon() -> Path:
+    """The wiccon-2023 snapshot, looked up when the test RUNS (never at import / collection: without scratch/boards,
+    e.g. GitHub CI, BENCH_BOARDS raises and a collection error would stop the whole pytest run); absent -> skip."""
+    try:
+        p = Path(BENCH_BOARDS["wiccon-2023"])
+    except (RuntimeError, KeyError) as ex:
+        pytest.skip(f"wiccon-2023 board snapshot not on this host: {ex}")
+    if not p.is_file():
+        pytest.skip(f"wiccon-2023 board not on this host: {p}")
+    return p
+
+
 def add_dangling(pcb: Path, length: float = 0.2) -> str:
     """Append a `length` mm F.Cu stub at right angles from the middle of the longest non-GND F.Cu track: one end on
     that track, the other free (KiCad: track_dangling, a warning in wiccon's project). Returns its uuid."""
@@ -78,8 +90,8 @@ def add_dangling(pcb: Path, length: float = 0.2) -> str:
 @pytest.mark.skipif(not all(shutil.which(t) for t in ("Xephyr", "xdotool", "wmctrl", "xwd", "pcbnew", "metacity",
                                                       "kicad-cli")),
                     reason="needs Xephyr, xdotool, wmctrl, xwd, metacity and KiCad 10")
-@pytest.mark.skipif(not Path(BENCH_BOARDS["wiccon-2023"]).is_file(), reason="wiccon-2023 board not on this host")
 def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
+    need_wiccon()
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     hand, inp, _ = strip.prepare("wiccon-2023", tmp_path / "boards", name="w")
     add_short(hand.pcb)
@@ -128,8 +140,8 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
 @pytest.mark.skipif(not all(shutil.which(t) for t in ("Xephyr", "xdotool", "wmctrl", "xwd", "pcbnew", "metacity",
                                                       "kicad-cli")),
                     reason="needs Xephyr, xdotool, wmctrl, xwd, metacity and KiCad 10")
-@pytest.mark.skipif(not Path(BENCH_BOARDS["wiccon-2023"]).is_file(), reason="wiccon-2023 board not on this host")
 def test_wiccon_topor_route_connection_ids_end_to_end(tmp_path, monkeypatch):
+    need_wiccon()
     """route (result.json) -> one synthetic short between two of OUR tracks -> drc rows carry engine connection ids
     -> cleanup's newly unconnected connections name ids of that result.json."""
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))

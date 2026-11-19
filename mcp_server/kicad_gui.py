@@ -328,11 +328,15 @@ class GuiSession:
         self.e.x("xdotool", "windowactivate", "--sync", w)
         self.e.x("xdotool", "windowraise", w)
 
-    def drc_walk(self, targets: list, settle_s: float = 1.0):
+    def drc_walk(self, targets: list, settle_s: float = 1.0, max_resyncs: int = 3):
         """Yield (k, selected_text, error) for each top-level DRC row index in `targets` (ascending), selecting it as
-        a user does: one click on the list's first line, then Down keys (the dialog lists every row expanded:
-        headline, then its item lines). After every key the selection is read back and must be the expected line;
-        a mismatch is reported for that row (error) and the walk re-syncs once by clicking the first line again."""
+        a user does: one click on the list's first line, then Down / Up keys (the dialog lists every row expanded:
+        headline, then its item lines). After every key the selection is read back; when it is not the expected
+        line (the dialog shows a row with other item lines than read, e.g. a solder mask bridge), the position is
+        relocated by that line's text (nearest such line) and the walk goes on. A row that cannot be reached
+        (unknown selection, > max_resyncs relocations, key budget spent, a failed helper step) is yielded with its
+        error and the next row starts again from a click on the first line: NEVER ends the walk (verify r4 F2).
+        O(rows + lines) keys in a straight walk; per row at most 2 * lines + 10 keys."""
         lines = []
         for r in self.drc_rows:
             lines.append((r["k"], r["text"]))
@@ -342,41 +346,63 @@ class GuiSession:
         def sel():
             return self.call("drc_selected", tab="violations").get("selected")
 
+        def locate(got, near):
+            cand = [i for i, (_, t) in enumerate(lines) if t == got]
+            return min(cand, key=lambda i: abs(i - near)) if cand else None
+
         def first():
+            """Click the first line; the position of the line that got selected (None: not a known line)."""
             self.activate(DRC_TITLE)
             x, y, w, h = self.must("drc_list_rect", "drc list")["rect"]
             self.e.click_abs(x + 80, y + 12)
             time.sleep(0.5)
             got = sel()
             if got != lines[0][1]:
-                self.fail(f"drc walk: a click on the first line selected {got!r}, not {lines[0][1]!r}")
-            return 0
+                self.step("drc walk first line", f"a click on the first line selected {got!r}, not {lines[0][1]!r}")
+                return locate(got, 0), got
+            return 0, got
 
-        pos = first()
+        pos = None
         for k in targets:
-            want = head[k]
-            err = None
-            for attempt in (0, 1):
-                ok = True
-                while pos < want:
+            want, err, resyncs = head[k], None, 0
+            try:
+                if pos is None:
+                    pos, got = first()
+                    if pos is None:
+                        yield k, None, f"a click on the first line selected {got!r}, not a line of the list"
+                        continue
+                budget = 2 * len(lines) + 10
+                while pos != want and budget > 0:
+                    step = 1 if pos < want else -1
                     self.activate(DRC_TITLE)
-                    self.e.x("xdotool", "key", "Down")
-                    pos += 1
+                    self.e.x("xdotool", "key", "Down" if step > 0 else "Up")
+                    budget -= 1
                     time.sleep(0.08)
                     got = sel()
-                    if got != lines[pos][1]:
-                        err = f"after Down to line {pos} the selection is {got!r}, expected {lines[pos][1]!r}"
-                        ok = False
+                    if 0 <= pos + step < len(lines) and got == lines[pos + step][1]:
+                        pos += step
+                        continue
+                    exp = lines[pos + step][1] if 0 <= pos + step < len(lines) else None
+                    resyncs += 1
+                    npos = locate(got, pos + step)
+                    self.step("drc walk resync", f"row {k}: after {'Down' if step > 0 else 'Up'} from line {pos} the "
+                                                 f"selection is {got!r}, expected {exp!r}; relocated to {npos}")
+                    if npos is None or resyncs > max_resyncs:
+                        err = (f"after {'Down' if step > 0 else 'Up'} from line {pos} the selection is {got!r}, expected "
+                               f"{exp!r}" + ("" if npos is None else f" ({resyncs} relocations)"))
                         break
-                if ok:
-                    break
-                self.step("drc walk resync", err)
-                pos = first()  # once, then the row is reported with its error
-            if pos != want:
-                yield k, None, err
-                continue
-            time.sleep(settle_s)
-            yield k, sel(), None
+                    pos = npos
+                if pos != want:
+                    pos = None  # unknown: the next row starts from a click on the first line
+                    yield k, None, err or f"line {want} not reached within the key budget"
+                    continue
+                time.sleep(settle_s)
+                yield k, sel(), None
+            except STEP_ERRORS as ex:  # a failed helper / X step: this row fails, the walk goes on
+                pos = None
+                yield k, None, describe(ex)
+                if not self.alive():
+                    return
 
     # ---------------------------------------------------------------- view transform
     def _status_xy(self):

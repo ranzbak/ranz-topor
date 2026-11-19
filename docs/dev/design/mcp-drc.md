@@ -7,7 +7,7 @@
 > 10.0.8 crashed 3x on a synthetic `DataViewCtrl.Select/EnsureVisible/GetItemRect` of a solder_mask_bridge row, a
 > real click never did. (c) No screen->board transform: KiCad's cross-probe centres the marker in the canvas part
 > left of the dialog; the pointer is moved there (no click) and the status bar X/Y read (`focus_mm`, finest grid);
-> `match` = same text + items, selection on it, focus within 1 mm of the row's nearest track/via. (d) KiCad 10 keeps
+> `match` = same text + items, selection on it, focus_score (graded by the focus distance to the row's nearest geometry, scaled by its extent; r6) >= match_min. (d) KiCad 10 keeps
 > the DRC gear toggles in pcbnew.json `"DRC"` (`report_all_track_errors`, `crossprobe`, `scroll_on_crossprobe`);
 > with the KiCad 9 `drc_dialog` keys the GUI showed 49 rows where kicad-cli `--all-track-errors` showed 51.
 > (e) Helper commands as listed in docs/dev/mcp.md "DRC feedback".

@@ -296,13 +296,30 @@ def _pieces(it: dict) -> list:
 
 
 def marker_dist(p, row: dict, items: dict):
-    """Distance (mm) from `p` to the nearest track / via of an index row (KiCad puts the marker on the violation,
-    i.e. on or between its items); rows without such an item: to the items' mean position. None if unknown."""
+    """Distance (mm) from `p` to the nearest geometry of an index row's items: our tracks / vias as their pieces,
+    every other item (pad, zone, polygon: kicad-cli gives a point) at its reported position. KiCad puts the marker
+    on the violation, i.e. on or between its items. Rows without any: to the items' mean position. None if unknown."""
     ds = [_seg_dist(p, a, b) for i in row.get("items", []) if i.get("uuid") in items
           for a, b in _pieces(items[i["uuid"]])]
+    ds += [math.hypot(p[0] - i["x"], p[1] - i["y"]) for i in row.get("items", [])
+           if i.get("uuid") not in items and i.get("x") is not None and i.get("y") is not None]
     if ds:
         return round(min(ds), 3)
     return None if row.get("x") is None else round(math.hypot(p[0] - row["x"], p[1] - row["y"]), 3)
+
+
+def row_extent(row: dict, items: dict) -> float:
+    """Diagonal (mm) of the bounding box of a row's geometry (track / via pieces, other items' points): the size
+    over which KiCad may place the marker (long tracks, mask polygons)."""
+    pts = [(i["x"], i["y"]) for i in row.get("items", []) if i.get("x") is not None and i.get("y") is not None]
+    for i in row.get("items", []):
+        if i.get("uuid") in items:
+            for a, b in _pieces(items[i["uuid"]]):
+                pts += [a, b]
+    if len(pts) < 2:
+        return 0.0
+    xs, ys = zip(*pts)
+    return round(math.hypot(max(xs) - min(xs), max(ys) - min(ys)), 3)
 
 
 def components(items: dict, uuids) -> dict:

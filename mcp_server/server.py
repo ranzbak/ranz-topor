@@ -62,15 +62,16 @@ def build_server():
 
     @srv.tool()
     def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: float = 20.0,
-                  keep_session: bool = True, severities: list[str] | None = None) -> dict:
+                  keep_session: bool = True, severities: list[str] | None = None, match_min: float = 0.5) -> dict:
         """Real KiCad (Xephyr, isolated home): DRC dialog -> Run DRC -> per drc row (cls = one class, e.g.
         "clearance track-track"; per_class > 0 caps a class; default all rows) select the dialog row with the same
         text in ONE KiCad session (DRC run once), screenshot the dialog and the board view at the marker (yellow
         ring). Records: PNG paths, GUI vs kicad-cli text, match (row found + selected), KiCad's focus point; a failed
         row is reported and the walk goes on. The session stays open for cleanup (idle timeout 600 s). Errors only
         by default: the dialog's Warnings box is unticked before the walk (severities=["error", "warning"] walks
-        warnings too); summary / ours_by_severity count both."""
-        return tools.drc_spots(run_id, cls, per_class, zoom, keep_session, severities=severities)
+        warnings too); summary / ours_by_severity count both. focus_score (graded by KiCad's focus distance to the
+        row's items, scaled by their extent) >= match_min is part of match."""
+        return tools.drc_spots(run_id, cls, per_class, zoom, keep_session, severities=severities, match_min=match_min)
 
     @srv.tool()
     def cleanup(run_id: str, options: list | dict | None = None, replay: bool = False,

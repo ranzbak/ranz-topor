@@ -351,7 +351,15 @@ def review(run_id: str, spot: str, verdict: str, note: str = "") -> dict:
 # session of mcp_server.kicad_gui (isolated home, helper by widget label). docs/dev/mcp.md "DRC feedback".
 
 ROWS_MAX = 200
-FOCUS_TOL_MM = 1.0  # drc_spots: KiCad's view centre vs the kicad-cli marker position (centring is px-exact at zoom 20)
+FOCUS_TOL_MM = 1.0  # drc_spots: focus scale floor (mm); KiCad's centring is px-exact at zoom 20
+FOCUS_EXTENT_SHARE = 0.5  # + this share of the row's geometry extent (long tracks / polygons: the marker may sit anywhere on them)
+MATCH_MIN = 0.5  # default drc_spots match_min: focus_score at focus_d_mm == the scale
+
+
+def focus_score(d_mm, scale_mm: float):
+    """Graded focus quality 1 / (1 + (d / scale)^2): 1 on the items, 0.5 at one scale away, smoothly lower further
+    (no cutoff); None distance (no geometry) -> 1."""
+    return 1.0 if d_mm is None else round(1.0 / (1.0 + (d_mm / max(scale_mm, 1e-6)) ** 2), 3)
 DEFAULT_CLEANUP = ("Delete tracks connecting different nets", "Delete redundant vias", "Merge co-linear tracks",
                    "Delete tracks unconnected at one end")
 
@@ -539,13 +547,16 @@ def _gui_for_run(info: dict, idle_s: float | None = None):
 
 
 def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: float = 20.0,
-              keep_session: bool = True, drc_timeout_s: float = 600.0, severities=None) -> dict:
+              keep_session: bool = True, drc_timeout_s: float = 600.0, severities=None,
+              match_min: float = MATCH_MIN) -> dict:
     """KiCad's own DRC dialog in the run's ONE Xephyr session: DRC run once (per board state), then every wanted
     index row (all, or class `cls`; `per_class` > 0 caps each class, shorts/crossings always kept) is selected as a
     user does, in list order, and the dialog + the board view at the marker are kept. A failed row is reported in
     its record and the walk goes on in the same session. match = the GUI row has the same text and items and the
     selection landed on it; focus_mm = the board point KiCad centred (its marker), focus_d_mm = its distance from the
-    row's nearest track / via (else the items' mean position); match also needs focus_d_mm <= FOCUS_TOL_MM.
+    row's nearest geometry (our track / via pieces, other items' points; else the items' mean position).
+    focus_score = 1 / (1 + (focus_d_mm / scale)^2), scale = FOCUS_TOL_MM + FOCUS_EXTENT_SHARE * the row's geometry
+    extent (graded, larger for long tracks / polygons); match also needs focus_score >= match_min.
     `severities` (default errors only): the dialog's severity filter is set to these before the walk (Warnings
     unticked by default) and only rows of these severities are wanted; the summary counts both."""
     from . import drc as D
@@ -610,18 +621,22 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
                     ok_sel = selected == g["text"]
                     f = s.focus()
                     d_mm = D.marker_dist(f["focus_mm"], r, geom)
+                    scale = round(FOCUS_TOL_MM + FOCUS_EXTENT_SHARE * D.row_extent(r, geom), 3)
+                    score = focus_score(d_mm, scale)
                     board_png = s.e.shot(f"{r['id']}-board", main_x)
                     dlg_png = s.e.shot(f"{r['id']}-dlg", dlg_x) if dlg_x else None
                     half = 350
                     sx, sy = f["spot_px"]
-                    rec.update(selected_ok=ok_sel, focus_mm=f["focus_mm"], focus_d_mm=d_mm,
+                    rec.update(selected_ok=ok_sel, focus_mm=f["focus_mm"], focus_d_mm=d_mm, focus_scale_mm=scale,
+                               focus_score=score,
                                board_png=G.crop(board_png, shots / f"{r['id']}-board.png",
                                                 (sx - half, sy - half, 2 * half, 2 * half), mark=(sx, sy)),
                                dlg_png=str(shutil.copy(dlg_png, shots / f"{r['id']}-dlg.png")) if dlg_png else None,
-                               match=bool(ok_sel) and (d_mm is None or d_mm <= FOCUS_TOL_MM))
+                               match=bool(ok_sel) and score >= match_min)
                     if not rec["match"]:
                         rec["why"] = ("the dialog selection is not this row" if not ok_sel else
-                                      f"KiCad focused {d_mm} mm from the marker (> {FOCUS_TOL_MM} mm)")
+                                      f"KiCad focused {d_mm} mm from the row's items: focus_score {score} < "
+                                      f"match_min {match_min} (scale {scale} mm)")
                 except G.STEP_ERRORS as ex:  # this row failed: say so, go on with the next row in the same session
                     rec.update(match=False, error=G.describe(ex))
                     errors.append(f"{r['id']} (row {k}): {G.describe(ex)}")
@@ -638,7 +653,9 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
                        "cli_by_severity": _sev_counts(cli_all, "severity"),
                        "gui_violations": len(gui), "cli_violations": cli_n, "gui_equals_cli": len(gui) == cli_n,
                        "wanted": len(want), "records": sorted(recs, key=lambda x: x["id"]),
-                       "matched": sum(1 for x in recs if x.get("match")), "errors": errors,
+                       "matched": sum(1 for x in recs if x.get("match")), "match_min": match_min,
+                       "focus_score_min": min((x["focus_score"] for x in recs if "focus_score" in x), default=None),
+                       "errors": errors,
                        "complete": not errors, "kicad_starts_this_call": G.GuiSession.starts_total - starts0,
                        "session": {"display": s.display, "pcbnew_pid": s.pid(), "board": str(s.board)},
                        "session_steps": s.steps[-60:], "shots_dir": str(shots)}
