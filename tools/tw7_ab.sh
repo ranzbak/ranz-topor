@@ -5,7 +5,8 @@
 #                            (off = main copper: compare with ladder_diff / copper_hash; xr_* profile; detour attribution)
 #   tw7_ab.sh k <cfgs>       K per cfg on esp + qmtech (deterministic per-connection comparison)
 #   tw7_ab.sh eq <cfgs>      equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults)
-#   tw7_ab.sh all <cfgs>     off + k <cfgs> + eq - <cfgs>
+#   tw7_ab.sh all <cfgs>     pyt + tests + off + k <cfgs> + eq - <cfgs>
+#   tw7_ab.sh pyt | tests    targeted pytest (config docs/defaults) | the TW7 cargo tests (release)
 # cfg: K = rounds=1; e<k> = equal time seed k; suffixes (any order, at the end):
 #   u = [optimize] pattern_moves = all five kinds; c = only "u_clinch", "evasion";
 #   d = [factors] detour = $DETOUR_K (default 1); x = [optimize] crossing_rules = false.
@@ -53,8 +54,12 @@ case ${1:-} in
       done
     done
     wait ;;
+  pyt) ( CI=1 python -m pytest -q -rs -p no:cacheprovider tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py > $R/pytest.log 2>&1 9>&-; note "pytest config rc $?"; tail -2 $R/pytest.log >> $R/rc.txt ) ;;
+  tests) ( cd engine && cargo test --release --test topo_tw7_patterns > $R/test-tw7.log 2>&1 9>&-; note "test topo_tw7_patterns rc $?"
+           cargo test --release --lib pourplan > $R/test-pourplan.log 2>&1 9>&-; note "test lib pourplan rc $?" ) ;;
   all)
     shift
+    ( hzq run --threads 2 --name tw7-chk -- bash -c "bash $ROOT/tools/tw7_ab.sh pyt; bash $ROOT/tools/tw7_ab.sh tests" > $R/u-chk.log 2>&1; note "unit chk rc $?" ) &
     ( hzq run --threads 4 --name tw7-off -- bash $ROOT/tools/tw7_ab.sh off > $R/u-off.log 2>&1; note "unit off rc $?" ) &
     for c in "$@"; do ( hzq run --threads 2 --name tw7-k$c -- bash $ROOT/tools/tw7_ab.sh k $c > $R/u-k$c.log 2>&1; note "unit k$c rc $?" ) & done
     bash $ROOT/tools/tw7_ab.sh eq - "$@"
