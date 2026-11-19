@@ -177,6 +177,14 @@ case ${1:-} in
     u i 1 "$ln"
     ( bash $ROOT/tools/tw5_job.sh d8 > $R/d8.log 2>&1 ) & sleep 1
     wait; note "all done" ;;
+  final)
+    # Merge trial on the tip (main merged in): every engine test, clippy, the full pytest (CI=1).
+    ( hzq run --threads 6 --name tw5-final -- bash -c "cd $ROOT/engine && cargo test --release --no-fail-fast > $R/cargo-all.log 2>&1; echo rc \$? >> $R/cargo-all.log; cargo clippy --release --all-targets > $R/clippy.log 2>&1; echo rc \$? >> $R/clippy.log; cd $ROOT && CI=1 python -m pytest -q > $R/pytest.log 2>&1; echo rc \$? >> $R/pytest.log" > $R/final.log 2>&1; note "final unit rc $?" ) & sleep 1
+    wait
+    note "cargo: $(grep -E '^test result' $R/cargo-all.log | awk '{p+=$4; f+=$6} END {print p" passed "f" failed"}'), $(tail -1 $R/cargo-all.log); FAILED: $(grep -E '^test .* FAILED$' $R/cargo-all.log | awk '{print $2}' | tr '\n' ' ')"
+    note "clippy: $(grep -cE '^(warning|error)' $R/clippy.log) warnings/errors, $(tail -1 $R/clippy.log)"
+    note "pytest: $(tail -2 $R/pytest.log | tr '\n' ' ')"
+    note "all done" ;;
   r2)
     # Round 2: O vs N at 16 cycles on the ladder (esp 5 seeds), the patterns O vs N at 16 cycles, targeted tests.
     gen

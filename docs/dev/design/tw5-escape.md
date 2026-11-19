@@ -100,3 +100,26 @@ D8 patterns (Polubasov figs. 6, 8-9, 10, 11) proposed as PNG + text to the lead,
    cost an extra code path). The plan's bound (not sooner than its last duration, share <= 50 %) in
    work units.
 2. The table offer hook in `optimise()` after TW3 merges; counted until then.
+
+## As built (2026-11-19, measured on the VM: tw5r1-tw5r5)
+- **Old options = main copper**: every TW5 option at its old value (`oscillation = "cooling"`, `escape = "ties"`,
+  `escape_take = "not_worse"`, `relay_count_fade = 1`, `loop_history = false`, `float_wire = false`,
+  `preloop_p4 = true`) gives main's copper on eprom, wiccon, esp, qmtech (copper hash, 1 cycle, tw5r1).
+- **Throttle**: κ = 0.07 (above). An escape comes after nearly every re-lay on small boards; the measured work
+  share is 0.17-0.21 (bound 0.35), the time share 16-26 % (esp 24-26 %).
+- **Escape front**: the via-rose wires are laid again first, once per cycle per connection. Without that bound the
+  front refilled faster than it drained at κ 0.07 and a 16-cycle esp run did not end (tw5r2, 1180 s against 165 s).
+- **Plateau walk**: clusters grow to a log-uniform random size (every scale equally likely). A fixed growth
+  probability per edge is supercritical on a board's graph (degree about 4): every cluster swells to a whole part
+  and its flip adds vias. Small sizes alone (2^-m) missed the large equal-via flips (wiccon 0.0 % changed).
+  Lone domains and parts without an SMD pad flip as a whole with probability 1/2.
+- **(e) folds P4's priced via moves into the loop**: the escape's capacity refinement may add a via when it removes
+  more over-full price than the via costs (`priced && [capacity] cut_vias`, as the P4 label moves). Without that, a
+  wire that crosses nothing has no event to relabel and never leaves an over-full cut.
+- **inner_layer_room is no valid routing test as generated**: the board's KiCad layer types are all "signal", so
+  topor's 4-layer default roles make In1.Cu a gnd plane (not routed). The expected answer needs In1, so the runs use
+  `--declared-layers` (tools/tw5_job.sh `q-` boards). With In1 routed, main's options reach DRC 0 in 3 of 10 seeds
+  (through the pre-loop P4 rounds) and the TW5 defaults before the priced vias in 0 of 10 (4 vias, DRC 4 each).
+- **D8 proposals**: harness/tw5_patterns.py (figs. 10, 11, 8-9, read from the paper's PDF pp. 107-108), not in the
+  suite. Fig. 8 at the paper's scale has a shorter 0-via answer than the paper's end state 9c (W2 on F.Cu between U2
+  and W4 instead of the left loop): the expected end state needs a decision.
