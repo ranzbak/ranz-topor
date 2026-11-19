@@ -1239,9 +1239,7 @@ class ProgressDialog(_Base):
         self.set_phase("")
         self.A11Y = {"limit": f"{W['limit_label']} ({W[self._unit_key]})"}
         if self.wide:
-            # about twice today's width at today's height (left column + the image's old 240 DIP + its 3 lines)
-            h = self.root.CalcMin().height + 2 * self.group + self.FromDIP(self.PREVIEW_DIP[1] + 60)
-            self.finish((760, 420), (2 * (self.TEXT_WIDTH + 24), self.ToDIP(h)))
+            self.finish((760, 420), self.WIDE_OPEN_DIP)  # the mock's size; finish() clamps to 90 % of the display
         else:
             self.finish((460, 300))
         self._sync_limit_controls()
@@ -1253,6 +1251,8 @@ class ProgressDialog(_Base):
     SCORE_ROWS = ("last", "run", "best")
     #: the board image's size (DIP); the image is scaled to fit it, the dialog never resizes for it
     PREVIEW_DIP = (430, 240)
+    #: opening size of the wide layout (DIP, the approved mock)
+    WIDE_OPEN_DIP = (1190, 850)
     #: width of the phase and verdict lines (DIP); longer text ends in "…" / wraps inside it
     TEXT_WIDTH = 430
 
