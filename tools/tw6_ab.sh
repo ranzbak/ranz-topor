@@ -10,7 +10,10 @@
 # cfg: K = rounds=1; M = rounds=40; e<k> = equal time seed k; suffixes (any order, at the end):
 #   s = [vias] site_price = "graded"; h = [capacity] via_disc_height = true; x = [capacity] pad_exits = true;
 #   p = [vias] pair_room = true; b = [factors] weight via_site_social = $SITE_W (default 50);
-#   m = [optimize] site_move = true; j = [optimize] branch_move = true.
+#   m = [optimize] site_move = true; j = [optimize] branch_move = true;
+#   z = [optimize] site_move_detour = 0 (no detour price); d = site_move_detour = $DET (default 0.25).
+#   (r4: s = site_price graded now implies via_disc_height through its "auto"; sh = s.)
+#   tw6_ab.sh r4 <cfgs>      tests + lint + off + pytest + eq <cfgs> (the r4 fix round)
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
@@ -32,6 +35,8 @@ one() {
     elif [ "${c%b}" != "$c" ]; then SETS+=(--set "factors.weight={\"via_site_social\": ${SITE_W:-50}}"); c=${c%b}
     elif [ "${c%m}" != "$c" ]; then SETS+=(--set optimize.site_move=true); c=${c%m}
     elif [ "${c%j}" != "$c" ]; then SETS+=(--set optimize.branch_move=true); c=${c%j}
+    elif [ "${c%z}" != "$c" ]; then SETS+=(--set optimize.site_move_detour=0); c=${c%z}
+    elif [ "${c%d}" != "$c" ]; then SETS+=(--set optimize.site_move_detour=${DET:-0.25}); c=${c%d}
     else break; fi
   done
   case $c in
@@ -91,6 +96,14 @@ case ${1:-} in
     ( hzq run --threads 4 --name tw6-off -- bash $ROOT/tools/tw6_ab.sh off > $R/u-off.log 2>&1; note "unit off rc $?" ) &
     ( hzq run --threads 4 --name tw6-py -- bash $ROOT/tools/tw6_ab.sh pytest > $R/u-py.log 2>&1; note "unit pytest rc $?" ) &
     ( hzq run --threads 4 --name tw6-pats -- bash $ROOT/tools/tw6_ab.sh pats > $R/u-pats.log 2>&1; note "unit pats rc $?" ) &
+    bash $ROOT/tools/tw6_ab.sh eq "$@"
+    wait; note "all done" ;;
+  r4)
+    shift
+    ( hzq run --threads 4 --name tw6-tests -- bash $ROOT/tools/tw6_ab.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
+    ( hzq run --threads 4 --name tw6-lint -- bash $ROOT/tools/tw6_ab.sh lint > $R/u-lint.log 2>&1; note "unit lint rc $?" ) &
+    ( hzq run --threads 4 --name tw6-off -- bash $ROOT/tools/tw6_ab.sh off > $R/u-off.log 2>&1; note "unit off rc $?" ) &
+    ( hzq run --threads 4 --name tw6-py -- bash $ROOT/tools/tw6_ab.sh pytest > $R/u-py.log 2>&1; note "unit pytest rc $?" ) &
     bash $ROOT/tools/tw6_ab.sh eq "$@"
     wait; note "all done" ;;
   ac)

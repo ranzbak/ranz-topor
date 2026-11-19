@@ -1603,6 +1603,13 @@ pub struct Options {
     /// interval (its tee via has no site) is laid again (`tree::dependents`, the tree search), so
     /// the junction moves. false (default) = as before.
     pub opt_branch_move: bool,
+    /// TW6 r4 (`[optimize] site_move_detour`, docs/dev/design/tw6-via-sites.md E): the keep
+    /// judgement of the site and branch moves adds, per relaid connection, the graded detour price
+    /// `violation x ((len / straight - 1) / scale)^2` after minus before (`len` = its wires'
+    /// length, `straight` = pad to pad; `topo::escape::detour_price`, the shape of the via-pair
+    /// stretch price): a connection whose excess ratio grows to `scale` costs one violation more.
+    /// No cutoff. 0 = no detour price (round 3). Default 0.5 (excess 0.5 = the report's detour 1.5).
+    pub opt_site_move_detour: f64,
     /// tw4-r2 (1) (`[capacity] pad_exits`, docs/dev/design/tw4-r2.md (1)): with via_cuts, every
     /// wire end at a fine-pitch pad (another net's copper beside it closer than the wire could
     /// pass) holds its planned exit, read from the plan (the leaving pass, the pad side it leaves
@@ -1855,6 +1862,7 @@ impl Default for Options {
             via_pair_room: false,
             opt_site_move: false,
             opt_branch_move: false,
+            opt_site_move_detour: 0.5,
             pad_exits: false,
             pad_exit_static: false,
             pour_cuts: false,

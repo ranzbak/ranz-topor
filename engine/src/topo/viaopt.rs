@@ -280,16 +280,23 @@ pub fn bounding_wires(st: &State, w: WireId, partner: &[Option<(WireId, usize)>]
     v
 }
 
-/// TW6 part E (`[optimize] branch_move`): the branch arms whose junction lies inside traversals
-/// `lo..=hi` of wire `w` (`junctions` = [`super::tree::junctions`]: `(branch, end, trunk,
-/// traversal, vertex)`): branches ending on a turn of `w` there, and `w` itself when its own
-/// junction end lies in the interval (the branch of a tee whose via has no site); with a
-/// connection, ascending.
-pub fn tee_arms(st: &State, junctions: &[(WireId, usize, WireId, usize, super::state::VertId)], w: WireId, lo: usize, hi: usize, has_conn: &dyn Fn(WireId) -> bool) -> Vec<WireId> {
+/// TW6 part E (`[optimize] branch_move`): the branch arms of the junctions of the via interval
+/// between events `i` and `i + 1` of wire `w` (`ev` = its layering events `(traversal, fraction,
+/// layer)`; `junctions` = [`super::tree::junctions`]: `(branch, end, trunk, traversal, vertex)`):
+/// branches ending on a turn of `w` whose tee event (its traversal at fraction 0.5,
+/// [`super::layers`] tee rule, Polubasov 2001 §5 p. 9) lies from event `i` to event `i + 1`
+/// inclusive, and `w` itself when the interval starts at its junction end 0 (first event at
+/// traversal 0, fraction 0) or ends at its junction end 1 (last traversal, fraction 1). The tee
+/// rule puts an event at every junction, so a junction never lies strictly inside an interval: it
+/// bounds the interval its tee via sits in (r4: the bounds count, else no branch move is ever
+/// tried). With a connection, ascending. O(junctions).
+pub fn tee_arms(st: &State, junctions: &[(WireId, usize, WireId, usize, super::state::VertId)], w: WireId, ev: &[(usize, f64, i32)], i: usize, has_conn: &dyn Fn(WireId) -> bool) -> Vec<WireId> {
+    let (Some(&(ka, sa, _)), Some(&(kb, sb, _))) = (ev.get(i), ev.get(i + 1)) else { return Vec::new() };
     let n = st.wires[w].tris.len();
+    let le = |a: (usize, f64), b: (usize, f64)| a.0 < b.0 || (a.0 == b.0 && a.1 <= b.1);
     let mut v: Vec<WireId> = junctions
         .iter()
-        .filter(|&&(b, end, t, k, _)| (t == w && (lo..=hi).contains(&k)) || (b == w && ((end == 0 && lo == 0) || (end == 1 && hi + 1 >= n))))
+        .filter(|&&(b, end, t, k, _)| (t == w && le((ka, sa), (k, 0.5)) && le((k, 0.5), (kb, sb))) || (b == w && ((end == 0 && ka == 0 && sa <= 0.0) || (end == 1 && sb >= 1.0 && kb + 1 >= n))))
         .map(|&(b, ..)| b)
         .filter(|&b| has_conn(b))
         .collect();

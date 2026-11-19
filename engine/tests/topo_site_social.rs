@@ -172,6 +172,35 @@ fn crossed_wire_amount_takes_its_via_interval() {
     assert_eq!((0..n).map(|k| st.site_k_at(w, k)).collect::<Vec<_>>(), own);
 }
 
+/// TW6 r4 (r3 mutant M13): one call sets the search's whole view of a layering, the B term's via
+/// intervals with it: the loop's `set_lr` can no longer refresh the layers and leave the site
+/// amounts of the layering before (the refresh changed no copper on any fixture tried, so the
+/// state is checked here).
+#[test]
+fn apply_layering_sets_the_via_intervals_with_the_layers() {
+    let m = board(true);
+    let b = board::build(&m, &opts()).unwrap();
+    let pk = Packer::for_model(&m, &Options::default(), &b.proj);
+    let mut st = State::new(&b.proj);
+    st.site_rooms = Some(pk.site_rooms());
+    let ob = |r: &str| m.pads.iter().position(|p| p.ref_ == r).map(|i| b.pad_of.iter().position(|&x| x == i).unwrap()).unwrap();
+    let (pa, pb) = (ob("B1"), ob("B2"));
+    let c = Conn { net: 2, pa, pb, a: b.centre[pa].unwrap(), b: b.centre[pb].unwrap(), w: 0.25 * MM, s: 0.2 * MM };
+    let (w, _) = st.route_conn(&c, &InitWeights::default(), 1.0).expect("B routes");
+    let n = st.wires[w].tris.len();
+    let own: Vec<f64> = (0..n).map(|k| st.site_k_at(w, k)).collect();
+    assert!(own.iter().any(|&a| a > 1.0), "B crosses the keepout: {own:?}");
+    st.site_strict = false;
+    let mut ev = vec![Vec::new(); st.wires.len()];
+    ev[w] = vec![(0, 0.0, 0), (n - 1, 1.0, 1)];
+    st.apply_layering(&ev, 1);
+    assert_eq!(st.layers_now[w].len(), n, "the layers");
+    assert!((0..n).all(|k| st.site_k_at(w, k) == 0.0), "and the via interval's best room with them");
+    ev[w] = vec![(0, 0.0, 0), (n - 1, 1.0, 0)];
+    st.apply_layering(&ev, 1);
+    assert_eq!((0..n).map(|k| st.site_k_at(w, k)).collect::<Vec<_>>(), own, "no layer change: the own rooms again");
+}
+
 /// Opt-in: the factor's default weight is 0, so the search weight is 0.
 #[test]
 fn via_site_social_is_opt_in() {
@@ -268,10 +297,12 @@ fn bounding_wires_leave_out_the_same_net() {
     assert!(bounding_wires(&st, w1, &p, 1, &|_| true).is_empty(), "same net");
 }
 
-/// The tee arms of an interval: a branch ending on a turn of the wire inside it, or the wire itself
-/// when its own junction end lies in it; outside the interval or without a connection, none.
+/// The tee arms of an interval: a branch whose tee event (its trunk traversal at fraction 0.5)
+/// lies from the interval's first event to its last, inclusive, or the wire itself when the
+/// interval starts at its junction end 0 or ends at its junction end 1; outside the interval or
+/// without a connection, none.
 #[test]
-fn tee_arms_are_the_junctions_inside_the_interval() {
+fn tee_arms_are_the_junctions_of_the_interval() {
     with_b(|st, _, w, _| {
         let n = st.wires[w].tris.len();
         let all = |_: usize| true;
@@ -279,15 +310,40 @@ fn tee_arms_are_the_junctions_inside_the_interval() {
         // (branch, end, trunk, traversal, vertex): branch 7 on B's traversal 5, B the branch of
         // trunk 9 at its end 1.
         let j = vec![(7, 0, w, 5, 0), (w, 1, 9, 2, 0)];
-        assert_eq!(tee_arms(st, &j, w, 4, 6, &all), vec![7]);
-        assert!(tee_arms(st, &j, w, 6, 8, &all).is_empty());
-        let mut both = vec![7, w];
-        both.sort_unstable();
-        assert_eq!(tee_arms(st, &j, w, 4, n - 1, &all), both);
-        assert!(tee_arms(st, &j, w, 4, 6, &none).is_empty());
+        // B's layering: the tee event of branch 7 at (5, 0.5), then a layer change at (8, 0.3).
+        let ev = vec![(0, 0.0, 0), (3, 0.4, 0), (5, 0.5, 0), (8, 0.3, 1), (n - 1, 1.0, 1)];
+        assert_eq!(tee_arms(st, &j, w, &ev, 2, &all), vec![7], "the tee event bounds the interval");
+        assert_eq!(tee_arms(st, &j, w, &ev, 1, &all), vec![7], "the tee event ends the interval");
+        assert!(tee_arms(st, &j, w, &ev, 0, &all).is_empty(), "before it");
+        assert_eq!(tee_arms(st, &j, w, &ev, 3, &all), vec![w], "the interval ends at B's junction end 1");
+        assert!(tee_arms(st, &j, w, &ev, 2, &none).is_empty(), "no connection");
+        assert!(tee_arms(st, &j, w, &ev, 4, &all).is_empty(), "no event after the last");
+        // The tee at fraction 0.5 lies before an event at (5, 0.6): not in the interval after it.
+        let ev2 = vec![(0, 0.0, 0), (5, 0.6, 0), (8, 0.3, 1), (n - 1, 1.0, 1)];
+        assert!(tee_arms(st, &j, w, &ev2, 1, &all).is_empty());
+        // A junction strictly inside an interval (no tee event there): still its arm.
+        let ev3 = vec![(0, 0.0, 0), (4, 0.2, 0), (6, 0.3, 1), (n - 1, 1.0, 1)];
+        assert_eq!(tee_arms(st, &j, w, &ev3, 1, &all), vec![7]);
         let j0 = vec![(w, 0, 9, 2, 0)];
-        assert_eq!(tee_arms(st, &j0, w, 0, 3, &all), vec![w]);
-        assert!(tee_arms(st, &j0, w, 1, 3, &all).is_empty());
+        assert_eq!(tee_arms(st, &j0, w, &ev, 0, &all), vec![w], "starts at B's junction end 0");
+        assert!(tee_arms(st, &j0, w, &ev, 1, &all).is_empty());
+    });
+}
+
+/// Why r3 never tried a branch move (0 of 0 on esp and qmtech): the layering's tee rule puts an
+/// event at the junction (trunk traversal k, fraction 0.5), and with `[vias] between_crossings`
+/// (strict intervals, the default with taut lengths) the via interval next to it covers only the
+/// traversals strictly between its events, so the junction's traversal k is never inside the
+/// interval its tee via sits in. The interval's bounding events are what name the junction.
+#[test]
+fn a_tee_event_bounds_the_strict_interval_but_lies_outside_it() {
+    use topor_engine::topo::refine::via_ranges;
+    let ev = vec![(0, 0.0, 0), (5, 0.5, 0), (8, 0.3, 1), (12, 1.0, 1)];
+    let (iv, ok) = via_ranges(&ev, true);
+    assert_eq!((iv, ok), (vec![(6, 7)], vec![true]), "the strict interval leaves out traversal 5");
+    with_b(|st, _, w, _| {
+        let j = vec![(7, 0, w, 5, 0)];
+        assert_eq!(tee_arms(st, &j, w, &ev, 1, &|_| true), vec![7]);
     });
 }
 
@@ -299,19 +355,78 @@ fn site_and_branch_moves_are_opt_in_and_parse() {
     assert!(o.opt_site_move && o.opt_branch_move);
 }
 
-/// The report line names exactly the moves that are on, with their counts.
+/// The report line names exactly the moves that are on, with their counts, and the detour price
+/// (its refusals, or that there is none).
 #[test]
 fn site_move_line_names_the_moves_on() {
     use topor_engine::topo::core::site_move_line;
     use topor_engine::topo::optimise::CycleStats;
-    let s = CycleStats { site_moved: 7, site_kept: 2, branch_moved: 5, branch_kept: 1, ..CycleStats::default() };
-    let a = site_move_line(true, false, &s);
+    let s = CycleStats { site_moved: 7, site_kept: 2, branch_moved: 5, branch_kept: 1, site_detour_refused: 3, ..CycleStats::default() };
+    let a = site_move_line(true, false, 0.5, &s);
     assert!(a.contains("2 of 7 site moves kept") && a.contains("site_move") && !a.contains("branch"), "{a}");
-    let b = site_move_line(false, true, &s);
+    assert!(a.contains("3 refused for their detour ([optimize] site_move_detour = 0.5)"), "{a}");
+    let b = site_move_line(false, true, 0.0, &s);
     assert!(b.contains("1 of 5 branch moves kept") && b.contains("branch_move") && !b.contains("site moves"), "{b}");
-    let c = site_move_line(true, true, &s);
+    assert!(b.contains("no detour price ([optimize] site_move_detour = 0)") && !b.contains("refused"), "{b}");
+    let c = site_move_line(true, true, 0.25, &s);
     let (i, j) = (c.find("2 of 7 site moves kept").expect("site part"), c.find("; 1 of 5 branch moves kept").expect("branch part"));
-    assert!(i < j, "{c}");
+    let k = c.find("; 3 refused for their detour ([optimize] site_move_detour = 0.25)").expect("detour part");
+    assert!(i < j && j < k, "{c}");
+}
+
+/// TW6 r4: the graded detour price is `((len / straight - 1) / scale)^2` violations: 0 for a
+/// straight path, one violation at the excess ratio `scale`, a quarter at half of it, growing
+/// smoothly beyond (no step anywhere); no reference (straight 0) or scale 0 = no price.
+#[test]
+fn the_detour_price_is_graded_on_the_excess_ratio() {
+    use topor_engine::topo::escape::{badness, detour_excess, detour_price};
+    assert_eq!(detour_price(10.0, 10.0, 0.5), 0.0);
+    assert!((detour_price(15.0, 10.0, 0.5) - 1.0).abs() < 1e-12);
+    assert!((detour_price(12.5, 10.0, 0.5) - 0.25).abs() < 1e-12);
+    assert!((detour_price(20.0, 10.0, 0.5) - 4.0).abs() < 1e-12);
+    assert!((detour_price(15.0, 10.0, 0.25) - 4.0).abs() < 1e-12, "a smaller scale is stricter");
+    assert_eq!(detour_price(9.0, 10.0, 0.5), 0.0, "shorter than straight: no excess");
+    assert_eq!(detour_price(15.0, 0.0, 0.5), 0.0, "no reference");
+    assert_eq!(detour_price(15.0, 10.0, 0.0), 0.0, "scale 0 = off");
+    assert_eq!(detour_price(f64::INFINITY, 10.0, 0.5), 0.0);
+    // Smooth and growing: no step between neighbouring lengths.
+    let v: Vec<f64> = (0..=400).map(|i| detour_price(10.0 + i as f64 * 0.05, 10.0, 0.5)).collect();
+    assert!(v.windows(2).all(|x| x[1] >= x[0] && x[1] - x[0] < 0.1), "graded, no cutoff");
+    // The same excess as the escape badness reads (one detour measure).
+    assert_eq!(detour_excess(15.0, 10.0), 0.5);
+    assert_eq!(badness(15.0, 10.0, 0.0, 0), 0.5);
+}
+
+/// The price is read per connection: the length of all its alive wires over its straight pad-to-pad
+/// distance. B routed twice, both wires on connection 0: about twice the straight length, so about
+/// ((2 - 1) / 0.5)^2 = 4 violations; one wire: about 0; a connection not asked for, or scale 0: 0.
+#[test]
+fn the_detour_price_sums_the_connections_wires() {
+    use std::collections::BTreeSet;
+    use topor_engine::topo::core::conn_detour_price;
+    let m = board(false);
+    let b = board::build(&m, &opts()).unwrap();
+    let mut st = State::new(&b.proj);
+    let ob = |r: &str| m.pads.iter().position(|p| p.ref_ == r).map(|i| b.pad_of.iter().position(|&x| x == i).unwrap()).unwrap();
+    let (pa, pb) = (ob("B1"), ob("B2"));
+    let c = Conn { net: 2, pa, pb, a: b.centre[pa].unwrap(), b: b.centre[pb].unwrap(), w: 0.25 * MM, s: 0.2 * MM };
+    let (w1, _) = st.route_conn(&c, &InitWeights::default(), 1.0).expect("B routes");
+    let conns = vec![c];
+    let one: BTreeSet<usize> = [0].into_iter().collect();
+    let mut wc = vec![usize::MAX; st.wires.len()];
+    wc[w1] = 0;
+    let p1 = conn_detour_price(&st, &wc, &conns, &one, 0.5);
+    assert!(p1 < 0.01, "one straight wire: {p1}");
+    let (w2, _) = st.route_conn(&c, &InitWeights::default(), 1.0).expect("B routes again");
+    wc.resize(st.wires.len(), usize::MAX);
+    wc[w2] = 0;
+    let p2 = conn_detour_price(&st, &wc, &conns, &one, 0.5);
+    assert!((4.0..5.0).contains(&p2), "two wires on one connection (each a little over straight): {p2}");
+    assert_eq!(conn_detour_price(&st, &wc, &conns, &BTreeSet::new(), 0.5), 0.0);
+    assert_eq!(conn_detour_price(&st, &wc, &conns, &one, 0.0), 0.0);
+    // A wire of another connection is not counted.
+    wc[w2] = usize::MAX;
+    assert!(conn_detour_price(&st, &wc, &conns, &one, 0.5) < 0.01);
 }
 
 fn qmtech_crop() -> BoardModel {
@@ -345,4 +460,49 @@ fn off_is_the_default_copper_and_on_reports() {
     let line = r1.warnings.iter().find(|w| w.contains("site moves kept")).expect("line");
     let tried: usize = line.split(" site moves kept").next().and_then(|a| a.rsplit(" of ").next()).and_then(|n| n.trim().parse().ok()).expect("count");
     assert!(tried > 0, "{line}");
+}
+
+/// TW6 r4: E's keep judgement adds the relaid connections' graded detour price, after minus
+/// before: a move kept by the evaluation alone is refused when its detour grows by more than it
+/// gains (and counted), one that shortens a detour gains by as much; a reroute not kept counts as
+/// refused only when it would have been kept without the price.
+#[test]
+fn the_site_keep_judgement_prices_the_detour() {
+    use topor_engine::topo::core::{reroute_detour_refused, site_keep};
+    assert_eq!(site_keep(100.0, 90.0, 0.0, 0.0), (true, false), "no detour change: the evaluation");
+    assert_eq!(site_keep(100.0, 90.0, 0.0, 20.0), (false, true), "gains 10, the detour costs 20: refused");
+    assert_eq!(site_keep(100.0, 90.0, 0.0, 5.0), (true, false), "the detour costs less than the gain");
+    assert_eq!(site_keep(100.0, 105.0, 20.0, 0.0), (true, false), "a shorter detour pays for 5 more");
+    assert_eq!(site_keep(100.0, 105.0, 0.0, 0.0), (false, false), "worse, not refused for the detour");
+    assert_eq!(site_keep(100.0, 100.0, 0.0, 0.0), (false, false), "equal: not kept");
+    assert!(reroute_detour_refused(false, 100.0, 110.0, 0.0, 20.0, 0.0), "100 vs 90 without the price");
+    assert!(!reroute_detour_refused(false, 100.0, 110.0, 0.0, 5.0, 0.0), "105 >= 100: not kept either way");
+    assert!(!reroute_detour_refused(false, 100.0, 110.0, 0.0, 20.0, 15.0), "the re-lay counter's price counts");
+    assert!(!reroute_detour_refused(true, 100.0, 90.0, 0.0, 0.0, 0.0), "kept");
+    assert!(!reroute_detour_refused(false, 100.0, f64::INFINITY, 0.0, 0.0, 0.0), "not placed");
+}
+
+/// TW6 r4, loop level on the qmtech USB crop (seed 0, three rounds, site_move + branch_move, the
+/// site price off): a strict detour price (scale 0.001) keeps site moves that shorten their
+/// connections, which the evaluation alone refused (measured: 3 of 7 kept against 0 of 3 without
+/// the price), and names its refusals in the report line; scale 0 = the evaluation alone.
+#[test]
+fn a_strict_detour_price_keeps_the_moves_that_shorten() {
+    use topor_engine::control::RunControl;
+    use topor_engine::route::route_with;
+    let m = qmtech_crop();
+    let run = |det: &str| {
+        let o = Options::from_json(&format!(r#"{{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 3, "via_cuts": true, "seed": 0, "opt_site_move": true, "opt_branch_move": true, "opt_site_move_detour": {det}}}"#)).expect("options parse");
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        let r = route_with(&m, &o, &ctl);
+        let line = r.warnings.iter().find(|w| w.contains("site moves kept")).cloned().expect("line");
+        let kept: usize = line.split(" of ").next().and_then(|a| a.rsplit(' ').next()).and_then(|n| n.parse().ok()).expect("kept");
+        (kept, line)
+    };
+    let (k0, l0) = run("0.0");
+    let (k1, l1) = run("0.001");
+    assert!(l0.contains("no detour price ([optimize] site_move_detour = 0)"), "{l0}");
+    assert!(l1.contains("refused for their detour ([optimize] site_move_detour = 0.001)"), "{l1}");
+    assert!(k1 > k0, "the price keeps the moves that shorten: {l0} / {l1}");
 }

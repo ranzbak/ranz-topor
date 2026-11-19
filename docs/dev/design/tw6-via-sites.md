@@ -203,6 +203,33 @@ added: one count). Counted inside the cycle's `max_ripped`. Report: `loop.site_m
 and one warning line (`core::site_move_line`). `pair_move` is left as it was (no refactor, bit-equal by
 construction).
 
+**E round 4 (lead decisions 2026-11-19).**
+- *Graded detour price in the keep judgement* (`[optimize] site_move_detour`, excess-ratio scale, default 0.5, 0 =
+  round 3's evaluation alone). Per relaid connection `c`: `D(c) = viol x ((len_c / straight_c - 1) / scale)^2`,
+  `len_c` the length of its alive wires, `straight_c` pad to pad (the run report's detour ratio;
+  `escape::detour_excess` is the badness's detour term, `escape::detour_price` has the shape of the via-pair stretch
+  price `viaopt::pair_len_price`: a scale, not a cutoff). `viol` = the judge's violation weight. Kept when
+  `e1 + ΣD_after < e0 + ΣD_before` (`core::site_keep`; (ii) and the branch moves), and in (i) the reroute's own
+  judge through `Rerouter::judge_extra` on both sides (`Sp::reroute_d`, every other reroute passes 0: bit-equal).
+  Symmetric by design: a move that shortens a detour gains by as much (the crop test: at scale 0.001 the site moves
+  kept rise 0 -> 3 of 3-7). Moves the evaluation alone would have kept and the price refused are counted
+  (`loop.site_move_detour_refused`, the report line). Why per connection: the det > 1.5 metric is per connection,
+  and a branch's straight to its junction is no detour reference (Luzin, Popov & Popov 2013 p. 134 step 8.1 keep a
+  relay by the board's quality; the length term there is the plain length, the graded ratio is ours: the user's
+  "no detours where a direct path exists").
+- *Branch moves bounded by the tee event.* The layering's tee rule (Polubasov 2001 §5 p. 9) puts an event at every
+  junction (trunk traversal k, fraction 0.5), so with strict intervals (between_crossings) a junction never lies
+  inside the via interval its tee via sits in: round 3's `tee_arms(lo..=hi)` could never match a trunk junction (0 of
+  0 branch moves on esp and qmtech). `tee_arms` now takes the interval's two events and matches a junction whose tee
+  event lies from the first to the last, inclusive (test `a_tee_event_bounds_the_strict_interval_but_lies_outside_it`).
+- *M13* (`set_lr` without the B term's `mark_site_k`): no fixture showed a copper change (the qmtech USB crop x 6
+  option sets, the keepout board x 8, live vs loop-start site_k). The refresh is made structural instead:
+  `State::apply_layering` sets layers_now, the free wires and site_k from the same events, called by `set_lr`.
+- `[vias] site_price = "graded"` implies `[capacity] via_disc_height` (its new "auto", unless the user sets it), so the
+  plan prices the via's room at its real point and the drawing packs the discs at the same height (r3: s without h
+  doubled qmtech's unconnected).
+- `planned_crossing_window` goes to CROSS-DRAW (F2/F3); the B search term stays parked (opt-in, weight 0).
+
 **E. Loop moves (submode 2).**
 - `site_move`: per via with d > 0, after `pair_move` and at the end-of-cycle via weight:
   - (i) re-lay its own wire, with B's search terms;
@@ -245,6 +272,8 @@ untouched). Order after the merge: A+C, D, B (search term), E; all opt-in until 
 | `[factors] via_site_social` (mm) | B search | 0 | price of a crossing in a room-less place, times min(own, crosser's) deficit |
 | `[vias] pair_room` | D | off | relocation keeps the crossers' need between a via pair |
 | `[optimize] site_move`, `branch_move` | E | off | loop moves (prof-counted, inside the work-unit throttle like `loop_p4`) |
+| `[optimize] site_move_detour` (excess ratio) | E r4 | 0.5 | graded detour price in E's keep judgement; 0 = none |
+| `[capacity] via_disc_height` = auto/on/off | A r4 | auto | auto = on with site_price graded |
 
 ## Tests
 - Unit tests:

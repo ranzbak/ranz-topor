@@ -870,6 +870,19 @@ impl<'p> State<'p> {
         }
     }
 
+    /// The loop's layering as the search reads it, all parts from the same `events` (`bottom` =
+    /// the layer of a wire without events): [`State::layers_now`]
+    /// ([`super::optimise::layers_now`]), the free wires ([`State::mark_free_wires`]) and the B
+    /// search term's via intervals ([`State::mark_site_k`], cleared without
+    /// [`State::site_rooms`]). TW6 r4: one call at every layering change, so no part can stay
+    /// behind (r3 mutant M13: dropping the site_k refresh alone left the copper of every fixture
+    /// tried unchanged, so only this state-level test sees it). O(traversals + events).
+    pub fn apply_layering(&mut self, events: &[Vec<(usize, f64, i32)>], bottom: i32) {
+        self.layers_now = super::optimise::layers_now(self, events, bottom);
+        self.mark_free_wires(events);
+        self.mark_site_k(events);
+    }
+
     /// TW6 part B search: [`State::site_k`] from the layering `events` (`(traversal, fraction,
     /// layer)` per wire): inside a via interval ([`super::refine::via_ranges`], strict with
     /// [`State::site_strict`]) the amount at the best room over the interval (the via may sit

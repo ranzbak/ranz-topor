@@ -43,8 +43,15 @@ def _cycles(values: dict) -> bool:
     return values[("optimize", "loop")] == "cycles"
 
 
+def _site_graded(values: dict) -> bool:
+    """[capacity] via_disc_height = "auto": on with [vias] site_price = "graded" (TW6 r4, lead 2026-11-19: the graded
+    site price reads a via's room at its real point; the plan's packing and the drawing's must measure it the same way,
+    measured TW6 r3: site_price without the disc height doubled qmtech's unconnected)."""
+    return values[("vias", "site_price")] == "graded"
+
+
 # engine_field of an auto / on / off setting -> what "auto" means for the current values (the engine gets a bool)
-_ENGINE_AUTO = {"via_relocate": _taut, "via_between": _taut, "drawing_feedback": _cycles}
+_ENGINE_AUTO = {"via_relocate": _taut, "via_between": _taut, "drawing_feedback": _cycles, "via_disc_height": _site_graded}
 
 # ---------------------------------------------------------------- value handling
 
