@@ -58,6 +58,19 @@ fn fuzz_items(
     .map_err(PyValueError::new_err)
 }
 
+/// The result as JSON; with `TOPO_PROF` set a `profile` member carries the run's counters
+/// (`topo::prof::report`).
+fn result_json(res: &crate::route::RouteResult) -> Result<String, String> {
+    match crate::topo::prof::report() {
+        None => serde_json::to_string(res).map_err(|e| e.to_string()),
+        Some(p) => {
+            let mut v = serde_json::to_value(res).map_err(|e| e.to_string())?;
+            v["profile"] = p;
+            serde_json::to_string(&v).map_err(|e| e.to_string())
+        }
+    }
+}
+
 /// `RouteResult` JSON: topological routing of the unconnected nets (see `route::route`).
 #[pyfunction]
 fn route(py: Python<'_>, model_json: String, options_json: String) -> PyResult<String> {
@@ -65,7 +78,7 @@ fn route(py: Python<'_>, model_json: String, options_json: String) -> PyResult<S
         let model = BoardModel::from_json(&model_json)?;
         let opts = Options::from_json(&options_json)?;
         let res = crate::route::route(&model, &opts);
-        serde_json::to_string(&res).map_err(|e| e.to_string())
+        result_json(&res)
     })
     .map_err(PyValueError::new_err)
 }
@@ -185,7 +198,7 @@ fn route_async(model_json: String, options_json: String) -> PyResult<RouteJob> {
     let c2 = ctl.clone();
     let job = Job::spawn(move || {
         let res = crate::route::route_with(&model, &opts, &c2);
-        serde_json::to_string(&res).map_err(|e| e.to_string())
+        result_json(&res)
     });
     Ok(RouteJob { ctl, job })
 }

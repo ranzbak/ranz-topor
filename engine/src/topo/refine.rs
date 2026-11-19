@@ -943,6 +943,7 @@ impl<'a> Frame<'a> {
     /// traversal with a site and the least overflow price, ties by the drawing's preference.
     /// O(vias x interval length x layers x passes of an edge).
     fn optimise<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], which: &[usize]) {
+        let _pg = super::prof::g(super::prof::K::CapmodelOptimise);
         let n = self.st.wires[w].passes.len();
         let mut ch = Vec::new();
         for &i in which {
@@ -1232,6 +1233,8 @@ impl<'a> CapModel<'a> {
     #[allow(clippy::too_many_arguments)]
     fn build(st: &'a State<'a>, packer: &'a Packer<'a>, dirs: &'a [Vec<Vec2>], evl: &[Vec<LEv>], bottom: i32, price: f64, cuts: bool, only: Option<&[bool]>) -> Self {
         let used = |w: WireId| only.is_none_or(|o| o.get(w).copied().unwrap_or(false));
+        let _pg = super::prof::g(super::prof::K::CapmodelBuild);
+        super::prof::units(super::prof::K::CapmodelBuild, st.passes.len());
         let nl = st.proj.n_layers;
         let nw = st.wires.len();
         let a = Arrays {
@@ -1552,6 +1555,7 @@ pub fn refine_only(
     p: &RefineParams,
     only: Option<&[bool]>,
 ) -> RefineStats {
+    let _pg = super::prof::g(super::prof::K::Refine);
     // Switched off: the model is built with a unit price only to count the over-full edge-layers.
     let price = if p.overflow_mm > 0.0 { p.overflow_mm } else { 1.0 };
     let mut cm = match only {
