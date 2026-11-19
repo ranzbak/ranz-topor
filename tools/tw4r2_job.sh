@@ -45,7 +45,7 @@ one() {
   note "run $cc $b th $th rc $? wall $(( $(date +%s) - t0 )) s"
 }
 tests() {
-  ( cd engine && cargo test --release --lib viacut > $R/test-lib.log 2>&1 9>&-; note "test lib viacut rc $?"
+  ( cd engine && cargo test --release --lib -- viacut pourplan optimise::tests::the_pour > $R/test-lib.log 2>&1 9>&-; note "test lib viacut+pour rc $?"
     cargo test --release --test topo_cm1_room > $R/test-cm1.log 2>&1 9>&-; note "test topo_cm1_room rc $?"
     cargo test --release --test topo_disc_height --test topo_d3 > $R/test-dh.log 2>&1 9>&-; note "test topo_disc_height+d3 rc $?" )
 }
