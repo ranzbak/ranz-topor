@@ -89,3 +89,14 @@ fn with_one_run_the_four_bests_are_drawn_one_after_another() {
     assert_eq!(n_roles, 4, "{:?}", r.bests);
     assert!(r.bests.iter().all(|b| b["run"] == 1));
 }
+
+/// TW3 D2 (lead 2026-11-19): a run whose loop ends at its re-lay budget (`loop_relays`) says so
+/// in its stop reason ("re-lay budget", a work cap like rounds, never "round cap" or "stable"),
+/// and the loop line names it.
+#[test]
+fn a_loop_ended_by_its_relay_budget_reports_it() {
+    let r = run(&eprom(), &topor(r#""runs": 1, "loop_relays": 40, "topo_rounds": 100000"#), 1);
+    assert_eq!(r.stop_reason, "re-lay budget", "{:?}", r.warnings);
+    assert!(line(&r, "TopoR loop (").contains("ended by re-lay budget"), "{}", line(&r, "TopoR loop ("));
+    assert!(!r.timed_out);
+}

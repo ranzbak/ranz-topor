@@ -284,10 +284,23 @@ fn run_threads(o: &Options, threads: usize, when: fn(&topor_engine::control::Pro
 /// the dialog's, the same for every restart mode.
 #[test]
 fn cancel_at_one_of_two_runs_stable_is_a_cancel() {
+    cancel_at_one_of_two_stable(r#", "restart": "stall""#);
+}
+
+/// V6 (verify tw3 r1): the same under the default hybrid restart, where stable is the shared variant
+/// table's. One compute slot: the runs take turns at the table's sync points, and the first run whose
+/// loop shows the table's stable reaches its stable yield check before the other run is given a view
+/// of it, so the moment "1 of 2 stable" is again there by construction.
+#[test]
+fn cancel_at_one_of_two_runs_stable_under_the_hybrid_is_a_cancel() {
+    cancel_at_one_of_two_stable("");
+}
+
+fn cancel_at_one_of_two_stable(extra: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     for seed in [2u64, 3, 4, 8] {
-        let o = Options::from_json(&format!(r#"{{"runs": 2, "seed": {seed}, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000, "restart": "stall"}}"#)).expect("options");
+        let o = Options::from_json(&format!(r#"{{"runs": 2, "seed": {seed}, "wall_clock_s": 300, "stop_when_stable": false, "topo_rounds": 100000{extra}}}"#)).expect("options");
         let mut ctl = RunControl::new();
         let (press, once) = (ctl.clone(), Arc::new(AtomicBool::new(false)));
         let at = Arc::new(Mutex::new(None));
@@ -303,12 +316,12 @@ fn cancel_at_one_of_two_runs_stable_is_a_cancel() {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().expect("pool");
             pool.install(|| route_with(&eprom(), &o, &ctl))
         };
-        let p = at.lock().unwrap().clone().unwrap_or_else(|| panic!("seed {seed}: no run reached its stable yield check: {:?}", r.warnings));
-        assert!(p.runs == 2 && p.runs_stable == 1 && !p.stable, "seed {seed}: premise {p:?}");
-        assert_eq!(r.stop_reason, "cancel", "seed {seed}: {:?}", r.warnings);
-        assert!(!r.warnings.iter().any(|w| w.starts_with("OK at Routes stable")), "seed {seed}: {:?}", r.warnings);
+        let p = at.lock().unwrap().clone().unwrap_or_else(|| panic!("seed {seed}{extra}: no run reached its stable yield check: {:?}", r.warnings));
+        assert!(p.runs == 2 && p.runs_stable == 1 && !p.stable, "seed {seed}{extra}: premise {p:?}");
+        assert_eq!(r.stop_reason, "cancel", "seed {seed}{extra}: {:?}", r.warnings);
+        assert!(!r.warnings.iter().any(|w| w.starts_with("OK at Routes stable")), "seed {seed}{extra}: {:?}", r.warnings);
         if let Some((before, after)) = stitching(&r) {
-            assert_eq!(after, before, "seed {seed}: a Cancel before stable cuts the stitching");
+            assert_eq!(after, before, "seed {seed}{extra}: a Cancel before stable cuts the stitching");
         }
     }
 }

@@ -317,6 +317,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         "timeout"
     } else if stable_stop_all {
         "stable"
+    } else if outs.iter().any(|o| o.relay_stop) {
+        // TW3 D2: a work cap like rounds, named for what ended it
+        "re-lay budget"
     } else {
         "round cap"
     }
@@ -658,6 +661,8 @@ struct RunOut {
     /// The run ended BECAUSE its routes were stable (the loop's or the run's stop at stable), not
     /// because it reached the cycle cap with stable recorded (a dialog run goes on past stable).
     stable_stop: bool,
+    /// TW3 D2: its TopoR loop ended at the re-lay budget (`[optimize] loop_relays`).
+    relay_stop: bool,
     /// The time limit, acting as hard, cut the one drawing of its TopoR loop pick (the traces, the
     /// via reduction or the pour stitching): its board is drawn only in part, whatever ended the
     /// loop (verify-sl3 F1: an OK at Routes stable then a hard limit in the drawing).
@@ -1352,6 +1357,7 @@ struct Run {
     notes: Vec<String>,
     time_hit: bool,
     stable_stop: bool,
+    relay_stop: bool,
     draw_cut: bool,
     stable_at: Option<usize>,
     first: Option<usize>,
@@ -1378,6 +1384,7 @@ impl Run {
             notes: Vec::new(),
             time_hit: false,
             stable_stop: false,
+            relay_stop: false,
             draw_cut: false,
             stable_at: None,
             first: None,
@@ -1499,6 +1506,7 @@ impl Run {
                 if let Some(e) = loop_end {
                     self.stable_at = self.stable_at.or(e.stable.then_some(cycle));
                     self.stable_stop = e.stopped_stable;
+                    self.relay_stop = e.relay_stop;
                     self.time_hit = e.time_hit;
                 }
                 self.busy_s += t.elapsed().as_secs_f64();
@@ -1701,6 +1709,7 @@ impl Run {
                     self.stable_at.get_or_insert(cycle);
                 }
                 self.stable_stop = e.stopped_stable && !interrupted;
+                self.relay_stop = e.relay_stop && !interrupted;
                 self.time_hit = e.time_hit || interrupted;
             } else {
                 self.time_hit = interrupted;
@@ -1776,7 +1785,7 @@ impl Run {
             self.picked_at,
             self.busy_s
         );
-        Ok(RunOut { k: self.k, rows_drawn: std::mem::take(&mut self.rows_drawn), result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, draw_cut: self.draw_cut, stable: self.stable_at.is_some(), line, cycles_line })
+        Ok(RunOut { k: self.k, rows_drawn: std::mem::take(&mut self.rows_drawn), result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, relay_stop: self.relay_stop, draw_cut: self.draw_cut, stable: self.stable_at.is_some(), line, cycles_line })
     }
 }
 
@@ -1967,6 +1976,8 @@ struct LoopEnd {
     /// The loop stopped at stable (not at the cycle cap with stable recorded).
     stopped_stable: bool,
     time_hit: bool,
+    /// TW3 D2: the loop stopped at its re-lay budget (`[optimize] loop_relays`).
+    relay_stop: bool,
 }
 
 impl RoundOut {
@@ -4787,6 +4798,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn fingerprint(&mut self) -> u64 {
                 // TW3: the wires' paths (triangles, turns, the pass points: their order on the
                 // edges) and the layering events; equal states give equal values. O(state).
+                let _pg = super::prof::g(super::prof::K::Fingerprint);
                 let mut h: u64 = 0x5EED_F1A9_0000_0001;
                 let mut add = |x: u64| {
                     h = (h ^ x).wrapping_mul(0x0100_0000_01B3).rotate_left(29);
@@ -5381,7 +5393,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.layers_now.clear();
         let loop_s = t_loop.elapsed().as_secs_f64();
         let time_hit = rep.stop == "time limit" || rep.stop == "loop_time_share";
-        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit });
+        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit, relay_stop: rep.stop == "re-lay budget" });
         let pc = arch.items[pick].crit;
         let table = table_text(&arch.table(Some(pick)), &obj);
         // TW3: the restarts whose descent then gave the shared table a new row (before the next

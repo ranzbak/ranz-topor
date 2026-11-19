@@ -460,7 +460,11 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             let sh = shared.expect("periodic");
             // the wait ends at Cancel / OK or the limit's cut (`inner`); not `stop`, whose stable
             // yield needs the compute slot the wait has given back
-            let Some(view) = sh.sync(cycle, inner) else {
+            let view = {
+                let _pg = super::prof::g(super::prof::K::TableSync);
+                sh.sync(cycle, inner)
+            };
+            let Some(view) = view else {
                 rep.stop = "time limit".into();
                 break;
             };
@@ -468,7 +472,10 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
             if view.stable && rep.stable_at.is_none() {
                 rep.stable_at = Some(cycle - 1);
             }
-            if p.stop_at_stable && view.stable {
+            // V1 (verify tw3 r1): the table's stable only records stable_at (its last committed
+            // cycle); the run ends after stable_patience cycles past it, as with its own meter (the
+            // check at the cycle's end below, which needs no sync); patience 0 ends here
+            if p.stop_at_stable && rep.stable_at.is_some_and(|s| cycle > s + p.stable_patience) {
                 rep.stop = "stable".into();
                 break;
             }
