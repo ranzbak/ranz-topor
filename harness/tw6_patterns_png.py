@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             _panel(ax[k], pat, segs, vias, f"topor main, cfg {c}: DRC new {r.get('drc_new', '?')}, unconnected "
                                          f"{r.get('unconnected', '?')}; matches expected: {'yes' if r['matches_expected'] else 'no'}", view)
             _marks(ax[k], pat)
-        fig.suptitle(f"{name}: {pat.title}\n[{STATUS}]  x = no via room; hatched = B.Cu rule area; "matches expected" = same via count, length within 5 %, via where it fits", fontsize=11)
+        fig.suptitle(f"{name}: {pat.title}\n[{STATUS}]  x = no via room; hatched = B.Cu rule area; 'matches expected' = same via count, length within 5 %, via where it fits", fontsize=11)
         fig.tight_layout()
         fig.savefig(out / f"{name}.png", dpi=110)
         plt.close(fig)
