@@ -80,6 +80,31 @@ fn the_result_does_not_depend_on_the_thread_count() {
     assert_eq!(restarts(&a), restarts(&b));
 }
 
+/// sync-wait (docs/dev/design/sync-wait.md): the fair slots and the lagged table views keep the
+/// result a function of the seeds: 1, 2 and 4 threads (1, 2 and 4 compute slots for 3 runs: the runs
+/// take turns at every cycle boundary with fewer slots than runs) give the same copper, table and
+/// restarts for every `[optimize] table_lag`; lag 2 restarts from older tables than lag 0.
+#[test]
+fn the_result_does_not_depend_on_the_thread_count_at_any_table_lag() {
+    let m = eprom();
+    let restarts = |r: &RouteResult| r.warnings.iter().filter(|w| w.starts_with("TopoR loop restarts")).cloned().collect::<Vec<_>>();
+    let mut by_lag = Vec::new();
+    for lag in [0usize, 2] {
+        let o = topor(&format!(r#", "runs": 3, "restart_relays": 60, "topo_rounds": 12, "table_lag": {lag}"#));
+        let a = run(&m, &o, 1);
+        for t in [2usize, 4] {
+            let b = run(&m, &o, t);
+            assert_eq!(copper(&a), copper(&b), "lag {lag}: 1 vs {t} threads");
+            assert_eq!(a.bests, b.bests, "lag {lag}: 1 vs {t} threads");
+            assert_eq!(line(&a, "TopoR variant table"), line(&b, "TopoR variant table"), "lag {lag}: 1 vs {t} threads");
+            assert_eq!(restarts(&a), restarts(&b), "lag {lag}: 1 vs {t} threads");
+        }
+        assert!(!restarts(&a).is_empty(), "lag {lag}: the runs restart through the table (premise)");
+        by_lag.push(restarts(&a));
+    }
+    assert_ne!(by_lag[0], by_lag[1], "lag 2 reads older tables: other restarts (premise: the option is used)");
+}
+
 #[test]
 fn with_one_run_the_four_bests_are_drawn_one_after_another() {
     // condition (1) of the lead: runs = 1 draws every distinct row of the four bests itself

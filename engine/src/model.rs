@@ -1128,6 +1128,10 @@ pub struct Options {
     /// TW3 `[optimize] loop_relays`: each run's TopoR loop ends after this many re-lays (the work
     /// clock; 0 = no budget, the default). For comparisons at an equal amount of loop work.
     pub loop_relays: usize,
+    /// sync-wait `[optimize] table_lag`: a run at loop cycle c reads the variant table as it was
+    /// after cycle c - 1 - table_lag (0 = TW3's lock-step: the cycle before its own), so it waits
+    /// only for a run more than table_lag cycles behind it. Deterministic for any lag.
+    pub table_lag: usize,
     /// TW3 `[optimize] best_penalty` (D5): add the graded violation price to the overall best's
     /// value (`pick = "best"`); off (default) = fewest errors, then length + mm_per_via x vias.
     pub best_penalty: bool,
@@ -1764,6 +1768,7 @@ impl Default for Options {
             restart_relays: 800,
             restart_min_cycles: 8,
             loop_relays: 0,
+            table_lag: 0,
             best_penalty: false,
             loop_stable_window: 8,
             loop_via_start: 0.5,
