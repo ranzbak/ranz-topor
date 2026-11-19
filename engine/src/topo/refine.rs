@@ -1196,7 +1196,10 @@ impl<'a> Frame<'a> {
             tot.graded += o.graded;
         };
         let r = 0.5 * self.wire_d[w];
-        // Diagnosis hook (`TOPO_PX_TERMS`, letters of the terms priced; default all three "abc").
+        // Diagnosis hook, not a setting: `TOPO_PX_TERMS` (letters of the terms priced, default all
+        // three "abc") is read once per process and only here, so it matters only with
+        // `[capacity] pad_exits` on. Used by tools/tw4r2_job.sh for the term split (design note
+        // tw4-r2 (1)); remove it before pad_exits becomes a default.
         static TERMS: std::sync::OnceLock<[bool; 3]> = std::sync::OnceLock::new();
         let terms = TERMS.get_or_init(|| {
             let v = std::env::var("TOPO_PX_TERMS").unwrap_or_else(|_| "abc".into());
@@ -1235,7 +1238,10 @@ impl<'a> Frame<'a> {
     }
 
     /// tw4-r2 (1): the planned pad exits with an over-full term, located: `(wire, end, layer,
-    /// stub a, stub b, graded)` (the compass). O(wires x exits).
+    /// stub a, stub b, graded)` (the compass). `graded` is the WIRE's total exit price
+    /// ([`Frame::exit_over`] sums the terms over all its exits), repeated on each of its exits: the
+    /// compass shows where the over-full wire's exits are, not a per-exit share (the loop's measure
+    /// uses the wire total, so no per-exit price exists). O(wires x exits).
     pub(crate) fn exit_list<M: MemRead + ?Sized>(&self, m: &M) -> Vec<(WireId, u8, usize, Vec2, Vec2, f64)> {
         if !self.packer.pad_exits {
             return Vec::new();
