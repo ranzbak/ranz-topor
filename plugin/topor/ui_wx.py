@@ -195,7 +195,7 @@ WORDING: dict[str, dict[str, str]] = {
         "preview_caption": "{which}: run {run}, round {round} — {what}",
         "preview_plan": "predicted plan, not drawn copper",
         "preview_copper": "drawn copper",
-        "preview_received": "Image of {time}; the board you get with OK / Cancel is the best so far.",
+        "preview_received": "Image of {time}; OK / Cancel keeps the best so far.",
         "preview_waiting": "Waiting for the first image…",
         "score_length": "{length} m",
         "score_pending": "–",

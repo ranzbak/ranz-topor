@@ -608,7 +608,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | preview_caption | text | {which}: run {run}, round {round} — {what} |
 | progress | preview_plan | text | predicted plan, not drawn copper |
 | progress | preview_copper | text | drawn copper |
-| progress | preview_received | text | Image of {time}; the board you get with OK / Cancel is the best so far. |
+| progress | preview_received | text | Image of {time}; OK / Cancel keeps the best so far. |
 | progress | preview_waiting | text | Waiting for the first image… |
 | progress | delta_errors | text | errors {d} |
 | progress | delta_open | text | open {d} |

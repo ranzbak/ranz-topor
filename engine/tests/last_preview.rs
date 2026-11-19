@@ -208,5 +208,54 @@ fn the_cycle_count_never_goes_back() {
     // two runs of six loop cycles each (headless: the cap), no cycle cut
     assert!(p.cycles_total >= 2 && p.cycles_total <= 12, "cycles_total {}", p.cycles_total);
     assert_eq!(p.pick_cycles.len(), 2, "pick cycles per run: {:?}", p.pick_cycles);
+    // the Last run row's round is its run's pick cycle (the plugin shows pick_cycles for the best's round)
+    assert!(p.runbest_cycle > 0 && p.pick_cycles[(p.runbest_run as usize).saturating_sub(1)] == p.runbest_cycle, "pick cycles {:?} vs Last run {}:{}", p.pick_cycles, p.runbest_run, p.runbest_cycle);
     assert_eq!(p.best_kind, "copper", "after the drawing the best is drawn");
+}
+
+/// The Last run / best sketch is the run's pick also when the pick is a state from inside a cycle
+/// (TW5 escape offers: `escape = "layering"`, `loop_p4`), not the cycle's end state: at every
+/// hook point of the loop the run's pick sketch has the Last run row's score.
+#[test]
+fn the_pick_sketch_is_the_pick_also_for_mid_cycle_states() {
+    let text = fixture_text(EPROM);
+    let m = BoardModel::from_json(&text).expect("fixture parses");
+    let o = Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 12, "runs": 1, "escape": "layering", "loop_p4": true}"#).expect("options parse");
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    ctl.sketches.enable();
+    let seen: Arc<std::sync::Mutex<Vec<(Sketch, String, (usize, usize, f64))>>> = Arc::default();
+    let mut c2 = ctl.clone();
+    {
+        let (c3, s2) = (ctl.clone(), seen.clone());
+        c2.set_test_hook(move |_| {
+            if let Some(sk) = c3.sketches.get(true, 1) {
+                let p = c3.snapshot();
+                s2.lock().expect("seen").push(((*sk).clone(), p.runbest_kind.clone(), (p.runbest_errors, p.runbest_vias, p.runbest_length_mm)));
+            }
+            false
+        });
+    }
+    let _ = route_with(&m, &o, &c2);
+    let seen = seen.lock().expect("seen");
+    let plan: Vec<_> = seen.iter().filter(|(sk, kind, _)| sk.kind == "plan" && kind == "plan").collect();
+    assert!(!plan.is_empty(), "no plan pick sketch seen");
+    for (sk, _, row) in plan {
+        assert_eq!((sk.errors, sk.vias, sk.length_mm), *row, "pick sketch of cycle {} vs the Last run row", sk.cycle);
+    }
+}
+
+/// The last round's sketch after the drawing is the copper variant the round was judged by (the
+/// better of "as drawn" and "reduced + fused"), with the Last round row's score; on the esp USB
+/// crop the variants differ.
+#[test]
+fn the_last_sketch_is_the_judged_copper() {
+    let text = fixture_text("esp-rust-board-usb-crop.json");
+    let m = BoardModel::from_json(&text).expect("fixture parses");
+    let o = Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "runs": 1, "refine_lanes": 1}"#).expect("options parse");
+    let (_, ctl) = run(&m, &o, 2, true);
+    let p = ctl.snapshot();
+    let last = ctl.sketches.get(false, 0).expect("a last sketch");
+    assert_eq!(last.kind, "copper", "the last sketch after the drawing");
+    assert_eq!((last.errors, last.vias, last.length_mm), (p.last_errors, p.last_vias, p.last_length_mm), "last sketch vs the Last round row");
 }

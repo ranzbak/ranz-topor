@@ -37,7 +37,7 @@ M = {
     "default_best": (S, "    _s(\"run\", \"progress_preview\", \"str\", \"last\",", "    _s(\"run\", \"progress_preview\", \"str\", \"best\",", "py"),
 }
 RS_TEST = ["cargo", "test", "--release", "--test", "last_preview", "--lib", "--", "sketch_request_publish_and_slots",
-           "copper_is_the_same", "plan_sketches", "the_cycle_count"]
+           "copper_is_the_same", "plan_sketches", "the_cycle_count", "the_pick_sketch", "the_last_sketch"]
 PY_TEST = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", "tests/plugin/test_last_preview.py",
            "tests/plugin/test_ui_wx.py"]
 
