@@ -85,6 +85,7 @@ case ${1:-} in
   be)
     # B search + E round: tests + clippy + full pytest (Python touched) + pats (PCFG) + eq <cfgs>
     shift
+    export PCFG="${PCFG:-- b sb mj sbmj}"
     ( hzq run --threads 4 --name tw6-tests -- bash $ROOT/tools/tw6_ab.sh tests > $R/u-tests.log 2>&1; note "unit tests rc $?" ) &
     ( hzq run --threads 4 --name tw6-lint -- bash $ROOT/tools/tw6_ab.sh lint > $R/u-lint.log 2>&1; note "unit lint rc $?" ) &
     ( hzq run --threads 4 --name tw6-off -- bash $ROOT/tools/tw6_ab.sh off > $R/u-off.log 2>&1; note "unit off rc $?" ) &
