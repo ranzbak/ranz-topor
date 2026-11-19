@@ -53,5 +53,6 @@ names (`prof::mark("label")`; the label to stage map is `stage_of`, covered by a
 nothing in the hooks may read or change routing state. `engine/tests/topo_prof.rs` checks that counters on give the same
 copper and that the windows cover the run.
 
-TW5 adds two inclusive keys inside the sweep lap (`st_sweep`): `escape` (one layering escape, `Sp::escape`) and
-`float_wire` (one floating up of a wire, `Sp::float_up`). The escape time share of the loop is `escape` / `cycle`.
+TW5 adds three inclusive keys inside the sweep lap (`st_sweep`) and the cycle: `escape` (one layering escape, `Sp::escape`),
+`float_wire` (one floating up of a wire, `Sp::float_up`) and `loop_p4` (one in-loop P4 rip-up round, `Sp::loop_p4`). The escape
+time share of the loop is `escape` / `cycle`.

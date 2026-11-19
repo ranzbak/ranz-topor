@@ -69,6 +69,7 @@ one() {
   local SETS=(--set optimize.runs=1) seed=0 o=${c%%r*} rr=${c#*r}
   local n=${rr%%s*}; [ "$rr" != "$n" ] && seed=${rr#*s}
   case $o in
+    D) ;;  # pure defaults: no TW5 option set (must give main's copper)
     O) SETS+=("${OLD[@]}") ;;
     N) SETS+=("${NEW[@]}") ;;
     N[a-e]) mapfile -t x < <(part ${o#N}); SETS+=("${x[@]}") ;;
