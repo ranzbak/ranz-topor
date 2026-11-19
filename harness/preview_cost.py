@@ -84,9 +84,10 @@ def main(argv=None) -> int:
     ap.add_argument("out", type=Path)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--off-only", action="store_true",
+                    help="only the runs without the image (the copper hash; also runs against an engine without sketches)")
     a = ap.parse_args(argv)
     import topor_engine
-    from topor import preview
     from topor.run import build_options
 
     a.out.mkdir(parents=True, exist_ok=True)
@@ -94,19 +95,24 @@ def main(argv=None) -> int:
     opts = build_options(cfg, topor_engine, model=model)
     opts.update({"wall_clock_s": 600.0, "stop_when_stable": True})
     mj, oj = json.dumps(model), json.dumps(opts)
-    base = preview.live_base(model)
+    base = None
+    if not a.off_only:
+        from topor import preview
+        base = preview.live_base(model)
     rows = []
     for rep in range(a.reps):
-        for on in ((False, True) if rep % 2 == 0 else (True, False)):
+        for on in ((False,) if a.off_only else (False, True) if rep % 2 == 0 else (True, False)):
             rows.append({"rep": rep, **route_once(topor_engine, mj, oj, base, on, a.interval)})
             print(json.dumps(rows[-1]), flush=True)
     # the engine's own runtime_s (route start to result, not quantised by the poll interval)
     off = [r["runtime_s"] for r in rows if not r["sketches"]]
     on = [r["runtime_s"] for r in rows if r["sketches"]]
     out = {"board": a.board, "reps": a.reps, "interval_s": a.interval, "runs": opts.get("runs"), "rows": rows,
-           "off_median_s": statistics.median(off), "on_median_s": statistics.median(on),
-           "delta_pct": round(100.0 * (statistics.median(on) - statistics.median(off)) / statistics.median(off), 2),
+           "off_median_s": statistics.median(off), "copper_sha": rows[0]["copper_sha"],
            "copper_same": len({r["copper_sha"] for r in rows}) == 1}
+    if on:
+        out["on_median_s"] = statistics.median(on)
+        out["delta_pct"] = round(100.0 * (statistics.median(on) - statistics.median(off)) / statistics.median(off), 2)
     (a.out / "preview-cost.json").write_text(json.dumps(out, indent=1))
     print(json.dumps({k: v for k, v in out.items() if k != "rows"}))
     return 0 if out["copper_same"] else 1
