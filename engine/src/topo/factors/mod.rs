@@ -28,6 +28,7 @@ mod crossing;
 mod diffpair;
 mod ignored_rule;
 mod length;
+mod neck_depth;
 mod necking;
 mod overflow;
 mod plane_signal;
@@ -39,7 +40,7 @@ mod via;
 mod via_squeeze;
 mod violation;
 
-pub use branch::{dangling_turn_shape, junction_psi};
+pub use branch::{dangling_turn_shape, junction_psi, with_lead_choice_turn, DANGLING_TURN_WITH_CHOICE};
 pub use necking::necking_amount;
 pub use squeeze::squeeze_amount;
 pub use violation::violation_amount;
@@ -276,6 +277,8 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(shrinkage::Shrinkage),
         // exist-term: after the last, so the draws of every factor before it stay as they were.
         Box::new(branch::DanglingTurn),
+        // tw4 T1: after the last, so the draws of every factor before it stay as they were.
+        Box::new(neck_depth::NeckDepth),
     ]
 }
 
@@ -572,6 +575,6 @@ mod tests {
         // (exist-term: dangling_turn), so the earlier factors' fluctuation draws stay the same.
         assert_eq!(Registry::standard().price(&ev_cross(), &WireCtx::default()), 20.0);
         let names: Vec<&str> = standard_factors().iter().map(|f| f.name()).collect();
-        assert_eq!(&names[names.len() - 2..], ["shrinkage", "dangling_turn"]);
+        assert_eq!(&names[names.len() - 3..], ["shrinkage", "dangling_turn", "neck_depth"]);
     }
 }

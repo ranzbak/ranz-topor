@@ -627,9 +627,12 @@ impl Drawer<'_> {
         let lead_dir = |end: usize, p: Vec2| -> Option<Vec2> {
             let ob = if end == 0 { wi.pa } else { wi.pb };
             let k = self.b.kept_ends.iter().find(|k| k.obs == ob && ob != NO_OBS)?;
-            let (q, _) = k.lead?;
+            let (q, d) = k.lead?;
             if (p - q).len() < 1.0 {
                 (q - k.at).unit()
+            } else if !k.choices.is_empty() && k.lead_point_t(&self.b.proj, p).is_some() {
+                // tw4 T3: a run from a start point short of the lead's end goes on from the lead
+                Some(d)
             } else {
                 None
             }

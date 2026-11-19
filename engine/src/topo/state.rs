@@ -557,6 +557,7 @@ pub struct Topology {
     tri_trav: Vec<Vec<(WireId, usize)>>,
     ends: Vec<u32>,
     pass_w: Vec<f64>,
+    pass_d: Vec<f64>,
 }
 
 impl Topology {
@@ -591,6 +592,12 @@ pub struct State<'p> {
     /// Width of each pass (nm, parallel to `passes`; M-C width in P2): its wire's nominal width,
     /// or the wire's neck floor where the pass lies in a necked stretch ([`State::refit_wire`]).
     pub pass_w: Vec<f64>,
+    /// tw4 T1 neck depth (parallel to `passes`; [`State::refit_wire`]): at the first pass of each
+    /// bottleneck cluster of a wire, d² with d = how deep the neck must go into the room between
+    /// the nominal width and the floor, `(need - room) / (w - floor)` clamped to [0, 1] (the
+    /// widest width that fits is `w - (need - room)`; 1 = only the floor fits); 0 elsewhere. The
+    /// `[factors] neck_depth` measure part is its sum ([`State::neck_depth`]).
+    pub pass_d: Vec<f64>,
     /// Neck floor per net (nm; M-C): the narrowest a necked stretch of the net may be (KiCad
     /// minimum track width, custom-rule minimum). Empty: no wire is ever necked in the plan.
     pub floors: std::collections::HashMap<i32, f64>,
@@ -627,14 +634,26 @@ pub struct State<'p> {
     pub cont_dir: BTreeMap<VertId, Vec2>,
 }
 
-impl<'p> State<'p> {
-    pub fn new(proj: &'p Projection) -> Self {
-        let mut centre = vec![None; proj.obstacles.len()];
-        for (v, k) in proj.vkind.iter().enumerate() {
-            if let VertKind::Centre(o) = *k {
+/// The main centre vertex of every obstacle (`None`: none): of its centre vertices the one
+/// nearest its `center` (the first such on a tie). An obstacle has one, except a dangling end's
+/// lead with tw4 T3's start points (`board::KeptEndOut::choices`), whose main one is its end.
+/// O(vertices).
+pub fn centre_vertices(proj: &Projection) -> Vec<Option<VertId>> {
+    let mut centre: Vec<Option<VertId>> = vec![None; proj.obstacles.len()];
+    for (v, k) in proj.vkind.iter().enumerate() {
+        if let VertKind::Centre(o) = *k {
+            let c = proj.obstacles[o].center;
+            if centre[o].is_none_or(|u| (proj.pos[v] - c).len() < (proj.pos[u] - c).len()) {
                 centre[o] = Some(v);
             }
         }
+    }
+    centre
+}
+
+impl<'p> State<'p> {
+    pub fn new(proj: &'p Projection) -> Self {
+        let centre = centre_vertices(proj);
         let mut ring: Vec<Vec<TriId>> = vec![Vec::new(); proj.obstacles.len()];
         for (t, vs) in proj.tris.iter().enumerate().filter(|(t, _)| !proj.tri_out[*t]) {
             for &v in vs {
@@ -657,6 +676,7 @@ impl<'p> State<'p> {
             ends: vec![0; proj.pos.len()],
             cross_vias: false,
             pass_w: Vec::new(),
+            pass_d: Vec::new(),
             floors: std::collections::HashMap::new(),
             neck_from_pad: true,
             taut_len: false,
@@ -671,7 +691,7 @@ impl<'p> State<'p> {
     /// The routed part of the state ([`Topology`]).
     pub fn topology(&self) -> Topology {
         let _pg = super::prof::g(super::prof::K::TopologyClone);
-        Topology { passes: self.passes.clone(), edge_order: self.edge_order.clone(), wires: self.wires.clone(), tri_trav: self.tri_trav.clone(), ends: self.ends.clone(), pass_w: self.pass_w.clone() }
+        Topology { passes: self.passes.clone(), edge_order: self.edge_order.clone(), wires: self.wires.clone(), tri_trav: self.tri_trav.clone(), ends: self.ends.clone(), pass_w: self.pass_w.clone(), pass_d: self.pass_d.clone() }
     }
 
     /// The [`Topology`] moved out (no copy; loop-local: the state now while the state before is
@@ -684,6 +704,7 @@ impl<'p> State<'p> {
             tri_trav: std::mem::take(&mut self.tri_trav),
             ends: std::mem::take(&mut self.ends),
             pass_w: std::mem::take(&mut self.pass_w),
+            pass_d: std::mem::take(&mut self.pass_d),
         }
     }
 
@@ -692,7 +713,7 @@ impl<'p> State<'p> {
         let _pg = super::prof::g(super::prof::K::StateRestore);
         // A state emptied by `take_topology` has no edges to compare with.
         assert!(self.edge_order.is_empty() || t.edge_order.len() == self.edge_order.len(), "a topology of the same projection");
-        (self.passes, self.edge_order, self.wires, self.tri_trav, self.ends, self.pass_w) = (t.passes, t.edge_order, t.wires, t.tri_trav, t.ends, t.pass_w);
+        (self.passes, self.edge_order, self.wires, self.tri_trav, self.ends, self.pass_w, self.pass_d) = (t.passes, t.edge_order, t.wires, t.tri_trav, t.ends, t.pass_w, t.pass_d);
     }
 
     /// The narrowest width a wire of `net` with nominal width `w` may neck to (`w`: none).
@@ -751,12 +772,15 @@ impl<'p> State<'p> {
             for k in 0..n {
                 let p = self.wires[w].passes[k];
                 self.pass_w[p] = wn;
+                self.pass_d[p] = 0.0;
             }
             return;
         }
         let held = self.stretch_layers(w);
         let pr = self.proj;
         let mut neck = vec![false; n];
+        // tw4 T1: per bottleneck pass the depth d of its neck (see `pass_d`).
+        let mut dk = vec![0.0f64; n];
         for (k, nk) in neck.iter_mut().enumerate() {
             let p = self.wires[w].passes[k];
             let e = self.passes[p].edge;
@@ -766,8 +790,10 @@ impl<'p> State<'p> {
             let h = if h != 0 { h } else { held[k] | held[k + 1] };
             let m = if both & h != 0 { both & h } else { both };
             let room: f64 = (0..pr.n_layers).filter(|&l| (m >> l) & 1 == 1).map(|l| pr.room_for(e, l, net)).sum();
-            if room.is_finite() && self.edge_need_at(e, false, None) > room + 1.0 {
+            let need = self.edge_need_at(e, false, None);
+            if room.is_finite() && need > room + 1.0 {
                 *nk = true;
+                dk[k] = ((need - room) / (wn - ws)).clamp(0.0, 1.0);
             }
             if std::env::var("TOPO_NECKDBG").is_ok() {
                 eprintln!("NECKDBG wire {w} k {k} e {e} mask {m:b} held {:b}/{:b} both {both:b} room {room:.0} need {:.0}", held[k], held[k + 1], self.edge_need_at(e, false, None));
@@ -814,7 +840,38 @@ impl<'p> State<'p> {
         for (k, &nk) in neck.iter().enumerate() {
             let p = self.wires[w].passes[k];
             self.pass_w[p] = if nk { ws } else { wn };
+            self.pass_d[p] = 0.0;
         }
+        // The neck depth per bottleneck cluster (the clusters of `neck_from_pad`: at most
+        // NECK_JOIN full-width passes between two bottleneck passes), the deepest pass's d,
+        // squared, at the cluster's first pass. Graded: 0 where the nominal widths just fit, 1
+        // where only the floor fits, no cutoff (TopoR 6.3 manual p. 56: the minimum width only
+        // "unless a different path is available").
+        let ks: Vec<usize> = (0..n).filter(|&k| dk[k] > 0.0).collect();
+        let mut i = 0;
+        while i < ks.len() {
+            let mut j = i;
+            while j + 1 < ks.len() && ks[j + 1] - ks[j] <= NECK_JOIN + 1 {
+                j += 1;
+            }
+            let d = ks[i..=j].iter().map(|&k| dk[k]).fold(0.0, f64::max);
+            self.pass_d[self.wires[w].passes[ks[i]]] = d * d;
+            i = j + 1;
+        }
+    }
+
+    /// tw4 T1: the neck depth of wire `w` (the sum of its clusters' d², [`State::pass_d`]). O(passes).
+    pub fn neck_depth_of(&self, w: WireId) -> f64 {
+        let wi = &self.wires[w];
+        if !wi.alive {
+            return 0.0;
+        }
+        wi.passes.iter().map(|&p| self.pass_d.get(p).copied().unwrap_or(0.0)).sum()
+    }
+
+    /// tw4 T1: the neck depth of the live wires `only[w]` (all with `None`). O(passes).
+    pub fn neck_depth(&self, only: Option<&[bool]>) -> f64 {
+        (0..self.wires.len()).filter(|&w| only.is_none_or(|o| o.get(w).copied().unwrap_or(false))).map(|w| self.neck_depth_of(w)).sum()
     }
 
     /// Whether the exit of wire `w` from its pad at `end` (0 = `a`, 1 = `b`) is too narrow for its
@@ -1441,6 +1498,7 @@ impl<'p> State<'p> {
             let pid = self.passes.len();
             self.passes.push(Pass { wire: id, edge: e });
             self.pass_w.push(wire.w);
+            self.pass_d.push(0.0);
             let at = (g + shift).min(self.edge_order[e].len());
             self.edge_order[e].insert(at, pid);
             wire.passes.push(pid);
@@ -1470,6 +1528,7 @@ impl<'p> State<'p> {
                 let pid = self.passes.len();
                 self.passes.push(Pass { wire: id, edge: e });
                 self.pass_w.push(wire.w);
+                self.pass_d.push(0.0);
                 at[e].push((u, pid));
                     wire.passes.push(pid);
             }
