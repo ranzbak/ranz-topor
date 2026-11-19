@@ -7,9 +7,13 @@
 #   tw7_ab.sh eq <cfgs>      equal time: esp seeds 0-4 + qmtech seed 0 per cfg (wall 300 s, 4 threads; cfg - = defaults)
 #   tw7_ab.sh all <cfgs>     pyt + tests + off + k <cfgs> + eq - <cfgs>
 #   tw7_ab.sh pyt | tests    targeted pytest (config docs/defaults) | the TW7 cargo tests (release)
+#   tw7_ab.sh tq <unit>...   TIMING slot (hz.sh job --timing, round 3): the units cfg:board:4 one after another, no hzq
+#                            (the slot is the job's 4 threads); "all done" at the end
+#   tw7_ab.sh bulk           round 3 bulk checks (hzq): pyt + tests + off (K x4, copper vs main)
 # cfg: K = rounds=1; e<k> = equal time seed k; suffixes (any order, at the end):
 #   u = [optimize] pattern_moves = all five kinds; c = only "u_clinch", "evasion";
-#   d = [factors] detour = $DETOUR_K (default 1); x = [optimize] crossing_rules = false.
+#   d = [factors] detour = $DETOUR_K (default 1); x = [optimize] crossing_rules = false;
+#   h = [optimize] pattern_share = $SHARE_H (default 0.25); q = pattern_share = $SHARE_Q (default 0.1).
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
@@ -26,6 +30,8 @@ one() {
     elif [ "${c%c}" != "$c" ]; then SETS+=(--set 'optimize.pattern_moves=["u_clinch","evasion"]'); c=${c%c}
     elif [ "${c%d}" != "$c" ]; then SETS+=(--set factors.detour=${DETOUR_K:-1}); c=${c%d}
     elif [ "${c%x}" != "$c" ]; then SETS+=(--set optimize.crossing_rules=false); c=${c%x}
+    elif [ "${c%h}" != "$c" ]; then SETS+=(--set optimize.pattern_share=${SHARE_H:-0.25}); c=${c%h}
+    elif [ "${c%q}" != "$c" ]; then SETS+=(--set optimize.pattern_share=${SHARE_Q:-0.1}); c=${c%q}
     else break; fi
   done
   case $c in
@@ -56,7 +62,13 @@ case ${1:-} in
     wait ;;
   pyt) ( CI=1 python -m pytest -q -rs -p no:cacheprovider tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py > $R/pytest.log 2>&1 9>&-; note "pytest config rc $?"; tail -2 $R/pytest.log >> $R/rc.txt ) ;;
   tests) ( cd engine && cargo test --release --test topo_tw7_patterns > $R/test-tw7.log 2>&1 9>&-; note "test topo_tw7_patterns rc $?"
-           cargo test --release --lib pourplan > $R/test-pourplan.log 2>&1 9>&-; note "test lib pourplan rc $?" ) ;;
+           cargo test --release --lib pourplan > $R/test-pourplan.log 2>&1 9>&-; note "test lib pourplan rc $?"
+           cargo test --release --lib -- pattern_share the_pattern_moves_line > $R/test-lib-tw7.log 2>&1 9>&-; note "test lib share/line rc $?" ) ;;
+  tq) shift; for u in "$@"; do bash $ROOT/tools/tw7_ab.sh one "$u"; done; note "all done" ;;
+  bulk)
+    ( hzq run --threads 2 --name tw7-chk -- bash -c "bash $ROOT/tools/tw7_ab.sh pyt; bash $ROOT/tools/tw7_ab.sh tests" > $R/u-chk.log 2>&1; note "unit chk rc $?" ) &
+    ( hzq run --threads 4 --name tw7-off -- bash $ROOT/tools/tw7_ab.sh off > $R/u-off.log 2>&1; note "unit off rc $?" ) &
+    wait; note "all done" ;;
   all)
     shift
     ( hzq run --threads 2 --name tw7-chk -- bash -c "bash $ROOT/tools/tw7_ab.sh pyt; bash $ROOT/tools/tw7_ab.sh tests" > $R/u-chk.log 2>&1; note "unit chk rc $?" ) &
