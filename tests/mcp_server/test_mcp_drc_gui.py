@@ -13,6 +13,7 @@ import math
 import re
 import shutil
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -30,11 +31,12 @@ SEG = re.compile(r'\(segment\s+\(start ([-\d.]+) ([-\d.]+)\)\s+\(end ([-\d.]+) (
                  r'\(layer "([^"]+)"\)\s+\(net (?:"([^"]*)"|(\d+))\)\s+\((?:uuid|tstamp)\s+"?([^")\s]+)')
 
 
-def add_short(pcb: Path, skip: set = frozenset()) -> tuple[str, str]:
+def add_short(pcb: Path, skip: set = frozenset()) -> tuple[str, str, tuple]:
     """Append one F.Cu track of net A joining the closest pair of A / B track ends (A != B; tracks whose uuid is
-    in `skip` are not used). O(n^2) in ends."""
+    in `skip` are not used). Returns (net, segment text, uuids to skip next time: the two joined tracks and the new
+    one, so the next call makes a DIFFERENT short). O(n^2) in ends."""
     text = pcb.read_text()
-    ends = [((float(m[1]), float(m[2])), (float(m[3]), float(m[4])), m[5], m[6], m[7] or m[8])
+    ends = [((float(m[1]), float(m[2])), (float(m[3]), float(m[4])), m[5], m[6], m[7] or m[8], m[9])
             for m in SEG.finditer(text) if m[6] == "F.Cu" and m[9] not in skip]
     best = None
     for i, a in enumerate(ends):
@@ -45,15 +47,16 @@ def add_short(pcb: Path, skip: set = frozenset()) -> tuple[str, str]:
                 for pb in b[:2]:
                     d = math.dist(pa, pb)
                     if d > 0.05 and (best is None or d < best[0]):
-                        best = (d, pa, pb, a)
+                        best = (d, pa, pb, a, b)
     assert best, "no F.Cu tracks of two nets"
-    _, pa, pb, a = best
+    _, pa, pb, a, b = best
     net = f'"{a[4]}"' if not a[4].isdigit() else a[4]
+    new = str(uuid.uuid4())
     seg = (f'\t(segment (start {pa[0]} {pa[1]}) (end {pb[0]} {pb[1]}) (width {a[2]}) (layer "F.Cu") (net {net}) '
-           f'({"tstamp" if "(tstamp " in text else "uuid"} "{uuid.uuid4()}"))\n')
+           f'({"tstamp" if "(tstamp " in text else "uuid"} "{new}"))\n')
     i = text.rstrip().rindex(")")
     pcb.write_text(text[:i] + seg + text[i:])
-    return a[4], seg
+    return a[4], seg, (a[5], b[5], new)
 
 
 def need_wiccon() -> Path:
@@ -94,7 +97,9 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
     need_wiccon()
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     hand, inp, _ = strip.prepare("wiccon-2023", tmp_path / "boards", name="w")
-    add_short(hand.pcb)
+    skip: set = set()
+    for _ in range(3):  # several shorts: their markers are close, so a stale focus (no scroll) would show
+        skip |= set(add_short(hand.pcb, skip=skip)[2])
     add_dangling(hand.pcb)  # one warning row of ours: the default (errors only) walk must skip it
     rid = tools.register_run(str(hand.pcb), str(inp.pcb), name="w")["run_id"]
     d = tools.drc(rid)
@@ -107,11 +112,40 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
     assert short, d["by_class"]
     starts0 = G.GuiSession.starts_total
     try:
-        s = tools.drc_spots(rid, per_class=1)  # >= 2 rows: one per class of ours, all shorts
+        s = tools.drc_spots(rid, per_class=3)  # the shorts' rows + their classes: >= 3 distinct markers
         assert s["wanted"] >= 2 and s["kicad_starts_this_call"] == 1, s.get("errors")
         recs = s["records"]
         assert len(recs) == s["wanted"] and all(r["match"] for r in recs), [r.get("error") for r in recs]
         assert all(Path(r["board_png"]).is_file() and Path(r["dlg_png"]).is_file() for r in recs)
+        # verify r6 N1: the ring is on each row's OWN marker (from the measured view transform), which is on screen
+        # (KiCad centres a track row's items, here up to ~5 mm from the marker): the clearance row's ring is not the
+        # shorts' ring, and every ring pixel is where that row's marker is on the screen
+        assert all(r["marker_visible"] and r["marker_px"] and r["marker_source"] == "kicad" for r in recs), \
+            [(r["id"], r["marker_px"], r["marker_source"]) for r in recs]
+        # three DIFFERENT shorts (verify n1 M3: it was one track 3x): KiCad highlights >= 3 distinct markers
+        assert len({tuple(r["marker_mm"]) for r in recs}) >= 3, [(r["id"], r["marker_mm"]) for r in recs]
+        assert len({tuple(r["marker_px"]) for r in recs}) >= 2
+        # the ring is on KiCad's highlighted marker: (1) the ring in each crop is at marker_px minus the main
+        # window's origin (the xwd image starts below the title bar); (2) in the live view of the LAST row the
+        # status bar read at marker_px (screen) is that marker's position within 0.15 mm (view transform + origin)
+        from PIL import Image
+        ox, oy = G._SESSION.window_origin()
+        for r in recs:
+            im = Image.open(r["board_png"]).convert("RGB")
+            pts = [(x, y) for x in range(im.width) for y in range(im.height) if im.getpixel((x, y)) == (255, 230, 0)]
+            assert pts, r["id"]
+            rx, ry = (min(p[0] for p in pts) + max(p[0] for p in pts)) / 2, (min(p[1] for p in pts) + max(p[1] for p in pts)) / 2
+            cx0 = max(0, r["marker_px"][0] - ox - 350)  # the crop's own origin in the screenshot
+            cy0 = max(0, r["marker_px"][1] - oy - 350)
+            assert abs(cx0 + rx - (r["marker_px"][0] - ox)) <= 3 and abs(cy0 + ry - (r["marker_px"][1] - oy)) <= 3, r["id"]
+        last = max(recs, key=lambda r: r["row"])  # the last row walked: the live view is still its view
+        sess = G._SESSION
+        sess.e.x("xdotool", "mousemove", str(last["marker_px"][0] + 3), str(last["marker_px"][1] + 3))
+        time.sleep(0.2)
+        sess.e.x("xdotool", "mousemove", str(last["marker_px"][0]), str(last["marker_px"][1]))
+        time.sleep(0.4)
+        gx, gy = sess._status_xy()
+        assert math.dist((gx, gy), last["marker_mm"]) <= 0.15, ((gx, gy), last["marker_mm"])
         # errors only: Warnings unticked in the live dialog before the walk, the list = kicad-cli's error rows,
         # no warning row visited; both severities counted
         assert s["severities"] == ["error"] and not {r["id"] for r in recs} & warn_ids
@@ -141,9 +175,9 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
                                                       "kicad-cli")),
                     reason="needs Xephyr, xdotool, wmctrl, xwd, metacity and KiCad 10")
 def test_wiccon_topor_route_connection_ids_end_to_end(tmp_path, monkeypatch):
-    need_wiccon()
     """route (result.json) -> one synthetic short between two of OUR tracks -> drc rows carry engine connection ids
     -> cleanup's newly unconnected connections name ids of that result.json."""
+    need_wiccon()
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     if not (ROOT / ".venv").is_dir():
         monkeypatch.setenv("TOPOR_VENV", sys.prefix)
