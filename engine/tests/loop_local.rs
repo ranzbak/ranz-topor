@@ -676,11 +676,55 @@ fn layering_escapes_change_free_positions_deterministically() {
         // the escapes so they stay within the share.
         let k = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", "escape_kappa": 10.0, {TW5}"#)));
         assert!(k["escapes"].as_f64().unwrap_or(0.0) > 0.0 && k["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, kappa 10: {k}");
+        // site-price-cost: the default budget is the wire units (kappa per alive wire, before);
+        // "cost" (the measured cost counter) is another escape schedule, the share bound in its own
+        // currency.
+        assert_eq!(e["budget"], "units", "{n_layers} layers: {e}");
+        let c = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", "escape_budget": "cost", {TW5}"#)));
+        assert_eq!(c["budget"], "cost", "{n_layers} layers: {c}");
+        assert!(c["escapes"].as_f64().unwrap_or(0.0) > 0.0 && c["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, cost: {c}");
+        assert_ne!(c["work_units"], e["work_units"], "{n_layers} layers: the two budgets count alike");
+        // The re-lays' work in the budget's own currency: wire units with "units", the cost counter
+        // (another number) with "cost".
+        assert_eq!(e["work_units"][1], e["relay_wires"], "{n_layers} layers, units: {e}");
+        assert_ne!(c["work_units"][1], c["relay_wires"], "{n_layers} layers, cost: the re-lays counted in wire units: {c}");
         let t = escape_json(&m, &loop_opts(r#""loop_judge": "local""#));
         assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, default (escape = ties): {t}");
         let t = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", {TW5}, "escape": "ties""#)));
         assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, TW5 with escape = ties: {t}");
     }
+}
+
+/// site-price-cost: the measured escape budget counts only counts (alive wires, passes, the
+/// refinement's evaluations, judged wires), never the clock or the lanes: 1 and 4 threads give the
+/// same escapes, work units and copper; the default copper (escapes off) is the budget's either way.
+#[test]
+fn the_cost_budget_is_the_same_for_any_thread_count() {
+    let mut pads = fan_pads();
+    pads.push(("F3", 6, 26.0, 4.0, 1.0, 1.0, 0));
+    let m = board_layers(30.0, 20.0, 8, &pads, 4);
+    let run = |threads: usize, extra: &str| {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("pool");
+        let o = loop_opts(&format!(r#""loop_judge": "local", "escape_budget": "cost", "refine_lanes": {threads}, {TW5}{extra}"#));
+        pool.install(|| {
+            let ctl = RunControl::new();
+            ctl.limit.init(o.wall_clock_s);
+            let r = route_with(&m, &o, &ctl);
+            (format!("{:?}", r.items), escape_json(&m, &o))
+        })
+    };
+    let (c1, e1) = run(1, "");
+    let (c4, e4) = run(4, "");
+    assert!(e1["escapes"].as_f64().unwrap_or(0.0) > 0.0, "{e1}");
+    assert_eq!(e1, e4, "escape record, 1 vs 4 threads");
+    assert_eq!(c1, c4, "copper, 1 vs 4 threads");
+    let d = |budget: &str| {
+        let o = loop_opts(&format!(r#""loop_judge": "local", "escape_budget": "{budget}""#));
+        let ctl = RunControl::new();
+        ctl.limit.init(o.wall_clock_s);
+        format!("{:?}", route_with(&m, &o, &ctl).items)
+    };
+    assert_eq!(d("cost"), d("units"), "escapes off: the budget never changes the copper");
 }
 
 /// TW5 (b) at the layering itself: `LayerParams.walk` > 0 with random ties moves the whole-board

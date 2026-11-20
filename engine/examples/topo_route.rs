@@ -1,6 +1,6 @@
 //! S2a on one exported board model, without Python:
 //!
-//!     cargo run --release --example topo_route -- <input.json> [--options options.json] [--out result.json] [--timeout S] [--plane-signals costly|forbidden] [--opt NAME=JSON ...]
+//!     cargo run --release --example topo_route -- <input.json> [--options options.json] [--out result.json] [--timeout S] [--plane-signals costly|forbidden] [--opt NAME=JSON ...] [--prof FILE]
 //!
 //! `input.json` is the board model with tracks and vias removed (`harness.g0 export`). Prints the
 //! routed count, the failure reasons and the detour ratios; `--out` writes the `RouteResult` JSON.
@@ -44,6 +44,11 @@ fn main() {
         }
     }
     let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
+    // --prof FILE (with TOPO_PROF set): the run's profile JSON (`topo::prof::report`, as the Python
+    // binding adds it to the result), for tools/prof_run.py-style tables without Python.
+    if let (Some(f), Some(p)) = (flag("--prof"), topor_engine::topo::prof::report()) {
+        std::fs::write(&f, p.to_string()).unwrap_or_else(|e| panic!("{f}: {e}"));
+    }
     println!(
         "{}: connections {} routed {} failed {} vias {} runtime {:.2} s ({})",
         m.board, r.connections_total, r.routed, r.failed, r.vias, r.runtime_s, r.stop_reason

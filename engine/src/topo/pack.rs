@@ -256,6 +256,8 @@ pub const DRAW_TOL_NM: f64 = 10.0;
 
 /// [`Packer::via_cands`] cache key: triangle, net, radius bits, clearance bits.
 type ViaCandKey = (usize, i32, u64, u64);
+/// [`Packer::point_free_cached`]: (point x bits, point y bits, net, clearance bits).
+type PointFreeKey = (u64, u64, i32, u64);
 
 /// Margin cache key: edge, end, net, width bits, clearance bits, layer (`u8::MAX`: any layer),
 /// height bits (tw4-r2 (2b): the centre off the edge line; 0 for a centre line on it).
@@ -273,6 +275,23 @@ pub struct Taut {
     /// Crossing direction of every pass (not normalised; zero when undefined).
     pub dir: Vec<Vec2>,
 }
+
+/// site-price-cost test hook: with [`point_free_memo::OFF`] set, [`Packer::point_free_cached`]
+/// computes every value afresh (the reference the tests compare the memo's copper with).
+/// Process-wide, like `refine::viacheck::ON`; it changes the time only, never a value.
+#[doc(hidden)]
+pub mod point_free_memo {
+    pub static OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// The memo's cap in entries; 0 = [`POINT_FREE_MEMO_CAP`]. Tests set a tiny cap to show the
+    /// clears leave the copper as it was.
+    pub static CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+}
+
+/// site-price-cost: the most entries [`Packer::point_free_cached`] holds (~40 MB with the hash
+/// map's overhead); at the cap the memo is cleared and fills again. Its values are a pure
+/// function of the key, so a clear changes the time only, never a value or the copper. qmtech
+/// det s0 with the graded site price holds ~15k entries, esp ~5k.
+pub const POINT_FREE_MEMO_CAP: usize = 1 << 20;
 
 /// The body of [`Packer::site_room`] over the cache `cache` (shared by [`SiteRooms`]).
 fn site_room_of(pr: &Projection, eps: f64, cache: &Mutex<FxHashMap<(usize, i32), f64>>, t: super::state::TriId, net: i32, s: f64) -> f64 {
@@ -357,6 +376,9 @@ pub struct Packer<'a> {
     pub(crate) via_static: super::viacut::GeoCache,
     /// tw4-r2: [`Packer::via_cands`] per (triangle, net, radius bits, clearance bits).
     via_cands: Mutex<FxHashMap<ViaCandKey, Arc<Vec<Vec2>>>>,
+    /// site-price-cost: [`super::cutflow::point_free`] per (point bits, net, clearance bits), a
+    /// function of the static board alone ([`Packer::point_free_cached`]).
+    point_free: Mutex<FxHashMap<PointFreeKey, f64>>,
     /// Reach diameter of the first via size of every net (nm, [`crate::vias::via_reach`] x 2:
     /// the copper disc, or larger where the drill's hole clearance reaches further; 5.4 task 1);
     /// nets not listed use `via_d0`. 0 = the planner gives vias no room (a packer built without
@@ -478,6 +500,7 @@ impl<'a> Packer<'a> {
             exit_floor0: 0.0,
             exit_cache: Mutex::new(fxmap()),
             via_cands: Mutex::new(fxmap()),
+            point_free: Mutex::new(fxmap()),
             octi: false,
             cuts: None,
             edge_memo: std::sync::Mutex::new(Default::default()),
@@ -607,6 +630,38 @@ impl<'a> Packer<'a> {
         let p = super::cutflow::via_point(self.pr, self, t, net, 0.5 * d, s).0;
         self.via_pt.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p);
         p
+    }
+
+    /// site-price-cost: [`super::cutflow::point_free`] of a via centre `q` of `net` at clearance
+    /// `s` on this packer's projection, cached per (point bits, net, clearance bits): the value is
+    /// a function of the static board alone, so the cached bits equal the computed ones (the
+    /// graded site price, [`super::refine::Frame::site_over`], asks it for every planned via of
+    /// every wire it reprices; uncached that was O(obstacles) per via per repricing). O(1) after
+    /// the first call per key, O(obstacles) on it. Bounded: cleared at [`POINT_FREE_MEMO_CAP`] entries.
+    pub fn point_free_cached(&self, q: Vec2, net: i32, s: f64) -> f64 {
+        if point_free_memo::OFF.load(std::sync::atomic::Ordering::Relaxed) {
+            return super::cutflow::point_free(self.pr, self, q, net, s);
+        }
+        let key = (q.x.to_bits(), q.y.to_bits(), net, s.to_bits());
+        if let Some(&f) = lock(&self.point_free).get(&key) {
+            return f;
+        }
+        let f = super::cutflow::point_free(self.pr, self, q, net, s);
+        let cap = match point_free_memo::CAP.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => POINT_FREE_MEMO_CAP,
+            c => c,
+        };
+        let mut memo = lock(&self.point_free);
+        if memo.len() >= cap {
+            memo.clear();
+        }
+        memo.insert(key, f);
+        f
+    }
+
+    /// site-price-cost (tests, diagnosis): the keys [`Packer::point_free_cached`] holds. O(1).
+    pub fn point_free_memo_len(&self) -> usize {
+        lock(&self.point_free).len()
     }
 
     /// tw4-r2 (`[capacity] via_best_point`): the site points of triangle `t`
