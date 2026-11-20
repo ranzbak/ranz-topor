@@ -342,12 +342,24 @@ def cmd_finest_grid() -> dict:
     return {"grid": _pick(c, best[0]), "grid_mm": best[1]}
 
 
+def cmd_drc_marker() -> dict:
+    """The DRC marker KiCad itself highlights for the row selected in the DRC dialog: {"markers": [{x, y} in mm, ...]}
+    of every brightened PCB_MARKER (exactly one for a selected row; several / none = the caller must not trust it)."""
+    import pcbnew  # noqa: PLC0415 - only inside the KiCad process this helper lives in
+    out = []
+    for m in pcbnew.GetBoard().Markers():
+        if m.IsBrightened():
+            p = m.GetPosition()
+            out.append({"x": p.x / 1e6, "y": p.y / 1e6})
+    return {"markers": out}
+
+
 COMMANDS = {"windows": cmd_windows, "menu": cmd_menu, "place": cmd_place, "buttons": cmd_buttons,
             "button": cmd_button, "checkboxes": cmd_checkboxes, "set_checkboxes": cmd_set_checkboxes,
             "list": cmd_list, "drc_state": cmd_drc_state, "drc_rows": cmd_drc_rows, "drc_list_rect": cmd_drc_list_rect,
             "drc_selected": cmd_drc_selected, "dialog_status": cmd_dialog_status, "status": cmd_status,
             "canvas_rect": cmd_canvas_rect, "zoom": cmd_zoom, "finest_grid": cmd_finest_grid,
-            "ping": lambda: {"pid": os.getpid()}}
+            "drc_marker": cmd_drc_marker, "ping": lambda: {"pid": os.getpid()}}
 
 
 # ------------------------------------------------------------------ dispatch (pure; unit-tested with a stub executor)
