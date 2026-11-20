@@ -52,6 +52,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+X_TIMEOUT_S = 30.0  # one xdotool / wmctrl / xwd call; a hung X tool must not hang the run
+REPLAY_TIMEOUT_S = 600.0  # harness.cleanup_check replay in its own pcbnew
 ICON = ROOT / "plugin" / "icons" / "topor-light-24.png"
 PLUGIN_ID = "org.topor.router"
 # Net name -> the effective netclass KiCad's API returns for it (get_netclass_for_nets): name, type, constituents and
@@ -109,12 +111,18 @@ class E2E:
                  XDG_CACHE_HOME=f"{h}/.cache", XDG_STATE_HOME=f"{h}/.local/state", TMPDIR=str(self.tmpdir()),
                  XDG_RUNTIME_DIR=f"{h}/run", KICAD_CONFIG_HOME=f"{h}/.config/kicad", DISPLAY=self.display,
                  GDK_BACKEND="x11", NO_AT_BRIDGE="1", RAYON_NUM_THREADS=e.get("RAYON_NUM_THREADS", "4"))
-        for k in ("DBUS_SESSION_BUS_ADDRESS", "KICAD_API_SOCKET", "KICAD_API_TOKEN", "TOPOR_REPORT_ROOT"):
+        # KiCad's location variables an `import harness` process carries (harness/kicad_env.PROCESS_VARS) point at
+        # the shared scratch home: KiCad must use THIS session home (KICAD_DOCUMENTS_HOME moves the scripting
+        # plugin folder: the GUI helper / plugin never loaded, verify r3 V1)
+        for k in ("DBUS_SESSION_BUS_ADDRESS", "KICAD_API_SOCKET", "KICAD_API_TOKEN", "TOPOR_REPORT_ROOT",
+                  "KICAD_CACHE_HOME", "KICAD_DOCUMENTS_HOME"):
             e.pop(k, None)
         return e
 
-    def x(self, *args, check=False) -> str:
-        r = subprocess.run(list(args), capture_output=True, text=True, env={**os.environ, "DISPLAY": self.display})
+    def x(self, *args, check=False, timeout: float = X_TIMEOUT_S) -> str:
+        """One X tool call (xdotool, wmctrl, ...) on this display, bounded: a hang raises subprocess.TimeoutExpired."""
+        r = subprocess.run(list(args), capture_output=True, text=True, env={**os.environ, "DISPLAY": self.display},
+                           timeout=timeout, stdin=subprocess.DEVNULL)
         if check and r.returncode:
             raise RuntimeError(f"{args}: {r.stderr}")
         return r.stdout
@@ -158,7 +166,7 @@ class E2E:
         p = self.shots / f"{self.n:02d}-{tag}.png"
         cmd = f"xwd -id {win}" if win else "xwd -root"
         subprocess.run(f"{cmd} -display {self.display} | convert xwd:- {p}", shell=True,
-                       capture_output=True)
+                       capture_output=True, timeout=X_TIMEOUT_S)
         return p
 
     def geom(self, win: str) -> tuple:
@@ -337,7 +345,8 @@ class E2E:
     def pcbnew_pid(self):
         for name, p in self.procs:
             if name == "pcbnew":
-                r = subprocess.run(["pgrep", "-g", str(p.pid), "-x", "pcbnew"], capture_output=True, text=True)
+                r = subprocess.run(["pgrep", "-g", str(p.pid), "-x", "pcbnew"], capture_output=True, text=True,
+                                   timeout=X_TIMEOUT_S)
                 pids = r.stdout.split()
                 return int(pids[0]) if pids else None
         return None
@@ -359,7 +368,7 @@ class E2E:
         self.x("xdotool", "windowraise", win)
         time.sleep(0.3)
         r = subprocess.run(f"xwd -id {win} -display {self.display} -silent | convert xwd:- png:-", shell=True,
-                           capture_output=True)
+                           capture_output=True, timeout=X_TIMEOUT_S)
         if r.returncode or not r.stdout:
             return None
         return np.asarray(Image.open(io.BytesIO(r.stdout)).convert("RGB"), dtype=np.int16)
@@ -426,7 +435,8 @@ class E2E:
         time.sleep(1)
         dx, dy, _dw, _dh = self.geom(dlg[1])
         img = self.tmpdir() / "drc-dialog.png"
-        subprocess.run(f"xwd -id {dlg[1]} -display {self.display} | convert xwd:- {img}", shell=True)
+        subprocess.run(f"xwd -id {dlg[1]} -display {self.display} | convert xwd:- {img}", shell=True,
+                       timeout=X_TIMEOUT_S)
         if not self._drc_refill_off:  # KiCad's default is checked; it remembers the setting afterwards
             self.click_abs(dx + 28, dy + 26)
             self._drc_refill_off = True
@@ -435,7 +445,8 @@ class E2E:
         time.sleep(1)
         for _ in range(120):
             time.sleep(1)
-            subprocess.run(f"xwd -id {dlg[1]} -display {self.display} | convert xwd:- {img}", shell=True)
+            subprocess.run(f"xwd -id {dlg[1]} -display {self.display} | convert xwd:- {img}", shell=True,
+                       timeout=X_TIMEOUT_S)
             if self._dlg_text(img):
                 break
         self.n += 1
@@ -585,7 +596,7 @@ def replay(pcb: Path, opts: dict, out_json: Path, env: dict) -> dict:
             "Path(sys.argv[3]).write_text(json.dumps(items, indent=1))\n")
     env = {**{k: v for k, v in env.items() if k != "DISPLAY"}, "PYTHONPATH": f"{ROOT}:{ROOT / 'plugin'}"}
     r = subprocess.run([sys.executable, "-c", prog, str(pcb), json.dumps(opts), str(out_json)], capture_output=True,
-                       text=True, env=env, cwd=ROOT)
+                       text=True, env=env, cwd=ROOT, timeout=REPLAY_TIMEOUT_S)
     if r.returncode:
         raise RuntimeError(f"cleanup_check replay failed: {r.stderr[-1500:]}")
     return {i["uuid"]: i for i in json.loads(out_json.read_text())}
@@ -605,7 +616,7 @@ def cleanup_step(e: E2E, main: str, pcb: Path, name: str, opts: dict) -> dict:
     saved, kicad-cli DRC runs on copies from before and after, and harness.cleanup_check replays the same options on
     the copy from before: the replay must remove exactly the items the dialog removed. Returns the result dict
     (also checks on `e`). O(two DRC runs + one replay + KiCad's cleanup)."""
-    from toporlib.drc import run_drc
+    from harness.kicad_env import run_drc
     cdir = e.out / "cleanup"
     if cdir.exists():
         shutil.rmtree(cdir)

@@ -26,6 +26,7 @@ import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import harness  # noqa: F401,E402,I001  (KiCad isolated before pcbnew, also when run as a script)
 import pcbnew
 
 from harness.fit_patterns import (CLEAR, DEFAULT_CLASS, MM, RULES, W_SIG, Fp, Keepout, Pad, Track, Via,

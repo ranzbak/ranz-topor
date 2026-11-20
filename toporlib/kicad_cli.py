@@ -13,6 +13,10 @@ def kicad_cli() -> Path:
     return Path(os.environ.get("KICAD_CLI", "/usr/bin/kicad-cli"))
 
 
+#: environment for every kicad-cli run_cli starts when the caller passes none (None = this process's own). The plugin
+#: inside the user's KiCad leaves it None; harness/kicad_env.py sets an isolated KiCad home for agents' test paths.
+DEFAULT_ENV: dict | None = None
+
 POLL_S = 0.25  # the progress callback runs at least this often while kicad-cli works
 
 
@@ -30,16 +34,17 @@ class KicadCliCancelled(RuntimeError):
     """The progress callback returned False: kicad-cli was killed on the user's request."""
 
 
-def run_cli(cmd, *, timeout_s: float | None = None, on_poll=None, poll_s: float = POLL_S):
+def run_cli(cmd, *, timeout_s: float | None = None, on_poll=None, poll_s: float = POLL_S, env: dict | None = None):
     """Run `cmd` (kicad-cli) with ``Popen`` and a poll loop; returns ``subprocess.CompletedProcess`` (text
     stdout / stderr). `timeout_s` None or <= 0 = no timeout; on expiry the process is killed and
     :class:`KicadCliTimeout` raised. `on_poll()` (optional) is called at least every `poll_s`; a return
     value of ``False`` kills the process and raises :class:`KicadCliCancelled`. With `on_poll` None this is
     a blocking wait that still honours the timeout. Output goes to temp files, so a chatty child can never
-    fill a pipe and stall. O(run time / poll_s) callbacks."""
+    fill a pipe and stall. `env` None = :data:`DEFAULT_ENV`. O(run time / poll_s) callbacks."""
     limit = float(timeout_s) if timeout_s and timeout_s > 0 else None
     with tempfile.TemporaryFile("w+") as so, tempfile.TemporaryFile("w+") as se:
-        proc = subprocess.Popen([str(c) for c in cmd], stdin=subprocess.DEVNULL, stdout=so, stderr=se, text=True)
+        proc = subprocess.Popen([str(c) for c in cmd], stdin=subprocess.DEVNULL, stdout=so, stderr=se, text=True,
+                                env=env if env is not None else DEFAULT_ENV)
         t0 = time.monotonic()
         last = -1e9
         try:

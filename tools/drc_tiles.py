@@ -35,6 +35,9 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import harness  # noqa: E402,F401  (KiCad isolated from the user's config before the in-process pcbnew below)
+
 CAP = {"clearance": 499, "unconnected_items": 499}
 DEFAULT_CAP = 199
 SKIP = {"unconnected_items"}
@@ -64,9 +67,10 @@ def tile(pcb, x0, y0, x1, y1, margin, outdir):
     pcbnew.SaveBoard(dst, b)
     j = os.path.join(outdir, "drc.json")
     # The harness's own DRC flags (toporlib/drc.py).
-    subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--units", "mm",
-                    "--refill-zones", "--all-track-errors", "-o", j, dst],
-                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    from harness.kicad_env import run as kicad_run  # isolated KiCad home: never the user's config
+    kicad_run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--units", "mm",
+               "--refill-zones", "--all-track-errors", "-o", j, dst],
+              check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600)
     for f in os.listdir(outdir):
         if f != "drc.json":
             os.remove(os.path.join(outdir, f))  # the tile's board copy (12 MB on bornhack): only its DRC is kept

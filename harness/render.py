@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import harness  # noqa: F401,E402,I001  (KiCad isolated before pcbnew, also when run as a script)
 import pcbnew
 
 from harness.paths import kicad_cli
@@ -43,7 +44,8 @@ def render_png(pcb: Path, out_png: Path, *, height: int = 1100,
             "-l", layers, "--mode-single", "--page-size-mode", "2", "--exclude-drawing-sheet",
             "-o", str(svg), str(stripped),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        from harness.kicad_env import run as kicad_run
+        proc = kicad_run(cmd, capture_output=True, text=True, timeout=600)
         if proc.returncode != 0 or not svg.is_file():
             raise RuntimeError(f"kicad-cli svg export failed (exit {proc.returncode}): "
                                f"{proc.stderr.strip()}")

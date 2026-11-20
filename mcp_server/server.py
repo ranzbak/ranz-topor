@@ -44,10 +44,61 @@ def build_server():
         """Record a review verdict (good|bad|neutral) for a spot of a run in reviews.jsonl next to the board copy."""
         return tools.review(run_id, spot, verdict, note)
 
+    @srv.tool()
+    def register_run(routed_copy: str, input_copy: str, result: str | None = None, name: str | None = None) -> dict:
+        """Register a board routed elsewhere (e.g. in real KiCad) for drc/drc_spots/cleanup/compare: the routed
+        .kicad_pcb copy, the unrouted input copy it came from, optionally the plugin's result.json."""
+        return tools.register_run(routed_copy, input_copy, result, name)
+
+    @srv.tool()
+    def drc(run_id: str, limit: int = 200, severities: list[str] | None = None) -> dict:
+        """kicad-cli DRC of the run's routed copy with the board's .kicad_pro provably used (sha before/after +
+        quoted clearances), as a DELTA vs the unrouted input: one row per new violation touching our copper (type,
+        class, nets, layers, position mm, item uuids, our track/via uuids with their engine connection ids, nearest
+        engine violation), counts per class, unconnected per net. Fails (RULES_MISMATCH / DRC_WITHOUT_PROJECT)
+        instead of returning numbers under the wrong rules. rows = errors only by default (severities=["error",
+        "warning"] lists warnings too); summary / ours_by_severity count both."""
+        return tools.drc(run_id, limit, severities=severities)
+
+    @srv.tool()
+    def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: float = 20.0,
+                  keep_session: bool = True, severities: list[str] | None = None, match_min: float = 0.5) -> dict:
+        """Real KiCad (Xephyr, isolated home): DRC dialog -> Run DRC -> per drc row (cls = one class, e.g.
+        "clearance track-track"; per_class > 0 caps a class; default all rows) select the dialog row with the same
+        text in ONE KiCad session (DRC run once), screenshot the dialog and the board view at the marker (yellow
+        ring). Records: PNG paths, GUI vs kicad-cli text, match (row found + selected), KiCad's focus point; a failed
+        row is reported and the walk goes on. The session stays open for cleanup (idle timeout 600 s). Errors only
+        by default: the dialog's Warnings box is unticked before the walk (severities=["error", "warning"] walks
+        warnings too); summary / ours_by_severity count both. focus_score (graded by KiCad's focus distance to the
+        row's items, scaled by their extent) >= match_min is part of match."""
+        return tools.drc_spots(run_id, cls, per_class, zoom, keep_session, severities=severities, match_min=match_min)
+
+    @srv.tool()
+    def cleanup(run_id: str, options: list | dict | None = None, replay: bool = False,
+                keep_session: bool = False) -> dict:
+        """Real KiCad Tools -> Cleanup Tracks & Vias on a copy of the routed board. options = KiCad's box labels
+        (list = these on), e.g. ["Delete tracks connecting different nets", "Delete redundant vias",
+        "Merge co-linear tracks", "Delete tracks unconnected at one end"] (the default). Returns removed items,
+        KiCad's change list by text, newly unconnected connections per net with engine connection ids, and the
+        DRC delta per class (before -> after). replay = also harness.cleanup_check's replay as a cross-check."""
+        return tools.cleanup(run_id, options, replay, keep_session)
+
+    @srv.tool()
+    def compare(run_a: str, run_b: str) -> dict:
+        """Per-class delta of our new DRC violations between two runs of the same board (builds / settings)."""
+        return tools.compare(run_a, run_b)
+
+    @srv.tool()
+    def gui_session(action: str = "status") -> dict:
+        """The server's real-KiCad session: status (display, board, pid, idle) or stop."""
+        return tools.gui_session(action)
+
     return srv
 
 
 def main() -> None:
+    from . import kicad_gui
+    kicad_gui.install_signal_stop()  # a SIGTERM'd server stops its KiCad session (no orphaned Xephyr / pcbnew)
     build_server().run("stdio") if _is_v2() else build_server().run()
 
 

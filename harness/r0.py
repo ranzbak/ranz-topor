@@ -153,7 +153,6 @@ def drc(work: Path, out_json: Path, force_copper: bool) -> dict:
     that a hand fault in a disabled check is reported by kicad-cli too. Returns {type: count}."""
     import collections
     import shutil
-    import subprocess
     import tempfile
 
     pcb = next(Path(work).glob("*.kicad_pcb"))
@@ -174,7 +173,8 @@ def drc(work: Path, out_json: Path, force_copper: bool) -> dict:
                 rs[k] = "error"
             pro.write_text(json.dumps(d, indent=2))
         out_json.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--units", "mm",
+        from harness.kicad_env import run as kicad_run
+        kicad_run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--units", "mm",
                         "-o", str(out_json.resolve()), str(t / pcb.name)], check=True, capture_output=True)
     rep = json.loads(out_json.read_text())
     rep["forced_copper_checks"] = sev

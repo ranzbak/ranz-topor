@@ -4,7 +4,9 @@ import json
 import sys
 from pathlib import Path
 
-import pcbnew
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import harness  # noqa: E402,F401  (KiCad isolated from the user's config before pcbnew)
+import pcbnew  # noqa: E402
 
 b = pcbnew.LoadBoard(sys.argv[1])
 rows = []
