@@ -2643,6 +2643,18 @@ pub fn viols_measured(model: &BoardModel, opts: &Options, checker: &Checker, idx
     }
 }
 
+/// Debug (`TOPO_RUNPROV`, forced-draw): one stderr line per committed run of the drawing: the
+/// writer (`ladder` = the first-draw ladder, `forced` = never drop), its source, the forced run's
+/// octilinear outcome, its free-angle stretches and its points (mm, KiCad frame). Read only.
+fn run_prov(kind: &str, w: WireId, net: i32, layer: usize, src: impl std::fmt::Display, tag: &str, pts: &[Vec2]) {
+    if std::env::var_os("TOPO_RUNPROV").is_none() {
+        return;
+    }
+    let any = super::octi::breaks(pts).0;
+    let mm = pts.iter().map(|p| format!("({:.6}, {:.6})", p.x / 1e6, -p.y / 1e6)).collect::<Vec<_>>().join(", ");
+    eprintln!("RUNPROV {kind} w{w} net {net} L{layer} src {src} octi {tag} any {} {:.3} pts [{mm}]", any.len(), any.iter().map(|a| a.2).sum::<f64>() / 1e6);
+}
+
 /// nd-perf F2: `via_reach` prices its reach segments only when the price is read: `[vias]
 /// reach_price` on (`reach_cost` is 0 while it is off), or the `TOPO_VIADBG` line that prints it.
 pub fn reach_priced(opts: &Options) -> bool {
@@ -3526,6 +3538,7 @@ impl<'a> Drawer<'a> {
                     if src >= 0 && band.is_some() && !replaced {
                         self.stats.erbs_fallback += 1;
                     }
+                    run_prov("ladder", w, wi.net, layer, src, "-", &pts);
                     out.items.extend(items);
                     out.runs.push((layer, pts));
                     out.run_src.push(if self.opts.realise != "erbs" {
@@ -3625,7 +3638,9 @@ impl<'a> Drawer<'a> {
                     // M-45: the forced run octilinear too, where that breaks no rule deeper than
                     // the run itself and costs no more violation price.
                     let (mut pts, mut items, mut vs) = (pts, items, vs);
+                    let mut ftag = "skip";
                     if self.octi.on && neck.is_none() && pts.len() >= 2 {
+                        ftag = "none";
                         let t_o = std::time::Instant::now();
                         let relax = vs.iter().filter(|v| !v.via).map(|v| v.depth_nm).fold(0.0, f64::max) + 1.0;
                         let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
@@ -3643,7 +3658,9 @@ impl<'a> Drawer<'a> {
                                 items = its;
                                 vs = v2;
                                 self.stats.octi_ok += 1;
+                                ftag = "ok";
                             } else {
+                                ftag = "rejected";
                                 if std::env::var("TOPO_OCTIDBG").is_ok() {
                                     eprintln!("OCTIFORCE wire {w} rejected: price {price:.1} -> {:.1}, viols {} -> {}", v2.iter().map(Viol::amount).sum::<f64>(), vs.len(), v2.len());
                                 }
@@ -3727,6 +3744,7 @@ impl<'a> Drawer<'a> {
                         }
                     }
                     out.necks.extend(fnecks);
+                    run_prov("forced", w, wi.net, layer, src, ftag, &pts);
                     out.items.extend(items);
                     out.runs.push((layer, pts));
                     out.run_src.push(if self.opts.realise != "erbs" { super::joint::RunSrc::Seq } else { super::joint::RunSrc::Forced { erbs: src == "erbs", class: cut } });
