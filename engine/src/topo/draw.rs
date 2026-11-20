@@ -536,6 +536,13 @@ pub struct DrawStats {
     pub forced_relaxed: usize,
     pub forced_funnel: usize,
     pub forced_attempt: usize,
+    /// forced-draw: forced runs drawn in their octilinear form (the cheaper by
+    /// [`forced_form_key`]), and the forced runs that keep free-angle stretches (their number and
+    /// length, mm): their octilinear form costs more (or there is none).
+    pub forced_octi: usize,
+    pub forced_free_runs: usize,
+    pub forced_free_stretches: usize,
+    pub forced_free_mm: f64,
     /// M-45: runs redrawn octilinear; octilinear runs the checker rejected (the taut run kept);
     /// seconds in the octilinear search.
     pub octi_ok: usize,
@@ -824,6 +831,40 @@ impl Viol {
 /// or deepens a short is never taken (KiCad tools are the spec).
 pub fn viol_key(vs: &[Viol]) -> (f64, f64) {
     (vs.iter().filter(|v| v.kind == "short").map(Viol::amount).sum(), vs.iter().map(Viol::amount).sum())
+}
+
+/// forced-draw (docs/dev/design/forced-draw.md): the graded choice key of one form of a forced
+/// run (never drop), its taut candidate or that candidate's octilinear form: `(short amount,
+/// price nm)`, the price = `violation` x the violation amounts + `any_angle` x the amounts of its
+/// free-angle stretches + `acute_bend` x the amounts of its acute bends + its length, the weights
+/// of `cfg` (the factor registry, mm per unit). Shorts first (KiCad Cleanup removes a shorting
+/// track: no graded judgement, [`viol_key`]); everything else on one scale, no gate.
+pub fn forced_form_key(vs: &[Viol], pts: &[Vec2], cfg: &super::octi::OctiCfg) -> (f64, f64) {
+    let (any, acute) = super::octi::breaks(pts);
+    let short: f64 = vs.iter().filter(|v| v.kind == "short").map(Viol::amount).sum();
+    let price = cfg.viol_nm * vs.iter().map(Viol::amount).sum::<f64>()
+        + cfg.any_nm * any.iter().map(|a| super::octi::any_angle_amount(a.2)).sum::<f64>()
+        + cfg.acute_nm * acute.iter().map(|a| super::octi::acute_amount(180.0 - a.1)).sum::<f64>()
+        + poly_len(pts);
+    (short, price)
+}
+
+/// `a` is strictly cheaper than `b` on [`forced_form_key`] (less short amount, else, at equal
+/// shorts, a lower price; ties keep `b`).
+pub fn forced_form_better(a: (f64, f64), b: (f64, f64)) -> bool {
+    a.0 < b.0 - 1e-9 || (a.0 <= b.0 + 1e-9 && a.1 < b.1 - 1e-9)
+}
+
+/// forced-draw: the form of a forced run to draw, by [`forced_form_key`] (`keys[0]` the taut
+/// run, then its octilinear forms in variant order): the strictly cheapest, the first on ties.
+pub fn forced_form_pick(keys: &[(f64, f64)]) -> usize {
+    let mut best = 0;
+    for (j, &k) in keys.iter().enumerate().skip(1) {
+        if forced_form_better(k, keys[best]) {
+            best = j;
+        }
+    }
+    best
 }
 
 /// `a` is no worse than `b` on [`viol_key`]: no more short amount, and no more total amount.
@@ -2643,6 +2684,18 @@ pub fn viols_measured(model: &BoardModel, opts: &Options, checker: &Checker, idx
     }
 }
 
+/// Debug (`TOPO_RUNPROV`, forced-draw): one stderr line per committed run of the drawing: the
+/// writer (`ladder` = the first-draw ladder, `forced` = never drop), its source, the forced run's
+/// octilinear outcome, its free-angle stretches and its points (mm, KiCad frame). Read only.
+fn run_prov(kind: &str, w: WireId, net: i32, layer: usize, src: impl std::fmt::Display, tag: &str, pts: &[Vec2]) {
+    if std::env::var_os("TOPO_RUNPROV").is_none() {
+        return;
+    }
+    let any = super::octi::breaks(pts).0;
+    let mm = pts.iter().map(|p| format!("({:.6}, {:.6})", p.x / 1e6, -p.y / 1e6)).collect::<Vec<_>>().join(", ");
+    eprintln!("RUNPROV {kind} w{w} net {net} L{layer} src {src} octi {tag} any {} {:.3} pts [{mm}]", any.len(), any.iter().map(|a| a.2).sum::<f64>() / 1e6);
+}
+
 /// nd-perf F2: `via_reach` prices its reach segments only when the price is read: `[vias]
 /// reach_price` on (`reach_cost` is 0 while it is off), or the `TOPO_VIADBG` line that prints it.
 pub fn reach_priced(opts: &Options) -> bool {
@@ -3320,7 +3373,7 @@ impl<'a> Drawer<'a> {
                 let mut pts = pts;
                 if attempt < 0 && !rep.violations.is_empty() && self.octi.on && pts.len() >= 2 {
                     let exits = [if r == 0 { self.pad_exit(w, 0, pts[1]) } else { None }, if r == plan.layers.len() - 1 { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
-                    if let Some(o) = self.octilinear(w, k0, k1, layer, &pts, None, exits, 0.0) {
+                    if let Some(o) = self.octilinear(w, k0, k1, layer, &pts, None, exits, None) {
                         if let Some((its, pn)) = self.realise(w, layer, lid, &o.pts, &pneck) {
                             pts = o.pts;
                             items = its;
@@ -3350,7 +3403,7 @@ impl<'a> Drawer<'a> {
                         let t_o = std::time::Instant::now();
                         let wneck = if pneck_out.is_some() || attempt == 1 { pneck } else { None };
                         let exits = [if ps { self.pad_exit(w, 0, pts[1]) } else { None }, if pe { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
-                        let got = self.octilinear(w, k0, k1, layer, &pts, wneck, exits, 0.0);
+                        let got = self.octilinear(w, k0, k1, layer, &pts, wneck, exits, None);
                         let dbg = std::env::var("TOPO_OCTIDBG").is_ok();
                         let tag = match got {
                             Some(o) => match self.realise(w, layer, lid, &o.pts, &pneck) {
@@ -3526,6 +3579,7 @@ impl<'a> Drawer<'a> {
                     if src >= 0 && band.is_some() && !replaced {
                         self.stats.erbs_fallback += 1;
                     }
+                    run_prov("ladder", w, wi.net, layer, src, "-", &pts);
                     out.items.extend(items);
                     out.runs.push((layer, pts));
                     out.run_src.push(if self.opts.realise != "erbs" {
@@ -3621,16 +3675,27 @@ impl<'a> Drawer<'a> {
                 }
                 // Shorts first, then the total violation price (a funnel run through a via must
                 // not beat a relaxed run that only grazes clearances).
-                if let Some((price, pts, items, vs, neck, src, _)) = pick.and_then(|j| cands.into_iter().nth(j)) {
-                    // M-45: the forced run octilinear too, where that breaks no rule deeper than
-                    // the run itself and costs no more violation price.
+                if let Some((_, pts, items, vs, neck, src, _)) = pick.and_then(|j| cands.into_iter().nth(j)) {
+                    // M-45, forced-draw (docs/dev/design/forced-draw.md): the forced run's
+                    // octilinear forms by the first draw's DP, its clearance priced at the full
+                    // rule, a short priced like a clearance unit and shorts first (two variants:
+                    // the DP prices per leg, the key per object), and the cheapest of the taut run
+                    // and its forms by one graded key (shorts first, then violation + style +
+                    // length), measured by the checker.
                     let (mut pts, mut items, mut vs) = (pts, items, vs);
+                    let mut ftag = "skip";
                     if self.octi.on && neck.is_none() && pts.len() >= 2 {
+                        ftag = "none";
                         let t_o = std::time::Instant::now();
-                        let relax = vs.iter().filter(|v| !v.via).map(|v| v.depth_nm).fold(0.0, f64::max) + 1.0;
                         let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
                         let exits = [if ps { self.pad_exit(w, 0, pts[1]) } else { None }, if pe { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
-                        if let Some(o) = self.octilinear(w, k0, k1, layer, &pts, pneck, exits, relax) {
+                        let dbg = std::env::var_os("TOPO_OCTIDBG").is_some();
+                        let mut forms: Vec<(Vec<Vec2>, Vec<Item>, Vec<Viol>)> = Vec::new();
+                        for short_nm in [self.octi.viol_nm, self.octi.short_nm] {
+                            let Some(o) = self.octilinear(w, k0, k1, layer, &pts, pneck, exits, Some(short_nm)) else { continue };
+                            if forms.iter().any(|f| f.0 == o.pts) {
+                                continue;
+                            }
                             let its = match &pneck {
                                 Some(pn) => self.neck_items(w, lid, &o.pts, pn, pn.min_w).0,
                                 None => self.run_items(w, layer, &o.pts),
@@ -3638,19 +3703,34 @@ impl<'a> Drawer<'a> {
                             let rep = self.checker.check_against(&self.idx, &its, &[]);
                             let mut v2 = self.viols_of(&its, &rep);
                             v2.extend(self.graze_viols(w, &its));
-                            if v2.iter().map(Viol::amount).sum::<f64>() <= price + 1e-9 && key_le(viol_key(&v2), viol_key(&vs)) {
-                                pts = o.pts;
-                                items = its;
-                                vs = v2;
+                            forms.push((o.pts, its, v2));
+                        }
+                        let keys: Vec<(f64, f64)> = std::iter::once(forced_form_key(&vs, &pts, &self.octi)).chain(forms.iter().map(|f| forced_form_key(&f.2, &f.0, &self.octi))).collect();
+                        if dbg {
+                            let vl = |x: &[Viol]| x.iter().map(|v| format!("{} {} d{:.0} l{:.0} a{:.2}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3, v.amount())).collect::<Vec<_>>().join("; ");
+                            let pl = |x: &[Vec2]| x.iter().map(|p| format!("({:.4},{:.4})", p.x / 1e6, -p.y / 1e6)).collect::<Vec<_>>().join(" ");
+                            let dl = |x: &[Vec2]| self.forced_leg_deficits(w, layer, x, pneck).iter().map(|d| format!("{:.2}/{:.2}", d[0], d[1])).collect::<Vec<_>>().join(" ");
+                            eprintln!("OCTIFORCEDBG wire {w} L{layer} keys {keys:?}\n  taut viols [{}]\n  taut pts {}\n  taut dp-legs [{}]", vl(&vs), pl(&pts), dl(&pts));
+                            for f in &forms {
+                                eprintln!("  form viols [{}]\n  form pts {}\n  form dp-legs [{}]", vl(&f.2), pl(&f.0), dl(&f.0));
+                            }
+                        }
+                        if !forms.is_empty() {
+                            let j = forced_form_pick(&keys);
+                            if j > 0 {
+                                (pts, items, vs) = forms.swap_remove(j - 1);
                                 self.stats.octi_ok += 1;
+                                self.stats.forced_octi += 1;
+                                ftag = "ok";
                             } else {
-                                if std::env::var("TOPO_OCTIDBG").is_ok() {
-                                    eprintln!("OCTIFORCE wire {w} rejected: price {price:.1} -> {:.1}, viols {} -> {}", v2.iter().map(Viol::amount).sum::<f64>(), vs.len(), v2.len());
+                                ftag = "rejected";
+                                if dbg {
+                                    eprintln!("OCTIFORCE wire {w} rejected: keys {keys:?}");
                                 }
                                 self.stats.octi_rejected += 1;
                             }
-                        } else if std::env::var("TOPO_OCTIDBG").is_ok() {
-                            eprintln!("OCTIFORCE wire {w} none (relax {relax:.0})");
+                        } else if dbg {
+                            eprintln!("OCTIFORCE wire {w} none");
                         }
                         self.stats.octi_s += t_o.elapsed().as_secs_f64();
                     }
@@ -3667,6 +3747,15 @@ impl<'a> Drawer<'a> {
                                 items = its;
                                 vs = v2;
                             }
+                        }
+                    }
+                    // Counted, never silent: a forced run that keeps free-angle stretches.
+                    if self.octi.on {
+                        let any = super::octi::breaks(&pts).0;
+                        if !any.is_empty() {
+                            self.stats.forced_free_runs += 1;
+                            self.stats.forced_free_stretches += any.len();
+                            self.stats.forced_free_mm += any.iter().map(|a| a.2).sum::<f64>() / 1e6;
                         }
                     }
                     match src {
@@ -3727,6 +3816,7 @@ impl<'a> Drawer<'a> {
                         }
                     }
                     out.necks.extend(fnecks);
+                    run_prov("forced", w, wi.net, layer, src, ftag, &pts);
                     out.items.extend(items);
                     out.runs.push((layer, pts));
                     out.run_src.push(if self.opts.realise != "erbs" { super::joint::RunSrc::Seq } else { super::joint::RunSrc::Forced { erbs: src == "erbs", class: cut } });
@@ -4590,6 +4680,60 @@ mod tests {
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }
+    }
+
+    /// forced-draw (T4): the graded choice of a forced run's form ([`forced_form_key`],
+    /// [`forced_form_better`]): every term on one mm scale, shorts first, ties keep the taut form.
+    #[test]
+    fn forced_form_key_is_one_graded_scale_with_shorts_first() {
+        const MM: f64 = 1e6;
+        let cfg = super::super::octi::OctiCfg::default(); // violation 1000, any_angle 15, acute 50 (mm)
+        let viol = |kind: &'static str, depth_mm: f64, len_mm: f64| Viol { kind, at: v(0.0, 0.0), layer: 0, depth_nm: depth_mm * MM, len_nm: len_mm * MM, against: "x".into(), via: false };
+        // taut: one 10 mm free-angle stretch (8 x 6), then 10 mm straight; octi: 45 deg + straight, a bit longer
+        let taut = [v(0.0, 0.0), v(8.0 * MM, 6.0 * MM), v(18.0 * MM, 6.0 * MM)];
+        let octi = [v(0.0, 0.0), v(2.0 * MM, 0.0), v(8.0 * MM, 6.0 * MM), v(18.0 * MM, 6.0 * MM)];
+        let lt = poly_len(&taut);
+        let lo = poly_len(&octi);
+        let base = vec![viol("clearance", 0.05, 0.2)];
+        let (kt, ko) = (forced_form_key(&base, &taut, &cfg), forced_form_key(&base, &octi, &cfg));
+        // the exact price: 1000 x (1 + 0.05 x 0.2 / 0.01) + 15 x (1 + 10 x 2/15) + length
+        let want_t = 1000.0 * MM * 2.0 + 15.0 * MM * (1.0 + 10.0 * 2.0 / 15.0) + lt;
+        assert!((kt.1 - want_t).abs() < 1.0 && kt.0 == 0.0, "{kt:?} vs {want_t}");
+        assert!((ko.1 - (1000.0 * MM * 2.0 + lo)).abs() < 1.0, "{ko:?}");
+        // the same violations, no free angle: the octilinear form wins although longer
+        assert!(lo > lt && forced_form_better(ko, kt) && !forced_form_better(kt, ko));
+        // one more violation unit (1000 mm) outweighs one 10 mm free-angle stretch (35 mm)
+        let more = vec![viol("clearance", 0.05, 0.2), viol("clearance", 0.001, 0.1)];
+        assert!(!forced_form_better(forced_form_key(&more, &octi, &cfg), kt));
+        // shorts first: less short amount wins whatever the clearance price
+        let short_t = vec![viol("short", 0.1, 0.3)];
+        let many = (0..20).map(|_| viol("clearance", 0.1, 1.0)).collect::<Vec<_>>();
+        assert!(forced_form_better(forced_form_key(&many, &octi, &cfg), forced_form_key(&short_t, &taut, &cfg)));
+        assert!(!forced_form_better(forced_form_key(&short_t, &octi, &cfg), forced_form_key(&many, &taut, &cfg)));
+        // a tie keeps the taut form (strictly cheaper only)
+        assert!(!forced_form_better(kt, kt));
+        // an acute bend (interior 45 deg: turn 135) pays acute_bend x 1.5
+        let acute = [v(0.0, 0.0), v(10.0 * MM, 0.0), v(0.0, 10.0 * MM)];
+        let ka = forced_form_key(&[], &acute, &cfg);
+        assert!((ka.1 - (50.0 * MM * 1.5 + poly_len(&acute))).abs() < 1.0, "{ka:?}");
+        // the weights are the registry's: a zero violation weight leaves style and length
+        let free = super::super::octi::OctiCfg { viol_nm: 0.0, ..cfg };
+        assert!((forced_form_key(&base, &taut, &free).1 - (want_t - 2000.0 * MM)).abs() < 1.0);
+    }
+
+    /// forced-draw (T7): [`forced_form_pick`] takes the strictly cheapest form by
+    /// [`forced_form_better`] (shorts first, then the price), the first on ties: the taut run
+    /// (index 0) stays unless a form is strictly cheaper, the earlier variant wins a tie.
+    #[test]
+    fn forced_form_pick_takes_the_strictly_cheapest_first_on_ties() {
+        assert_eq!(forced_form_pick(&[(0.0, 5.0)]), 0);
+        assert_eq!(forced_form_pick(&[(0.0, 5.0), (0.0, 5.0), (0.0, 5.0)]), 0, "ties keep the taut run");
+        assert_eq!(forced_form_pick(&[(0.0, 5.0), (0.0, 4.0), (0.0, 4.0)]), 1, "ties keep the earlier variant");
+        assert_eq!(forced_form_pick(&[(0.0, 5.0), (0.0, 4.0), (0.0, 3.0)]), 2);
+        assert_eq!(forced_form_pick(&[(0.0, 5.0), (0.0, 3.0), (0.0, 4.0)]), 1);
+        assert_eq!(forced_form_pick(&[(2.0, 5.0), (1.0, 9.0), (1.5, 1.0)]), 1, "shorts first");
+        assert_eq!(forced_form_pick(&[(0.0, 5.0), (1.0, 1.0), (0.0, 6.0)]), 0, "a short never wins over none");
+        assert_eq!(forced_form_pick(&[(3.0, 50.0), (2.0, 60.0), (1.0, 70.0)]), 2);
     }
 
     /// nd-perf F1: [`pick_by_bound`] returns what `min_by` over the exact keys returns (the least

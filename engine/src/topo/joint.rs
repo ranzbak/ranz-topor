@@ -384,7 +384,7 @@ impl<'a> Drawer<'a> {
         let k0 = if r == 0 { 0 } else { vs[r - 1].0 };
         let k1 = if r == n - 1 { self.st.wires[w].passes.len() } else { vs[r].0 };
         let exits = [if r == 0 { self.pad_exit(w, 0, pts[1]) } else { None }, if r == n - 1 { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
-        let o = self.octilinear(w, k0, k1, layer, pts, None, exits, 0.0)?;
+        let o = self.octilinear(w, k0, k1, layer, pts, None, exits, None)?;
         let (items, pn) = self.realise(w, layer, self.layer_id(layer), &o.pts, pneck)?;
         (!items.is_empty()).then_some((o.pts, items, pn))
     }

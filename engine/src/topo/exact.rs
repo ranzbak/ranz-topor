@@ -33,6 +33,52 @@ const MAX_NODES: usize = 1200;
 const STEP: f64 = std::f64::consts::PI / 8.0;
 /// Tolerance on a clearance test (nm).
 const TOL: f64 = 0.5;
+
+/// forced-draw: the length of the segment `a-b` that lies closer than `need` to `core` (the
+/// stretch a violation of that object runs along, [`Drawer::seg_deficit_near`]). The distance
+/// along a segment to a convex core is convex, so that stretch is one interval: it holds the
+/// segment's point closest to the core ([`seg_core`]), and each of its ends is found by bisection
+/// towards the segment end (30 steps, below 1e-9 of the length). A non-convex core (kept copper)
+/// gives the interval around the closest point only. O(bisection steps x core size).
+pub(super) fn band_len(a: Vec2, b: Vec2, core: &Core, need: f64) -> f64 {
+    let d = b - a;
+    let l = d.len();
+    if l < 1.0 {
+        return 0.0;
+    }
+    let at = |t: f64| a + d * t;
+    let dist = |t: f64| seg_core(at(t), at(t), core).0;
+    let proj = |p: Vec2| ((p - a).dot(d) / (l * l)).clamp(0.0, 1.0);
+    // `seg_core` returns the closest pair (the order of the two points depends on the core kind):
+    // the one on `a-b` is the one nearer to the segment.
+    let (_, p, q) = seg_core(a, b, core);
+    let off = |x: Vec2| (at(proj(x)) - x).len();
+    let tc = proj(if off(p) <= off(q) { p } else { q });
+    if dist(tc) >= need {
+        return 0.0;
+    }
+    let edge = |mut inside: f64, mut outside: f64| {
+        if dist(outside) < need {
+            return outside;
+        }
+        for _ in 0..30 {
+            let m = 0.5 * (inside + outside);
+            if dist(m) < need {
+                inside = m;
+            } else {
+                outside = m;
+            }
+        }
+        0.5 * (inside + outside)
+    };
+    (edge(tc, 1.0) - edge(tc, 0.0)) * l
+}
+/// forced-draw: a segment `d` from object `e` at width `sw` overlaps its copper and `e` is
+/// foreign copper (not a hole, the board edge or a keepout, `fixed`; not the own net `net`): a
+/// short (KiCad `shorting_items`; the checker's `gap < 0`).
+pub(super) fn ent_short(e: &super::draw::Ent, net: i32, d: f64, sw: f64) -> bool {
+    !e.fixed && e.net != Some(net) && d < e.grow + 0.5 * sw
+}
 /// Rings of pocket triangles around the strip.
 const POCKET_DEPTH: usize = 2;
 
@@ -486,6 +532,84 @@ impl Drawer<'_> {
             }
         }
         true
+    }
+
+    /// forced-draw (never drop, docs/dev/design/forced-draw.md): the violation amount of the
+    /// segment `a-b` against the objects of `nr`, the graded counterpart of
+    /// [`Drawer::seg_clear_near`] (0 exactly when that is true, up to its tolerance): per object
+    /// it comes too close to, [`violation_amount`](super::factors::violation_amount) of
+    /// the depth (the clearance missing at the closest point, [`Drawer::need_of`] at `nr`'s
+    /// relax) and the length of the segment inside the object's clearance band ([`band_len`]).
+    /// The sum of [`Drawer::seg_deficit_parts_near`]. O(objects near the segment x bisection
+    /// steps). Tests only: the drawing reads the parts.
+    #[cfg(test)]
+    pub(super) fn seg_deficit_near(&self, nr: &Near, a: Vec2, b: Vec2) -> f64 {
+        let [c, s] = self.seg_deficit_parts_near(nr, a, b);
+        c + s
+    }
+
+    /// [`Drawer::seg_deficit_near`] split as `[clearance, short]`: the amounts against the
+    /// objects whose copper the segment's copper overlaps (a foreign pad, via, track or copper
+    /// shape closer than its copper radius plus half the width: KiCad's `shorting_items`, which
+    /// Cleanup removes, the checker's `short`), and the rest (clearance; holes, board edge and
+    /// keepouts, `fixed`, and own-net slivers stay here).
+    pub(super) fn seg_deficit_parts_near(&self, nr: &Near, a: Vec2, b: Vec2) -> [f64; 2] {
+        let wp = &nr.wp;
+        if wp.neck.is_some() {
+            return wp.pieces(a, b).into_iter().fold([0.0; 2], |t, (u, v, w)| {
+                let x = self.seg_deficit_w_near(nr, u, v, self.seg_width(wp.wire, wp.layer, u, v, w));
+                [t[0] + x[0], t[1] + x[1]]
+            });
+        }
+        self.seg_deficit_w_near(nr, a, b, self.seg_width(wp.wire, wp.layer, a, b, wp.w))
+    }
+
+    fn seg_deficit_w_near(&self, nr: &Near, a: Vec2, b: Vec2, sw: f64) -> [f64; 2] {
+        let bb = bbox_of(&[a, b]);
+        let wp = &nr.wp;
+        let mut tot = [0.0; 2];
+        let mut add = |i: usize| {
+            let x = self.ent_deficit(i, wp, a, b, &bb, sw);
+            tot[0] += x[0];
+            tot[1] += x[1];
+        };
+        if nr.cells.is_empty() {
+            nr.ids.iter().for_each(|&i| add(i));
+            return tot;
+        }
+        nr.big.iter().for_each(|&i| add(i));
+        // The cells of `seg_clear_w_near`: every object in reach has its low corner there.
+        let g = nr.c + 0.5 * sw + 1.0;
+        let (x0, x1) = (nr.slot(bb.min.x - g - nr.ext - 1.0, nr.lo.x, nr.nx), nr.slot(bb.max.x + g, nr.lo.x, nr.nx));
+        let (y0, y1) = (nr.slot(bb.min.y - g - nr.ext - 1.0, nr.lo.y, nr.ny), nr.slot(bb.max.y + g, nr.lo.y, nr.ny));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                nr.cells[y * nr.nx + x].iter().for_each(|&i| add(i));
+            }
+        }
+        tot
+    }
+
+    /// The violation amount of `a-b` (box `bb`, width `sw`) against object `i`, `[clearance,
+    /// short]` (one of them 0): 0 where [`Drawer::ent_clear`] holds.
+    #[inline]
+    fn ent_deficit(&self, i: usize, wp: &Wp, a: Vec2, b: Vec2, bb: &Aabb, sw: f64) -> [f64; 2] {
+        let e = &self.ents[i];
+        let need = self.need_of(i, wp, sw);
+        let (lo, hi) = (self.ent_box[i].min, self.ent_box[i].max);
+        if bb.min.x > hi.x + need || bb.max.x < lo.x - need || bb.min.y > hi.y + need || bb.max.y < lo.y - need {
+            return [0.0; 2];
+        }
+        let d = seg_core(a, b, &e.core).0;
+        if d >= need - TOL {
+            return [0.0; 2];
+        }
+        let amt = super::factors::violation_amount(need - d, band_len(a, b, &e.core, need));
+        if ent_short(e, wp.net, d, sw) {
+            [0.0, amt]
+        } else {
+            [amt, 0.0]
+        }
     }
 
     /// Candidate nodes around the corners of object `id` that fall in `bb`.
@@ -1458,7 +1582,7 @@ mod tests {
 
     /// Fields like [`with_fields`], the drawn copper of nets 2 and 3 octilinear (0 / 45 / 90
     /// degree tracks, the bundle neighbours `follow` prices) and any angle.
-    fn with_octi_fields(f: &mut dyn FnMut(&Drawer, &mut Rng)) {
+    fn with_octi_fields(f: &mut dyn FnMut(&mut Drawer, &mut Rng)) {
         for seed in 1..=4u64 {
             let mut g = Rng(0x2f_1c_93_aa_51_08_6d_e3 ^ seed);
             let m = field(&mut g);
@@ -1485,7 +1609,7 @@ mod tests {
                 let net = g.int(2, 3) as i32;
                 dr.commit(&track_item(net, [0u32, 2][g.int(0, 1) as usize], 150_000.0 + 200_000.0 * g.f(), a, e, None));
             }
-            f(&dr, &mut g);
+            f(&mut dr, &mut g);
         }
     }
 
@@ -1499,6 +1623,7 @@ mod tests {
         let mut split = [[0usize; 2]; 4];
         let (mut some, mut runs) = (0, 0);
         with_octi_fields(&mut |dr, g| {
+            let dr: &Drawer = dr;
             let wi = &dr.st.wires[0];
             let k1 = wi.passes.len();
             let poly = dr.st.polyline(0);
@@ -1512,9 +1637,9 @@ mod tests {
                     _ => [dr.pad_exit(0, 0, pts[1]), dr.pad_exit(0, 1, pts[pts.len() - 2])],
                 };
                 let layer = g.int(0, 1) as usize;
-                let relax = [0.0, 20_000.0][g.int(0, 1) as usize];
+                let forced = [None, Some(dr.octi.viol_nm), Some(dr.octi.short_nm)][g.int(0, 2) as usize];
                 OCTI_REF.with(|f| f.set(false));
-                let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
+                let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced);
                 // par-draw: every node's successors on 1/2/4/8 lanes (pair rule 1, the reverse
                 // hook: the first successors finish last). The test switch and the node counts are
                 // thread-locals of the thread that calls `octilinear`: the pool's worker.
@@ -1526,7 +1651,7 @@ mod tests {
                         pool.install(|| {
                             OCTI_LANE_MIN.with(|f| f.set(1));
                             OCTI_NODE_SPLIT.with(|c| c.set([0, 0]));
-                            let r = super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax));
+                            let r = super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced));
                             let c = OCTI_NODE_SPLIT.with(|c| c.get());
                             OCTI_LANE_MIN.with(|f| f.set(0));
                             split[ki] = [split[ki][0] + c[0], split[ki][1] + c[1]];
@@ -1535,7 +1660,7 @@ mod tests {
                     })
                     .collect();
                 OCTI_REF.with(|f| f.set(true));
-                let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, relax);
+                let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced);
                 OCTI_REF.with(|f| f.set(false));
                 runs += 1;
                 some += usize::from(want.is_some());
@@ -1553,5 +1678,214 @@ mod tests {
         for (ki, k) in [(1usize, 2usize), (2, 4), (3, 8)] {
             assert!(split[ki][1] > 0 && split[ki][0] == 0, "{k} lanes: nodes alone / on the crew {:?}", split[ki]);
         }
+    }
+
+    /// forced-draw (T1): [`band_len`] against a slow sampling reference (20 000 points along the
+    /// segment): point, segment and convex polygon cores, zero-length and far segments, segments
+    /// through the core and along it.
+    #[test]
+    fn band_len_matches_a_sampling_reference() {
+        let mut g = Rng(0x7a_31_5c_02_e9_44_b1_0f);
+        let (mut hit, mut zero) = (0usize, 0usize);
+        for case in 0..3000 {
+            let c = Vec2 { x: (g.f() - 0.5) * 4.0 * MM, y: (g.f() - 0.5) * 4.0 * MM };
+            let core = match case % 3 {
+                0 => Core::Pt(c),
+                1 => Core::Seg(c, c + Vec2 { x: (g.f() - 0.5) * 3.0 * MM, y: (g.f() - 0.5) * 3.0 * MM }),
+                _ => {
+                    // a rotated rectangle (a pad)
+                    let (hx, hy, t) = (0.1 * MM + g.f() * MM, 0.1 * MM + g.f() * MM, g.f() * 3.2);
+                    let (u, v) = (Vec2 { x: t.cos(), y: t.sin() }, Vec2 { x: -t.sin(), y: t.cos() });
+                    Core::Poly(vec![c + u * hx + v * hy, c - u * hx + v * hy, c - u * hx - v * hy, c + u * hx - v * hy])
+                }
+            };
+            let a = Vec2 { x: (g.f() - 0.5) * 6.0 * MM, y: (g.f() - 0.5) * 6.0 * MM };
+            let b = match g.int(0, 4) {
+                0 => a,
+                1 => c + Vec2 { x: (g.f() - 0.5) * 0.2 * MM, y: (g.f() - 0.5) * 0.2 * MM },
+                2 => Vec2 { x: a.x + (g.f() - 0.5) * 8.0 * MM, y: a.y },
+                _ => Vec2 { x: (g.f() - 0.5) * 6.0 * MM, y: (g.f() - 0.5) * 6.0 * MM },
+            };
+            let need = 0.05 * MM + g.f() * 1.2 * MM;
+            let got = band_len(a, b, &core, need);
+            let (l, n) = ((b - a).len(), 20_000usize);
+            let inside = (0..n).filter(|&k| {
+                let p = a + (b - a) * ((k as f64 + 0.5) / n as f64);
+                seg_core(p, p, &core).0 < need
+            }).count();
+            let want = if l < 1.0 { 0.0 } else { l * inside as f64 / n as f64 };
+            assert!((got - want).abs() <= 2.0 * l / n as f64 + 1.0, "case {case}: {got} vs {want} (len {l}, need {need})");
+            if want > 0.0 { hit += 1 } else { zero += 1 }
+        }
+        assert!(hit > 500 && zero > 500, "{hit} {zero}");
+    }
+
+    /// forced-draw (T1b): [`Drawer::seg_deficit_near`] is 0 exactly where
+    /// [`Drawer::seg_clear_near`] holds, and otherwise the brute-force sum over the objects of
+    /// `violation_amount(need - distance, band_len)` (no box filter, no grid; neck pieces too);
+    /// [`Drawer::seg_deficit_parts_near`] puts an object's amount in the short part exactly when
+    /// the copper overlaps foreign copper that is not a hole, edge or keepout.
+    #[test]
+    fn seg_deficit_is_the_graded_clearance_test() {
+        let mut n = [0usize; 3];
+        with_fields(&mut |dr, g| {
+            for _ in 0..60 {
+                let wp = rand_wp(dr, g);
+                let c = pt(g);
+                let half = [0.3, 1.5, 4.0, 12.0][g.int(0, 3) as usize] * MM;
+                let ents = dr.local_ents(&wp, Aabb { min: c - Vec2 { x: half, y: half }, max: c + Vec2 { x: half, y: half } }.grow(dr.qgrow));
+                let nr = dr.near(ents.clone(), &wp);
+                let one = |u: Vec2, v: Vec2, sw: f64| -> [f64; 2] {
+                    ents.iter().fold([0.0; 2], |t, &i| {
+                        let e = &dr.ents[i];
+                        let need = dr.need_of(i, &wp, sw);
+                        let d = seg_core(u, v, &e.core).0;
+                        if d >= need - TOL {
+                            return t;
+                        }
+                        let x = crate::topo::factors::violation_amount(need - d, band_len(u, v, &e.core, need));
+                        // copper over foreign copper (not a hole, edge or keepout): a short
+                        if !e.fixed && e.net != Some(wp.net) && d < e.grow + 0.5 * sw {
+                            [t[0], t[1] + x]
+                        } else {
+                            [t[0] + x, t[1]]
+                        }
+                    })
+                };
+                for k in 0..80 {
+                    let a = c + Vec2 { x: (2.0 * g.f() - 1.0) * half, y: (2.0 * g.f() - 1.0) * half };
+                    let b = if k % 5 == 0 { a } else { c + Vec2 { x: (2.0 * g.f() - 1.0) * half, y: (2.0 * g.f() - 1.0) * half } };
+                    let want: [f64; 2] = if wp.neck.is_some() {
+                        wp.pieces(a, b).into_iter().fold([0.0; 2], |t, (u, v, w)| {
+                            let x = one(u, v, dr.seg_width(wp.wire, wp.layer, u, v, w));
+                            [t[0] + x[0], t[1] + x[1]]
+                        })
+                    } else {
+                        one(a, b, dr.seg_width(wp.wire, wp.layer, a, b, wp.w))
+                    };
+                    let got = dr.seg_deficit_near(&nr, a, b);
+                    let parts = dr.seg_deficit_parts_near(&nr, a, b);
+                    assert_eq!(got == 0.0, dr.seg_clear_near(&nr, a, b), "{a:?}-{b:?}: deficit {got}");
+                    assert!((got - want[0] - want[1]).abs() <= 1e-9 * got.max(1.0), "{a:?}-{b:?}: {got} vs {want:?}");
+                    for q in 0..2 {
+                        assert!((parts[q] - want[q]).abs() <= 1e-9 * want[q].max(1.0), "{a:?}-{b:?}: parts {parts:?} vs {want:?}");
+                    }
+                    n[usize::from(got > 0.0)] += 1;
+                    n[2] += usize::from(parts[1] > 0.0);
+                }
+            }
+        });
+        assert!(n[0] > 2_000 && n[1] > 2_000 && n[2] > 100, "{n:?}");
+    }
+
+    /// forced-draw (T3): the forced octilinear DP prices the clearance. Pricing a violation can
+    /// only lower the violation the DP chooses (exchange argument over the same chains), so over
+    /// random forced runs the chosen forms' summed violation amount with the `violation` weight
+    /// is at most the one with weight 0, and below it in some runs; the forced DP takes legs
+    /// below the rule where that is cheapest (the clearance is a price, not a test).
+    #[test]
+    fn forced_octilinear_prices_the_clearance() {
+        let (mut tot, mut tot0, mut lower, mut below, mut runs) = (0.0, 0.0, 0usize, 0usize, 0usize);
+        with_octi_fields(&mut |dr, g| {
+            let k1 = dr.st.wires[0].passes.len();
+            let poly = dr.st.polyline(0);
+            for _ in 0..10 {
+                let mut pts = poly.clone();
+                for p in pts.iter_mut().skip(1).take(poly.len().saturating_sub(2)) {
+                    *p = *p + Vec2 { x: (g.f() - 0.5) * 0.6 * MM, y: (g.f() - 0.5) * 0.6 * MM };
+                }
+                let layer = g.int(0, 1) as usize;
+                let wi = &dr.st.wires[0];
+                let wp = Wp { wire: 0, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                let region = bbox_of(&pts).grow(2.0 * MM + 4.0 * (wi.w + wi.s));
+                let form = |dr: &Drawer| dr.octilinear(0, 0, k1, layer, &pts, None, [None, None], Some(dr.octi.viol_nm)).map_or(pts.clone(), |o| o.pts);
+                let f1 = form(dr);
+                let keep = dr.octi;
+                dr.octi.viol_nm = 0.0;
+                let f0 = form(dr);
+                dr.octi = keep;
+                let dr: &Drawer = dr;
+                let nr = dr.near(dr.local_ents(&wp, region.grow(dr.qgrow)), &wp);
+                let deficit = |q: &[Vec2]| -> f64 { q.windows(2).map(|x| dr.seg_deficit_near(&nr, x[0], x[1])).sum() };
+                let (d1, d0) = (deficit(&f1), deficit(&f0));
+                tot += d1;
+                tot0 += d0;
+                lower += usize::from(d1 < d0 - 1e-9);
+                below += usize::from(f1.windows(2).any(|x| super::super::octi::octi_dir(x[1] - x[0]).is_some() && dr.seg_deficit_near(&nr, x[0], x[1]) > 0.0));
+                runs += 1;
+            }
+        });
+        assert!(tot <= tot0 + 1e-9 && lower > 3 && below > 0, "priced {tot} vs free {tot0}, lower in {lower} and octilinear legs below the rule in {below} of {runs} runs");
+    }
+
+    /// forced-draw (T6, the qmtech `Net-(U9-~{RST})` mechanism: the forced form cut through a
+    /// foreign via, a short, where its taut run only missed the clearance): the forced DP puts
+    /// shorts first in its shorts-first variant (`short_nm`). A net-1 run straight from A to B
+    /// (not octilinear) along a foreign track
+    /// on its left, closer than the rule but clear of its copper, and a second foreign track on
+    /// its right, clear of the run: every octilinear form between A and B leaves the line by
+    /// more than the room to one of the tracks, so it crosses it (a short). The forced DP keeps
+    /// the taut run's short amount (0: it returns the taut run or a form without a short); the
+    /// flat variant (a short priced like a clearance unit) takes a form that shorts, its
+    /// clearance amount lower than the taut run's: the two variants differ, the key picks.
+    #[test]
+    fn forced_octilinear_puts_shorts_first() {
+        let p = |v: f64| (v * MM) as i64;
+        let (mut runs, mut traded) = (0usize, 0usize);
+        let mut seen = Vec::new();
+        for dy in [2.0, 3.0, 5.0] {
+            for f2 in [0.05, 0.2, 0.4] {
+                let (ax, ay, bx, by) = (2.0, 12.0, 12.0, 12.0 - dy);
+                let pad = |i: usize, x: f64, y: f64| format!(r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":1,"attr":"smd","center":[{x},{y}],"rotation_deg":0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{s},"h":{s}}}}},"drill":null}}"#, x = p(x), y = p(y), s = p(0.4));
+                let c = [(0.0, 0.0), (24.0, 0.0), (24.0, 24.0), (0.0, 24.0)];
+                let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+                let js = format!(
+                    r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}},{{"code":3,"name":"C"}}],"pads":[{},{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+                    pad(0, ax, ay),
+                    pad(1, bx, by),
+                    segs.join(",")
+                );
+                let m = BoardModel::from_json(&js).unwrap();
+                let bd = board::build(&m, &BuildOpts::default()).unwrap();
+                let conns = bd.connections(&m);
+                let mut st = State::new(&bd.proj);
+                let cn = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
+                st.route_conn(cn, &InitWeights::default(), (cn.w + cn.s) / 400_000.0).expect("routes");
+                let opts = Options::default();
+                let checker = Checker::new(&m, &opts);
+                let mut dr = Drawer::new(&m, &opts, &bd, &st, &checker);
+                dr.octi = crate::topo::octi::OctiCfg { on: true, ..dr.octi };
+                // math frame (y up)
+                let (a, b) = (Vec2 { x: ax * MM, y: -ay * MM }, Vec2 { x: bx * MM, y: -by * MM });
+                let u = (b - a).unit().expect("A != B");
+                let left = Vec2 { x: -u.y, y: u.x };
+                let wi = dr.st.wires[0].clone();
+                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                let tw = 150_000.0;
+                let r0 = 0.5 * tw + 0.5 * wi.w;
+                // the room to a track's copper and its clearance band, measured on the first one
+                let track = |dr: &mut Drawer, net: i32, off: f64| {
+                    let (s0, s1) = (a - u * 1.5 * MM + left * off, b + u * 1.5 * MM + left * off);
+                    dr.commit(&track_item(net, 0, tw, s0, s1, None));
+                    dr.ents.len() - 1
+                };
+                let probe = track(&mut dr, 3, 20.0 * MM);
+                let need = dr.need_of(probe, &wp, wi.w);
+                track(&mut dr, 2, r0 + 0.1 * (need - r0));
+                track(&mut dr, 3, -(need + f2 * MM));
+                let pts = vec![a, b];
+                let k1 = dr.st.wires[0].passes.len();
+                let short = |dr: &Drawer, q: &[Vec2]| -> f64 { dr.forced_leg_deficits(0, 0, q, None).iter().map(|x| x[1]).sum() };
+                let form = |sh: f64| dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], Some(sh)).map_or(pts.clone(), |o| o.pts);
+                let st0 = short(&dr, &pts);
+                let s1 = short(&dr, &form(dr.octi.short_nm));
+                let s0 = short(&dr, &form(dr.octi.viol_nm));
+                assert!(st0 == 0.0 && s1 == 0.0, "dy {dy} f2 {f2}: the forced form shorts ({s1}, taut {st0})");
+                traded += usize::from(s0 > 0.0);
+                seen.push((dy, f2, s0));
+                runs += 1;
+            }
+        }
+        assert!(traded > 0, "short priced as clearance: no run traded clearance for a short ({runs} runs: {seen:?})");
     }
 }

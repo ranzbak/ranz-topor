@@ -64,6 +64,8 @@ struct Memo {
     room: FxHashMap<[u64; 4], f64>,
     follow: FxHashMap<[u64; 4], f64>,
     legal: FxHashMap<[u64; 4], bool>,
+    /// forced-draw: the violation price of a leg of a forced run.
+    viol: FxHashMap<[u64; 4], f64>,
 }
 
 impl Memo {
@@ -72,6 +74,7 @@ impl Memo {
         self.room.extend(o.room);
         self.follow.extend(o.follow);
         self.legal.extend(o.legal);
+        self.viol.extend(o.viol);
     }
 }
 
@@ -115,7 +118,25 @@ pub struct OctiCfg {
     /// `planned_room` factor weight: price per nm of drawn shape inside the room the plan keeps
     /// for a lane neighbour not drawn yet, times `x + x^2` (`x` = depth over the pitch).
     pub room: f64,
+    /// forced-draw: `violation` factor weight (nm per violation unit): the price of a forced
+    /// run's leg that comes closer than the rule ([`Drawer::octilinear`] with `forced`).
+    pub viol_nm: f64,
+    /// forced-draw: the price per violation unit of a leg whose copper overlaps foreign copper (a
+    /// short) in the forced DP's shorts-first variant, `viol_nm` x [`SHORT_FIRST`]: the DP's one
+    /// scale carries the choice key's "shorts first" ([`super::draw::forced_form_key`]).
+    pub short_nm: f64,
 }
+
+/// forced-draw: a short's violation unit costs this many clearance units in the shorts-first
+/// variant of the forced octilinear DP. The choice key ranks the short amount before everything
+/// else (KiCad Cleanup removes a shorting track: [`super::draw::viol_key`]); the DP has one scalar
+/// price, so a short unit is priced far above what a run's clearance, style and length add up to
+/// (about 1e2 units on qmtech's deepest forced runs), graded by the short's own depth and length.
+/// Not a judgement of its own: the order is the key's. The DP prices per leg, the key per object
+/// (a violation of one object is a short as a whole once any piece of it overlaps,
+/// [`super::draw::merge_viols`]), so the forced run also gets the variant with a short priced
+/// like a clearance unit, and the key picks ([`super::draw::forced_form_pick`]).
+pub const SHORT_FIRST: f64 = 1e4;
 
 impl OctiCfg {
     /// From the engine options: `[drawing]` and the `any_angle` / `acute_bend` weights of
@@ -132,13 +153,15 @@ impl OctiCfg {
             acute_forbidden: o.acute == "forbidden",
             pull: o.bundle_pull.clamp(0.0, 0.9),
             room: reg.weight("planned_room").unwrap_or(5.0).max(0.0),
+            viol_nm: reg.weight("violation").unwrap_or(1000.0).max(0.0) * MM,
+            short_nm: reg.weight("violation").unwrap_or(1000.0).max(0.0) * MM * SHORT_FIRST,
         }
     }
 }
 
 impl Default for OctiCfg {
     fn default() -> Self {
-        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0 }
+        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST }
     }
 }
 
@@ -286,19 +309,35 @@ impl Drawer<'_> {
     /// The run `pts` (passes `k0..k1` of `w` on `layer`, legal as drawn) redrawn octilinear in its
     /// sleeve (see the module doc). `None` when nothing changes or the run is too short.
     #[allow(clippy::too_many_arguments)]
-    /// `relax` (nm, 0 = the rule): the clearance to foreign objects is kept only up to this much
-    /// less (a run drawn by force, never drop: no deeper than its own violations).
-    pub(super) fn octilinear(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], relax: f64) -> Option<OctiOut> {
+    /// `forced` (a run drawn by force, never drop; docs/dev/design/forced-draw.md): the clearance
+    /// is a price, not a test. Every leg, the taut pieces included, pays the `violation` weight
+    /// times the violation amount it has at the full rule ([`Drawer::seg_deficit_parts_near`]),
+    /// the amount of a short (copper over foreign copper) at the given price per unit instead
+    /// (`Some(short_nm)`), on the DP's one scale (length, bends, `any_angle`, `planned_room`); the
+    /// topology tests (region, strip, walls) stay. `None`: a leg must keep every clearance (the
+    /// first draw).
+    pub(super) fn octilinear(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>) -> Option<OctiOut> {
         let t = std::time::Instant::now();
-        let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, relax);
+        let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced);
         super::par::meter::time(super::par::meter::OCTI, t);
         super::par::meter::count(super::par::meter::OCTI_CALLS, 1);
         r
     }
 
+    /// Debug (`TOPO_OCTIDBG`, forced-draw): the forced DP's violation amounts `[clearance,
+    /// short]` per leg of `pts` (the near set the DP builds for this run). Read only.
+    pub(super) fn forced_leg_deficits(&self, w: WireId, layer: usize, pts: &[Vec2], neck: Option<Neck>) -> Vec<[f64; 2]> {
+        let wi = &self.st.wires[w];
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax: 0.0 };
+        let region: Aabb = bbox_of(pts).grow(2.0 * MM + 4.0 * (wi.w + wi.s));
+        let nr = self.near(self.local_ents(&wp, region.grow(self.qgrow)), &wp);
+        pts.windows(2).map(|x| self.seg_deficit_parts_near(&nr, x[0], x[1])).collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], relax: f64) -> Option<OctiOut> {
+    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>) -> Option<OctiOut> {
         let cfg = self.octi;
+        let (short_nm, forced) = (forced.unwrap_or(0.0), forced.is_some());
         let mut taut: Vec<Vec2> = pts.to_vec();
         taut.dedup_by(|a, b| (*a - *b).len2() < 1.0);
         if taut.len() < 2 {
@@ -308,7 +347,7 @@ impl Drawer<'_> {
             return None;
         }
         let wi = &self.st.wires[w];
-        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax };
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax: 0.0 };
         let mut strip: Strip = self.open_strip(w, k0, k1, layer);
         strip.walls.extend(self.via_walls(w, k0, k1, layer));
         // The wire's own lane on every edge it crosses (Bast et al.: the grid restricted to the
@@ -606,7 +645,17 @@ impl Drawer<'_> {
                 && strip.contains(b)
                 && strip.contains((a + b) * 0.5)
                 && !strip.crosses_wall(a, b)
-                && self.seg_clear_near(&nr, a, b)
+                && (forced || self.seg_clear_near(&nr, a, b))
+        };
+        // forced-draw: the violation price of the leg `a-b` (0 in the first draw, where a leg keeps
+        // every clearance or is not taken): a short (copper over foreign copper) at `short_nm`,
+        // the rest at `viol_nm`.
+        let viol_x = |a: Vec2, b: Vec2| -> f64 {
+            if !forced {
+                return 0.0;
+            }
+            let [c, sh] = self.seg_deficit_parts_near(&nr, a, b);
+            cfg.viol_nm * c + short_nm * sh
         };
         let mut memo = Memo::default();
         // DP state per node: arrival direction 0..7, or 8 (the start / an any-angle leg).
@@ -703,6 +752,8 @@ impl Drawer<'_> {
             let mut fmemo: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
             let mut follow = |a: Vec2, b: Vec2, k: usize| memo_get(None, &mut fmemo, leg_key(a, b), || follow_f(a, b, k));
             let mut lmemo: FxHashMap<[u64; 4], bool> = crate::fxhash::map();
+            let mut vmemo: FxHashMap<[u64; 4], f64> = crate::fxhash::map();
+            let mut viol = |a: Vec2, b: Vec2| memo_get(None, &mut vmemo, leg_key(a, b), || viol_x(a, b));
             let mut legal = |a: Vec2, b: Vec2| memo_get(None, &mut lmemo, leg_key(a, b), || legal_f(a, b));
             for i in 0..n {
                 for din in 0..ND {
@@ -769,7 +820,7 @@ impl Drawer<'_> {
                                     ok = false;
                                     break;
                                 }
-                                c += len + b + room(from, e);
+                                c += len + b + room(from, e) + viol(from, e);
                                 if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
                                     c -= cfg.pull * follow(from, e, kk);
                                 }
@@ -829,8 +880,8 @@ impl Drawer<'_> {
             #[allow(clippy::type_complexity)]
             let relax = |i: usize, j: usize, fin: &[(usize, f64, Vec2, f64)], dj: [f64; ND], shared: Option<&Memo>, own: &mut Memo| -> Vec<(usize, f64, (Vec2, f64), (usize, usize, Vec<Leg>))> {
                 let (p, q) = (nodes[i].0, nodes[j].0);
-                let (sh_room, sh_follow, sh_legal) = (shared.map(|m| &m.room), shared.map(|m| &m.follow), shared.map(|m| &m.legal));
-                let (own_room, own_follow, own_legal) = (&mut own.room, &mut own.follow, &mut own.legal);
+                let (sh_room, sh_follow, sh_legal, sh_viol) = (shared.map(|m| &m.room), shared.map(|m| &m.follow), shared.map(|m| &m.legal), shared.map(|m| &m.viol));
+                let (own_room, own_follow, own_legal, own_viol) = (&mut own.room, &mut own.follow, &mut own.legal, &mut own.viol);
                 let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
                 if i == 0 {
                     if let Some(x) = exits[0] {
@@ -871,6 +922,7 @@ impl Drawer<'_> {
                             }
                             let v = d * (1.0 / len);
                             let rv = if room_none { 0.0 } else { memo_get(sh_room, own_room, leg_key(from, e), || room_x(from, e)) };
+                            let rv = if forced { rv + memo_get(sh_viol, own_viol, leg_key(from, e), || viol_x(from, e)) } else { rv };
                             let fv = match (dk, pull_on) {
                                 (Some(kk), true) => memo_get(sh_follow, own_follow, leg_key(from, e), || follow_x(from, e, kk)),
                                 _ => 0.0,
@@ -1032,6 +1084,29 @@ impl Drawer<'_> {
                 Some(lease) => super::par::crew(lease, unit, |c| nodes_loop(Some(c))),
                 None => nodes_loop(None),
             }
+        }
+        // Debug (`TOPO_OCTIWHYF`, forced-draw): a forced run's (relax > 0) octilinear legs the
+        // legality refused, by the first test that failed (read only).
+        if forced && std::env::var_os("TOPO_OCTIWHYF").is_some() {
+            let nr0 = self.near(ents.clone(), &wp);
+            let mut c = [0usize; 6];
+            for (k, &ok) in &memo.legal {
+                let (a, b) = (Vec2 { x: f64::from_bits(k[0]), y: f64::from_bits(k[1]) }, Vec2 { x: f64::from_bits(k[2]), y: f64::from_bits(k[3]) });
+                let bb = bbox_of(&[a, b]);
+                let i = if ok {
+                    if self.seg_clear_near(&nr0, a, b) { 0 } else { 1 }
+                } else if !(bb.min.x >= region.min.x && bb.min.y >= region.min.y && bb.max.x <= region.max.x && bb.max.y <= region.max.y) {
+                    2
+                } else if !(strip.contains(b) && strip.contains((a + b) * 0.5)) {
+                    3
+                } else if strip.crosses_wall(a, b) {
+                    4
+                } else {
+                    5
+                };
+                c[i] += 1;
+            }
+            eprintln!("OCTIWHYF w{w} L{layer} legs {}: legal {} (of them below the full rule {}), refused: region {} strip {} wall {} clearance {}", memo.legal.len(), c[0] + c[1], c[1], c[2], c[3], c[4], c[5]);
         }
         // TOPO_OCTINODES=<wire>: the nodes, their best price and the arrival state.
         if std::env::var("TOPO_OCTINODES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(w) {
