@@ -282,7 +282,16 @@ pub struct Taut {
 #[doc(hidden)]
 pub mod point_free_memo {
     pub static OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// The memo's cap in entries; 0 = [`POINT_FREE_MEMO_CAP`]. Tests set a tiny cap to show the
+    /// clears leave the copper as it was.
+    pub static CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 }
+
+/// site-price-cost: the most entries [`Packer::point_free_cached`] holds (~40 MB with the hash
+/// map's overhead); at the cap the memo is cleared and fills again. Its values are a pure
+/// function of the key, so a clear changes the time only, never a value or the copper. qmtech
+/// det s0 with the graded site price holds ~15k entries, esp ~5k.
+pub const POINT_FREE_MEMO_CAP: usize = 1 << 20;
 
 /// The body of [`Packer::site_room`] over the cache `cache` (shared by [`SiteRooms`]).
 fn site_room_of(pr: &Projection, eps: f64, cache: &Mutex<FxHashMap<(usize, i32), f64>>, t: super::state::TriId, net: i32, s: f64) -> f64 {
@@ -628,7 +637,7 @@ impl<'a> Packer<'a> {
     /// a function of the static board alone, so the cached bits equal the computed ones (the
     /// graded site price, [`super::refine::Frame::site_over`], asks it for every planned via of
     /// every wire it reprices; uncached that was O(obstacles) per via per repricing). O(1) after
-    /// the first call per key, O(obstacles) on it.
+    /// the first call per key, O(obstacles) on it. Bounded: cleared at [`POINT_FREE_MEMO_CAP`] entries.
     pub fn point_free_cached(&self, q: Vec2, net: i32, s: f64) -> f64 {
         if point_free_memo::OFF.load(std::sync::atomic::Ordering::Relaxed) {
             return super::cutflow::point_free(self.pr, self, q, net, s);
@@ -638,7 +647,15 @@ impl<'a> Packer<'a> {
             return f;
         }
         let f = super::cutflow::point_free(self.pr, self, q, net, s);
-        lock(&self.point_free).insert(key, f);
+        let cap = match point_free_memo::CAP.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => POINT_FREE_MEMO_CAP,
+            c => c,
+        };
+        let mut memo = lock(&self.point_free);
+        if memo.len() >= cap {
+            memo.clear();
+        }
+        memo.insert(key, f);
         f
     }
 

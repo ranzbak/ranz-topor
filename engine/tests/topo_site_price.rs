@@ -126,6 +126,20 @@ fn the_point_free_memo_returns_the_computed_bits_and_keeps_the_copper() {
         }
         assert_eq!(pk.point_free_memo_len(), keys.len(), "round {round}: one entry per key, a repeat is a hit");
     }
+    // At the cap the memo is cleared before the next new key and the values stay the computed ones.
+    {
+        use std::sync::atomic::Ordering;
+        use topor_engine::topo::pack::point_free_memo;
+        let q2 = topor_engine::geom::Vec2 { x: 11.0 * MM, y: -9.5 * MM };
+        point_free_memo::CAP.store(keys.len(), Ordering::Relaxed);
+        assert_eq!(pk.point_free_cached(q2, 1, 0.2 * MM).to_bits(), point_free(&b.proj, &pk, q2, 1, 0.2 * MM).to_bits());
+        assert_eq!(pk.point_free_memo_len(), 1, "full memo: cleared, then the new key");
+        point_free_memo::CAP.store(0, Ordering::Relaxed);
+        for &(q, net, s) in &keys {
+            assert_eq!(pk.point_free_cached(q, net, s).to_bits(), point_free(&b.proj, &pk, q, net, s).to_bits(), "after the clear: {q:?}");
+        }
+        assert_eq!(pk.point_free_memo_len(), keys.len() + 1);
+    }
     // Not vacuous: next to the pad of net 1 the other net sees less room than its own net, and a
     // larger clearance less still.
     let q = pts[0];
@@ -153,6 +167,11 @@ fn memo_keeps_the_graded_copper() {
     let fresh = run(r#", "via_site_price": "graded""#);
     point_free_memo::OFF.store(false, Ordering::Relaxed);
     assert_eq!(memo, fresh, "the memo changed the graded copper");
+    // A tiny cap: the memo is cleared every few entries, the copper stays.
+    point_free_memo::CAP.store(3, Ordering::Relaxed);
+    let capped = run(r#", "via_site_price": "graded""#);
+    point_free_memo::CAP.store(0, Ordering::Relaxed);
+    assert_eq!(memo, capped, "clearing the memo at its cap changed the graded copper");
     assert_ne!(memo, run(""), "the graded price does not change this crop's copper: the case does not show");
 }
 
