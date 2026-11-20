@@ -683,6 +683,10 @@ fn layering_escapes_change_free_positions_deterministically() {
         assert_eq!(u["budget"], "units", "{n_layers} layers: {u}");
         assert!(u["escapes"].as_f64().unwrap_or(0.0) > 0.0 && u["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, units: {u}");
         assert_ne!(u["work_units"], e["work_units"], "{n_layers} layers: the two budgets count alike");
+        // The re-lays' work in the budget's own currency: wire units with "units", the cost counter
+        // (another number) with "cost".
+        assert_eq!(u["work_units"][1], u["relay_wires"], "{n_layers} layers, units: {u}");
+        assert_ne!(e["work_units"][1], e["relay_wires"], "{n_layers} layers, cost: the re-lays counted in wire units: {e}");
         let t = escape_json(&m, &loop_opts(r#""loop_judge": "local""#));
         assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, default (escape = ties): {t}");
         let t = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", {TW5}, "escape": "ties""#)));

@@ -4889,6 +4889,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// cost counter ([`LoopCtr::cost`]) and an escape its measured cost; false = the wire
             /// units with `escape_kappa` per alive wire (before).
             cost_budget: bool,
+            /// site-price-cost: the sweep re-lays' work in wire units ([`Sp::work_since`]) whatever
+            /// the budget, reported beside the throttle's own currency ("relay_wires").
+            relay_wires: f64,
             take_always: bool,
             /// The re-lay counter's fading price per connection (`relay_count_fade` < 1; None =
             /// the plain counter, as before TW5).
@@ -6280,6 +6283,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     // counted layerings and judges.
                     self.lctr.spend(super::escape::cost::relay(self.st.passes.len()));
                     let units = self.budget_since(k0, c0);
+                    self.tw5.relay_wires += self.work_since(k0);
                     self.work_row("relay", rt, rm, c0);
                     self.tw5.throttle.add(units);
                     self.tw5.p4_throttle.add(units);
@@ -6782,6 +6786,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 throttle: throttle0(),
                 p4_throttle: throttle0(),
                 cost_budget,
+                relay_wires: 0.0,
                 take_always: opts.escape_take == "always",
                 relay_w: (opts.relay_count_fade < 1.0).then(|| (reroutes0.iter().map(|&r| f64::from(r)).collect(), opts.relay_count_fade.max(0.0))),
                 // TW5 (f): the in-loop P4 rounds price with the loop history, so it is on with them.
@@ -6996,6 +7001,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             if t.relay_work > 0.0 { (t.esc_work + p.esc_work) / (t.esc_work + p.esc_work + t.relay_work) } else { 0.0 }
         };
         let esc_work = (sp.tw5.throttle.esc_work + sp.tw5.p4_throttle.esc_work, sp.tw5.throttle.relay_work, sp.st.wires.iter().filter(|w| w.alive).count());
+        let relay_wires = sp.tw5.relay_wires;
         drop(sp);
         if std::env::var_os("TOPO_LOOPDBG").is_some() {
             let dirs = dirs_of(&st);
@@ -7177,6 +7183,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "work_share": (esc_share * 1e4).round() / 1e4,
                 "budget": if opts.escape_budget == "units" { "units" } else { "cost" },
                 "work_units": [(esc_work.0 * 10.0).round() / 10.0, (esc_work.1 * 10.0).round() / 10.0],
+                "relay_wires": (relay_wires * 10.0).round() / 10.0,
                 "layer_s": (rep.stats.layer_s * 1e3).round() / 1e3,
                 "busy_s": (rep.stats.busy_s * 1e3).round() / 1e3,
                 "alive": esc_work.2,
