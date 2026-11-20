@@ -332,6 +332,19 @@ class _FakeSession:
         return {"focus_mm": list(self.marks[self.cur]), "canvas": [0, 0, 1000, 1000], "spot_px": [500, 500],
                 "mm_px": list(self.mm_px), "view_px": [0, 0, 1000, 1000]}
 
+    origin = (0, 37)  # the main window's xwd image starts below the title bar: screen px - origin = image px
+    marker_reads = None  # tests: list of drc_marker answers to return instead of the row's own marker
+
+    marker_off = (3.0, -2.0)  # KiCad centred the items (marks[n]); its marker for the row is this far from there
+
+    def marker(self):  # the marker KiCad highlights for the n-th row: not where it centred, not the items' mean
+        if self.marker_reads is not None:
+            return self.marker_reads.pop(0) if self.marker_reads else None
+        return (self.marks[self.cur][0] + self.marker_off[0], self.marks[self.cur][1] + self.marker_off[1])
+
+    def window_origin(self, win=None):
+        return self.origin
+
     def stop(self):
         pass
 
@@ -341,8 +354,9 @@ def _spots(tmp_path, monkeypatch, off_mm=0.0, warn_second=False, **kw):
     warn_second: the second row is a warning (index row + its dialog line)."""
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     from PIL import Image
-    im = Image.new("RGB", (1000, 1000))  # each pixel's colour encodes its own position (4 px steps)
-    im.putdata([(x // 4, y // 4, 7) for y in range(1000) for x in range(1000)])
+    ox, oy = _FakeSession.origin  # screenshot pixel (x, y) shows screen pixel (x + ox, y + oy): colours encode the SCREEN px
+    im = Image.new("RGB", (1000 - ox, 1000 - oy))
+    im.putdata([((x + ox) // 4, (y + oy) // 4, 7) for y in range(1000 - oy) for x in range(1000 - ox)])
     im.save(tmp_path / "shot.png")
     routed = _j("wiccon-routed-drc.json")
     rows = [{"k": k, "text": "Error: " + v["description"], "items": [i["description"] for i in v["items"]]}
@@ -835,9 +849,13 @@ def test_the_ring_goes_on_the_rows_own_marker_not_on_where_kicad_centred(tmp_pat
     the marker; the ring / crop is put on the row's marker by the measured view transform, and a marker that is not
     on screen is reported (no ring on the wrong spot)."""
     r, _, idx = _spots(tmp_path, monkeypatch, off_mm=0.0)
-    for rec, row in zip(r["records"], idx["rows"]):
+    for n, (rec, row) in enumerate(zip(r["records"], idx["rows"])):
+        mk = (_FakeSession.last.marks[n][0] + _FakeSession.marker_off[0],
+              _FakeSession.last.marks[n][1] + _FakeSession.marker_off[1])  # KiCad's marker, not the items' mean
         G_marker = want = tools.marker_px({"mm_px": [1.0, 1.0], "spot_px": [500, 500], "focus_mm": rec["focus_mm"]},
-                                          row["x"], row["y"])
+                                          mk[0], mk[1])
+        assert rec["marker_mm"] == [round(mk[0], 4), round(mk[1], 4)] and rec["marker_source"] == "kicad"
+        assert (row["x"], row["y"]) != pytest.approx(mk, abs=0.5)  # the two really differ in this fixture
         assert rec["marker_px"] == [round(want[0]), round(want[1])] and rec["marker_visible"] and G_marker
         assert rec["marker_px"] != [500, 500]  # not the spot where KiCad centred the items
         rx, ry = _ring_centre(rec["board_png"])
@@ -848,6 +866,53 @@ def test_the_ring_goes_on_the_rows_own_marker_not_on_where_kicad_centred(tmp_pat
     assert [x["focus_score"] for x in r2["records"]] == [1.0, 1.0]
     assert [x["marker_visible"] for x in r2["records"]] == [False, False] and not any(x["match"] for x in r2["records"])
     assert all("not on screen" in x["why"] for x in r2["records"])
+
+
+def test_ring_is_in_screenshot_pixels_not_screen_pixels(tmp_path, monkeypatch):
+    """verify n1 M2: the main window's xwd image starts at screen (0, 37): the ring sits on the screenshot pixel that
+    shows the marker's SCREEN pixel (the test screenshot's colours encode the screen position)."""
+    for origin in ((0, 37), (0, 0), (5, 61)):
+        d = tmp_path / f"o{origin[0]}_{origin[1]}"
+        d.mkdir()
+        monkeypatch.setattr(_FakeSession, "origin", origin)
+        r, _, _ = _spots(d, monkeypatch)
+        for rec in r["records"]:
+            rx, ry = _ring_centre(rec["board_png"])
+            assert abs(rx - rec["marker_px"][0]) <= 4 and abs(ry - rec["marker_px"][1]) <= 4, (origin, rx, ry, rec["marker_px"])
+
+
+def test_a_row_without_a_single_kicad_marker_cannot_match(tmp_path, monkeypatch):
+    """verify n1 H1: no brightened marker (or several) -> marker_source items_mean, match False with the reason."""
+    monkeypatch.setattr(_FakeSession, "marker_reads", [None, None])
+    r, _, _ = _spots(tmp_path, monkeypatch)
+    assert [x["marker_source"] for x in r["records"]] == ["items_mean"] * 2 and not any(x["match"] for x in r["records"])
+    assert all("no single highlighted marker" in x["why"] for x in r["records"])
+
+
+def test_gui_marker_reads_the_one_brightened_marker_and_retries(tmp_path, monkeypatch):
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    s = G.GuiSession(tmp_path / "b.kicad_pcb", tmp_path / "s", display=":29")
+    answers = [{"markers": []}, {"markers": [{"x": 1, "y": 2}, {"x": 3, "y": 4}]}, {"markers": [{"x": 5.5, "y": 6.5}]}]
+    s.call = lambda cmd, **a: answers.pop(0) if cmd == "drc_marker" else pytest.fail(cmd)
+    assert s.marker() == (5.5, 6.5)
+    answers[:] = [{"markers": []}] * 5
+    assert s.marker() is None
+    s.e = type("E", (), {"geom": staticmethod(lambda w: (3, 37, 1920, 1043))})()
+    s.main = "0x1"
+    assert s.window_origin() == (3, 37)
+
+
+def test_helper_drc_marker_returns_only_brightened_markers(monkeypatch):
+    import sys
+    import types
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("h", ROOT / "harness/gui_helper/topor_gui_helper.py")
+    h = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(h)
+    mk = lambda x, y, b: types.SimpleNamespace(IsBrightened=lambda: b, GetPosition=lambda: types.SimpleNamespace(x=x, y=y))  # noqa: E731
+    fake = types.SimpleNamespace(GetBoard=lambda: types.SimpleNamespace(Markers=lambda: [mk(1e6, 2e6, False), mk(3.5e6, 4.25e6, True)]))
+    monkeypatch.setitem(sys.modules, "pcbnew", fake)
+    assert h.cmd_drc_marker() == {"markers": [{"x": 3.5, "y": 4.25}]} and "drc_marker" in h.COMMANDS
 
 
 def _ring_centre(png, marker_px=None, half=350):
@@ -898,3 +963,37 @@ def test_gui_focus_reads_x_y_at_the_spot_and_measures_the_scale_once_per_zoom(tm
     s.must = lambda cmd, step, **a: {"zoom": "Zoom 20,00"}
     s.set_zoom(20)
     assert s._scale is None  # a new zoom asks for a new scale
+
+
+def test_drc_walk_relocates_to_the_nearest_duplicate_line_not_the_first(tmp_path, monkeypatch):
+    """verify r6 M4: row B shows no 'q' line, so Down from B lands on 'x' (a text three lines carry): the relocation
+    takes the NEAREST 'x' (line 4), after which C is one key away; the first 'x' (line 1) needs a 2nd relocation."""
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    model = [{"k": 0, "text": "A", "items": ["x"]}, {"k": 1, "text": "B", "items": ["q", "x"]},
+             {"k": 2, "text": "C", "items": ["x"]}]
+    s = _walk_session(tmp_path, model, ["A", "x", "B", "x", "C", "x"])
+    assert list(s.drc_walk([2], max_resyncs=1)) == [(2, "C", None)]
+    assert sum(st["step"] == "drc walk resync" for st in s.steps) == 1
+
+
+def test_drc_walk_relocation_allowance_is_enforced(tmp_path, monkeypatch):
+    """verify r6 M7: more relocations than max_resyncs fail the row (error names the relocations), not loop."""
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    model = [{"k": 0, "text": "A", "items": ["a1", "a2"]}, {"k": 1, "text": "B", "items": ["b1"]},
+             {"k": 2, "text": "C", "items": ["c1"]}]
+    s = _walk_session(tmp_path, model, ["A", "a1", "C", "c1", "B", "b1"])
+    out = list(s.drc_walk([1], max_resyncs=0))
+    assert len(out) == 1 and out[0][0] == 1 and out[0][1] is None and "relocations" in out[0][2]
+
+
+def test_drc_walk_after_an_unreachable_row_the_next_row_starts_from_a_click(tmp_path, monkeypatch):
+    """verify r6 M2: after a failed row the position is unknown: the next row clicks the first line again (a stale
+    position would make the keys start from the wrong line)."""
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    s = _walk_session(tmp_path, _MODEL3, ["A", "a1", "B", "b1", "C", "c1"], fail_once=2)
+    clicks = []
+    orig = s.e.click_abs
+    s.e.click_abs = lambda *a: (clicks.append(a), orig(*a))[1]
+    out = list(s.drc_walk([0, 1, 2]))
+    assert out[0][2] and out[1:] == [(1, "B", None), (2, "C", None)]
+    assert len(clicks) == 2  # the first click + the restart after row 0 failed

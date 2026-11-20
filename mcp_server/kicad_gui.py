@@ -468,6 +468,24 @@ class GuiSession:
         return {"focus_mm": list(xy), "canvas": [x0, y0, w, h], "spot_px": [sx, sy], "mm_px": list(self._scale),
                 "view_px": [x0, y0, x0 + free_w, y0 + h]}
 
+    def marker(self, tries: int = 5, wait_s: float = 0.2):
+        """(x, y) mm of the DRC marker KiCad itself highlights (brightens) for the selected row, read through the
+        helper's drc_marker command; None when it reports none or several after `tries` reads (the caller must then
+        not claim a ring position)."""
+        for i in range(tries):
+            ms = self.call("drc_marker").get("markers") or []
+            if len(ms) == 1:
+                return float(ms[0]["x"]), float(ms[0]["y"])
+            if i + 1 < tries:
+                time.sleep(wait_s)
+        return None
+
+    def window_origin(self, win: str | None = None) -> tuple:
+        """Screen position (x, y) of the top-left pixel of `xwd -id <win>` (default: the main window): the window's
+        screenshot starts below the window manager's title bar, so screen px - this origin = screenshot px."""
+        g = self.e.geom(win or self.main)
+        return g[0], g[1]
+
 
 # ------------------------------------------------------------------ the one session of this process
 

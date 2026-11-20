@@ -562,7 +562,10 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
     index row (all, or class `cls`; `per_class` > 0 caps each class, shorts/crossings always kept) is selected as a
     user does, in list order, and the dialog + the board view at the marker are kept. A failed row is reported in
     its record and the walk goes on in the same session. match = the GUI row has the same text and items and the
-    selection landed on it; focus_mm = the board point KiCad centred (its marker), focus_d_mm = its distance from the
+    selection landed on it; marker_mm = the marker KiCad itself highlights for the selected row (read through the
+    helper, marker_source "kicad"), marker_px / the ring / the crop = that marker on the screen (measured view
+    transform, minus the main window's origin in the screenshot), marker_visible = it is inside the free canvas;
+    focus_mm = the board point KiCad centred (it centres the row's items, not necessarily the marker), focus_d_mm = its distance from the
     row's nearest geometry (our track / via pieces, other items' points; else the items' mean position).
     focus_score = 1 / (1 + (focus_d_mm / scale)^2), scale = FOCUS_TOL_MM + FOCUS_EXTENT_SHARE * the row's geometry
     extent (graded, larger for long tracks / polygons); match also needs focus_score >= match_min.
@@ -640,25 +643,34 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
                     d_mm = D.marker_dist(f["focus_mm"], r, geom)
                     scale = round(FOCUS_TOL_MM + FOCUS_EXTENT_SHARE * D.row_extent(r, geom), 3)
                     score = focus_score(d_mm, scale)
-                    # the ring goes on the ROW's marker, from the view transform (KiCad centres the row's items, for
-                    # tracks the middle of their bounding box, which may be several mm from the marker)
+                    # the ring goes on the marker KiCad itself highlights for the selected row (read from KiCad through
+                    # the helper), put on the screen by the measured view transform; screen px -> screenshot px by the
+                    # window origin (the main window's xwd image starts below the title bar). Fallback (KiCad reports no
+                    # single marker): the items' mean, and the row cannot match (verify n1 H1)
                     sx, sy = f["spot_px"]
-                    mpx = marker_px(f, r["x"], r["y"])
+                    mk = s.marker()
+                    rec["marker_source"] = "kicad" if mk else "items_mean"
+                    mm_pos = mk if mk else (r["x"], r["y"])
+                    if mk:
+                        rec["marker_mm"] = [round(mk[0], 4), round(mk[1], 4)]
+                    mpx = marker_px(f, mm_pos[0], mm_pos[1])
                     visible = mpx is not None and f["view_px"][0] + 12 <= mpx[0] <= f["view_px"][2] - 12 and \
                         f["view_px"][1] + 12 <= mpx[1] <= f["view_px"][3] - 12
+                    ox, oy = s.window_origin()
                     board_png = s.e.shot(f"{r['id']}-board", main_x)
                     dlg_png = s.e.shot(f"{r['id']}-dlg", dlg_x) if dlg_x else None
                     half = 350
-                    cx, cy = (round(mpx[0]), round(mpx[1])) if visible else (sx, sy)  # crop and ring on the marker
+                    cx, cy = (round(mpx[0]) - ox, round(mpx[1]) - oy) if visible else (sx - ox, sy - oy)  # screenshot px
                     rec.update(selected_ok=ok_sel, focus_mm=f["focus_mm"], focus_d_mm=d_mm, focus_scale_mm=scale,
                                focus_score=score, marker_px=[round(mpx[0]), round(mpx[1])] if mpx else None,
                                marker_visible=bool(visible),
                                board_png=G.crop(board_png, shots / f"{r['id']}-board.png",
                                                 (cx - half, cy - half, 2 * half, 2 * half), mark=(cx, cy)),
                                dlg_png=str(shutil.copy(dlg_png, shots / f"{r['id']}-dlg.png")) if dlg_png else None,
-                               match=bool(ok_sel) and bool(visible) and score >= match_min)
+                               match=bool(ok_sel) and bool(visible) and bool(mk) and score >= match_min)
                     if not rec["match"]:
                         rec["why"] = ("the dialog selection is not this row" if not ok_sel else
+                                      "KiCad reports no single highlighted marker for this row" if not mk else
                                       "the row's marker is not on screen (KiCad did not scroll to it)" if not visible
                                       else f"KiCad focused {d_mm} mm from the row's items: focus_score {score} < "
                                       f"match_min {match_min} (scale {scale} mm)")
