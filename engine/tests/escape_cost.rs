@@ -99,13 +99,20 @@ fn the_cost_budget_counts_each_step_by_its_cost_terms() {
     let esc: Vec<_> = rows.iter().filter(|r| r["kind"] == "escape").collect();
     let rel: Vec<_> = rows.iter().filter(|r| r["kind"] == "relay").collect();
     assert!(!esc.is_empty() && !rel.is_empty(), "escapes {} re-lays {}", esc.len(), rel.len());
+    // A re-lay's cost terms from the weights themselves (not `cost::relay` / `cost::local`, so a
+    // wrong term there shows): fixed part, per pass, per judged wire and per judged wire and pass,
+    // per local refinement evaluation.
+    let relay_terms = |r: &serde_json::Value| {
+        let (p, w, e) = (f(r, "passes"), f(r, "local_wires"), f(r, "evals"));
+        cost::RELAY_FIXED + cost::RELAY_PASS * p + cost::LOCAL_WIRE * w + cost::LOCAL_WIRE_PASS * w * p + cost::LOCAL_EVAL * e
+    };
     assert_eq!(esc.len() as f64, f(&e, "escapes"), "{e}");
     for r in &rel {
-        let want = cost::relay(f(r, "passes") as usize, f(r, "local_wires") as usize) + cost::local(f(r, "evals") as usize, f(r, "local_wires") as usize);
+        let want = relay_terms(r);
         // A re-lay whose judge fell back to the whole board also pays a global layering + measure.
         assert!(near(f(r, "cost"), want, 1e-9) || f(r, "cost") > want, "re-lay row {r}: cost terms {want}");
     }
-    assert!(rel.iter().any(|r| near(f(r, "cost"), cost::relay(f(r, "passes") as usize, f(r, "local_wires") as usize) + cost::local(f(r, "evals") as usize, f(r, "local_wires") as usize), 1e-9)));
+    assert!(rel.iter().any(|r| near(f(r, "cost"), relay_terms(r), 1e-9)));
     // An escape: its fixed part, the whole-board layering and its measures.
     let esc_terms = |r: &serde_json::Value| {
         let n = f(r, "passes") as usize;
