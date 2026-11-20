@@ -388,13 +388,21 @@ pub fn no_run_reason(model: &BoardModel, lid: u32) -> String {
 /// Shortcuts of a branch run onto its trunk (D6b fuse; TopoR's FreeStyle auto move of T-points,
 /// black-box E8c-E8e): `run` starts on the trunk's copper (`trunk`, the trunk's polylines on the
 /// run's layer, math frame); leaving the trunk at the foot `q` of a later vertex `run[i]`
-/// instead replaces `run[0..=i]` by `q -> run[i]`. Price per candidate (mm): its length plus the
-/// `junction_angle` price `jw x ws_mm x psi(angle to the trunk)`; returns the candidates that are
-/// cheaper than the run as it is, the cheapest first, as `(price gain, length gain mm, i, new
-/// run)`: the price gain is the length gain plus the junction-angle price gain (a price, not a
-/// length: psi grows without bound as the branch leaves the trunk tangentially).
-/// O(run vertices x trunk segments).
-pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
+/// instead replaces `run[0..=i]` by a link `q -> run[i]`. Price per candidate (mm): its length
+/// plus the `junction_angle` price `jw x ws_mm x psi(angle to the trunk)`, and with `style`
+/// (`[drawing] style = "octilinear"`: the DP's prices and the wire's pitch w + s, nm) the
+/// octilinear DP's style price of the whole run ([`super::octi::style_price`]: bends, jogs, acute
+/// bends, `any_angle` per stretch), so a fuse prices on the first draw's scale (octi-bundle r2,
+/// the user's A1c rule: every redraw path uses the first draw's rules). With `style` the links
+/// are the DP's connectors ([`super::octi::link_shapes`]: straight, two elbows, two centred Zs)
+/// and the straight any-angle link, which pays `any_angle` (allowed, graded, no cutoff); without,
+/// the straight link only. Returns the candidates that are cheaper than the run as it is, the
+/// cheapest first, as `(price gain, length gain mm, i, new run)`: the price gain is the length
+/// gain plus the junction-angle and style price gains (a price, not a length: psi grows without
+/// bound as the branch leaves the trunk tangentially). The caller checks each with the full
+/// checker (every clearance against all drawn copper, [`Drawer::refit_run`]).
+/// O(run vertices x (trunk segments + shapes x run vertices)).
+pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
     let price = |dir: Vec2, arms: &[Vec2]| -> f64 {
         let Some(u) = dir.unit() else { return 0.0 };
         if arms.is_empty() || jw <= 0.0 {
@@ -403,6 +411,7 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> 
         let deg = arms.iter().map(|a| a.dot(u).clamp(-1.0, 1.0).acos().to_degrees()).fold(180.0, f64::min);
         jw * ws_mm * super::factors::junction_psi(deg)
     };
+    let style_mm = |pts: &[Vec2]| -> f64 { style.map_or(0.0, |(cfg, pitch)| super::octi::style_price(cfg, pitch, pts) / 1e6) };
     let mut out = Vec::new();
     if run.len() < 2 {
         return out;
@@ -410,16 +419,42 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> 
     let Some((_, arms0)) = trunk_foot(trunk, run[0]) else { return out };
     let mut along = 0.0;
     let old0 = price(run[1] - run[0], &arms0);
+    // The run as drawn may hold a piece the style forbids (kept where nothing else fitted): it is
+    // priced with the bans lifted; a reversal in it (no finite price) leaves the style out of the
+    // comparison, as without `style`.
+    let old_style = style.map_or(0.0, |(cfg, pitch)| {
+        let soft = super::octi::OctiCfg { any_forbidden: false, acute_forbidden: false, ..*cfg };
+        super::octi::style_price(&soft, pitch, run) / 1e6
+    });
     for i in 1..run.len() {
         along += (run[i] - run[i - 1]).len() / 1e6;
         let Some((q, arms)) = trunk_foot(trunk, run[i]) else { continue };
-        let d = (run[i] - q).len() / 1e6;
-        let gain = along + old0 - d - price(run[i] - q, &arms);
-        if gain > 1e-3 {
+        // The links q -> run[i]: the straight one, and with the style the DP's connectors.
+        let mut links: Vec<Vec<Vec2>> = vec![vec![run[i]]];
+        if style.is_some() && super::octi::octi_dir(run[i] - q).is_none() {
+            links.extend(super::octi::link_shapes(q, run[i]));
+        }
+        for link in links {
             let mut pts = vec![q];
+            pts.extend_from_slice(&link[..link.len() - 1]);
             pts.extend_from_slice(&run[i..]);
             pts.dedup_by(|a, b| (*a - *b).len2() < 1.0);
-            if pts.len() >= 2 {
+            if pts.len() < 2 {
+                continue;
+            }
+            let mut from = q;
+            let mut d = 0.0;
+            for &p in &link {
+                d += (p - from).len() / 1e6;
+                from = p;
+            }
+            let new_style = style_mm(&pts);
+            if !new_style.is_finite() {
+                continue;
+            }
+            let style_gain = if old_style.is_finite() { old_style - new_style } else { 0.0 };
+            let gain = along + old0 - d - price(pts[1] - pts[0], &arms) + style_gain;
+            if gain > 1e-3 {
                 out.push((gain, along - d, i, pts));
             }
         }
@@ -5110,7 +5145,7 @@ mod tests {
         let mm = 1e6;
         let trunk = [v(-10.0 * mm, 0.0), v(10.0 * mm, 0.0)];
         let run = [v(0.0, 0.0), v(1.0 * mm, 0.5 * mm), v(5.0 * mm, 0.5 * mm), v(6.0 * mm, 3.0 * mm)];
-        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0);
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None);
         assert!(!c.is_empty());
         let (gain, len_gain, i, pts) = &c[0];
         assert_eq!(*i, 3);
@@ -5122,7 +5157,50 @@ mod tests {
         // psi(26.6 deg) = 1.73 before, psi(90 deg) = 0.04 after: 12.39 mm.
         assert!((*gain - 12.39).abs() < 0.02, "{gain}");
         // A branch that leaves straight away has nothing to gain.
-        assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0).is_empty());
+        assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0, None).is_empty());
+    }
+
+    /// octi-bundle r2 (A1c: the fuse prices on the first draw's scale): a 45/90 staircase branch
+    /// that starts at the end of a vertical trunk (the wiccon GPIO14 shape: the chord leaves the
+    /// trunk arm at 149 degrees, psi = 0, so the junction angle gains nothing). Without the style
+    /// the cheapest fuse is the straight free-angle chord (length only); with it the chord pays
+    /// `any_angle` (15 + 2 x 6.71 = 28.4 mm) and loses, and the cheapest link is the DP's elbow
+    /// (vertical then 45 degrees, as long as the staircase, 5 bends fewer).
+    #[test]
+    fn fuse_prices_the_link_on_the_octilinear_dp_scale() {
+        let mm = 1e6;
+        let p = |x: f64, y: f64| v(x * mm, y * mm);
+        let trunk = [p(0.0, 5.0), p(0.0, 0.0)];
+        let run = [p(0.0, 0.0), p(0.0, -1.0), p(1.0, -2.0), p(1.0, -3.0), p(2.0, -4.0), p(2.0, -5.0), p(3.0, -6.0)];
+        let plain = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None);
+        assert!(super::super::octi::any_price(&plain[0].3) > 0.0, "length only: the free-angle chord first {:?}", plain[0]);
+        let cfg = super::super::octi::OctiCfg { on: true, ..Default::default() };
+        let pitch = 0.45 * mm;
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, Some((&cfg, pitch)));
+        assert!(!c.is_empty());
+        let (gain, len_gain, _, pts) = &c[0];
+        assert_eq!(super::super::octi::any_price(pts), 0.0, "{pts:?}");
+        // One elbow: a single bend (at i = 5 the elbow's leg goes on through the last vertex).
+        let bends = pts.windows(3).filter(|x| super::super::octi::turn_deg(x[1] - x[0], x[2] - x[1]) > 0.5).count();
+        assert_eq!(bends, 1, "one elbow {pts:?}");
+        // Same length as the staircase (both monotone in the same two directions).
+        assert!(len_gain.abs() < 1e-6, "{len_gain}");
+        // The price gain is the style price gain alone, on the DP's scale (bends and jogs).
+        let st = |x: &[Vec2]| super::super::octi::style_price(&cfg, pitch, x) / 1e6;
+        assert!((*gain - (st(&run) - st(pts))).abs() < 1e-9 && *gain > 0.9, "{gain}");
+        // Every free-angle link that is offered pays `any_angle`: none gains here (graded, not
+        // cut off: see the next case).
+        assert!(c.iter().all(|x| super::super::octi::any_price(&x.3) == 0.0), "{c:?}");
+        // A long octilinear detour (20 out, 3 across, 14 back) against its free-angle chord from
+        // the trunk end (6.71 mm, any_angle 15 + 13.4): the chord still gains 2.9 and is offered,
+        // far below the elbow (3 + 4.24 mm, gain 30.5).
+        let run = [p(0.0, 0.0), p(0.0, -20.0), p(3.0, -20.0), p(3.0, -6.0)];
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, Some((&cfg, pitch)));
+        let chord = c.iter().find(|x| x.2 == 3 && x.3.len() == 2).expect("the free-angle chord is offered");
+        let elbow = c.iter().position(|x| x.2 == 3 && x.3.len() == 3 && super::super::octi::any_price(&x.3) == 0.0).expect("elbow");
+        assert!(c[elbow].0 > chord.0, "{c:?}");
+        let any_mm = 15.0 * super::super::octi::any_angle_amount((p(3.0, -6.0) - p(0.0, 0.0)).len());
+        assert!((chord.0 - (chord.1 + st(&run) - any_mm)).abs() < 1e-6, "{chord:?}");
     }
 
     #[test]

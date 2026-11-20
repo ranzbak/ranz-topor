@@ -203,6 +203,78 @@ pub fn any_angle_amount(len_nm: f64) -> f64 {
     1.0 + len_nm / MM * (2.0 / 15.0)
 }
 
+/// octi-bundle: the `any_angle` amount of the polyline `pts` (the sum of [`any_angle_amount`] over
+/// its any-angle stretches, [`breaks`]); 0 for an octilinear polyline.
+pub fn any_price(pts: &[Vec2]) -> f64 {
+    breaks(pts).0.iter().map(|a| any_angle_amount(a.2)).sum()
+}
+
+/// The leg length under which a bend pays the jog penalty: `L_min = min(L_pref, 2 (w + s))`
+/// (`pitch` = w + s, nm; at least 1 nm). The octilinear DP's and [`style_price`]'s.
+pub fn jog_leg(cfg: &OctiCfg, pitch: f64) -> f64 {
+    cfg.spacing_nm.min(2.0 * pitch).max(1.0)
+}
+
+/// The octilinear DP's price of a turn from direction `u` (after a leg of `l_in` nm; `u` zero:
+/// no leg before, no price) to direction `v`, nm: `bend_nm` per 45 degrees, plus `acute_bend`
+/// beyond 90 degrees, plus the jog penalty `2 bend_nm (1 - l_in / leff)^2` after a leg shorter
+/// than `leff` ([`jog_leg`]); infinite for a reversal (over 179 degrees) or a forbidden acute
+/// turn. The one bend price of the first draw and of every redraw that prices on its scale
+/// ([`style_price`]). O(1).
+pub fn bend_price(cfg: &OctiCfg, leff: f64, u: Vec2, l_in: f64, v: Vec2) -> f64 {
+    if u.len2() < 1e-18 {
+        return 0.0;
+    }
+    let t = turn_deg(u, v);
+    if t < 0.5 {
+        return 0.0;
+    }
+    if t > 179.0 {
+        return f64::INFINITY;
+    }
+    let mut p = cfg.bend_nm * t / 45.0;
+    if t > 90.5 {
+        if cfg.acute_forbidden {
+            return f64::INFINITY;
+        }
+        p += cfg.acute_nm * acute_amount(t);
+    }
+    if l_in < leff {
+        p += 2.0 * cfg.bend_nm * (1.0 - l_in / leff).powi(2);
+    }
+    p
+}
+
+/// octi-bundle r2 (fuse octilinear, the user's A1c rule: every redraw path prices on the first
+/// draw's scale): the style price of the polyline `pts` (nm, without its length) as the
+/// octilinear DP prices its legs: every bend at [`bend_price`] with the segment before it, plus
+/// `any_nm` per [`any_price`] amount (each any-angle stretch once, 1 plus 2/15 per mm at the
+/// default weight 15). Infinite where the style forbids a piece (`any_angle = "forbidden"`, a
+/// forbidden acute bend, a reversal). `pitch` = w + s of the wire (the jog leg). O(points).
+pub fn style_price(cfg: &OctiCfg, pitch: f64, pts: &[Vec2]) -> f64 {
+    let leff = jog_leg(cfg, pitch);
+    let segs: Vec<Vec2> = pts.windows(2).map(|p| p[1] - p[0]).filter(|d| d.len2() > 1.0).collect();
+    let mut tot = 0.0;
+    for s in segs.windows(2) {
+        tot += bend_price(cfg, leff, s[0], s[0].len(), s[1]);
+    }
+    let any = any_price(pts);
+    if any > 0.0 {
+        if cfg.any_forbidden {
+            return f64::INFINITY;
+        }
+        tot += cfg.any_nm * any;
+    }
+    tot
+}
+
+/// The octilinear links from `p` to `q` (fuse octilinear): the straight segment when `p -> q` is
+/// at 0/45/90 degrees, else the two elbows and the two centred Z shapes of the DP's connectors,
+/// each as its points after `p` (ending at `q`). Empty for `p == q`. O(1).
+pub fn link_shapes(p: Vec2, q: Vec2) -> Vec<Vec<Vec2>> {
+    connectors(p, q).into_iter().map(|s| s.into_iter().map(|l| l.0).collect()).collect()
+}
+
 /// `acute_bend` amount of a turn of `turn` degrees (> 90): 1, rising to 2 as the interior angle
 /// closes from 90 to 0 degrees.
 pub fn acute_amount(turn: f64) -> f64 {
@@ -528,7 +600,7 @@ impl Drawer<'_> {
         }
         // The next node on the taut path after each node on it.
         let next_on: Vec<Option<usize>> = (0..n).map(|i| if nodes[i].3 { (i + 1..n).find(|&j| nodes[j].3) } else { None }).collect();
-        let leff = cfg.spacing_nm.min(2.0 * pitch).max(1.0);
+        let leff = jog_leg(&cfg, pitch);
         // Drawn octilinear segments of other nets near the run, with the centre distance at which
         // this wire would run beside them at the clearance (bundle following).
         let side: Vec<(Vec2, Vec2, usize, f64)> = if cfg.pull > 0.0 {
@@ -692,29 +764,7 @@ impl Drawer<'_> {
         if let Some(u) = lead_in {
             last[0][8] = (u, f64::INFINITY);
         }
-        let bend = |u: Vec2, l_in: f64, v: Vec2| -> f64 {
-            if u.len2() < 1e-18 {
-                return 0.0;
-            }
-            let t = turn_deg(u, v);
-            if t < 0.5 {
-                return 0.0;
-            }
-            if t > 179.0 {
-                return f64::INFINITY;
-            }
-            let mut p = cfg.bend_nm * t / 45.0;
-            if t > 90.5 {
-                if cfg.acute_forbidden {
-                    return f64::INFINITY;
-                }
-                p += cfg.acute_nm * acute_amount(t);
-            }
-            if l_in < leff {
-                p += 2.0 * cfg.bend_nm * (1.0 - l_in / leff).powi(2);
-            }
-            p
-        };
+        let bend = |u: Vec2, l_in: f64, v: Vec2| -> f64 { bend_price(&cfg, leff, u, l_in, v) };
         // Price of leaving / entering a pad off its axis (up to two bends' worth at 90 degrees),
         // or along it but turning before the pad's tip is cleared (graded like the jog penalty):
         // pad exit along the pad axis until clear of the neighbour pads.

@@ -49,7 +49,9 @@ What works on this branch:
   the junction angle price follows the Steiner-tree length bound (`junction_angle`, ψ curve, 0 from 120°);
 - fuse after drawing: a trace that leaves a branch point or a pad right beside another trace of its net
   starts on that trace's copper where the two part (one copper, a T there), when that is cheaper by length
-  and junction angle and keeps every clearance (`[search] fuse_branches`, on by default);
+  and junction angle (and, in the octilinear style, by the drawing's own bend and any-angle prices: the link
+  is an elbow or Z at 0/45/90 degrees where it fits) and keeps every clearance (`[search] fuse_branches`, on
+  by default);
 - the drawing's exact path has no out-and-back track pieces at its joints any more.
 
 The board ladder at commit `121e3eb` (headless, `tools/route_board.sh`, judged by `kicad-cli` DRC after a zone

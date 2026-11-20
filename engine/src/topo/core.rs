@@ -2261,15 +2261,16 @@ impl RoundOut {
 
 /// The fuse pass's report line (M6 F-3) from the fuses applied, each `(price gain, length gain
 /// mm)` as [`draw::fuse_candidates`] gives them: the length the moved ends saved in mm, and apart
-/// from it the drop of the `junction_angle` price (price gain minus length gain; a price: it grows
-/// without bound for a branch that leaves its trunk tangentially, so it is never added to a
+/// from it the drop of the `junction_angle` price and, in the octilinear style, of the DP's style
+/// price (bends, jogs, `any_angle`; octi-bundle r2) (price gain minus length gain; a price: it
+/// grows without bound for a branch that leaves its trunk tangentially, so it is never added to a
 /// length). O(fuses).
 pub fn fuse_line(fused: &[(f64, f64)]) -> String {
     let n_fused = fused.len();
     let len_gain_mm: f64 = fused.iter().map(|f| f.1).sum();
     let angle_gain: f64 = fused.iter().map(|f| f.0 - f.1).sum();
     format!(
-        "fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part: {:.1} mm {} in length, junction-angle price ([factors] junction_angle) {} by {:.1}",
+        "fuse after drawing: {n_fused} trace ends moved onto their trunk's copper where the two part: {:.1} mm {} in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) {} by {:.1}",
         len_gain_mm.abs(),
         if len_gain_mm >= 0.0 { "saved" } else { "added" },
         if angle_gain >= 0.0 { "lower" } else { "higher" },
@@ -8681,6 +8682,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         });
         let ids: Vec<WireId> = drawn.keys().copied().collect();
         let pad_nm = opts.junction_pad_mm * MM;
+        // octi-bundle r2: the links and prices of the octilinear first draw (A1c).
+        let ocfg = dr.octi;
         for &w in &ids {
             if pairs.width.contains_key(&st.wires[w].net) || jmoved.contains(&w) {
                 continue;
@@ -8714,7 +8717,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let Some(uo) = drawn.get(&u) else { continue };
                     let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
                     let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
-                    for (gain, len_gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw).into_iter().take(8) {
+                    for (gain, len_gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw, octi_on.then_some((&ocfg, wi.w + wi.s))).into_iter().take(8) {
                         let cut = &run[..=i];
                         let fdbg = std::env::var("TOPO_FUSEDBG").is_ok();
                         if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, cut))) {

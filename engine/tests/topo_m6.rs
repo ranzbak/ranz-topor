@@ -3,7 +3,7 @@
 //!
 //! * `drawing_feedback` acts with `[optimize] loop = "cycles"` only; with the TopoR loop a true
 //!   value is ignored with the warning `FEEDBACK_IGNORED` (the picked plan is drawn once, M2).
-//! * The fuse pass reports the length it saved in mm and the junction-angle price apart (F-3: the
+//! * The fuse pass reports the length it saved in mm and the junction-angle and style price apart (F-3: the
 //!   sum of both was printed as "mm cheaper", 1281560.3 mm on esp-rust-board).
 //!
 //! Fixture: `harness/mechfix.py fx_narrow_gap_forced` (one connection, a gap too narrow for it),
@@ -54,13 +54,13 @@ fn fuse_line_keeps_length_and_angle_price_apart() {
     // junction-angle price 4.0 + 3.58 = 7.58 lower.
     let l = fuse_line(&[(7.0, 3.0), (5.39, 1.81)]);
     assert!(l.starts_with("fuse after drawing: 2 trace ends moved onto their trunk's copper"), "{l}");
-    assert!(l.contains(": 4.8 mm saved in length, junction-angle price ([factors] junction_angle) lower by 7.6"), "{l}");
+    assert!(l.contains(": 4.8 mm saved in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) lower by 7.6"), "{l}");
     assert!(!l.contains("mm cheaper"), "{l}");
     // A fuse that trades length for a better angle says "added"; a worse angle "higher".
     let l = fuse_line(&[(1281555.7, -0.3)]);
-    assert!(l.contains(": 0.3 mm added in length, junction-angle price ([factors] junction_angle) lower by 1281556.0"), "{l}");
-    assert!(fuse_line(&[(0.5 - 2.0, 0.5)]).contains("0.5 mm saved in length, junction-angle price ([factors] junction_angle) higher by 2.0"));
-    assert!(fuse_line(&[]).starts_with("fuse after drawing: 0 trace ends moved onto their trunk's copper where the two part: 0.0 mm saved in length, junction-angle price ([factors] junction_angle) lower by 0.0"));
+    assert!(l.contains(": 0.3 mm added in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) lower by 1281556.0"), "{l}");
+    assert!(fuse_line(&[(0.5 - 2.0, 0.5)]).contains("0.5 mm saved in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) higher by 2.0"));
+    assert!(fuse_line(&[]).starts_with("fuse after drawing: 0 trace ends moved onto their trunk's copper where the two part: 0.0 mm saved in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) lower by 0.0"));
     // The polish line says the length its elbows and Zs changed, "added" (never shorter) or
     // "saved" by its sign.
     assert!(polish_line(34, 3.013).ends_with(": 34 segments not at 0/45/90 degrees (fused branch ends) redrawn as an elbow or Z: 3.0 mm added in length"));
