@@ -20,7 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Circle, Polygon, Rectangle  # noqa: E402
 
-from harness.drc_patterns import EDGE, PATTERNS, ROUND2, STATUS, Pat, arc_points, pad_geom, plen  # noqa: E402
+from harness.drc_patterns import EDGE, PARKED, PATTERNS, ROUND, STATUS, Pat, arc_points, outline, pad_geom, plen  # noqa: E402
 
 COL = {"F.Cu": "#c8372f", "B.Cu": "#2f62c8"}
 ROUTING = {"clearance", "shorting_items", "tracks_crossing", "hole_clearance", "copper_edge_clearance", "track_width",
@@ -38,8 +38,9 @@ def _poly(ax, g, **kw):
 
 def _base(ax, pat: Pat, title: str):
     Wd, Hd = pat.size
-    ax.add_patch(Rectangle((0, 0), Wd, Hd, fc="#fbfbf6", ec="k", lw=1.2, zorder=0))
-    ax.add_patch(Rectangle((EDGE, EDGE), Wd - 2 * EDGE, Hd - 2 * EDGE, fc="none", ec="#888", lw=0.6, ls=(0, (3, 3)), zorder=1))
+    ol = outline(pat)
+    _poly(ax, ol, fc="#fbfbf6", ec="k", lw=1.2, zorder=0)
+    _poly(ax, ol.buffer(-EDGE, quad_segs=32), fc="none", ec="#888", lw=0.6, ls=(0, (3, 3)), zorder=1)
     for f in pat.fps:
         for p in f.pads:
             g = pad_geom(p)
@@ -200,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     summ = {}
     for name in names:
-        pat = PATTERNS[name]()
+        pat = {**PATTERNS, **PARKED}[name]()
         Wd, Hd = pat.size
         cfgs = sorted(c.name for c in runs.iterdir() if (c / name / f"{name}-topor" / f"{name}.kicad_pcb").exists())
         n = 2 + len(cfgs)
@@ -211,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         _base(ax[1], pat, f"expected (sketch, KiCad DRC 0): {pat.expect.get('vias', 0)} via(s), {sum(plen(t.pts) for t in pat.ref_tracks):.2f} mm")
         _copper(ax[1], [(t.layer, t.net, t.width, t.pts) for t in pat.ref_tracks], [(v.pos[0], v.pos[1], v.dia, v.net) for v in pat.ref_vias])
         _marks(ax[1], pat)
-        summ[name] = {"cluster": pat.cluster, "title": pat.title, "round2": ROUND2.get(name, "unchanged")}
+        summ[name] = {"cluster": pat.cluster, "title": pat.title, "round": ROUND.get(name, "unchanged")}
         for k, c in enumerate(cfgs, start=2):
             run = runs / c / name
             segs, vias = read_copper(run / f"{name}-topor" / f"{name}.kicad_pcb")
@@ -226,8 +227,8 @@ def main(argv: list[str] | None = None) -> int:
             _copper(ax[k], [s for s in segs if not _is_kept(s, pat)], vias)
             for v in drc:
                 ax[k].add_patch(Circle(v["xy"], 0.45, fc="none", ec="#f2c200", lw=2.2, zorder=10))
-        tag = f" [round 2: {ROUND2[name]}]" if name in ROUND2 else ""
-        fig.suptitle(f"{pat.cluster} {name}{tag}: {pat.title}\n[{STATUS}]  F.Cu red, B.Cu blue, hatched = kept hand copper, "
+        tag = f" [{ROUND[name]}]" if name in ROUND else ""
+        fig.suptitle(f"{pat.cluster} {name}{tag}: {pat.title}\n[{"APPROVED (expected answer in tests/test_drc_patterns_e2e.py)" if "approved" in ROUND.get(name, "") else STATUS}]  F.Cu red, B.Cu blue, hatched = kept hand copper, "
                      "grey = PTH, dashed frame = copper-to-edge line, yellow ring = KiCad DRC of the routed copy", fontsize=9)
         fig.tight_layout()
         fig.savefig(out / f"{name}.png", dpi=120)

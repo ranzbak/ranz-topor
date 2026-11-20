@@ -108,6 +108,9 @@ class Pat:
     kept_arcs: list[Arc] = field(default_factory=list)
     expect: dict = field(default_factory=dict)  # vias, len (new copper), layers per net, etc.
     marks: list[dict] = field(default_factory=list)  # PNG annotations: {"xy": [x, y], "text": str}
+    corner_r: float = 0.0  # board outline: radius of the bottom-left corner (0 = square)
+    classes: list[dict] = field(default_factory=list)  # extra net classes ({"name", "track_width", ...}) besides Default
+    class_patterns: list[dict] = field(default_factory=list)  # netclass_patterns ({"netclass", "pattern"})
 
 
 def _r(x: float) -> float:
@@ -170,6 +173,19 @@ def arc_points(a: Arc, n: int = 64) -> list[tuple[float, float]]:
     return [(ux + r * math.cos(t1 + sweep * i / n), uy + r * math.sin(t1 + sweep * i / n)) for i in range(n + 1)]
 
 
+def outline(pat: Pat):
+    """The board outline as a shapely polygon (rectangle, bottom-left corner rounded by pat.corner_r)."""
+    from shapely.geometry import Point, box
+
+    Wd, Hd = pat.size
+    poly = box(0, 0, Wd, Hd)
+    r = pat.corner_r
+    if r > 0:
+        sq = box(0, Hd - r, r, Hd)
+        poly = poly.difference(sq).union(Point(r, Hd - r).buffer(r, quad_segs=64).intersection(sq))
+    return poly
+
+
 def clearance_report(pat: Pat) -> list[dict]:
     """Layer-aware shapely check of reference + kept copper + pads (different nets >= CL apart, copper inside the
     edge line). KiCad's DRC (--drc) is the authority; this catches construction slips before it runs."""
@@ -187,8 +203,7 @@ def clearance_report(pat: Pat) -> list[dict]:
             d = ga.distance(gb)
             if d < CL - 1e-6:
                 bad.append({"a": a, "b": b, "gap": round(d, 4)})
-    Wd, Hd = pat.size
-    inner = box(EDGE, EDGE, Wd - EDGE, Hd - EDGE)
+    inner = outline(pat).buffer(-EDGE, quad_segs=64)
     for _, a, _, g in its:
         if not inner.contains(g):
             bad.append({"a": a, "b": "edge", "gap": None})
@@ -210,13 +225,21 @@ def build_board(pat: Pat, *, copper: bool) -> pcbnew.BOARD:
         b.Add(n)
         nets[name] = n
     Wd, Hd = pat.size
-    for a, c in (((0, 0), (Wd, 0)), ((Wd, 0), (Wd, Hd)), ((Wd, Hd), (0, Hd)), ((0, Hd), (0, 0))):
+    r = pat.corner_r
+    for a, c in (((0, 0), (Wd, 0)), ((Wd, 0), (Wd, Hd)), ((Wd, Hd), (r, Hd)), ((0, Hd - r), (0, 0))):
         s = pcbnew.PCB_SHAPE(b)
         s.SetShape(pcbnew.SHAPE_T_SEGMENT)
         s.SetLayer(pcbnew.Edge_Cuts)
         s.SetWidth(int(0.05 * MM))
         s.SetStart(_v(*a))
         s.SetEnd(_v(*c))
+        b.Add(s)
+    if r > 0:
+        s = pcbnew.PCB_SHAPE(b)
+        s.SetShape(pcbnew.SHAPE_T_ARC)
+        s.SetLayer(pcbnew.Edge_Cuts)
+        s.SetWidth(int(0.05 * MM))
+        s.SetArcGeometry(_v(0, Hd - r), _v(_r(r - r / SQ2), _r(Hd - r + r / SQ2)), _v(r, Hd))
         b.Add(s)
     for f in pat.fps:
         fp = pcbnew.FOOTPRINT(b)
@@ -298,7 +321,8 @@ def write_board(pat: Pat, path: Path, *, copper: bool) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     pcbnew.SaveBoard(str(path), build_board(pat, copper=copper))
-    write_project_file(path, rules=dict(RULES), classes=[dict(DEFAULT_CLASS)])
+    write_project_file(path, rules=dict(RULES), classes=[dict(DEFAULT_CLASS)] + [{**DEFAULT_CLASS, "priority": 0, **c} for c in pat.classes],
+                       patterns=pat.class_patterns)
     return path
 
 
@@ -312,6 +336,12 @@ def header_2x3(ref, x0, y0, nets, *, drill=1.0, size=1.7):
         pads.append(Pad(str(i + 1), nets[i], (_r(x0 + 2.54 * col), _r(y0 + 2.54 * row)), (size, size),
                         "rect" if i == 0 else "circle", drill=drill))
     return Fp(ref, pads, "Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical")
+
+
+def jst_sh(ref, x0, y0, nets, *, layer="B.Cu"):
+    """JST SH n-pin pin row (Connector_JST:JST_SH_SM0nB-SRSS-TB, 0.6 x 1.55 pads at 1.0 mm pitch) from (x0, y0) in +x."""
+    return Fp(ref, [Pad(str(i + 1), n, (_r(x0 + i), y0), (0.6, 1.55), layer=layer) for i, n in enumerate(nets)],
+              f"Connector_JST:JST_SH_SM{len(nets):02d}B-SRSS-TB_1x{len(nets):02d}-1MP_P1.00mm_Horizontal (pin row)")
 
 
 def jst_sh4(ref, x0, y0, nets, *, mp_dy=None, layer="B.Cu"):
@@ -491,38 +521,44 @@ def kept_wide_gnd_arc() -> Pat:
     hdr = header_2x3("J1", hx, 10.5, ["P3V3", "GND", None, None, "SDA", "SCL"])
     ty = 1.4  # target row at the top edge: the pads' outer ends are 0.33 mm from the edge line (no wire passes)
     jst = jst_sh4("J2", 15.96, ty, ["P3V3", "SDA", "SCL", "GND"])  # pin row only (the 3V3 diagonal comes in where its mounting pad would be)
-    tp = Fp("TP3", [Pad("1", "GND", (1.3, 5.0), (1.7, 1.7), "circle", drill=1.0)], "TestPoint:TestPoint_THTPad_D1.7mm_Drill1.0mm")
     gw = 1.125
+    cr = 4.0  # the board's bottom-left corner is round (radius 4); the kept GND edge trace follows it at the edge clearance
+    off = _r(EDGE + gw / 2 + 0.05)  # edge trace centre line: copper-to-edge clearance + 0.05 mm
+    tp = Fp("TP3", [Pad("1", "GND", (1.3, 4.0), (1.7, 1.7), "circle", drill=1.0)], "TestPoint:TestPoint_THTPad_D1.7mm_Drill1.0mm")
     cxa, cya, ra = 12.9, 10.5, 2.5
     mid = (_r(cxa - ra / SQ2), _r(cya - ra / SQ2))
-    ye = _r(Hd - EDGE - gw / 2 - 0.09)  # the edge trace's bottom run, 0.09 mm inside the copper-to-edge line
-    xl, re = 1.3, 2.5  # its left run and the radius of its bottom-left corner
-    ce = (_r(xl + re), _r(ye - re))
-    gnd = [Trk("GND", "B.Cu", gw, [(xl, 5.0), (xl, ce[1])], locked=True),
-           Trk("GND", "B.Cu", gw, [(ce[0], ye), (10.4, ye), (10.4, 10.5)], locked=True),
+    ye = _r(Hd - off)
+    re = cr - off  # concentric with the board corner (centre (cr, Hd - cr))
+    gnd = [Trk("GND", "B.Cu", gw, [(1.3, 4.0), (off, _r(4.0 + 1.3 - off)), (off, _r(Hd - cr))], locked=True),
+           Trk("GND", "B.Cu", gw, [(cr, ye), (10.4, ye), (10.4, 10.5)], locked=True),
            Trk("GND", "B.Cu", gw, [(hx, _r(10.5 + 2.54)), (hx, ye)], locked=True),
            Trk("GND", "B.Cu", gw, [(12.9, 8.0), (18.96, 8.0)], locked=True),
            Trk("GND", "B.Cu", 0.3, [(18.96, 8.0), (18.96, ty)], locked=True)]
     arc = Arc("GND", "B.Cu", gw, (10.4, 10.5), mid, (12.9, 8.0))
-    edge_arc = Arc("GND", "B.Cu", gw, (xl, ce[1]), (_r(ce[0] - re / SQ2), _r(ce[1] + re / SQ2)), (ce[0], ye))
+    edge_arc = Arc("GND", "B.Cu", gw, (off, _r(Hd - cr)), (_r(cr - re / SQ2), _r(Hd - cr + re / SQ2)), (cr, ye))
     c3 = 18.36  # 3V3 diagonal x + y = c3: (cxa + cya - c3) / sqrt 2 - (ra + gw / 2) - 0.15 = 0.35 mm free (< one wire)
     v3 = Trk("P3V3", "B.Cu", 0.3, [(hx, 10.5), (hx, 8.6), (_r(c3 - 8.6), 8.6), (15.96, _r(c3 - 15.96)), (15.96, ty)])
     room = (cxa + cya - c3) / SQ2 - (ra + gw / 2) - 0.15
-    via_s, via_c = (16.96, 2.6), (17.96, 2.6)
+    # expected: the vias go next to their JST pads, but low enough that the via, the F.Cu bend above it and the B.Cu
+    # stub keep the copper-to-edge clearance with margin (via ring top >= 1.0 mm from the board edge)
+    yv = 2.9
+    via_s, via_c = (16.96, yv), (17.96, yv)
     p5, p6 = (_r(hx + 5.08), 10.5), (_r(hx + 5.08), 13.04)
-    cs, cc = 19.56, _r(p6[0] + p6[1])  # SDA / SCL F.Cu diagonals x + y = c
+    cs, cc = _r(16.96 + yv), _r(p6[0] + p6[1])  # SDA / SCL F.Cu diagonals x + y = c
     ref = [Trk("SDA", "F.Cu", W, [p5, (_r(cs - 10.5), 10.5), via_s]), Trk("SDA", "B.Cu", W, [via_s, (16.96, ty)]),
            Trk("SCL", "F.Cu", W, [p6, (17.96, _r(cc - 17.96)), via_c]), Trk("SCL", "B.Cu", W, [via_c, (17.96, ty)])]
     return Pat(
         name="kept_wide_gnd_arc", cluster="K4", title="Kept wide GND arcs + 3V3 leave no B.Cu room: I2C on the other layer",
-        purpose="Kept hand copper on B.Cu: a 1.125 mm GND trace along the board edge (down the left edge, round the "
-                "bottom-left corner on a 2.5 mm arc, along the bottom edge), up beside a 2x3 header and round it on a "
-                "2.5 mm arc to the target connector's GND pin; the header's GND pin drops onto the edge trace. A 0.3 mm "
-                "3V3 track runs from header pin 1 over the header to the target's 3V3 pin. SDA / SCL go from the header "
-                "(PTH) to a JST SH connector on B.Cu at the top edge, between its 3V3 and GND pins. Between the 3V3 "
-                f"diagonal and the GND arc only {room:.2f} mm is free (one wire needs {W + 2 * CL:.2f}). F.Cu is empty.",
-        answer="SDA and SCL leave the header on F.Cu (PTH pins), run 45 deg up-right over the kept B.Cu copper and drop "
-               "with one via each just below their JST pads (short B.Cu stubs). 2 vias, nothing touches either GND arc.",
+        purpose="The board's bottom-left corner is round (radius 4 mm). Kept hand copper on B.Cu: a 1.125 mm GND trace "
+                "along the board edge 0.05 mm inside the copper-to-edge line (down the left edge, round the corner concentric "
+                "with it, along the bottom edge), up beside a 2x3 header and round it on a 2.5 mm arc to the target "
+                "connector's GND pin; the header's GND pin drops onto the edge trace. A 0.3 mm 3V3 track runs from header "
+                "pin 1 over the header to the target's 3V3 pin. SDA / SCL go from the header (PTH) to a JST SH connector on "
+                f"B.Cu at the top edge, between its 3V3 and GND pins. Between the 3V3 diagonal and the GND arc only "
+                f"{room:.2f} mm is free (one wire needs {W + 2 * CL:.2f}). F.Cu is empty.",
+        answer=f"SDA and SCL leave the header on F.Cu (PTH pins), run 45 deg up-right over the kept B.Cu copper and drop "
+               f"with one via each below their JST pads (vias at y {yv}, short B.Cu stubs up into the pads). All copper "
+               "keeps the 0.3 mm copper-to-edge clearance; 2 vias, nothing touches either GND arc.",
         why="On B.Cu the targets are only reachable through the channel between the 3V3 and GND tracks (the JST row sits "
             "at the board edge, its pins close the channel's top; the GND edge trace closes the bottom), and the "
             "channel's bottleneck at the arc is narrower than one wire. F.Cu has ample room; the B.Cu target pads need "
@@ -534,73 +570,80 @@ def kept_wide_gnd_arc() -> Pat:
         expect={"vias": 2, "layers": {"SDA": ["F.Cu", "B.Cu"], "SCL": ["F.Cu", "B.Cu"]}, "b_cu_room": round(room, 3)},
         marks=[{"xy": [_r(cxa - (ra + gw / 2 + 0.25) / SQ2), _r(cya - (ra + gw / 2 + 0.25) / SQ2)],
                 "text": f"B.Cu bottleneck {room:.2f} mm"},
-               {"xy": [_r(ce[0] - re / SQ2), _r(ce[1] + re / SQ2)], "text": "kept edge arc"}])
+               {"xy": [_r(cr - re / SQ2), _r(Hd - cr + re / SQ2)], "text": "kept edge arc (round board corner)"}],
+        corner_r=cr)
 
 
 # ------------------------------------------------------------------------------------------------ K5 jst_fanout_45
+JST8 = [None, "P3V3", "SDA", "SCL", "D1", "D2", "D3", "D4"]  # 8-pin JST SH: GND (nc), 3V3 (kept), I2C, 4 data lines
+
+
 def jst_fanout_45() -> Pat:
-    Wd, Hd = 15.0, 13.2
-    x0, pc = 11.0, 2.0  # upper JST: GND(nc), 3V3, SDA, SCL from x0 in +x, pins at y pc (B.Cu), pin row only
-    j1 = jst_sh4("J1", x0, pc, [None, "P3V3", "SDA", "SCL"])
+    x0, pc = 11.0, 2.0  # upper JST SH 8-pin: pins at y pc (B.Cu), pin row only
     xb, yb = 3.0, 11.8  # lower JST, same pin order, 8 mm to the left
-    j2 = jst_sh4("J2", xb, yb, [None, "P3V3", "SDA", "SCL"])
+    n = len(JST8)
+    Wd, Hd = _r(x0 + n - 1 + 1.6), 13.2
+    j1, j2 = jst_sh("J1", x0, pc, JST8), jst_sh("J2", xb, yb, JST8)
     y1, y2 = _r(pc + 0.9), _r(yb - 0.9)  # 0.9 mm straight out of the pads (past the 0.775 mm pad tip), then 45 deg
 
     def run(net, i, w, locked=False):
         return Trk(net, "B.Cu", w, [(x0 + i, pc), (x0 + i, y1), (xb + i, y2), (xb + i, yb)], locked=locked)
 
     v3 = run("P3V3", 1, 0.3, locked=True)
-    ref = [run("SDA", 2, W), run("SCL", 3, W)]
+    sig = [(JST8[i], i) for i in range(2, n)]
+    ref = [run(net, i, W) for net, i in sig]
     return Pat(
-        name="jst_fanout_45", cluster="K5", title="I2C from a 1 mm JST beside kept 3V3: a 45 deg parallel pair, no crossing",
-        purpose="Two JST SH 4-pin connectors on B.Cu (1.0 mm pitch, pin order GND, 3V3, SDA, SCL), the lower one 8 mm "
-                "to the left. A kept hand 3V3 track joins their 3V3 pins: straight out of the upper pad, 45 deg "
-                "down-left, straight into the lower pad. SDA and SCL must follow it on B.Cu (both ends are B.Cu SMD pads).",
-        answer="0 vias, B.Cu. SDA and SCL leave their pads straight down, turn 45 deg down-left as a pair parallel to the "
+        name="jst_fanout_45", cluster="K5", title="Six wires from an 8-pin 1 mm JST beside kept 3V3: a 45 deg parallel bundle",
+        purpose="Two JST SH 8-pin connectors on B.Cu (1.0 mm pitch: GND (no net), 3V3, SDA, SCL, D1..D4), the lower one "
+                "8 mm to the left. A kept hand 3V3 track joins their 3V3 pins: straight out of the upper pad, 45 deg "
+                "down-left, straight into the lower pad. The six signals must follow it on B.Cu (both ends B.Cu SMD).",
+        answer="0 vias, B.Cu. The six wires leave their pads straight down, turn 45 deg down-left as a bundle parallel to the "
                "kept 3V3 (1 mm pitch, 0.71 mm between centre lines) and drop straight into the lower connector's pins. "
-               "Only 0 / 45 / 90 degree segments; SDA and SCL never cross.",
-        why="The pin order and pitch are the same on both connectors, so the three wires are one parallel bundle; every "
-            "monotone octilinear path from pad to pad has the same length (8 mm across, 9.8 mm down), so the 45 deg "
-            "pair is optimal and needs no free-angle stretch. The failure class: SDA / SCL drawn as free-angle segments "
-            "that cross each other next to the connector (any_angle forbidden in that route; never-drop forced copper).",
-        size=(Wd, Hd), nets=["P3V3", "SDA", "SCL"], fps=[j1, j2],
-        connections=[("SDA", "J1.3", "J2.3"), ("SCL", "J1.4", "J2.4")], ref_tracks=ref, kept=[v3],
-        expect={"vias": 0, "layers": {"SDA": ["B.Cu"], "SCL": ["B.Cu"]}, "octilinear": True})
+               "Only 0 / 45 / 90 degree segments; no wire crosses another.",
+        why="Pin order and pitch are the same on both connectors, so the wires form one parallel bundle; every monotone "
+            "octilinear path from pad to pad has the same length (8 mm across, 9.8 mm down). The failure class: "
+            "I2C wires drawn as free-angle segments that cross each other next to the connector (never-drop forced copper).",
+        size=(Wd, Hd), nets=["P3V3"] + [s for s, _ in sig], fps=[j1, j2],
+        connections=[(s, f"J1.{i + 1}", f"J2.{i + 1}") for s, i in sig], ref_tracks=ref, kept=[v3],
+        expect={"vias": 0, "layers": {s: ["B.Cu"] for s, _ in sig}, "octilinear": True})
 
 
 # ------------------------------------------------------------------------------------------------ K5 jst_fanout_45_close
 def jst_fanout_45_close() -> Pat:
-    Wd, Hd = 15.0, 9.0
-    x0, pc = 11.0, 2.0  # upper JST, pin row only (GND(nc), 3V3, SDA, SCL)
-    xb, yb = 3.0, 7.8  # lower JST, 8 mm to the left but only 5.8 mm lower: the bundle needs a horizontal stretch
-    j1 = jst_sh4("J1", x0, pc, [None, "P3V3", "SDA", "SCL"])
-    j2 = jst_sh4("J2", xb, yb, [None, "P3V3", "SDA", "SCL"])
+    x0, pc = 11.0, 2.0
+    xb, yb = 3.0, 8.8  # 8 mm to the left but only 6.8 mm lower: the bundle needs a horizontal stretch
+    n = len(JST8)
+    Wd, Hd = _r(x0 + n - 1 + 1.6), 10.0
+    j1, j2 = jst_sh("J1", x0, pc, JST8), jst_sh("J2", xb, yb, JST8)
     y1, y2 = _r(pc + 0.9), _r(yb - 0.9)
-    hm, off = _r((y1 + y2) / 2), 1 / SQ2  # SDA's horizontal halfway; the bundle keeps a 0.71 mm pitch on every stretch
+    off = 1 / SQ2  # the bundle keeps a 0.71 mm pitch on every 45 deg and horizontal stretch
+    hm = (y1 + y2) / 2
+    mid = (1 + n - 1) / 2
 
-    def run(net, i, w, locked=False):  # i = 1 (3V3), 2 (SDA), 3 (SCL)
-        h = _r(hm + (i - 2) * off)
+    def run(net, i, w, locked=False):  # i = 1 (3V3) .. n - 1
+        h = _r(hm + (i - mid) * off)
         c, e = x0 + i + y1, xb + i + y2  # first and second 45 deg lines x + y = c / e
         return Trk(net, "B.Cu", w, [(x0 + i, pc), (x0 + i, y1), (_r(c - h), h), (_r(e - h), h), (xb + i, y2), (xb + i, yb)],
                    locked=locked)
 
     v3 = run("P3V3", 1, 0.3, locked=True)
-    ref = [run("SDA", 2, W), run("SCL", 3, W)]
+    sig = [(JST8[i], i) for i in range(2, n)]
+    ref = [run(net, i, W) for net, i in sig]
     return Pat(
-        name="jst_fanout_45_close", cluster="K5", title="JST to JST closer together: four 45 deg bends per wire, parallel pair",
-        purpose="The jst_fanout_45 pair with the lower connector only 5.8 mm below the upper one (still 8 mm to the "
-                "left): the kept hand 3V3 track runs straight out of its pad, 45 deg down-left, left, 45 deg down-left "
-                "and straight into the lower pad. SDA and SCL must follow it on B.Cu.",
-        answer="0 vias, B.Cu. SDA and SCL follow the kept 3V3 as a parallel bundle (0.71 mm pitch on the 45 deg and "
-               "horizontal stretches, 1 mm at the pads): out of the pad, 45 deg, horizontal, 45 deg, into the pad. Four "
-               "45 deg bends per wire, no 90 deg corner, no free-angle segment, no crossing.",
-        why="The pads need a straight exit (0.9 mm) at both ends; the 8 mm across is more than the 4 mm left for the "
-            "diagonals, so each wire needs a horizontal stretch: two 45 deg turns into it and two out. Every monotone "
-            "octilinear path has the same length, so the parallel bundle is optimal. The failure class: SDA / SCL "
-            "drawn as free-angle segments that cross each other next to the connector.",
-        size=(Wd, Hd), nets=["P3V3", "SDA", "SCL"], fps=[j1, j2],
-        connections=[("SDA", "J1.3", "J2.3"), ("SCL", "J1.4", "J2.4")], ref_tracks=ref, kept=[v3],
-        expect={"vias": 0, "layers": {"SDA": ["B.Cu"], "SCL": ["B.Cu"]}, "octilinear": True, "bends": {"SDA": 4, "SCL": 4}})
+        name="jst_fanout_45_close", cluster="K5", title="8-pin JST to JST closer together: 45 deg / horizontal / 45 deg bundle",
+        purpose="The jst_fanout_45 bundle (8-pin JSTs, kept 3V3, six signals) with the lower connector only 6.8 mm below "
+                "the upper one (still 8 mm to the left): the kept 3V3 runs straight out of its pad, 45 deg down-left, "
+                "left, 45 deg down-left and straight into the lower pad. The six signals follow it on B.Cu.",
+        answer="0 vias, B.Cu. The six wires follow the kept 3V3 as a parallel bundle (0.71 mm pitch on the 45 deg and "
+               "horizontal stretches, 1 mm at the pads): out of the pad, 45 deg, horizontal, 45 deg, into the pad. No 90 "
+               "deg corner, no free-angle segment, no crossing. (A wire may also leave its pad at 45 deg from inside the "
+               "pad where the 1 mm pitch allows it: the same length, two bends fewer.)",
+        why="8 mm across is more than the diagonals can cover between the straight pad exits, so the bundle needs a "
+            "horizontal stretch; every monotone octilinear path has the same length, so the parallel bundle is optimal. "
+            "The failure class: I2C wires drawn as free-angle segments crossing each other next to the connector.",
+        size=(Wd, Hd), nets=["P3V3"] + [s for s, _ in sig], fps=[j1, j2],
+        connections=[(s, f"J1.{i + 1}", f"J2.{i + 1}") for s, i in sig], ref_tracks=ref, kept=[v3],
+        expect={"vias": 0, "layers": {s: ["B.Cu"] for s, _ in sig}, "octilinear": True})
 
 
 # ------------------------------------------------------------------------------------------------ K6 pth_wrap_pin
@@ -613,26 +656,28 @@ def pth_wrap_pin() -> Pat:
     t2 = (_r(xr + 6.0), _r(hy - 2.0 - 6.0))
     tp2 = Fp("TP2", [Pad("1", "SCL", t2, (1.7, 1.7), "circle", drill=1.0)], "TestPoint:TestPoint_THTPad_D1.7mm_Drill1.0mm")
     scl = Trk("SCL", "B.Cu", W, [p4, (xr, _r(hy + 1.27)), (xr, _r(hy - 2.0)), t2], locked=True)
-    dmin = 0.85 + CL + W / 2 + 0.02  # SDA's last 45 deg leg passes pin 4 at clearance + 0.02 mm
-    c = _r(p4[0] - p4[1] - dmin * SQ2)  # that leg: x - y = c
-    t1 = (p4[0], _r(p4[0] - c))  # SDA target right below pin 4, on B.Cu
+    dmin = 0.85 + CL + W / 2 + 0.02  # SDA passes pin 4 at clearance + 0.02 mm on its lower-left and below it
+    c = _r(p4[0] - p4[1] - dmin * SQ2)  # the 45 deg leg round the lower-left: x - y = c
+    yh = _r(p4[1] + dmin)  # the run under pin 4
+    t1 = (xr, yh)  # SDA target: lower right of pin 4, between pins 4 and 6, on B.Cu
     tp1 = Fp("TP1", [Pad("1", "SDA", t1, (0.8, 0.8), "circle", layer="B.Cu")], "SMD test pad D0.8 mm")
-    ref = [Trk("SDA", "B.Cu", W, [p3, (xm, _r(hy + 1.27)), (xm, _r(xm - c)), t1])]
+    ref = [Trk("SDA", "B.Cu", W, [p3, (xm, _r(hy + 1.27)), (xm, _r(xm - c)), (_r(yh + c), yh), t1])]
     return Pat(
-        name="pth_wrap_pin", cluster="K6", title="SDA wraps round a PTH pin on B.Cu at clearance (kept SCL blocks the other side)",
+        name="pth_wrap_pin", cluster="K6", title="SDA wraps round the SCL pin via the bottom on B.Cu (kept SCL closes the top)",
         purpose="A 2x3 PTH header; a kept hand SCL track leaves pin 4 on B.Cu up-right between the pin columns to a THT "
-                "test point. SDA runs from pin 3 to an SMD pad on B.Cu right below pin 4 (0.33 mm from its ring): the "
-                "straight line goes through pin 4, the right side is closed by SCL, so SDA must wrap round pin 4's left side.",
+                "test point. SDA runs from pin 3 (above pin 4) to an SMD pad on B.Cu at the lower right of pin 4, between "
+                "pins 4 and 6. The way right of pin 4 is closed by the kept SCL, so on B.Cu SDA has to wrap round pin 4: "
+                "down its left side and under it.",
         answer="0 vias, B.Cu. SDA 45 deg down-left from pin 3 into the gap between the pin columns, straight down past "
-               "pin 4 (0.32 mm each side), then 45 deg down-right round pin 4's lower-left into the pad, passing the "
-               "ring at 0.17 mm (clearance 0.15). Octilinear only.",
-        why="The wrap is the shortest path: going right of pin 4 crosses the kept SCL, and F.Cu would need a via at the "
-            "B.Cu pad for no gain in length. The last leg passes a round PTH ring at clearance + 0.02 mm, so it tests "
-            "the clearance of a 45 deg leg round a pin. The failure class: a wire wrapped round a PTH pad at 0.01-0.11 mm.",
+               "pin 4, 45 deg round its lower-left and straight right under it into the pad: 0.17 mm from the pin-4 ring "
+               "on the corner and under it (clearance 0.15). Octilinear only.",
+        why="The wrap is the shortest legal path on B.Cu; F.Cu would need a via at the B.Cu pad (a via costs more than the "
+            "wrap's extra 2 mm). The corner and the run under pin 4 pass a round PTH ring at clearance + 0.02 mm, so they "
+            "test a wire wrapped round a pin. The failure class: a wire wrapped round a PTH pad at 0.01-0.11 mm.",
         size=(Wd, Hd), nets=["SDA", "SCL"], fps=[hdr, tp1, tp2],
         connections=[("SDA", "J1.3", "TP1.1")], ref_tracks=ref, kept=[scl],
         expect={"vias": 0, "layers": {"SDA": ["B.Cu"]}, "octilinear": True},
-        marks=[{"xy": [_r(p4[0] - 0.85 / SQ2 - 0.15), _r(p4[1] + 0.85 / SQ2 + 0.15)], "text": "0.17 mm to the ring"}])
+        marks=[{"xy": [p4[0], _r(yh + 0.3)], "text": "0.17 mm under pin 4"}])
 
 
 # ------------------------------------------------------------------------------------------------ K7 via_in_fanin
@@ -692,6 +737,223 @@ def pair_crossing_layered() -> Pat:
         size=(Wd, Hd), nets=["P", "N", "X"], fps=fps,
         connections=[("P", "J1.1", "J2.1"), ("N", "J1.2", "J2.2"), ("X", "J3.1", "J4.1")],
         ref_tracks=ref, ref_vias=[Via("X", v1), Via("X", v2)], expect={"vias": 2})
+
+
+# ------------------------------------------------------------------------------------------------ K8 via_before_crossing
+def via_before_crossing() -> Pat:
+    Wd, Hd = 9.0, 9.0  # round 3b: right edge against the X pads, no wire fits between them and the edge line
+    ys = [_r(2.7 + 0.9 * i) for i in range(4)]  # four X nets, B.Cu pad left -> F.Cu pad right
+    xy = [6.0, 6.5, 7.0]  # three Y nets straight down on F.Cu between them
+    xa, xb = 1.5, 8.3
+    xv = _r(xy[-1] + W / 2 + CL + VIA_D / 2 + 0.01)  # the only via site right of the Y bundle, against the F.Cu pad
+    fps, ref, vias, nets, conns = [], [], [], [], []
+    for i, y in enumerate(ys):
+        n = f"X{i + 1}"
+        nets.append(n)
+        fps += [Fp(f"XA{i + 1}", [Pad("1", n, (xa, y), (0.5, 0.5), layer="B.Cu")]), Fp(f"XB{i + 1}", [Pad("1", n, (xb, y), (0.5, 0.5))])]
+        conns.append((n, f"XA{i + 1}.1", f"XB{i + 1}.1"))
+        ref += [Trk(n, "B.Cu", W, [(xa, y), (xv, y)]), Trk(n, "F.Cu", W, [(xv, y), (xb, y)])]
+        vias.append(Via(n, (xv, y)))
+    for k, x in enumerate(xy):
+        n = f"Y{k + 1}"
+        nets.append(n)
+        fps += [Fp(f"YT{k + 1}", [Pad("1", n, (x, 0.9), (0.3, 0.8))]), Fp(f"YB{k + 1}", [Pad("1", n, (x, _r(Hd - 0.9)), (0.3, 0.8))])]
+        conns.append((n, f"YT{k + 1}.1", f"YB{k + 1}.1"))
+        ref.append(Trk(n, "F.Cu", W, [(x, 0.9), (x, _r(Hd - 0.9))]))
+    return Pat(
+        name="via_before_crossing", cluster="K8", title="Layer change on the right side of a crossing: vias between the bundle and the pads",
+        purpose="Four nets X1..X4 run left to right from B.Cu pads to F.Cu pads; three nets Y1..Y3 run straight down on "
+                "F.Cu just left of the X pads (0.5 mm pitch). Each X net needs one via. Left of the Y bundle there is "
+                "ample room for vias; right of it only one via site per X net, against its own pad. The board edge is against the X pads: "
+                "no wire fits round the right of them.",
+        answer=f"X1..X4 straight on B.Cu under the Y bundle, via at x {xv} (between the bundle and the pad, touching "
+               "the pad), a short F.Cu stub into the pad; Y1..Y3 straight on F.Cu. 4 vias; every X / Y crossing is "
+               "F.Cu over B.Cu.",
+        why="The pads fix the layers: X starts on B.Cu and ends on F.Cu, Y is all F.Cu, so X must be on B.Cu where it "
+            "crosses Y and its via must lie after the crossing, in the narrow room by the pad. A via in the roomy area "
+            "left of the bundle puts the crossing on F.Cu: a short. The failure class (two places on the private board): "
+            "the via sited on the wrong side of a planned crossing, the crossing drawn on one layer.",
+        size=(Wd, Hd), nets=nets, fps=fps, connections=conns, ref_tracks=ref, ref_vias=vias, expect={"vias": 4},
+        marks=[{"xy": [xv, ys[0] - 0.5], "text": "the only via site"}])
+
+
+# ------------------------------------------------------------------------------------------------ C6 cc_lines_esd
+def cc_lines_esd() -> Pat:
+    Wd, Hd = 15.5, 9.0
+    cx, yr = 7.5, 7.0
+    row = [(-3.25, 0.6, None), (-2.45, 0.6, "VB"), (-1.75, 0.3, "CC2"), (-1.25, 0.3, None), (-0.75, 0.3, None),
+           (-0.25, 0.3, None), (0.25, 0.3, None), (0.75, 0.3, None), (1.25, 0.3, "CC1"), (1.75, 0.3, None),
+           (2.45, 0.6, "VB"), (3.25, 0.6, None)]
+    names = ["A1", "A4", "B5", "A8", "B6", "A7", "A6", "B7", "A5", "B8", "B4", "B1"]
+    j1 = Fp("J1", [Pad(n, net, (_r(cx + dx), yr), (w, 1.45)) for n, (dx, w, net) in zip(names, row)],
+            "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12 (signal row; data pins without net here)")
+    ex, ey = cx + 0.5, _r(yr - 3.405)
+    esd = []
+    for k in range(1, 6):
+        y = _r(ey - 1.0 + 0.5 * (k - 1))
+        if k == 3:
+            esd += [Pad("3", None, (_r(ex + 0.365), y), (0.67, 0.45)), Pad("8", None, (_r(ex - 0.412), y), (0.57, 0.45))]
+        else:
+            net = {1: "CC1", 2: "CC2"}.get(k)
+            esd += [Pad(str(k), net, (_r(ex + 0.388), y), (0.62, 0.25)), Pad(str(11 - k), net, (_r(ex - 0.388), y), (0.62, 0.25))]
+    u2 = Fp("U2", esd, "Package_DFN_QFN:Diodes_UDFN-10_1x2.5mm_P0.5mm (CC on 1/10 and 2/9; data pins without net here)")
+    xr5 = _r(cx - 6.088)
+    r56 = Fp("R1", [Pad("1", "CC2", (xr5, _r(yr - 2.905)), (1.02, 1.4))], "Resistor_SMD:R_0805_2012Metric (one pad)")
+    r6 = Fp("R2", [Pad("1", "CC1", (xr5, _r(yr - 0.905)), (1.02, 1.4))], "Resistor_SMD:R_0805_2012Metric (one pad)")
+    d = Fp("D1", [Pad("2", "VB", (_r(cx + 6.5), _r(yr - 1.755)), (0.9, 1.2))], "Diode_SMD:D_SOD-123 (one pad)")
+    y1, y2 = _r(ey - 1.0), _r(ey - 0.5)  # CC1 and CC2 pin rows of the ESD
+    xc1 = _r(ex + 0.388 + 0.31 + CL + W / 2 + 0.05)  # CC1 rises right of the ESD's right column
+    xl = 0.6  # CC1's run down the left edge, outside R1
+    xs = _r(cx - 1.75)
+    yb = _r(yr + 0.725 + CL + W / 2 + 0.005)
+    vb0, vb1 = _r(cx - 2.45), _r(cx + 2.45)
+    yd = _r(yr - 1.755)
+    ref = [Trk("CC1", "F.Cu", W, [(_r(cx + 1.25), yr), (_r(cx + 1.25), 5.35), (xc1, _r(5.35 - (xc1 - cx - 1.25))), (xc1, y1),
+                                  (xl, y1), (xl, _r(yr - 0.905)), (xr5, _r(yr - 0.905))]),
+           Trk("CC2", "F.Cu", W, [(xs, yr), (xs, y2), (_r(ex - 0.388), y2), (_r(ex + 0.388), y2)]),
+           Trk("CC2", "F.Cu", W, [(xs, _r(yr - 2.905)), (xr5, _r(yr - 2.905))]),
+           Trk("VB", "F.Cu", W, [(vb0, yr), (vb0, yb), (vb1, yb), (vb1, yr)]),
+           Trk("VB", "F.Cu", W, [(vb1, yr), (vb1, 6.2), (_r(vb1 + 6.2 - yd), yd), (_r(cx + 6.5), yd)])]
+    return Pat(
+        name="cc_lines_esd", cluster="C6", title="USB-C CC lines through the flow-through ESD's outer pins, VBUS-side pair joined below",
+        purpose="The K1 receptacle and ESD (UDFN-10 at 180 deg) with the other nets: CC1 on A5, CC2 on B5, a supply net VB "
+                "on the two 0.6 mm pads A4 / B4; CC1 on ESD pins 1 / 10, CC2 on 2 / 9 (the rows farthest from the "
+                "receptacle). CC1 / CC2 go on to two resistor pads at the left, VB to a diode pad at the right. The data "
+                "pins (DP / DN in K1) have no net here, they are obstacles. All F.Cu.",
+        answer="0 vias, F.Cu. CC2 rises from B5 into ESD pin 9 (left column) and on under the part to pin 2, with a branch "
+               "left to its resistor; CC1 rises from A5 right of the ESD, enters pin 1 from the right, runs under the "
+               "part through pin 10 and on to the left above CC2, down the board's left edge outside the CC2 resistor "
+               "into its own. VB joins its two pads under the row and runs 45 deg up-right to the diode. Every wire "
+               "keeps the 0.15 mm clearance to the 0.5 mm pitch pins.",
+        why="CC2's pins are nearer the receptacle than CC1's on the left column, so CC2 takes the inner way and CC1 goes "
+            "round the outside of the ESD: no crossing, no via. The failure class: CC lines drawn past the ESD's 0.5 mm "
+            "pins below clearance (0.08 mm) and a planned CC1 / CC2 crossing drawn on one layer.",
+        size=(Wd, Hd), nets=["CC1", "CC2", "VB"], fps=[j1, u2, r56, r6, d],
+        connections=[("CC1", "J1.A5", "U2.1"), ("CC1", "U2.1", "U2.10"), ("CC1", "U2.10", "R2.1"),
+                     ("CC2", "J1.B5", "U2.9"), ("CC2", "U2.9", "U2.2"), ("CC2", "J1.B5", "R1.1"),
+                     ("VB", "J1.A4", "J1.B4"), ("VB", "J1.B4", "D1.2")],
+        ref_tracks=ref, expect={"vias": 0, "layers": {"CC1": ["F.Cu"], "CC2": ["F.Cu"], "VB": ["F.Cu"]}})
+
+
+# ------------------------------------------------------------------------------------------------ C9 through_other_copper
+def through_other_copper() -> Pat:
+    Wd, Hd = 11.0, 13.0  # round 3b: right edge against the pin column, no way round it
+    px, pp = 10.0, 0.65  # DFN pin column on B.Cu, pads 0.8 x 0.3 pointing left (tip at x 9.6)
+    yp = {8: 5.0, 7: 5.65, 6: 6.3, 5: 6.95}
+    u = Fp("U1", [Pad(str(k), {8: "P3V3", 6: "SCL", 5: "SDA"}.get(k), (px, y), (0.8, 0.3), layer="B.Cu") for k, y in yp.items()],
+           "Package_DFN_QFN DFN-8 0.65 mm pitch (one pin column)")
+    v3 = (8.6, 5.0)  # kept 3V3 fan-out via next to pin 8, and its 0.3 mm B.Cu track 45 deg down-left to a THT pad
+    c3 = v3[0] + v3[1]
+    t3 = (2.6, _r(c3 - 2.6))
+    tp3 = Fp("TP3", [Pad("1", "P3V3", t3, (1.7, 1.7), "circle", drill=1.0)], "TestPoint:TestPoint_THTPad_D1.7mm_Drill1.0mm")
+    kept = [Trk("P3V3", "B.Cu", 0.3, [(px, 5.0), v3, t3], locked=True)]
+    tsc, tsd = (4.0, 3.0), (5.0, 11.5)  # SCL test pad above-left of the 3V3 track, SDA test pad below it (THT, 2 mm)
+    tps = [Fp("TP1", [Pad("1", "SCL", tsc, (2.0, 2.0), "circle", drill=1.0)], "TestPoint:TestPoint_THTPad_D2.0mm_Drill1.0mm"),
+           Fp("TP2", [Pad("1", "SDA", tsd, (2.0, 2.0), "circle", drill=1.0)], "TestPoint:TestPoint_THTPad_D2.0mm_Drill1.0mm")]
+    vs = (8.5, 6.3)  # SCL's via, right of the 3V3 track
+    ref = [Trk("SCL", "F.Cu", W, [tsc, (_r(tsc[0] + vs[1] - tsc[1]), vs[1]), vs]), Trk("SCL", "B.Cu", W, [vs, (px, 6.3)]),
+           Trk("SDA", "B.Cu", W, [tsd, (_r(tsd[0] + tsd[1] - 6.95), 6.95), (px, 6.95)])]
+    return Pat(
+        name="through_other_copper", cluster="C9", title="SCL must cross a kept 3V3 track: via, not through the copper",
+        purpose="A DFN pin column on B.Cu (0.65 mm pitch): 3V3 (pin 8), SCL (6), SDA (5). Kept hand 3V3 on B.Cu: a via "
+                "next to pin 8 and a 0.3 mm track from it 45 deg down-left to a THT pad; it separates the SCL test pad "
+                "(above-left, THT) from the pin column. The SDA test pad (THT) is on the pin side of it. F.Cu is empty. "
+                "The board edge is against the pin column: no wire fits round its right side.",
+        answer=f"1 via. SCL leaves its test pad on F.Cu, crosses over the kept 3V3, drops with a via at {list(vs)} (right "
+               "of the 3V3 track, between the 3V3 via and SDA) and a short B.Cu stub into pin 6. SDA straight on B.Cu, "
+               "45 deg up-right and into pin 5.",
+        why="On B.Cu SCL cannot reach pin 6 without crossing the kept 3V3 track; the test pad is THT, so F.Cu costs only "
+            "the via next to the pin. The failure class: SCL drawn on B.Cu through the 3V3 track / via (overlap -0.25 "
+            "mm), never-drop forced copper.",
+        size=(Wd, Hd), nets=["P3V3", "SCL", "SDA"], fps=[u, tp3] + tps,
+        connections=[("SCL", "TP1.1", "U1.6"), ("SDA", "TP2.1", "U1.5")], ref_tracks=ref, ref_vias=[Via("SCL", vs)],
+        kept=kept, expect={"vias": 1, "layers": {"SDA": ["B.Cu"]}})
+
+
+# ------------------------------------------------------------------------------------------------ C10 narrow_passage_pair
+def narrow_passage_pair() -> Pat:
+    Wd, Hd = 14.0, 8.0
+    ya = _r(EDGE + W / 2 + 0.01)  # L1 against the copper-to-edge line
+    yb = _r(ya + W + CL + 0.005)  # L2 at one pitch below it
+    gw = 0.8
+    yw = _r(yb + W / 2 + CL + 0.01 + gw / 2)  # kept GND wall: its top edge 0.01 mm beyond what the pair needs
+    xw0, xw1 = 3.0, 11.0
+    wall = Trk("GND", "F.Cu", gw, [(xw0, _r(Hd - EDGE - gw / 2 - 0.05)), (xw0, yw), (xw1, yw), (xw1, _r(Hd - EDGE - gw / 2 - 0.05))],
+               locked=True)
+    tg = Fp("TP3", [Pad("1", "GND", (7.0, 5.0), (1.5, 1.5), "circle", drill=0.8)], "TestPoint:TestPoint_THTPad_D1.5mm_Drill0.8mm")
+    stub = Trk("GND", "F.Cu", gw, [(7.0, yw), (7.0, 5.0)], locked=True)
+    spine = Trk("GND", "B.Cu", gw, [(7.0, _r(EDGE + gw / 2 + 0.05)), (7.0, _r(Hd - EDGE - gw / 2 - 0.05))], locked=True)
+    xa, xb2 = 1.0, 1.6  # left pads (L1 outer, L2 inner), mirrored on the right
+    yp = 6.0
+    fps = [tg]
+    for n, x in (("L1", xa), ("L2", xb2)):
+        fps += [Fp(f"{n}A", [Pad("1", n, (x, yp), (0.4, 0.4), "circle")]), Fp(f"{n}B", [Pad("1", n, (_r(Wd - x), yp), (0.4, 0.4), "circle")])]
+
+    def run(x, y):
+        c = x + y + (1.0 if x == xa else 0.0)  # 45 deg corner line x + y = c into the passage (L2's at 0.35 mm offset)
+        return [(x, yp), (x, _r(c - x)), (_r(c - y), y), (_r(Wd - c + y), y), (_r(Wd - x), _r(c - x)), (_r(Wd - x), yp)]
+
+    ca = xa + ya + 1.0
+    cb = _r(ca + (W + CL + 0.005) * SQ2)
+    pa = [(xa, yp), (xa, _r(ca - xa)), (_r(ca - ya), ya), (_r(Wd - ca + ya), ya), (_r(Wd - xa), _r(ca - xa)), (_r(Wd - xa), yp)]
+    pb = [(xb2, yp), (xb2, _r(cb - xb2)), (_r(cb - yb), yb), (_r(Wd - cb + yb), yb), (_r(Wd - xb2), _r(cb - xb2)), (_r(Wd - xb2), yp)]
+    room = (yw - gw / 2) - EDGE
+    return Pat(
+        name="narrow_passage_pair", cluster="C10", title="Two wires through a passage that fits exactly two: tight, no drawing loss",
+        purpose=f"A kept GND wall (F.Cu, 0.8 mm) shaped like a gate: down to the bottom edge at x {xw0} and {xw1}, across "
+                f"under the top edge between them, with a GND test pad on its middle. Between the wall and the board's top "
+                f"edge {room:.3f} mm is free up to the copper-to-edge line: two 0.2 mm wires at 0.15 mm clearance plus "
+                "0.015 mm. L1 and L2 run from pads left of the gate to pads right of it. A kept B.Cu GND spine (0.8 mm) "
+                "runs edge to edge through the test pad, so no wire crosses on B.Cu either.",
+        answer="0 vias, F.Cu. L1 and L2 go up the left side, turn 45 deg into the passage as a pair (L1 outer, against the "
+               "edge line; L2 at one pitch below it), run straight through and turn 45 deg down on the right. Every gap "
+               "at clearance or above (the spare 0.015 mm split over the pair).",
+        why="The pads are outside the gate on both sides and the wall reaches the bottom edge, so the passage is the only "
+            "F.Cu way and the B.Cu spine closes the other layer. The passage fits exactly two wires, so the drawing must place "
+            "them at the plan's pitch. The failure class: a narrow passage the plan said fits, the drawing losing 0.01 "
+            "- 0.02 mm (0.133 mm < 0.15).",
+        size=(Wd, Hd), nets=["GND", "L1", "L2"], fps=fps,
+        connections=[("L1", "L1A.1", "L1B.1"), ("L2", "L2A.1", "L2B.1")],
+        ref_tracks=[Trk("L1", "F.Cu", W, pa), Trk("L2", "F.Cu", W, pb)], kept=[wall, stub, spine],
+        expect={"vias": 0, "layers": {"L1": ["F.Cu"], "L2": ["F.Cu"]}, "octilinear": True, "passage": round(room, 3)},
+        marks=[{"xy": [7.0, _r((ya + yb) / 2)], "text": f"passage {room:.3f} mm"}])
+
+
+# ------------------------------------------------------------------------------------------------ C11 own_net_neck
+def own_net_neck() -> Pat:
+    Wd, Hd = 9.0, 9.0
+    pw = 0.5  # the P5V net class width: too wide to reach a 0.5 mm pitch pad tip without a neck
+    yr, x0 = 4.0, 3.5  # QFN bottom pin row (0.25 x 0.8 pads, 0.5 mm pitch, pointing down, tip at y 3.4) and exposed pad
+    nets = ["Q", "P5V", None, "P5V", None]
+    row = [Pad(str(20 - i), n, (_r(x0 + 0.5 * i), yr), (0.25, 0.8)) for i, n in enumerate(nets)]
+    ep = Pad("21", None, (_r(x0 + 1.0), _r(yr - 0.4 - 0.25 - 1.3)), (3.1, 2.6))
+    u = Fp("U1", row + [ep], "Package_DFN_QFN:QFN-20 0.5 mm pitch (bottom row + exposed pad)")
+    src = (_r(x0 + 0.75), 7.0)
+    ps = Fp("C1", [Pad("1", "P5V", src, (1.0, 1.45))], "Capacitor_SMD:C_0805_2012Metric (one pad)")
+    q = Fp("Q1", [Pad("1", "Q", (_r(x0 - 2.0), 7.0), (1.0, 1.45))], "Capacitor_SMD:C_0805_2012Metric (one pad)")
+    tip = _r(yr + 0.4)
+    yj = _r(tip + CL + pw / 2 + 0.02)  # the 0.5 mm join under the row: clears the tips of pins 20 / 18 / 16
+    x19, x17 = _r(x0 + 0.5), _r(x0 + 1.5)
+    ref = [Trk("P5V", "F.Cu", 0.2, [(x19, yr), (x19, yj)]), Trk("P5V", "F.Cu", 0.2, [(x17, yr), (x17, yj)]),
+           Trk("P5V", "F.Cu", pw, [(x19, yj), (x17, yj)]), Trk("P5V", "F.Cu", pw, [(src[0], yj), src]),
+           Trk("Q", "F.Cu", W, [(x0, yr), (x0, _r(7.0 - (x0 - (x0 - 2.0)))), (_r(x0 - 2.0), 7.0)])]
+    return Pat(
+        name="own_net_neck", cluster="C11", title="A 0.5 mm power net necks into two pins of a 0.5 mm pitch row, joined below",
+        purpose="A QFN bottom row (0.25 x 0.8 pads, 0.5 mm pitch, exposed pad above): pins 19 and 17 are P5V (net class "
+                f"width {pw} mm, board minimum 0.2), 20 is Q, 18 / 16 without net. P5V comes from a capacitor pad below; Q "
+                "goes to a pad down-left. F.Cu only.",
+        answer=f"0 vias. P5V: a {pw} mm trunk up from the capacitor to a {pw} mm join under the row ({yj - tip:.2f} mm "
+               "below the pad tips), necked to 0.2 mm only for the short straight stubs into pins 19 and 17. Q straight "
+               "down from pin 20 and 45 deg to its pad. No P5V copper next to pin 18 / 20 below clearance.",
+        why=f"A {pw} mm wire cannot end at a 0.5 mm pitch pad tip (0.125 mm to the neighbours), so it necks to the board "
+            "minimum for the last stretch; joining the two pins below the tips keeps the wide part clear of the row. The "
+            "failure class: a power net drawn past the pin row and the exposed pad at 0.144 - 0.147 mm (own-net graze / "
+            "KiCad minimum connection width).",
+        size=(Wd, Hd), nets=["P5V", "Q"], fps=[u, ps, q],
+        connections=[("P5V", "U1.19", "U1.17"), ("P5V", "U1.17", "C1.1"), ("Q", "U1.20", "Q1.1")],
+        ref_tracks=ref, expect={"vias": 0},
+        classes=[{"name": "Power", "track_width": pw}], class_patterns=[{"netclass": "Power", "pattern": "P5V"}],
+        marks=[{"xy": [_r(x0 + 1.0), tip], "text": "pin 18 tip"}])
 
 
 # ------------------------------------------------------------------------------------------------ K9 roundrect_corner_pass
@@ -809,12 +1071,18 @@ def via_slot_60() -> Pat:
 
 
 PATTERNS = {f.__name__: f for f in (usbc_pair_esd, fpc_exit_fanout, via_pair_cross, via_grid_10, kept_wide_gnd_arc,
-                                    jst_fanout_45, jst_fanout_45_close, pth_wrap_pin, via_in_fanin, pair_crossing_layered,
-                                    roundrect_corner_pass, via_slot_30, via_slot_60)}
-# round 2 (user review of the round 1 PNGs): patterns new or changed in it
-ROUND2 = {"usbc_pair_esd": "changed", "fpc_exit_fanout": "changed", "via_grid_10": "new", "kept_wide_gnd_arc": "changed",
-          "jst_fanout_45_close": "new", "pth_wrap_pin": "new (replaces pth_wrap_other_layer)", "via_slot_30": "new",
-          "via_slot_60": "new"}
+                                    jst_fanout_45, jst_fanout_45_close, pth_wrap_pin, via_in_fanin, via_before_crossing,
+                                    cc_lines_esd, through_other_copper, narrow_passage_pair, own_net_neck)}
+# parked / regression set: no repro left on the board, no further work (user, round 3)
+PARKED = {f.__name__: f for f in (roundrect_corner_pass, via_slot_30, via_slot_60, pair_crossing_layered)}
+# what changed in the latest review round per pattern (round 3 = user review of the round 2 PNGs)
+ROUND = {"kept_wide_gnd_arc": "round 3: changed", "jst_fanout_45": "round 3: changed (8 pins)",
+         "jst_fanout_45_close": "round 3: changed (8 pins)", "pth_wrap_pin": "round 3: changed (wrap via the bottom)",
+         "via_before_crossing": "round 3b: new (K8 rebuilt, edge closed)", "cc_lines_esd": "round 3: new", "through_other_copper": "round 3b: new (edge closed)",
+         "narrow_passage_pair": "round 3b: new (B.Cu closed)", "own_net_neck": "round 3: new", "via_in_fanin": "round 3: approved (e2e test)",
+         "usbc_pair_esd": "round 2: changed", "fpc_exit_fanout": "round 2: changed", "via_grid_10": "round 2: new",
+         "roundrect_corner_pass": "parked", "via_slot_30": "parked", "via_slot_60": "parked",
+         "pair_crossing_layered": "parked (K8 rebuilt as via_before_crossing)"}
 
 
 def ref_length(pat: Pat) -> float:
@@ -836,7 +1104,7 @@ def expected_doc(pat: Pat) -> dict:
 
 
 def generate(name: str, out: Path, *, drc: bool = False) -> dict:
-    pat = PATTERNS[name]()
+    pat = {**PATTERNS, **PARKED}[name]()
     bad = clearance_report(pat)
     if bad:
         raise SystemExit(f"{name}: reference breaks a clearance: {bad}")
@@ -860,6 +1128,12 @@ def main(argv: list[str] | None = None) -> int:
     argv = [a for a in argv if a != "--drc"]
     out = Path(argv[0]) if argv else Path(__file__).resolve().parents[1] / "scratch" / "drc-patterns" / "boards"
     names = argv[1:] or list(PATTERNS)
+    if len(names) > 1:  # one fresh process per pattern: KiCad's KIID sequence (and so the saved footprint order,
+        import subprocess  # which the router sees) depends on what the process created before, not on the seed alone
+
+        for name in names:
+            subprocess.run([sys.executable, "-m", "harness.drc_patterns", str(out), name] + (["--drc"] if drc else []), check=True)
+        return 0
     for name in names:
         print(name, *(str(p) for p in generate(name, out, drc=drc).values()))
     return 0

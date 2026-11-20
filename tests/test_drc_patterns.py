@@ -10,13 +10,16 @@ import pytest
 from harness import drc_patterns as dp
 from harness.paths import kicad_cli
 
-GENERIC_NETS = ({"DP", "DN", "A", "B", "C", "P3V3", "GND", "SDA", "SCL", "VX", "P", "N", "X", "SIG"}
-                | {f"S{i}" for i in range(1, 9)} | {f"H{i}" for i in range(1, 6)} | {f"V{i}" for i in range(1, 6)})
+GENERIC_NETS = ({"DP", "DN", "A", "B", "C", "P3V3", "GND", "SDA", "SCL", "VX", "P", "N", "X", "SIG", "CC1", "CC2", "VB",
+                 "L1", "L2", "P5V", "Q"}
+                | {f"S{i}" for i in range(1, 9)} | {f"H{i}" for i in range(1, 6)} | {f"V{i}" for i in range(1, 6)}
+                | {f"D{i}" for i in range(1, 5)} | {f"X{i}" for i in range(1, 5)} | {f"Y{i}" for i in range(1, 4)})
+ALL = {**dp.PATTERNS, **dp.PARKED}
 
 
-@pytest.mark.parametrize("name", list(dp.PATTERNS))
+@pytest.mark.parametrize("name", list(ALL))
 def test_reference_keeps_clearance_and_names_are_generic(name):
-    pat = dp.PATTERNS[name]()
+    pat = ALL[name]()
     assert dp.clearance_report(pat) == []
     assert set(pat.nets) <= GENERIC_NETS
     pads = {f"{f.ref}.{p.num}": p.net for f in pat.fps for p in f.pads}
@@ -32,9 +35,9 @@ def test_clearance_report_sees_a_slip():
     assert any(b["a"].startswith("track B") or b["b"].startswith("track B") for b in bad)
 
 
-@pytest.mark.parametrize("name", list(dp.PATTERNS))
+@pytest.mark.parametrize("name", list(ALL))
 def test_problem_board_has_only_kept_copper(name, tmp_path):
-    pat = dp.PATTERNS[name]()
+    pat = ALL[name]()
     prob = dp.write_board(pat, tmp_path / "p" / f"{name}.kicad_pcb", copper=False)
     ref = dp.write_board(pat, tmp_path / "r" / f"{name}.kicad_pcb", copper=True)
     nb_prob = len(pcbnew.LoadBoard(str(prob)).GetTracks())
@@ -68,7 +71,11 @@ def test_kept_arc_round_trip_and_polyline(tmp_path):
     assert min(math.dist(p, a.mid) for p in pts) < 0.05  # the polyline passes the mid point (the short way round)
     b = pcbnew.LoadBoard(str(dp.write_board(pat, tmp_path / "k.kicad_pcb", copper=False)))
     arcs = [t for t in b.GetTracks() if t.GetClass() == "PCB_ARC"]
-    assert len(arcs) == 2 and all(a.IsLocked() and abs(a.GetRadius() / 1e6 - 2.5) < 1e-3 for a in arcs)
+    radii = sorted(round(a.GetRadius() / 1e6, 2) for a in arcs)
+    edge = pat.kept_arcs[1]
+    re_ = math.dist(edge.start, (pat.corner_r, pat.size[1] - pat.corner_r))
+    assert len(arcs) == 2 and all(a.IsLocked() for a in arcs)
+    assert radii == sorted([2.5, round(re_, 2)])  # the header arc and the edge arc concentric with the round corner
 
 
 def test_bottleneck_is_narrower_than_one_wire():
@@ -77,11 +84,12 @@ def test_bottleneck_is_narrower_than_one_wire():
 
 
 @pytest.mark.skipif(not kicad_cli().exists(), reason="no kicad-cli")
-@pytest.mark.parametrize("name", list(dp.PATTERNS))
+@pytest.mark.parametrize("name", list(ALL))
 def test_reference_passes_kicad_drc(name, tmp_path):
     dp.generate(name, tmp_path, drc=True)
     doc = json.loads((tmp_path / name / "expected.json").read_text())
-    assert doc["reference_drc"]["violations"] == 0, doc["reference_drc"]["detail"]
+    errors = [d for d in doc["reference_drc"]["detail"] if "severity='warning'" not in d]  # kept stubs may dangle (warning)
+    assert not errors, errors
     assert doc["reference_drc"]["unconnected"] == 0
     assert doc["rules_assumed"] == {"authority": "board"}
 
@@ -92,7 +100,7 @@ def _dirs(pts):
 
 @pytest.mark.parametrize("name", ["via_slot_30", "via_slot_60", "jst_fanout_45_close"])
 def test_reference_is_octilinear_with_four_bends(name):
-    pat = dp.PATTERNS[name]()
+    pat = ALL[name]()
     for t in pat.ref_tracks:
         d = _dirs(t.pts)
         assert all(min(abs(a - k) for k in (0, 45, 90, 135, 180)) < 0.05 for a in d), d
@@ -115,3 +123,22 @@ def test_esd_pins_face_each_other_across_the_part():
     pads = {p.num: p for p in next(f for f in dp.usbc_pair_esd().fps if f.ref == "U2").pads}
     for a, b, net in (("5", "6", "DP"), ("4", "7", "DN")):
         assert pads[a].net == pads[b].net == net and pads[a].pos[1] == pads[b].pos[1] and pads[a].pos[0] > pads[b].pos[0]
+
+
+def test_round_corner_outline_and_edge_trace(tmp_path):
+    pat = dp.kept_wide_gnd_arc()
+    assert pat.corner_r > 0
+    b = pcbnew.LoadBoard(str(dp.write_board(pat, tmp_path / "k.kicad_pcb", copper=False)))
+    arcs = [d for d in b.GetDrawings() if d.GetLayer() == pcbnew.Edge_Cuts and d.GetShape() == pcbnew.SHAPE_T_ARC]
+    assert len(arcs) == 1 and abs(arcs[0].GetRadius() / 1e6 - pat.corner_r) < 1e-3
+    edge = next(a for a in pat.kept_arcs if a.start[0] < 2)
+    r = math.dist(dp.arc_points(edge)[0], (pat.corner_r, pat.size[1] - pat.corner_r))
+    assert r == pytest.approx(pat.corner_r - (dp.EDGE + edge.width / 2 + 0.05), abs=1e-3)  # concentric, inside the edge line
+
+
+def test_power_class_in_project(tmp_path):
+    pat = dp.own_net_neck()
+    pro = dp.write_board(pat, tmp_path / "n.kicad_pcb", copper=False).with_suffix(".kicad_pro")
+    ns = json.loads(pro.read_text())["net_settings"]
+    assert {c["name"]: c["track_width"] for c in ns["classes"]}["Power"] == 0.5
+    assert ns["netclass_patterns"] == [{"netclass": "Power", "pattern": "P5V"}]
