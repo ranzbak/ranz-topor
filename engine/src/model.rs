@@ -1227,6 +1227,13 @@ pub struct Options {
     /// eprom 0.062, wiccon 0.069, qmtech 0.069, esp 0.123 (tw5r1, 1 thread, ccx43; a re-lay's path
     /// search dominates its time, so a global layering is cheap per wire).
     pub escape_kappa: f64,
+    /// site-price-cost `[optimize] escape_budget` (docs/dev/design/site-price-cost.md): the
+    /// currency of the escape budget (`escape_share`, the layering escapes and the in-loop P4
+    /// rounds). `"cost"` (default) = the loop's deterministic cost counter, counts weighted to
+    /// follow time ([`crate::topo::escape::cost`]): an escape's work is measured over the escape
+    /// itself; `"units"` = wire counts with `escape_kappa` x alive wires per escape (before;
+    /// escapes took 0.41-0.55 of the sweep at share 0.35 on qmtech/esp). Never the clock.
+    pub escape_budget: String,
     /// TW5 `[optimize] escape_take`: `"always"` = the whole-board moves (layering
     /// escape, floating up, crossing passes) are taken as they come, the variant table keeps the
     /// bests (Appendix F 2-4); `"not_worse"` (default) = each is undone when the board's evaluation rises
@@ -1818,6 +1825,7 @@ impl Default for Options {
             escape_walk: 4,
             escape_share: 0.35,
             escape_kappa: 0.07,
+            escape_budget: "cost".into(),
             escape_take: "not_worse".into(),
             relay_count_fade: 1.0,
             loop_history: false,

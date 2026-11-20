@@ -32,6 +32,13 @@ the python split from `log.txt` (baseline DRC, DRC after, refill, commit). The c
 `assign_with`, `refine`, `search_tree`, ...) are inclusive and summed over all threads: they overlap each other and can
 exceed the wall time inside the refine lanes. Per 600 s of loop time: cycles and re-lays (`reroute` calls = Sp::reroute).
 
+The profile JSON also holds `work`: one row per layering escape and per sweep re-lay of the TopoR loop (wall seconds and
+the counts the loop's cost counter reads: refine evaluations, local wires, whole-board measures, alive wires, passes,
+the counter's cost), and `notes` (e.g. `point_free_memo`: the packer's memo size). `tools/escape_cost_fit.py` refits
+the cost counter's weights from such profiles (`--check`: the escape-vs-re-lay real/predicted ratio of the weights in
+the engine; docs/dev/design/site-price-cost.md). Without a Python run: `cargo run --release --example topo_route --
+model.json --options options.json --prof prof.json` with `TOPO_PROF=1`.
+
 ## Flame graphs
 
 `--flame` needs `perf`, `rustfilt` and `inferno` (`cargo install inferno --locked`) on PATH and an engine built with

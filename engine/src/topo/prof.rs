@@ -224,8 +224,10 @@ struct St {
     mono_last: f64,
     rows: Vec<Row>,
     cycles: Vec<Cyc>,
+    work: Vec<Value>,
+    notes: Vec<(String, Value)>,
 }
-static ST: Mutex<St> = Mutex::new(St { last: None, mono_last: 0.0, rows: Vec::new(), cycles: Vec::new() });
+static ST: Mutex<St> = Mutex::new(St { last: None, mono_last: 0.0, rows: Vec::new(), cycles: Vec::new(), work: Vec::new(), notes: Vec::new() });
 
 /// Set when [`mono_now`] could not read the clock (the `Instant` Debug format changed): the report then
 /// says `"mono_ok": false` and the flame-graph stage folding must not trust `mono0` / `mono1`.
@@ -282,6 +284,8 @@ pub fn begin() {
     let mut s = ST.lock().unwrap();
     s.rows.clear();
     s.cycles.clear();
+    s.work.clear();
+    s.notes.clear();
     s.last = Some(Instant::now());
     s.mono_last = mono_now();
 }
@@ -333,6 +337,31 @@ pub fn cycle(n: usize, tried: usize, kept: usize, relaid: usize, pair_moved: usi
     mark("cycle");
 }
 
+/// site-price-cost: one row of the TopoR loop's work record (`work` in the report): a layering
+/// escape or a sweep re-lay with its wall seconds and the deterministic counts the loop's cost
+/// counter reads (`escape::cost`); the refit input of tools/escape_cost_fit.py. Capped at 20000
+/// rows per run. Off: nothing (the caller builds the row only under [`on`]).
+pub fn work(row: Value) {
+    if !on() {
+        return;
+    }
+    let mut s = ST.lock().unwrap();
+    if s.work.len() < 20_000 {
+        s.work.push(row);
+    }
+}
+
+/// site-price-cost: a named value of the run for the report's `notes` (e.g. a memo's size); a later
+/// note of the same name replaces it. Off: nothing.
+pub fn note(name: &str, v: Value) {
+    if !on() {
+        return;
+    }
+    let mut s = ST.lock().unwrap();
+    s.notes.retain(|(n, _)| n != name);
+    s.notes.push((name.to_string(), v));
+}
+
 fn keys_json(k: &[[u64; 3]; N]) -> Value {
     let mut m = Map::new();
     for (i, v) in k.iter().enumerate() {
@@ -345,7 +374,7 @@ fn keys_json(k: &[[u64; 3]; N]) -> Value {
 
 /// The record as JSON (`None` when profiling is off or no run began): `stages` in run order with
 /// wall seconds and keys `[calls, inclusive seconds, units]`, `cycles` (one row per loop cycle),
-/// `engine_s` (sum of the stage windows).
+/// `work` (the loop's escape and re-lay rows, [`work`]), `engine_s` (sum of the stage windows).
 pub fn report() -> Option<Value> {
     if !on() {
         return None;
@@ -358,7 +387,7 @@ pub fn report() -> Option<Value> {
     let stages: Vec<Value> = s.rows.iter().map(|r| json!({"stage": r.stage, "labels": r.labels, "wall_s": r.wall_s, "mono0": r.mono0, "mono1": r.mono1, "keys": keys_json(&r.keys)})).collect();
     let cycles: Vec<Value> = s.cycles.iter().map(|c| json!({"n": c.n, "wall_s": c.wall_s, "tried": c.tried, "kept": c.kept, "relaid": c.relaid, "pair_moved": c.pair_moved, "pair_relaid": c.pair_relaid, "archived": c.archived})).collect();
     let engine_s: f64 = s.rows.iter().map(|r| r.wall_s).sum();
-    Some(json!({"version": 1, "mono_ok": !MONO_BAD.load(Relaxed), "engine_s": engine_s, "stages": stages, "cycles": cycles}))
+    Some(json!({"version": 1, "mono_ok": !MONO_BAD.load(Relaxed), "engine_s": engine_s, "stages": stages, "cycles": cycles, "work": s.work, "notes": s.notes.iter().cloned().collect::<Map<String, Value>>()}))
 }
 
 #[cfg(test)]

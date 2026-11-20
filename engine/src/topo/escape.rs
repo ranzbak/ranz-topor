@@ -82,6 +82,10 @@ pub struct Throttle {
     pub runs: usize,
     pub esc_work: f64,
     pub relay_work: f64,
+    /// site-price-cost ([`Throttle::new_work`]): the re-lay work past the due point carries over to
+    /// the next wait (a re-lay is not small against an escape: resetting to 0 lost on average half a
+    /// re-lay per escape, esp 0.29 for 0.35); false = reset (before).
+    pub carry: bool,
 }
 
 impl Throttle {
@@ -90,8 +94,22 @@ impl Throttle {
     pub fn new(share: f64, kappa: f64, alive: usize) -> Throttle {
         let share = if share.is_finite() { share.clamp(1e-3, 0.5) } else { 0.5 };
         let kappa = kappa.max(0.0);
-        let mut t = Throttle { share, kappa, since: 0.0, need: 0.0, runs: 0, esc_work: 0.0, relay_work: 0.0 };
+        let mut t = Throttle { share, kappa, since: 0.0, need: 0.0, runs: 0, esc_work: 0.0, relay_work: 0.0, carry: false };
         t.need = t.cost(alive) * (1.0 / share - 1.0);
+        t
+    }
+    /// site-price-cost (`[optimize] escape_budget = "cost"`): a throttle at share `share` (as
+    /// [`Throttle::new`]) whose escapes report their measured work ([`Throttle::ran_work`]); the
+    /// first escape is due after `first x (1/s - 1)` re-lay work, `first` the measured cost of one
+    /// whole-board layering and measure ([`cost`]). `kappa` is 0 (unused). The re-lay work past a
+    /// due point counts towards the next wait ([`Throttle::carry`]), so over a run the escapes take
+    /// the share itself, not less (an escape may come one re-lay early: the share can pass `s` by
+    /// at most one re-lay's work over the run).
+    pub fn new_work(share: f64, first: f64) -> Throttle {
+        let mut t = Throttle::new(share, 0.0, 0);
+        t.carry = true;
+        let first = if first.is_finite() { first.max(0.0) } else { 0.0 };
+        t.need = first * (1.0 / t.share - 1.0);
         t
     }
     /// The work of one global layering of `alive` wires.
@@ -122,7 +140,7 @@ impl Throttle {
         let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
         self.runs += 1;
         self.esc_work += w;
-        self.since = 0.0;
+        self.since = if self.carry { (self.since - self.need).max(0.0) } else { 0.0 };
         self.need = w * (1.0 / self.share - 1.0);
     }
     /// The escapes' share of all work so far (0 without work).
@@ -133,6 +151,53 @@ impl Throttle {
         } else {
             0.0
         }
+    }
+}
+
+/// site-price-cost (`[optimize] escape_budget = "cost"`, docs/dev/design/site-price-cost.md): the
+/// weights of the TopoR loop's deterministic cost counter, in units of one wire a re-lay's local
+/// judge lays or models (the old work unit, about 0.8 ms at 4 threads). Only counts enter (alive
+/// wires, passes, the refinement's candidate evaluations, which the lane executor keeps equal to the
+/// serial loop's), so the copper never depends on the clock, the thread or the lane count.
+///
+/// Source: least squares of the wall time per escape and per sweep re-lay over 4 deterministic runs
+/// (qmtech + esp-rust-board seed 0, `optimize.rounds = 1`, `runs = 1`, arms X = every TW opt-in
+/// but `[vias] site_price` and `preloop_p4 = false`, and X with `site_price = "graded"`; 315
+/// escapes, 884 re-lays; 4 threads, local, 2026-11-20, branch site-price-cost after the point_free
+/// memo). Escape-vs-re-lay real/predicted ratio per run: 0.87, 1.02, 1.01, 1.13. Refit:
+/// `tools/escape_cost_fit.py` on the profile JSONs (`TOPO_PROF=1`, `topo_route --prof FILE`; their
+/// `work` rows) of such runs. The measured throttle carries a re-lay's excess work over to the next
+/// escape (`Throttle::carry`), so the share holds for re-lays dearer than one escape's due.
+pub mod cost {
+    /// A whole-board layering: per alive wire, per candidate evaluation of its refinement, per pass.
+    pub const GLOBAL_ALIVE: f64 = 0.2146;
+    pub const GLOBAL_EVAL: f64 = 0.0818;
+    pub const GLOBAL_PASS: f64 = 1.341e-3;
+    /// A whole-board measure (capacity model of every wire): per pass.
+    pub const MEASURE_PASS: f64 = 1.305e-3;
+    /// A local layering: per candidate evaluation of its refinement (its judge's wires are the old
+    /// unit, 1 per wire).
+    pub const LOCAL_EVAL: f64 = 0.2357;
+    /// One sweep re-lay (path search, placing, uncrossing): per pass of the board.
+    pub const RELAY_PASS: f64 = 6.15e-4;
+
+    /// The cost of a whole-board layering of `alive` wires over `passes` passes whose refinement
+    /// evaluated `evals` candidates. O(1).
+    pub fn global(alive: usize, evals: usize, passes: usize) -> f64 {
+        GLOBAL_ALIVE * alive as f64 + GLOBAL_EVAL * evals as f64 + GLOBAL_PASS * passes as f64
+    }
+    /// The cost of a whole-board measure over `passes` passes. O(1).
+    pub fn measure(passes: usize) -> f64 {
+        MEASURE_PASS * passes as f64
+    }
+    /// The cost of a local layering's refinement of `evals` candidates and a local judge of
+    /// `wires` laid and modelled wires. O(1).
+    pub fn local(evals: usize, wires: usize) -> f64 {
+        LOCAL_EVAL * evals as f64 + wires as f64
+    }
+    /// The fixed cost of one sweep re-lay on a board of `passes` passes. O(1).
+    pub fn relay(passes: usize) -> f64 {
+        RELAY_PASS * passes as f64
     }
 }
 
@@ -321,6 +386,74 @@ mod tests {
         assert_eq!(t.share, 0.5, "never above half (not sooner than its own last duration)");
         t.add(10.0);
         assert!(t.due(), "at 0.5 one escape's work of re-lays makes the next due");
+    }
+
+    /// site-price-cost: with measured escape costs (`escape_budget = "cost"`) the throttle keeps
+    /// the share whatever an escape costs against a re-lay (cheap, dear, varying), and the first
+    /// escape waits for `first x (1/s - 1)` re-lay work.
+    #[test]
+    fn the_measured_throttle_keeps_the_share_for_any_escape_cost() {
+        for &(share, first, esc_mean) in &[(0.35, 40.0, 40.0), (0.175, 22.0, 300.0), (0.5, 5.0, 1.0), (0.35, 100.0, 2.0)] {
+            let mut t = Throttle::new_work(share, first);
+            assert!((t.need - first * (1.0 / share - 1.0)).abs() < 1e-9, "{share}: first due after {}", t.need);
+            assert!(!t.due() && t.kappa == 0.0);
+            let mut s = 7u64;
+            let mut rnd = |m: f64| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                m * (0.5 + ((s >> 33) % 1000) as f64 / 1000.0)
+            };
+            for _ in 0..20_000 {
+                t.add(rnd(1.0));
+                if t.due() {
+                    let w = rnd(esc_mean);
+                    t.ran_work(w);
+                }
+            }
+            assert!(t.runs > 10, "{share}: {} runs", t.runs);
+            let m = t.measured_share();
+            assert!((m - share).abs() <= 0.02, "{share} (escape {esc_mean}): measured {m}");
+        }
+        // The carry: re-lays as large as the wait, escapes of equal work. Without the carry the
+        // share falls to s / (s + 1.5 (1 - s)) (half a re-lay lost per escape); with it, s.
+        for carry in [false, true] {
+            let mut t = Throttle::new_work(0.35, 10.0);
+            t.carry = carry;
+            for _ in 0..3000 {
+                t.add(13.0);
+                if t.due() {
+                    t.ran_work(10.0);
+                }
+            }
+            let m = t.measured_share();
+            if carry {
+                assert!((m - 0.35).abs() < 0.01, "carry: {m}");
+            } else {
+                assert!(m < 0.32, "reset: {m}");
+            }
+        }
+        // Not a finite first cost: no first wait beyond any re-lay.
+        assert_eq!(Throttle::new_work(0.35, f64::NAN).need, 0.0);
+        assert_eq!(Throttle::new_work(0.35, -3.0).need, 0.0);
+    }
+
+    /// site-price-cost: the cost counter's terms are the weighted counts (each grows with its count
+    /// at its weight, 0 for none), so an escape on a board of 320 alive wires and 27k passes with
+    /// 2005 evaluations costs about what the 4 calibration runs measured (231 ms at 0.81 ms per
+    /// unit, within 15 %).
+    #[test]
+    fn the_cost_terms_are_the_weighted_counts() {
+        assert_eq!(cost::global(0, 0, 0), 0.0);
+        assert_eq!(cost::measure(0) + cost::local(0, 0) + cost::relay(0), 0.0);
+        assert!((cost::global(10, 0, 0) - 10.0 * cost::GLOBAL_ALIVE).abs() < 1e-12);
+        assert!((cost::global(0, 10, 0) - 10.0 * cost::GLOBAL_EVAL).abs() < 1e-12);
+        assert!((cost::global(0, 0, 10) - 10.0 * cost::GLOBAL_PASS).abs() < 1e-12);
+        assert!((cost::measure(1000) - 1000.0 * cost::MEASURE_PASS).abs() < 1e-12);
+        assert!((cost::local(10, 3) - (10.0 * cost::LOCAL_EVAL + 3.0)).abs() < 1e-12);
+        assert!((cost::relay(1000) - 1000.0 * cost::RELAY_PASS).abs() < 1e-12);
+        let esc_ms = 0.813 * (cost::global(320, 2005, 26993) + 0.6 * cost::measure(26993));
+        assert!((esc_ms / 231.0 - 1.0).abs() < 0.15, "qmtech X escape {esc_ms} ms");
+        let relay_ms = 0.813 * (cost::local(15, 34) + cost::relay(26993));
+        assert!((relay_ms / 49.8 - 1.0).abs() < 0.25, "qmtech X re-lay {relay_ms} ms");
     }
 
     #[test]
