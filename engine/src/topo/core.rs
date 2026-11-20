@@ -64,6 +64,19 @@ pub fn diff_pair_nets(model: &BoardModel) -> BTreeSet<i32> {
     model.rules.diff_pairs.iter().filter(|p| p.p != p.n).flat_map(|p| [p.p, p.n]).collect()
 }
 
+/// forced-draw (docs/dev/design/forced-draw.md): the never-drop pass's octilinear count, so a
+/// forced run's free-angle stretch is never silent: `None` when the octilinear style is off or
+/// nothing was drawn by force.
+fn forced_free_line(octi_on: bool, s: &draw::DrawStats) -> Option<String> {
+    let runs = s.forced_relaxed + s.forced_funnel + s.forced_attempt;
+    (octi_on && runs > 0).then(|| {
+        format!(
+            "never drop, octilinear: {} of {runs} forced runs drawn in their octilinear form; {} forced runs keep {} free-angle stretches ({:.1} mm), where the octilinear form costs more violation price or there is none (a layer change for them is the plan's decision)",
+            s.forced_octi, s.forced_free_runs, s.forced_free_stretches, s.forced_free_mm
+        )
+    })
+}
+
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
 /// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
 /// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
@@ -9463,6 +9476,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             n_via_forced,
             unlayerable_errors
         ));
+        if let Some(line) = forced_free_line(octi_on, &forced_stats) {
+            warnings.push(line);
+        }
         // Q14b: a trace whose copper overlaps copper of another net (a pad, an existing via, a
         // copper shape, a routed track or via) or runs inside a no-tracks rule area is a short
         // the optimiser could not take out; like a crossing on one layer (above), the user sees it
@@ -10118,6 +10134,29 @@ fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, pour_on: bool,
 
 #[cfg(test)]
 mod tests {
+    /// forced-draw (T5): the never-drop octilinear line, every case of its text: no line with the
+    /// octilinear style off or no forced run; the counts of each candidate kind summed; zero and
+    /// nonzero free-angle counts.
+    #[test]
+    fn forced_free_line_counts_every_forced_run() {
+        let mut s = super::draw::DrawStats::default();
+        assert_eq!(super::forced_free_line(true, &s), None, "no forced run, no line");
+        s.forced_relaxed = 2;
+        s.forced_funnel = 1;
+        s.forced_attempt = 1;
+        assert_eq!(super::forced_free_line(false, &s), None, "octilinear style off, no line");
+        assert_eq!(
+            super::forced_free_line(true, &s).as_deref(),
+            Some("never drop, octilinear: 0 of 4 forced runs drawn in their octilinear form; 0 forced runs keep 0 free-angle stretches (0.0 mm), where the octilinear form costs more violation price or there is none (a layer change for them is the plan's decision)")
+        );
+        s.forced_octi = 3;
+        s.forced_free_runs = 1;
+        s.forced_free_stretches = 2;
+        s.forced_free_mm = 12.34;
+        let line = super::forced_free_line(true, &s).expect("a line");
+        assert!(line.starts_with("never drop, octilinear: 3 of 4 forced runs drawn in their octilinear form; 1 forced runs keep 2 free-angle stretches (12.3 mm)"), "{line}");
+    }
+
     /// TW7 B `[optimize] pattern_stuck`: the order falls with every fruitless try, never to 0,
     /// and weight 0 is the excess length alone.
     #[test]
