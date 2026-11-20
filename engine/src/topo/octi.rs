@@ -1033,6 +1033,30 @@ impl Drawer<'_> {
                 None => nodes_loop(None),
             }
         }
+        // Debug (`TOPO_OCTIWHYF`, forced-draw): a forced run's (relax > 0) octilinear legs the
+        // legality refused, by the first test that failed (read only).
+        if relax > 0.0 && std::env::var_os("TOPO_OCTIWHYF").is_some() {
+            let full = Wp { relax: 0.0, ..wp };
+            let nr0 = self.near(ents.clone(), &full);
+            let mut c = [0usize; 6];
+            for (k, &ok) in &memo.legal {
+                let (a, b) = (Vec2 { x: f64::from_bits(k[0]), y: f64::from_bits(k[1]) }, Vec2 { x: f64::from_bits(k[2]), y: f64::from_bits(k[3]) });
+                let bb = bbox_of(&[a, b]);
+                let i = if ok {
+                    if self.seg_clear_near(&nr0, a, b) { 0 } else { 1 }
+                } else if !(bb.min.x >= region.min.x && bb.min.y >= region.min.y && bb.max.x <= region.max.x && bb.max.y <= region.max.y) {
+                    2
+                } else if !(strip.contains(b) && strip.contains((a + b) * 0.5)) {
+                    3
+                } else if strip.crosses_wall(a, b) {
+                    4
+                } else {
+                    5
+                };
+                c[i] += 1;
+            }
+            eprintln!("OCTIWHYF w{w} L{layer} relax {:.0} legs {}: legal {} (of them below the full rule {}), refused: region {} strip {} wall {} clearance {}", relax, memo.legal.len(), c[0] + c[1], c[1], c[2], c[3], c[4], c[5]);
+        }
         // TOPO_OCTINODES=<wire>: the nodes, their best price and the arrival state.
         if std::env::var("TOPO_OCTINODES").ok().and_then(|v| v.parse::<usize>().ok()) == Some(w) {
             for (i, nd) in nodes.iter().enumerate() {
