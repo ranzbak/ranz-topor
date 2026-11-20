@@ -69,6 +69,11 @@ the values are 0.33, 0.76, 0.52 and 2.84. qmtech fails in every variant tried (1
 refine evaluations (about 1400 per escape, esp 12), so without it the evaluation weight is not identified. Rule (lead):
 not all 4 within 0.8-1.25, so the default is "units".
 
+**Gap (verifier r2).** A re-lay whose local judge falls back to the whole board (under cuts) pays the whole-board
+layering and measure terms in the code (GLOBAL_*, MEASURE_PASS). The relay fit has no such term: it models those
+evaluations as LOCAL_EVAL. The 18 fit runs have 0 such rows, so this has no effect today. If a board shows them,
+add the global terms to the relay model of tools/escape_cost_fit.py.
+
 **Option.** `[optimize] escape_budget = "units"` (default: kappa x alive per escape; `escape_kappa` applies) |
 `"cost"` (opt-in, this note). Documented in schema.py, configuration.md.
 

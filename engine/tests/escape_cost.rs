@@ -73,15 +73,22 @@ fn opts(extra: &str) -> Options {
     Options::from_json(&s).unwrap()
 }
 
-/// One run: its plan metrics "loop" -> "escape" record and the profile's work rows.
+/// One run: its plan metrics "loop" -> "escape" record and the profile's work rows (the notes:
+/// [`run_notes`]).
 fn run(m: &BoardModel, o: &Options) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let (e, rows, _) = run_notes(m, o);
+    (e, rows)
+}
+
+/// [`run`] and the profile's notes.
+fn run_notes(m: &BoardModel, o: &Options) -> (serde_json::Value, Vec<serde_json::Value>, serde_json::Value) {
     let ctl = RunControl::new();
     ctl.limit.init(o.wall_clock_s);
     let r = route_with(m, o, &ctl);
     let line = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics line");
     let v: serde_json::Value = serde_json::from_str(line.trim_start_matches("plan metrics:").trim()).expect("plan metrics JSON");
     let p = prof::report().expect("profile");
-    (v["loop"]["escape"].clone(), p["work"].as_array().cloned().unwrap_or_default())
+    (v["loop"]["escape"].clone(), p["work"].as_array().cloned().unwrap_or_default(), p["notes"].clone())
 }
 
 /// The measured budget prices each sweep re-lay by the cost terms of its counts (fixed part per pass,
@@ -94,7 +101,7 @@ fn the_cost_budget_counts_each_step_by_its_cost_terms() {
     let m = fan4();
     let near = |a: f64, b: f64, tol: f64| (a - b).abs() <= tol;
     let f = |r: &serde_json::Value, k: &str| r[k].as_f64().unwrap_or_else(|| panic!("{k} in {r}"));
-    let (e, rows) = run(&m, &opts(r#", "escape_budget": "cost""#));
+    let (e, rows, notes) = run_notes(&m, &opts(r#", "escape_budget": "cost""#));
     assert_eq!(e["budget"], "cost", "{e}");
     let esc: Vec<_> = rows.iter().filter(|r| r["kind"] == "escape").collect();
     let rel: Vec<_> = rows.iter().filter(|r| r["kind"] == "relay").collect();
@@ -113,19 +120,43 @@ fn the_cost_budget_counts_each_step_by_its_cost_terms() {
         assert!(near(f(r, "cost"), want, 1e-9) || f(r, "cost") > want, "re-lay row {r}: cost terms {want}");
     }
     assert!(rel.iter().any(|r| near(f(r, "cost"), relay_terms(r), 1e-9)));
-    // An escape: its fixed part, the whole-board layering and its measures.
+    // An escape: its fixed part, the whole-board layering and its measures (from the weights).
     let esc_terms = |r: &serde_json::Value| {
-        let n = f(r, "passes") as usize;
-        cost::ESCAPE_FIXED + cost::global(f(r, "alive") as usize, f(r, "evals") as usize, n) + f(r, "measures") * cost::measure(n)
+        let p = f(r, "passes");
+        cost::ESCAPE_FIXED + cost::GLOBAL_ALIVE * f(r, "alive") + cost::GLOBAL_EVAL * f(r, "evals") + cost::GLOBAL_PASS * p + cost::MEASURE_PASS * f(r, "measures") * p
     };
-    assert!(esc.iter().all(|r| f(r, "cost") >= cost::ESCAPE_FIXED - 1e-9), "an escape below its fixed part");
-    assert!(esc.iter().any(|r| near(f(r, "cost"), esc_terms(r), 1e-6)), "no escape row at its cost terms: {:?}", esc.iter().map(|r| (f(r, "cost"), esc_terms(r))).collect::<Vec<_>>());
+    for r in &esc {
+        assert!(near(f(r, "cost"), esc_terms(r), 1e-6), "escape row {r}: cost terms {}", esc_terms(r));
+    }
+    assert!(esc.iter().any(|r| f(r, "measures") > 0.0), "no escape measured the board: the measure term is not shown");
+    // The first escape is due after (1/s - 1) x (fixed part + one whole-board layering and measure
+    // at the loop's start): the re-lays before it reach that, all but the last one do not.
+    let n0 = &notes["escape_first"];
+    let first = cost::ESCAPE_FIXED + cost::GLOBAL_ALIVE * f(n0, "alive") + cost::GLOBAL_EVAL * f(n0, "evals") + (cost::GLOBAL_PASS + cost::MEASURE_PASS) * f(n0, "passes");
+    assert!(near(f(n0, "first"), first, 1e-6), "first wait {n0}: cost terms {first}");
+    let need = first * (1.0 / f(n0, "share") - 1.0);
+    let k = rows.iter().position(|r| r["kind"] == "escape").expect("an escape");
+    let before: Vec<f64> = rows[..k].iter().filter(|r| r["kind"] == "relay").map(|r| f(r, "cost")).collect();
+    let sum: f64 = before.iter().sum();
+    assert!(sum >= need - 1e-6 && sum - before.last().copied().unwrap_or(0.0) < need, "first escape after {sum} of re-lay cost, need {need}");
     let w = e["work_units"].as_array().expect("work_units");
     let (ew, rw) = (w[0].as_f64().unwrap(), w[1].as_f64().unwrap());
     let (se, sr): (f64, f64) = (esc.iter().map(|r| f(r, "cost")).sum(), rel.iter().map(|r| f(r, "cost")).sum());
     assert!(near(ew, se, 0.051) && near(rw, sr, 0.051), "work_units {w:?} vs the rows' cost {se} {sr}");
     assert!(se / (se + sr) <= 0.35 + 0.05, "escape share of the counted cost {}", se / (se + sr));
     assert!(sr > 0.0 && f(&e, "relay_wires") > 0.0 && !near(sr, f(&e, "relay_wires"), 0.051), "{e}");
+    // In-loop P4 rounds (`loop_p4`, the escapes' other half of the share): each round charges its
+    // throttle its own counter change plus its placings, and the escapes' total is the escape and
+    // P4 charges.
+    let (p, rows_p) = run(&m, &opts(r#", "escape_budget": "cost", "loop_p4": true"#));
+    let p4: Vec<_> = rows_p.iter().filter(|r| r["kind"] == "p4").collect();
+    assert!(!p4.is_empty(), "no in-loop P4 round: {p}");
+    for r in &p4 {
+        assert!(near(f(r, "work"), f(r, "cost") + f(r, "placing"), 1e-9) && f(r, "cost") > 0.0, "P4 row {r}");
+    }
+    let se_p: f64 = rows_p.iter().filter(|r| r["kind"] == "escape").map(|r| f(r, "cost")).sum::<f64>() + p4.iter().map(|r| f(r, "work")).sum::<f64>();
+    let wp = p["work_units"].as_array().expect("work_units");
+    assert!(near(wp[0].as_f64().unwrap(), se_p, 0.051), "work_units {wp:?} vs escapes + P4 rounds {se_p}");
     // "units": the re-lays in wire units (the counter still runs for the rows).
     let (u, rows_u) = run(&m, &opts(r#", "escape_budget": "units""#));
     let sr_u: f64 = rows_u.iter().filter(|r| r["kind"] == "relay").map(|r| f(r, "cost")).sum();

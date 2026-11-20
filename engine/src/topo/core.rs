@@ -5418,6 +5418,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     return false;
                 }
                 let _pg = super::prof::g(super::prof::K::LoopP4);
+                let (rt, _, _) = self.row_mark();
                 self.resync();
                 let k0 = self.work_mark();
                 let c0 = self.lctr.cost.get();
@@ -5495,8 +5496,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 // Its work: the counted layering and measuring, plus each placing at the mean
                 // re-lay's work so far (a placing is a re-lay's search without its local judge).
                 let relays = self.relays.max(1) as f64;
-                let w = self.budget_since(k0, c0) + vw.len() as f64 * self.tw5.p4_throttle.relay_work / relays;
+                let placing = vw.len() as f64 * self.tw5.p4_throttle.relay_work / relays;
+                let w = self.budget_since(k0, c0) + placing;
                 self.tw5.p4_throttle.ran_work(w);
+                // site-price-cost (profile only): the round's throttle charge, its counter change and
+                // its placings' part.
+                if let Some(t0) = rt {
+                    super::prof::work(serde_json::json!({"kind": "p4", "wall_s": t0.elapsed().as_secs_f64(), "cost": self.lctr.cost.get() - c0, "placing": placing, "work": w, "ripped": vw.len()}));
+                }
                 if self.dbg {
                     let t = self.dbg_crit();
                     eprintln!("LOOPDBG[{}] cycle {} loop P4: {} wires ripped, {}: {t}", self.dbg_tag, c.cycle, vw.len(), if lost { "undone (a wire found no path)" } else if worse { "undone (worse)" } else { "taken" });
@@ -6721,6 +6728,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let cost_budget = opts.escape_budget == "cost";
         let share_each = if opts.escape == "layering" && opts.loop_p4 { opts.escape_share * 0.5 } else { opts.escape_share };
         let first_cost = super::escape::cost::ESCAPE_FIXED + super::escape::cost::global(st_alive, lr.refine_stream.0, st.passes.len()) + super::escape::cost::measure(st.passes.len());
+        if cost_budget && opts.escape == "layering" {
+            // site-price-cost (profile only): the first wait's inputs, for the tests.
+            super::prof::note("escape_first", serde_json::json!({"first": first_cost, "share": share_each, "alive": st_alive, "evals": lr.refine_stream.0, "passes": st.passes.len()}));
+        }
         let throttle0 = || if cost_budget { super::escape::Throttle::new_work(share_each, first_cost) } else { super::escape::Throttle::new(share_each, opts.escape_kappa, st_alive) };
         let reroutes0 = reroutes.clone();
         let hist_base0 = st.history.clone();
