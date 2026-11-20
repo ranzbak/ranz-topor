@@ -5537,6 +5537,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn escape(&mut self, c: &CycleCtx, cs: &mut CycleStats, front: &mut std::collections::VecDeque<WireId>, fronted: &mut Vec<bool>) {
                 let _pg = super::prof::g(super::prof::K::Escape);
                 let (rt, rm, c0) = self.row_mark();
+                // site-price-cost: an escape's fixed part (resync, history, bookkeeping).
+                self.lctr.spend(super::escape::cost::ESCAPE_FIXED);
                 self.resync();
                 self.tw5.n_esc += 1;
                 let seed = super::optimise::mix_seed(c.seed, 0xE5C0_0000 + self.tw5.n_esc) | 1;
@@ -6281,7 +6283,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     }
                     // site-price-cost: a re-lay's fixed cost (path search, placing) on top of its
                     // counted layerings and judges.
-                    self.lctr.spend(super::escape::cost::relay(self.st.passes.len()));
+                    let judged = self.lctr.local_free.get() + self.lctr.local_model.get() - rm.1;
+                    self.lctr.spend(super::escape::cost::relay(self.st.passes.len(), judged));
                     let units = self.budget_since(k0, c0);
                     self.tw5.relay_wires += self.work_since(k0);
                     self.work_row("relay", rt, rm, c0);
@@ -6715,9 +6718,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // site-price-cost: the budget's currency; with "cost" the first escape (or in-loop P4
         // round) is due after (1/s - 1) x the cost of one whole-board layering and measure of this
         // board (the last layering's evaluations), else after kappa x alive wire units.
-        let cost_budget = opts.escape_budget != "units";
+        let cost_budget = opts.escape_budget == "cost";
         let share_each = if opts.escape == "layering" && opts.loop_p4 { opts.escape_share * 0.5 } else { opts.escape_share };
-        let first_cost = super::escape::cost::global(st_alive, lr.refine_stream.0, st.passes.len()) + super::escape::cost::measure(st.passes.len());
+        let first_cost = super::escape::cost::ESCAPE_FIXED + super::escape::cost::global(st_alive, lr.refine_stream.0, st.passes.len()) + super::escape::cost::measure(st.passes.len());
         let throttle0 = || if cost_budget { super::escape::Throttle::new_work(share_each, first_cost) } else { super::escape::Throttle::new(share_each, opts.escape_kappa, st_alive) };
         let reroutes0 = reroutes.clone();
         let hist_base0 = st.history.clone();
@@ -7147,7 +7150,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 opts.escape_take,
                 100.0 * esc_share,
                 100.0 * opts.escape_share.clamp(0.0, 0.5),
-                if opts.escape_budget == "units" { "units" } else { "cost" },
+                if opts.escape_budget == "cost" { "cost" } else { "units" },
                 st_.float_w_kept,
                 st_.float_w_tried,
                 st_.hist_updates,
@@ -7181,7 +7184,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 "walked": rep.stats.esc_walked,
                 "relaid": [rep.stats.relaid_kept, rep.stats.relaid],
                 "work_share": (esc_share * 1e4).round() / 1e4,
-                "budget": if opts.escape_budget == "units" { "units" } else { "cost" },
+                "budget": if opts.escape_budget == "cost" { "cost" } else { "units" },
                 "work_units": [(esc_work.0 * 10.0).round() / 10.0, (esc_work.1 * 10.0).round() / 10.0],
                 "relay_wires": (relay_wires * 10.0).round() / 10.0,
                 "layer_s": (rep.stats.layer_s * 1e3).round() / 1e3,

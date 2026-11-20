@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refit the TopoR loop's cost counter weights (engine/src/topo/escape.rs `pub mod cost`).
 
-usage: python3 tools/escape_cost_fit.py PROF.json [PROF.json ...] [--check]
+usage: python3 tools/escape_cost_fit.py [BOARD:]PROF.json [...] [--check] [--loo]
 
 Input: profile JSONs of deterministic runs with layering escapes on (`TOPO_PROF=1`, engine example
 `topo_route ... --prof FILE`, or the `profile` object of a plugin/harness result.json), each with the
@@ -9,20 +9,23 @@ Input: profile JSONs of deterministic runs with layering escapes on (`TOPO_PROF=
 alive, passes, cost). Run them at the scorecard thread count (RAYON_NUM_THREADS=4) on a quiet machine.
 
 Model (wall ms, non-negative least squares, each run weighted equally):
-  escape = a * alive + e * evals + p * passes + m * passes * measures
-  relay  = l * local_wires + le * evals + r * passes
-Printed in the counter's unit, one local wire (`l` ms): GLOBAL_ALIVE = a / l, GLOBAL_EVAL = e / l,
-GLOBAL_PASS = p / l, MEASURE_PASS = m / l, LOCAL_EVAL = le / l, RELAY_PASS = r / l; then per run the
-escape-vs-relay real/predicted ratio f (a share s becomes f s / (f s + 1 - s) in time).
+  escape = ESCAPE_FIXED + GLOBAL_ALIVE * alive + GLOBAL_EVAL * evals + GLOBAL_PASS * passes
+           + MEASURE_PASS * passes * measures
+  relay  = RELAY_FIXED + LOCAL_WIRE * local_wires + LOCAL_WIRE_PASS * local_wires * passes
+           + LOCAL_EVAL * evals + RELAY_PASS * passes
+Printed in the counter's unit (1 ms at 4 threads); then per run the escape-vs-relay real/predicted
+ratio f (a share s becomes f s / (f s + 1 - s) in time).
 --check: no fit; the ratios of the weights compiled in now (the rows' own `cost` column).
+--loo: also leave one board out: fit on the other boards, f of the left-out board (BOARD: prefixes
+name the boards; without one a file is its own board).
 """
 from __future__ import annotations
 
 import json
 import sys
 
-ESC = ("alive", "evals", "passes", "pm")
-REL = ("local_wires", "evals", "passes")
+ESC = ("one", "alive", "evals", "passes", "pm")
+REL = ("one", "local_wires", "lwp", "evals", "passes")
 
 
 def rows(path: str) -> list[dict]:
@@ -32,6 +35,8 @@ def rows(path: str) -> list[dict]:
     for r in p.get("work", []):
         r = dict(r)
         r["pm"] = r["passes"] * r["measures"]
+        r["one"] = 1.0
+        r["lwp"] = r["local_wires"] * r["passes"]
         out.append(r)
     return out
 
@@ -64,44 +69,68 @@ def nnls(xs: list[list[float]], ys: list[float]) -> list[float]:
         free.pop(min(neg, key=lambda i: sol[i]))
 
 
+def fit(data: dict[str, list[dict]]) -> tuple[list[float], list[float]]:
+    """The escape and re-lay weights (wall s per count) over the runs `data`."""
+    xe, ye, xr, yr = [], [], [], []
+    for rs in data.values():
+        e = [r for r in rs if r["kind"] == "escape"]
+        r_ = [r for r in rs if r["kind"] == "relay"]
+        we = 1.0 / (len(e) ** 0.5 * sum(r["wall_s"] for r in e) / len(e))
+        wr = 1.0 / (len(r_) ** 0.5 * sum(r["wall_s"] for r in r_) / len(r_))
+        xe += [[r[k] * we for k in ESC] for r in e]
+        ye += [r["wall_s"] * we for r in e]
+        xr += [[r[k] * wr for k in REL] for r in r_]
+        yr += [r["wall_s"] * wr for r in r_]
+    return nnls(xe, ye), nnls(xr, yr)
+
+
+def ratio(rs: list[dict], pe, pr) -> float:
+    """Escape-vs-re-lay real/predicted f over the rows `rs`."""
+    e = [r for r in rs if r["kind"] == "escape"]
+    r_ = [r for r in rs if r["kind"] == "relay"]
+    re_ = sum(r["wall_s"] for r in e) / sum(pe(r) for r in e)
+    rr = sum(r["wall_s"] for r in r_) / sum(pr(r) for r in r_)
+    return re_ / rr
+
+
+def lin(c: list[float], keys: tuple) -> object:
+    return lambda r: sum(w * r[k] for w, k in zip(c, keys))
+
+
 def main(argv: list[str]) -> int:
     check = "--check" in argv
-    files = [a for a in argv if a != "--check"]
-    if not files:
+    loo = "--loo" in argv
+    args = [a for a in argv if a not in ("--check", "--loo")]
+    if not args:
         print(__doc__)
         return 2
-    data = {f: rows(f) for f in files}
+    board = {}
+    data = {}
+    for a in args:
+        b, f = a.split(":", 1) if ":" in a else (a, a)
+        data[f] = rows(f)
+        board[f] = b
     for f, rs in data.items():
         if not any(r["kind"] == "escape" for r in rs) or not any(r["kind"] == "relay" for r in rs):
             print(f"{f}: no escape or no relay rows (escape = \"layering\", TOPO_PROF=1?)", file=sys.stderr)
             return 1
     if check:
-        pe = lambda r: r["cost"]  # noqa: E731
-        pr = pe
+        pe = pr = lambda r: r["cost"]  # noqa: E731
     else:
-        xe, ye, xr, yr = [], [], [], []
-        for rs in data.values():
-            e = [r for r in rs if r["kind"] == "escape"]
-            r_ = [r for r in rs if r["kind"] == "relay"]
-            we = 1.0 / (len(e) ** 0.5 * sum(r["wall_s"] for r in e) / len(e))
-            wr = 1.0 / (len(r_) ** 0.5 * sum(r["wall_s"] for r in r_) / len(r_))
-            xe += [[r[k] * we for k in ESC] for r in e]
-            ye += [r["wall_s"] * we for r in e]
-            xr += [[r[k] * wr for k in REL] for r in r_]
-            yr += [r["wall_s"] * wr for r in r_]
-        ce, cr = nnls(xe, ye), nnls(xr, yr)
-        unit = cr[0] if cr[0] > 0 else 1e-3
-        print(f"unit = one local wire = {1000 * unit:.3f} ms")
-        for name, v in [("GLOBAL_ALIVE", ce[0]), ("GLOBAL_EVAL", ce[1]), ("GLOBAL_PASS", ce[2]), ("MEASURE_PASS", ce[3]),
-                        ("LOCAL_EVAL", cr[1]), ("RELAY_PASS", cr[2])]:
-            print(f"pub const {name}: f64 = {v / unit:.4g};")
-        pe = lambda r: sum(c * r[k] for c, k in zip(ce, ESC))  # noqa: E731
-        pr = lambda r: sum(c * r[k] for c, k in zip(cr, REL))  # noqa: E731
+        ce, cr = fit(data)
+        for name, v in [("ESCAPE_FIXED", ce[0]), ("GLOBAL_ALIVE", ce[1]), ("GLOBAL_EVAL", ce[2]), ("GLOBAL_PASS", ce[3]),
+                        ("MEASURE_PASS", ce[4]), ("RELAY_FIXED", cr[0]), ("LOCAL_WIRE", cr[1]), ("LOCAL_WIRE_PASS", cr[2]),
+                        ("LOCAL_EVAL", cr[3]), ("RELAY_PASS", cr[4])]:
+            print(f"pub const {name}: f64 = {1000 * v:.4g};")
+        pe, pr = lin(ce, ESC), lin(cr, REL)
     for f, rs in data.items():
-        e = [r for r in rs if r["kind"] == "escape"]
-        r_ = [r for r in rs if r["kind"] == "relay"]
-        re_, rr = sum(r["wall_s"] for r in e) / sum(pe(r) for r in e), sum(r["wall_s"] for r in r_) / sum(pr(r) for r in r_)
-        print(f"{f}: {len(e)} escapes, {len(r_)} re-lays, escape-vs-relay real/predicted f = {re_ / rr:.2f}")
+        e = sum(r["kind"] == "escape" for r in rs)
+        print(f"{f}: {e} escapes, {len(rs) - e} re-lays, escape-vs-relay real/predicted f = {ratio(rs, pe, pr):.2f}")
+    if loo and not check:
+        for b in sorted(set(board.values())):
+            ce, cr = fit({f: rs for f, rs in data.items() if board[f] != b})
+            out = [r for f, rs in data.items() if board[f] == b for r in rs]
+            print(f"leave out {b}: f = {ratio(out, lin(ce, ESC), lin(cr, REL)):.2f}")
     return 0
 
 

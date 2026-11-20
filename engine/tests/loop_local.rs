@@ -676,17 +676,18 @@ fn layering_escapes_change_free_positions_deterministically() {
         // the escapes so they stay within the share.
         let k = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", "escape_kappa": 10.0, {TW5}"#)));
         assert!(k["escapes"].as_f64().unwrap_or(0.0) > 0.0 && k["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, kappa 10: {k}");
-        // site-price-cost: the default budget is the measured cost; "units" is the budget before
-        // (kappa per alive wire): another escape schedule, the share bound in its own units.
-        assert_eq!(e["budget"], "cost", "{n_layers} layers: {e}");
-        let u = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", "escape_budget": "units", {TW5}"#)));
-        assert_eq!(u["budget"], "units", "{n_layers} layers: {u}");
-        assert!(u["escapes"].as_f64().unwrap_or(0.0) > 0.0 && u["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, units: {u}");
-        assert_ne!(u["work_units"], e["work_units"], "{n_layers} layers: the two budgets count alike");
+        // site-price-cost: the default budget is the wire units (kappa per alive wire, before);
+        // "cost" (the measured cost counter) is another escape schedule, the share bound in its own
+        // currency.
+        assert_eq!(e["budget"], "units", "{n_layers} layers: {e}");
+        let c = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", "escape_budget": "cost", {TW5}"#)));
+        assert_eq!(c["budget"], "cost", "{n_layers} layers: {c}");
+        assert!(c["escapes"].as_f64().unwrap_or(0.0) > 0.0 && c["work_share"].as_f64().unwrap_or(1.0) <= 0.35 + 1e-9, "{n_layers} layers, cost: {c}");
+        assert_ne!(c["work_units"], e["work_units"], "{n_layers} layers: the two budgets count alike");
         // The re-lays' work in the budget's own currency: wire units with "units", the cost counter
         // (another number) with "cost".
-        assert_eq!(u["work_units"][1], u["relay_wires"], "{n_layers} layers, units: {u}");
-        assert_ne!(e["work_units"][1], e["relay_wires"], "{n_layers} layers, cost: the re-lays counted in wire units: {e}");
+        assert_eq!(e["work_units"][1], e["relay_wires"], "{n_layers} layers, units: {e}");
+        assert_ne!(c["work_units"][1], c["relay_wires"], "{n_layers} layers, cost: the re-lays counted in wire units: {c}");
         let t = escape_json(&m, &loop_opts(r#""loop_judge": "local""#));
         assert_eq!(t["escapes"].as_f64(), Some(0.0), "{n_layers} layers, default (escape = ties): {t}");
         let t = escape_json(&m, &loop_opts(&format!(r#""loop_judge": "local", {TW5}, "escape": "ties""#)));
@@ -704,7 +705,7 @@ fn the_cost_budget_is_the_same_for_any_thread_count() {
     let m = board_layers(30.0, 20.0, 8, &pads, 4);
     let run = |threads: usize, extra: &str| {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("pool");
-        let o = loop_opts(&format!(r#""loop_judge": "local", "refine_lanes": {threads}, {TW5}{extra}"#));
+        let o = loop_opts(&format!(r#""loop_judge": "local", "escape_budget": "cost", "refine_lanes": {threads}, {TW5}{extra}"#));
         pool.install(|| {
             let ctl = RunControl::new();
             ctl.limit.init(o.wall_clock_s);

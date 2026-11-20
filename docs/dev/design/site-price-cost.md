@@ -17,15 +17,17 @@ CapModel::optimise 14.97 -> 0.56 ms per call (off: 0.77 ms on the VM), copper ha
 
 **What.** The TW5 throttle ([`escape::Throttle`], tw5-escape.md (b)) counts work in wire units: a re-lay = the wires
 its local judge laid + modelled; an escape = `escape_kappa` x alive wires. A per-run deterministic cost counter
-(`LoopCtr::cost`, units of about one re-lay model wire) replaces both for the escapes and the in-loop P4 rounds:
+(`LoopCtr::cost`, units of about 1 ms at 4 threads; round 2 weights) replaces both for the escapes and the in-loop
+P4 rounds:
 
 | step (call site in core.rs) | adds (deterministic counts only) |
 |---|---|
-| whole-board layering (`assign_tw`) | 0.215 x alive + 0.082 x refine evaluations + 1.33e-3 x passes |
-| whole-board measure | 1.31e-3 x passes |
-| local judge (`local_free`, `local_model` counted) | free + model wires (the old unit) |
-| local layering (`assign_l`) | 0.236 x refine evaluations |
-| one sweep re-lay (path search, placing) | 6.2e-4 x passes |
+| one escape (fixed part) | 1.415 |
+| whole-board layering (`assign_tw`) | 0.0954 x alive + 0.0804 x refine evaluations + 1.25e-3 x passes |
+| whole-board measure | 1.07e-3 x passes |
+| local judge (`local_free`, `local_model` counted) | 0.0765 x free + model wires |
+| local layering (`assign_l`) | 0.19 x refine evaluations |
+| one sweep re-lay (path search, placing) | 5.26 + 2.5e-4 x passes + 2.25e-5 x judged wires x passes |
 
 An escape's work is the counter's change over the escape itself (as `loop_p4` already does with `ran_work`), no
 kappa. The first escape is due after `(1/s - 1)` x the cost of one whole-board layering + measure at the loop's
@@ -56,8 +58,23 @@ ticks; manuals, not in docs/literature, no page).
 unchanged: escapes (`escape = "ties"`) and in-loop P4 (`loop_p4 = false`) are off by default. TW7's
 `pattern_share` keeps the old units (out of scope; its real share is reported as a finding).
 
-**Option.** `[optimize] escape_budget = "cost"` (default, this note) | `"units"` (before: kappa x alive per escape;
-`escape_kappa` then applies). Documented in schema.py, configuration.md.
+**Round 2 (lead 2026-11-20): refit on 4 boards, default rule.** The first fit (qmtech + esp only) gave eprom f
+0.73 and wiccon 2.77 out of sample. The refit adds a fixed part per escape (the lead's term). It also adds a fixed
+part per re-lay and a judged wire x pass term: an eprom re-lay costs 1.15 ms per judged wire, a wiccon one 0.27 ms,
+and no per-wire constant fits both. The fit covers 18 local det s0 runs on eprom, wiccon, esp and qmtech (1173
+escapes, 3058 re-lays). In-sample f is 0.77-1.25 on every run.
+
+Leave one board out: eprom 0.86, esp 0.84, qmtech 0.45, wiccon 1.99. With the lead's model (fixed escape term only)
+the values are 0.33, 0.76, 0.52 and 2.84. qmtech fails in every variant tried (15): only qmtech's escapes carry heavy
+refine evaluations (about 1400 per escape, esp 12), so without it the evaluation weight is not identified. Rule (lead):
+not all 4 within 0.8-1.25, so the default is "units".
+
+**Option.** `[optimize] escape_budget = "units"` (default: kappa x alive per escape; `escape_kappa` applies) |
+`"cost"` (opt-in, this note). Documented in schema.py, configuration.md.
+
+**Memo cap.** `pack::POINT_FREE_MEMO_CAP` = 2^20 entries: at the cap the memo is cleared and fills again. The values
+are pure, so a clear changes only the time; a test with cap 3 gives the same qmtech crop copper. Measured with the
+graded price, det s0: qmtech 14.5-14.7k entries, esp 5.0k.
 
 **Tests.** Throttle unit test: a stream of escapes and re-lays of measured costs keeps the share; loop_local test of
 the escape share on the fan board (both budgets); determinism (same copper and counts for 1 and 4 threads); mutants on

@@ -56,9 +56,10 @@ its path and its surroundings, and they oscillate within limits", "раскач�
   0.069, esp 0.123. With κ = 1 the work share was 32-35 % but the time share only 3-6 %: a re-lay's
   path search, not its layering, dominates its time. The copper never depends on the clock.
   **Superseded (site-price-cost, 2026-11-20)**: κ did not follow the cost once TW4r2's options were on
-  (escapes took 41-55 % of the sweep at s = 0.35). Default `[optimize] escape_budget = "cost"`: a
+  (escapes took 41-68 % of the sweep at s = 0.35). Opt-in `[optimize] escape_budget = "cost"`: a
   deterministic cost counter of counts weighted to follow time (escape.rs `pub mod cost`), an escape's
-  work measured over the escape itself; κ applies with `escape_budget = "units"` only.
+  work measured over the escape itself; κ applies with `escape_budget = "units"` (default: the
+  counter's weights do not carry over to a board left out of their fit).
   docs/dev/design/site-price-cost.md.
 - After each escape and its via-rose re-lays the state is offered to the table (TopoR: every step is
   tested against the kept variants; manual pp. 72-73) once TW3's table is in; before that it is counted.

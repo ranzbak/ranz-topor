@@ -94,18 +94,25 @@ fn the_cost_budget_counts_each_step_by_its_cost_terms() {
     let m = fan4();
     let near = |a: f64, b: f64, tol: f64| (a - b).abs() <= tol;
     let f = |r: &serde_json::Value, k: &str| r[k].as_f64().unwrap_or_else(|| panic!("{k} in {r}"));
-    let (e, rows) = run(&m, &opts(""));
+    let (e, rows) = run(&m, &opts(r#", "escape_budget": "cost""#));
     assert_eq!(e["budget"], "cost", "{e}");
     let esc: Vec<_> = rows.iter().filter(|r| r["kind"] == "escape").collect();
     let rel: Vec<_> = rows.iter().filter(|r| r["kind"] == "relay").collect();
     assert!(!esc.is_empty() && !rel.is_empty(), "escapes {} re-lays {}", esc.len(), rel.len());
     assert_eq!(esc.len() as f64, f(&e, "escapes"), "{e}");
     for r in &rel {
-        let want = cost::relay(f(r, "passes") as usize) + cost::local(f(r, "evals") as usize, f(r, "local_wires") as usize);
+        let want = cost::relay(f(r, "passes") as usize, f(r, "local_wires") as usize) + cost::local(f(r, "evals") as usize, f(r, "local_wires") as usize);
         // A re-lay whose judge fell back to the whole board also pays a global layering + measure.
         assert!(near(f(r, "cost"), want, 1e-9) || f(r, "cost") > want, "re-lay row {r}: cost terms {want}");
     }
-    assert!(rel.iter().any(|r| near(f(r, "cost"), cost::relay(f(r, "passes") as usize) + cost::local(f(r, "evals") as usize, f(r, "local_wires") as usize), 1e-9)));
+    assert!(rel.iter().any(|r| near(f(r, "cost"), cost::relay(f(r, "passes") as usize, f(r, "local_wires") as usize) + cost::local(f(r, "evals") as usize, f(r, "local_wires") as usize), 1e-9)));
+    // An escape: its fixed part, the whole-board layering and its measures.
+    let esc_terms = |r: &serde_json::Value| {
+        let n = f(r, "passes") as usize;
+        cost::ESCAPE_FIXED + cost::global(f(r, "alive") as usize, f(r, "evals") as usize, n) + f(r, "measures") * cost::measure(n)
+    };
+    assert!(esc.iter().all(|r| f(r, "cost") >= cost::ESCAPE_FIXED - 1e-9), "an escape below its fixed part");
+    assert!(esc.iter().any(|r| near(f(r, "cost"), esc_terms(r), 1e-6)), "no escape row at its cost terms: {:?}", esc.iter().map(|r| (f(r, "cost"), esc_terms(r))).collect::<Vec<_>>());
     let w = e["work_units"].as_array().expect("work_units");
     let (ew, rw) = (w[0].as_f64().unwrap(), w[1].as_f64().unwrap());
     let (se, sr): (f64, f64) = (esc.iter().map(|r| f(r, "cost")).sum(), rel.iter().map(|r| f(r, "cost")).sum());

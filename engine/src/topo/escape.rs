@@ -155,31 +155,42 @@ impl Throttle {
 }
 
 /// site-price-cost (`[optimize] escape_budget = "cost"`, docs/dev/design/site-price-cost.md): the
-/// weights of the TopoR loop's deterministic cost counter, in units of one wire a re-lay's local
-/// judge lays or models (the old work unit, about 0.8 ms at 4 threads). Only counts enter (alive
-/// wires, passes, the refinement's candidate evaluations, which the lane executor keeps equal to the
-/// serial loop's), so the copper never depends on the clock, the thread or the lane count.
+/// weights of the TopoR loop's deterministic cost counter, in units of about 1 ms of wall time at 4
+/// threads. Only counts enter (alive wires, passes, the refinement's candidate evaluations, which
+/// the lane executor keeps equal to the serial loop's, judged wires), so the copper never depends on
+/// the clock, the thread or the lane count.
 ///
-/// Source: least squares of the wall time per escape and per sweep re-lay over 4 deterministic runs
-/// (qmtech + esp-rust-board seed 0, `optimize.rounds = 1`, `runs = 1`, arms X = every TW opt-in
-/// but `[vias] site_price` and `preloop_p4 = false`, and X with `site_price = "graded"`; 315
-/// escapes, 884 re-lays; 4 threads, local, 2026-11-20, branch site-price-cost after the point_free
-/// memo). Escape-vs-re-lay real/predicted ratio per run: 0.87, 1.02, 1.01, 1.13. Refit:
-/// `tools/escape_cost_fit.py` on the profile JSONs (`TOPO_PROF=1`, `topo_route --prof FILE`; their
-/// `work` rows) of such runs. The measured throttle carries a re-lay's excess work over to the next
-/// escape (`Throttle::carry`), so the share holds for re-lays dearer than one escape's due.
+/// Source (round 2, 2026-11-20, local, 4 threads, branch site-price-cost after the point_free memo):
+/// non-negative least squares of the wall time per escape and per sweep re-lay over 18 deterministic
+/// seed-0 runs (`optimize.rounds = 1`, `runs = 1`) on 4 boards: qmtech and esp-rust-board x arms X
+/// (every TW opt-in but `[vias] site_price`; `preloop_p4` default), X + `site_price = "graded"`, both
+/// with `loop_p4 = false`, both budgets; eprom and wiccon x X, X with `escape_budget = "units"`, and
+/// that with `loop_p4 = false`. 1173 escapes, 3058 re-lays. A fixed part per escape and per re-lay
+/// and a judged wire's cost growing with the board's passes cover the small boards. Escape-vs-re-lay
+/// real/predicted ratio per run 0.77-1.25 (eprom 0.91-1.00, wiccon 1.04-1.11, esp 0.83-1.09, qmtech
+/// 0.77-1.25); leaving one board out of the fit: eprom 0.86, esp 0.84, qmtech 0.45, wiccon 1.99 (so
+/// the default budget stays "units", model.rs). Refit: `tools/escape_cost_fit.py --loo` on the
+/// profile JSONs (`TOPO_PROF=1`, `topo_route --prof FILE`; their `work` rows) of such runs. The
+/// measured throttle carries a re-lay's excess work over to the next escape (`Throttle::carry`), so
+/// the share holds for re-lays dearer than one escape's due.
 pub mod cost {
+    /// One escape's fixed part (resync, history model, bookkeeping).
+    pub const ESCAPE_FIXED: f64 = 1.415;
     /// A whole-board layering: per alive wire, per candidate evaluation of its refinement, per pass.
-    pub const GLOBAL_ALIVE: f64 = 0.2146;
-    pub const GLOBAL_EVAL: f64 = 0.0818;
-    pub const GLOBAL_PASS: f64 = 1.341e-3;
+    pub const GLOBAL_ALIVE: f64 = 0.09537;
+    pub const GLOBAL_EVAL: f64 = 0.08039;
+    pub const GLOBAL_PASS: f64 = 1.249e-3;
     /// A whole-board measure (capacity model of every wire): per pass.
-    pub const MEASURE_PASS: f64 = 1.305e-3;
-    /// A local layering: per candidate evaluation of its refinement (its judge's wires are the old
-    /// unit, 1 per wire).
-    pub const LOCAL_EVAL: f64 = 0.2357;
+    pub const MEASURE_PASS: f64 = 1.066e-3;
+    /// One sweep re-lay's fixed part (path search set-up, placing, bookkeeping).
+    pub const RELAY_FIXED: f64 = 5.261;
+    /// A local judge: per wire it lays or models, and per such wire and pass of the board.
+    pub const LOCAL_WIRE: f64 = 0.0765;
+    pub const LOCAL_WIRE_PASS: f64 = 2.253e-5;
+    /// A local layering: per candidate evaluation of its refinement.
+    pub const LOCAL_EVAL: f64 = 0.1905;
     /// One sweep re-lay (path search, placing, uncrossing): per pass of the board.
-    pub const RELAY_PASS: f64 = 6.15e-4;
+    pub const RELAY_PASS: f64 = 2.504e-4;
 
     /// The cost of a whole-board layering of `alive` wires over `passes` passes whose refinement
     /// evaluated `evals` candidates. O(1).
@@ -193,11 +204,12 @@ pub mod cost {
     /// The cost of a local layering's refinement of `evals` candidates and a local judge of
     /// `wires` laid and modelled wires. O(1).
     pub fn local(evals: usize, wires: usize) -> f64 {
-        LOCAL_EVAL * evals as f64 + wires as f64
+        LOCAL_EVAL * evals as f64 + LOCAL_WIRE * wires as f64
     }
-    /// The fixed cost of one sweep re-lay on a board of `passes` passes. O(1).
-    pub fn relay(passes: usize) -> f64 {
-        RELAY_PASS * passes as f64
+    /// The fixed cost of one sweep re-lay on a board of `passes` passes whose local judges laid
+    /// and modelled `wires` wires in all. O(1).
+    pub fn relay(passes: usize, wires: usize) -> f64 {
+        RELAY_FIXED + RELAY_PASS * passes as f64 + LOCAL_WIRE_PASS * (wires * passes) as f64
     }
 }
 
@@ -437,23 +449,30 @@ mod tests {
     }
 
     /// site-price-cost: the cost counter's terms are the weighted counts (each grows with its count
-    /// at its weight, 0 for none), so an escape on a board of 320 alive wires and 27k passes with
-    /// 2005 evaluations costs about what the 4 calibration runs measured (231 ms at 0.81 ms per
-    /// unit, within 15 %).
+    /// at its weight), so a qmtech X escape (320 alive wires, 29.7k passes, 1400 evaluations, 0.8
+    /// measures) and re-lay (33 judged wires, 20 evaluations) cost about what the calibration runs
+    /// measured (219 and 49 ms), and an eprom one (27 alive, 244 passes) its 4.8 and 6.8 ms.
     #[test]
     fn the_cost_terms_are_the_weighted_counts() {
-        assert_eq!(cost::global(0, 0, 0), 0.0);
-        assert_eq!(cost::measure(0) + cost::local(0, 0) + cost::relay(0), 0.0);
+        assert_eq!(cost::global(0, 0, 0) + cost::measure(0) + cost::local(0, 0), 0.0);
+        assert_eq!(cost::relay(0, 0), cost::RELAY_FIXED);
         assert!((cost::global(10, 0, 0) - 10.0 * cost::GLOBAL_ALIVE).abs() < 1e-12);
         assert!((cost::global(0, 10, 0) - 10.0 * cost::GLOBAL_EVAL).abs() < 1e-12);
         assert!((cost::global(0, 0, 10) - 10.0 * cost::GLOBAL_PASS).abs() < 1e-12);
         assert!((cost::measure(1000) - 1000.0 * cost::MEASURE_PASS).abs() < 1e-12);
-        assert!((cost::local(10, 3) - (10.0 * cost::LOCAL_EVAL + 3.0)).abs() < 1e-12);
-        assert!((cost::relay(1000) - 1000.0 * cost::RELAY_PASS).abs() < 1e-12);
-        let esc_ms = 0.813 * (cost::global(320, 2005, 26993) + 0.6 * cost::measure(26993));
-        assert!((esc_ms / 231.0 - 1.0).abs() < 0.15, "qmtech X escape {esc_ms} ms");
-        let relay_ms = 0.813 * (cost::local(15, 34) + cost::relay(26993));
-        assert!((relay_ms / 49.8 - 1.0).abs() < 0.25, "qmtech X re-lay {relay_ms} ms");
+        assert!((cost::local(10, 3) - (10.0 * cost::LOCAL_EVAL + 3.0 * cost::LOCAL_WIRE)).abs() < 1e-12);
+        assert!((cost::relay(1000, 0) - cost::RELAY_FIXED - 1000.0 * cost::RELAY_PASS).abs() < 1e-12);
+        assert!((cost::relay(1000, 2) - cost::relay(1000, 0) - 2000.0 * cost::LOCAL_WIRE_PASS).abs() < 1e-12);
+        let esc = |alive, evals, passes, meas: f64| cost::ESCAPE_FIXED + cost::global(alive, evals, passes) + meas * cost::measure(passes);
+        let relay = |evals, wires, passes| cost::local(evals, wires) + cost::relay(passes, wires);
+        for (what, got, want, tol) in [
+            ("qmtech escape", esc(320, 1400, 29721, 0.8), 219.3, 0.25),
+            ("qmtech re-lay", relay(20, 33, 29757), 49.4, 0.25),
+            ("eprom escape", esc(27, 0, 244, 0.0), 4.8, 0.6),
+            ("eprom re-lay", relay(0, 6, 244), 6.8, 0.25),
+        ] {
+            assert!((got / want - 1.0).abs() < tol, "{what}: {got} ms against {want}");
+        }
     }
 
     #[test]

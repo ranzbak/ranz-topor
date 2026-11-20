@@ -36,7 +36,7 @@ The profile JSON also holds `work`: one row per layering escape and per sweep re
 the counts the loop's cost counter reads: refine evaluations, local wires, whole-board measures, alive wires, passes,
 the counter's cost), and `notes` (e.g. `point_free_memo`: the packer's memo size). `tools/escape_cost_fit.py` refits
 the cost counter's weights from such profiles (`--check`: the escape-vs-re-lay real/predicted ratio of the weights in
-the engine; docs/dev/design/site-price-cost.md). Without a Python run: `cargo run --release --example topo_route --
+the engine; `--loo`: the same ratio for each board left out of the fit, `BOARD:file` arguments name the boards; docs/dev/design/site-price-cost.md). Without a Python run: `cargo run --release --example topo_route --
 model.json --options options.json --prof prof.json` with `TOPO_PROF=1`.
 
 ## Flame graphs
