@@ -2,7 +2,7 @@
 
     python -m harness.drc_patterns_png RUNS OUT [name ...]
 
-RUNS/<cfg>/<name>/ = tools/drc_patterns_run.sh output (harness.route_board: <name>-topor/<name>.kicad_pcb, --metrics.json,
+RUNS/<label>/<name>/ (one panel per label, e.g. main-default) = tools/drc_patterns_run.sh output (harness.route_board: <name>-topor/<name>.kicad_pcb, --metrics.json,
 --drc-routed.json). Same view and scale in every panel; F.Cu red, B.Cu blue, kept copper hatched, PTH pads grey with the
 drill, the copper-to-edge line dashed, KiCad DRC violations of the routed copy ringed yellow. OUT/<name>.png and
 OUT/summary.json (per pattern and config: routed, DRC routing_new, unconnected, vias, new copper length, layers per net,
@@ -20,7 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Circle, Polygon, Rectangle  # noqa: E402
 
-from harness.drc_patterns import CONFIGS, EDGE, PATTERNS, STATUS, Pat, arc_points, pad_geom, plen  # noqa: E402
+from harness.drc_patterns import EDGE, PATTERNS, ROUND2, STATUS, Pat, arc_points, pad_geom, plen  # noqa: E402
 
 COL = {"F.Cu": "#c8372f", "B.Cu": "#2f62c8"}
 ROUTING = {"clearance", "shorting_items", "tracks_crossing", "hole_clearance", "copper_edge_clearance", "track_width",
@@ -151,6 +151,23 @@ def _octi(pts) -> bool:
     return True
 
 
+def bends(segs) -> dict:
+    """Per net: corners where two straight segments of the net meet at an angle (> 1 deg), T junctions not counted."""
+    ends = {}
+    for _layer, net, _w, pts in segs:
+        if len(pts) != 2 or math.dist(*pts) < 1e-4:
+            continue
+        for p, q in ((pts[0], pts[1]), (pts[1], pts[0])):
+            ends.setdefault((net, round(p[0], 3), round(p[1], 3)), []).append(math.atan2(q[1] - p[1], q[0] - p[0]))
+    out = {}
+    for (net, _x, _y), angs in ends.items():
+        if len(angs) == 2:
+            d = abs((angs[0] - angs[1] + math.pi) % (2 * math.pi) - math.pi)
+            if abs(d - math.pi) > math.radians(1):
+                out[net] = out.get(net, 0) + 1
+    return dict(sorted(out.items()))
+
+
 def judge(pat: Pat, segs, vias, m: dict, drc: list[dict]) -> dict:
     new = [s for s in segs if not _is_kept(s, pat)]
     ln = sum(plen(p) for _, _, _, p in new)
@@ -162,13 +179,16 @@ def judge(pat: Pat, segs, vias, m: dict, drc: list[dict]) -> dict:
     r = {"routed": f"{m.get('routed')}/{m.get('connections')}", "drc_new": len([v for v in drc if v["type"] != "unconnected_items"]),
          "drc_types": sorted({v["type"] for v in drc}), "unconnected": m.get("unconnected"), "vias": len(vias),
          "len": round(ln, 3), "ref_len": round(ref_len, 3), "layers": {k: sorted(v) for k, v in sorted(layers.items())},
-         "free_angle_segments": sum(0 if _octi(p) else 1 for _, _, _, p in new if len(p) == 2), "valid": m.get("valid")}
+         "free_angle_segments": sum(0 if _octi(p) else 1 for _, _, _, p in new if len(p) == 2), "valid": m.get("valid"),
+         "bends": bends(new), "detour": round(ln / ref_len, 3) if ref_len else None}
     bad = r["drc_new"] > 0 or (r["unconnected"] or 0) > 0 or m.get("routed") != m.get("connections")
     same = r["vias"] == e.get("vias", r["vias"]) and ln <= 1.05 * ref_len + 1e-6
     if "layers" in e:
         same = same and all(sorted(e["layers"][n]) == r["layers"].get(n) for n in e["layers"])
     if e.get("octilinear"):
         same = same and r["free_angle_segments"] == 0
+    if "bends" in e:
+        same = same and all(r["bends"].get(n, 0) <= b for n, b in e["bends"].items())
     r["verdict"] = "REPRODUCES (DRC/unrouted)" if bad else ("matches expected" if same else "clean, differs from expected")
     return r
 
@@ -182,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in names:
         pat = PATTERNS[name]()
         Wd, Hd = pat.size
-        cfgs = [c for c in CONFIGS if (runs / c / name / f"{name}-topor" / f"{name}.kicad_pcb").exists()]
+        cfgs = sorted(c.name for c in runs.iterdir() if (c / name / f"{name}-topor" / f"{name}.kicad_pcb").exists())
         n = 2 + len(cfgs)
         fig, ax = plt.subplots(1, n, figsize=(4.6 * n, 4.6 * Hd / Wd + 1.6))
         _base(ax[0], pat, "setup (problem board; dashed = connections to make)")
@@ -191,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         _base(ax[1], pat, f"expected (sketch, KiCad DRC 0): {pat.expect.get('vias', 0)} via(s), {sum(plen(t.pts) for t in pat.ref_tracks):.2f} mm")
         _copper(ax[1], [(t.layer, t.net, t.width, t.pts) for t in pat.ref_tracks], [(v.pos[0], v.pos[1], v.dia, v.net) for v in pat.ref_vias])
         _marks(ax[1], pat)
-        summ[name] = {"cluster": pat.cluster, "title": pat.title}
+        summ[name] = {"cluster": pat.cluster, "title": pat.title, "round2": ROUND2.get(name, "unchanged")}
         for k, c in enumerate(cfgs, start=2):
             run = runs / c / name
             segs, vias = read_copper(run / f"{name}-topor" / f"{name}.kicad_pcb")
@@ -199,12 +219,15 @@ def main(argv: list[str] | None = None) -> int:
             drc = _drc_new(run, name)
             r = judge(pat, segs, vias, m, drc)
             summ[name][c] = r
-            _base(ax[k], pat, f"topor main, {c}: {r['verdict']}\nDRC new {r['drc_new']} {','.join(t for t in r['drc_types'] if t != 'unconnected_items')}, "
-                              f"unconnected {r['unconnected']}, vias {r['vias']}, {r['len']:.2f} mm, free-angle {r['free_angle_segments']}")
+            types = ", ".join(t for t in r["drc_types"] if t != "unconnected_items")
+            _base(ax[k], pat, f"topor {c}: {r['verdict']}\nDRC new {r['drc_new']}{' (' + types + ')' if types else ''}, "
+                              f"unconnected {r['unconnected']}, vias {r['vias']}\n{r['len']:.2f} mm (x{r['detour']}), "
+                              f"free-angle {r['free_angle_segments']}, bends {sum(r['bends'].values())}")
             _copper(ax[k], [s for s in segs if not _is_kept(s, pat)], vias)
             for v in drc:
                 ax[k].add_patch(Circle(v["xy"], 0.45, fc="none", ec="#f2c200", lw=2.2, zorder=10))
-        fig.suptitle(f"{pat.cluster} {name}: {pat.title}\n[{STATUS}]  F.Cu red, B.Cu blue, hatched = kept hand copper, "
+        tag = f" [round 2: {ROUND2[name]}]" if name in ROUND2 else ""
+        fig.suptitle(f"{pat.cluster} {name}{tag}: {pat.title}\n[{STATUS}]  F.Cu red, B.Cu blue, hatched = kept hand copper, "
                      "grey = PTH, dashed frame = copper-to-edge line, yellow ring = KiCad DRC of the routed copy", fontsize=9)
         fig.tight_layout()
         fig.savefig(out / f"{name}.png", dpi=120)
