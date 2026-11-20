@@ -1189,7 +1189,8 @@ impl<'a> Frame<'a> {
     /// ([`Packer::site_deficit`] of [`super::cutflow::point_free`] there, the measure of
     /// [`Packer::site_room`]); the count (1 per via without a site) is `nosite`'s, so a via short
     /// of room pays `1 + deficit / (d + s)` at the violation weight. Zero outside the via focus,
-    /// as [`Frame::via_over`]. O(vias x obstacles) (cached per point by the caller's repricing).
+    /// as [`Frame::via_over`]. O(vias) after the first call per via point ([`Packer::point_free_cached`]; was
+    /// O(vias x obstacles) per call, site-price-cost).
     pub(crate) fn site_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> f64 {
         if self.vfocus.as_ref().is_some_and(|f| !f.get(w).copied().unwrap_or(false)) {
             return 0.0;
@@ -1200,7 +1201,8 @@ impl<'a> Frame<'a> {
             return 0.0;
         }
         let pitch = (d + wi.s).max(1.0);
-        m.vpts(w).iter().flatten().map(|&(_, p)| Packer::site_deficit(super::cutflow::point_free(self.st.proj, self.packer, p, wi.net, wi.s), d) / pitch).sum()
+        let free = |p: Vec2| if self.packer.same_proj(self.st.proj) { self.packer.point_free_cached(p, wi.net, wi.s) } else { super::cutflow::point_free(self.st.proj, self.packer, p, wi.net, wi.s) };
+        m.vpts(w).iter().flatten().map(|&(_, p)| Packer::site_deficit(free(p), d) / pitch).sum()
     }
 
     /// tw4-r2 (1): the planned pad exits of wire `w` (empty without `[capacity] pad_exits`). Memo.
