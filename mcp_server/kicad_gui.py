@@ -110,6 +110,8 @@ class GuiSession:
         self.drc_rows: list = []
         self.drc_severities: tuple | None = None  # severity filter drc_rows was read under (None: not set by us)
         self.kicad_starts = 0
+        self.zoom_value: float | None = None  # the preset asked for last (set_zoom)
+        self._scale: tuple | None = None  # (mm per px X, Y) of the board view at that zoom (focus())
 
     # ---------------------------------------------------------------- lifecycle
     def start(self, timeout_s: float = 240.0) -> "GuiSession":
@@ -328,13 +330,16 @@ class GuiSession:
         self.e.x("xdotool", "windowactivate", "--sync", w)
         self.e.x("xdotool", "windowraise", w)
 
-    def drc_walk(self, targets: list, settle_s: float = 1.0, max_resyncs: int = 3):
+    def drc_walk(self, targets: list, settle_s: float = 1.0, max_resyncs: int = 3, busy_polls: int = 6,
+                 busy_wait_s: float = 0.5):
         """Yield (k, selected_text, error) for each top-level DRC row index in `targets` (ascending), selecting it as
         a user does: one click on the list's first line, then Down / Up keys (the dialog lists every row expanded:
         headline, then its item lines). After every key the selection is read back; when it is not the expected
         line (the dialog shows a row with other item lines than read, e.g. a solder mask bridge), the position is
-        relocated by that line's text (nearest such line) and the walk goes on. A row that cannot be reached
-        (unknown selection, > max_resyncs relocations, key budget spent, a failed helper step) is yielded with its
+        relocated by that line's text (nearest such line) and the walk goes on; a line the model never read keeps
+        the stepping going the same way until a known line shows (N2), an unchanged selection is waited for (KiCad
+        busy), not counted as a relocation (N3). A row that cannot be reached
+        (> max_resyncs relocations, key budget spent, a failed helper step) is yielded with its
         error and the next row starts again from a click on the first line: NEVER ends the walk (verify r4 F2).
         O(rows + lines) keys in a straight walk; per row at most 2 * lines + 10 keys."""
         lines = []
@@ -372,26 +377,40 @@ class GuiSession:
                         yield k, None, f"a click on the first line selected {got!r}, not a line of the list"
                         continue
                 budget = 2 * len(lines) + 10
+                lost, lost_dir = 0, 1  # keys since the selection was a line the model never read (N2)
                 while pos != want and budget > 0:
-                    step = 1 if pos < want else -1
+                    step = lost_dir if lost else (1 if pos < want else -1)
                     self.activate(DRC_TITLE)
                     self.e.x("xdotool", "key", "Down" if step > 0 else "Up")
                     budget -= 1
                     time.sleep(0.08)
                     got = sel()
-                    if 0 <= pos + step < len(lines) and got == lines[pos + step][1]:
+                    exp = lines[pos + step][1] if not lost and 0 <= pos + step < len(lines) else None
+                    for _ in range(0 if lost else busy_polls):
+                        if got != lines[pos][1] or got == exp:  # still the old line: KiCad is busy, wait, not a relocation (N3)
+                            break
+                        time.sleep(busy_wait_s)
+                        got = sel()
+                    if exp is not None and got == exp:
                         pos += step
                         continue
-                    exp = lines[pos + step][1] if 0 <= pos + step < len(lines) else None
+                    npos = locate(got, pos + step * (lost + 1))
+                    if npos is None:  # a line the model never read: keep stepping the same way until a known one (N2)
+                        lost, lost_dir = lost + 1, step
+                        self.step("drc walk unknown line", f"row {k}: selection {got!r} is no known line ({lost} key(s) "
+                                                           f"past line {pos})")
+                        continue
+                    lost = 0
                     resyncs += 1
-                    npos = locate(got, pos + step)
                     self.step("drc walk resync", f"row {k}: after {'Down' if step > 0 else 'Up'} from line {pos} the "
                                                  f"selection is {got!r}, expected {exp!r}; relocated to {npos}")
-                    if npos is None or resyncs > max_resyncs:
+                    if resyncs > max_resyncs:
                         err = (f"after {'Down' if step > 0 else 'Up'} from line {pos} the selection is {got!r}, expected "
-                               f"{exp!r}" + ("" if npos is None else f" ({resyncs} relocations)"))
+                               f"{exp!r} ({resyncs} relocations)")
                         break
                     pos = npos
+                if lost and not err:
+                    err = f"the selection stayed on lines the model never read ({lost} keys)"
                 if pos != want:
                     pos = None  # unknown: the next row starts from a click on the first line
                     yield k, None, err or f"line {want} not reached within the key budget"
@@ -405,6 +424,14 @@ class GuiSession:
                     return
 
     # ---------------------------------------------------------------- view transform
+    def set_zoom(self, value: float) -> float:
+        """The tool bar's zoom preset nearest `value` (cmd zoom); returns its number ("Zoom 20,00" -> 20.0)."""
+        name = self.must("zoom", "zoom", value=float(value))["zoom"]
+        m = re.search(r"([\d.,]+)\s*$", str(name))
+        z = float(m.group(1).replace(",", ".")) if m else float(value)
+        self.zoom_value, self._scale = float(value), None
+        return z
+
     def _status_xy(self):
         for f in self.call("status"):
             m = re.match(r"^X\s*(-?[\d.,]+)\s+Y\s*(-?[\d.,]+)$", f.strip())
@@ -413,20 +440,33 @@ class GuiSession:
         self.fail("view: no 'X .. Y ..' field in the status bar")
 
     def focus(self) -> dict:
-        """Where KiCad focused after a DRC row was selected. Its cross-probe centres the marker in the part of the
-        canvas the DRC dialog does not cover (spot_px, screen px) without moving the pointer, and the status bar's
-        X/Y only follows the pointer: the pointer is moved onto spot_px (no click) and X/Y read there (focus_mm,
-        snapped to the finest grid; 0.35 s settle). Returns {focus_mm, canvas, spot_px}."""
+        """Where KiCad focused after a DRC row was selected. Its cross-probe centres the selected row's items in
+        the part of the canvas the DRC dialog does not cover (spot_px, screen px; for track items KiCad centres
+        on the items' bounding box, not on the marker) without moving the pointer, and the status bar's X/Y only
+        follows the pointer: the pointer is moved onto spot_px (no click) and X/Y read there until two reads agree
+        (focus_mm, snapped to the finest grid), then, once per zoom, 300 / 200 px further to get the view scale.
+        Returns {focus_mm, canvas, spot_px, mm_px (mm per px in X, Y), view_px (x0, y0, x1, y1 of the free part)}."""
         x0, y0, w, h = self.call("canvas_rect")
         free_w = max(1, min(x0 + w, DRC_RECT[0]) - x0)
         sx, sy = x0 + free_w // 2, y0 + h // 2
-        # two moves: the pointer may already sit on spot_px from the last row (no motion event, a stale X/Y)
-        self.e.x("xdotool", "mousemove", str(sx + 3), str(sy + 3))
-        time.sleep(0.15)
-        self.e.x("xdotool", "mousemove", str(sx), str(sy))
-        time.sleep(0.35)
-        xy = self._status_xy()
-        return {"focus_mm": list(xy), "canvas": [x0, y0, w, h], "spot_px": [sx, sy]}
+
+        def read(px, py):
+            # two moves: the pointer may already sit on that pixel from the last row (no motion event, a stale X/Y)
+            self.e.x("xdotool", "mousemove", str(px + 3), str(py + 3))
+            time.sleep(0.15)
+            self.e.x("xdotool", "mousemove", str(px), str(py))
+            time.sleep(0.35)
+            return self._status_xy()
+        xy, prev = read(sx, sy), None
+        for _ in range(3):  # the status bar may lag the view after a scroll: read until stable
+            if xy == prev:
+                break
+            xy, prev = read(sx, sy), xy
+        if self._scale is None:
+            far = read(sx + 300, sy + 200)
+            self._scale = (abs(far[0] - xy[0]) / 300 or None, abs(far[1] - xy[1]) / 200 or None)
+        return {"focus_mm": list(xy), "canvas": [x0, y0, w, h], "spot_px": [sx, sy], "mm_px": list(self._scale),
+                "view_px": [x0, y0, x0 + free_w, y0 + h]}
 
 
 # ------------------------------------------------------------------ the one session of this process

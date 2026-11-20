@@ -356,6 +356,15 @@ FOCUS_EXTENT_SHARE = 0.5  # + this share of the row's geometry extent (long trac
 MATCH_MIN = 0.5  # default drc_spots match_min: focus_score at focus_d_mm == the scale
 
 
+def marker_px(f: dict, x_mm: float, y_mm: float):
+    """Screen pixel of the board point (x_mm, y_mm) in the view `Session.focus()` measured: its focus point sits at
+    spot_px, the scale is mm_px (None: the status bar gave no scale)."""
+    kx, ky = f["mm_px"]
+    if not kx or not ky:
+        return None
+    return f["spot_px"][0] + (x_mm - f["focus_mm"][0]) / kx, f["spot_px"][1] + (y_mm - f["focus_mm"][1]) / ky
+
+
 def focus_score(d_mm, scale_mm: float):
     """Graded focus quality 1 / (1 + (d / scale)^2): 1 on the items, 0.5 at one scale away, smoothly lower further
     (no cutoff); None distance (no geometry) -> 1."""
@@ -585,7 +594,7 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
                        f"stop the session (gui_session stop) first")
             s.drc_open()
             if s.drc_state_of != s.board_state:
-                s.step("zoom", str(s.must("zoom", "zoom", value=float(zoom))))
+                s.step("zoom", str(s.set_zoom(zoom)))
                 s.step("grid", str(s.must("finest_grid", "grid")))  # focus_mm snaps to the grid
                 st = s.drc_run(drc_timeout_s)
                 tabs = st["tabs"][:2]
@@ -610,6 +619,7 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
             plan.sort(key=lambda t: t[0])
             by_k = {k: (r, g) for k, r, g in plan}
             main_x, dlg_x = s.main, s.xid(G.DRC_TITLE)
+            prev_focus = None
             for k, selected, err in s.drc_walk([k for k, _, _ in plan]):
                 r, g = by_k[k]
                 rec = {"id": r["id"], "class": r["class"], "nets": r["nets"], "x": r["x"], "y": r["y"], "row": k,
@@ -620,22 +630,37 @@ def drc_spots(run_id: str, cls: str | None = None, per_class: int = 0, zoom: flo
                         raise G.GuiError(err)
                     ok_sel = selected == g["text"]
                     f = s.focus()
+                    if prev_focus is not None and f["focus_mm"] == prev_focus[0] and \
+                            math.hypot(r["x"] - prev_focus[1]["x"], r["y"] - prev_focus[1]["y"]) > 1.0:
+                        # the same view as the previous row's although the marker moved: KiCad did not move it
+                        # (verify r6 N1); the ring below is still put on the row's own marker
+                        rec["focus_repeat"] = True
+                        s.step("focus repeat", f"{r['id']}: same focus point as the previous row")
+                    prev_focus = (f["focus_mm"], r)
                     d_mm = D.marker_dist(f["focus_mm"], r, geom)
                     scale = round(FOCUS_TOL_MM + FOCUS_EXTENT_SHARE * D.row_extent(r, geom), 3)
                     score = focus_score(d_mm, scale)
+                    # the ring goes on the ROW's marker, from the view transform (KiCad centres the row's items, for
+                    # tracks the middle of their bounding box, which may be several mm from the marker)
+                    sx, sy = f["spot_px"]
+                    mpx = marker_px(f, r["x"], r["y"])
+                    visible = mpx is not None and f["view_px"][0] + 12 <= mpx[0] <= f["view_px"][2] - 12 and \
+                        f["view_px"][1] + 12 <= mpx[1] <= f["view_px"][3] - 12
                     board_png = s.e.shot(f"{r['id']}-board", main_x)
                     dlg_png = s.e.shot(f"{r['id']}-dlg", dlg_x) if dlg_x else None
                     half = 350
-                    sx, sy = f["spot_px"]
+                    cx, cy = (round(mpx[0]), round(mpx[1])) if visible else (sx, sy)  # crop and ring on the marker
                     rec.update(selected_ok=ok_sel, focus_mm=f["focus_mm"], focus_d_mm=d_mm, focus_scale_mm=scale,
-                               focus_score=score,
+                               focus_score=score, marker_px=[round(mpx[0]), round(mpx[1])] if mpx else None,
+                               marker_visible=bool(visible),
                                board_png=G.crop(board_png, shots / f"{r['id']}-board.png",
-                                                (sx - half, sy - half, 2 * half, 2 * half), mark=(sx, sy)),
+                                                (cx - half, cy - half, 2 * half, 2 * half), mark=(cx, cy)),
                                dlg_png=str(shutil.copy(dlg_png, shots / f"{r['id']}-dlg.png")) if dlg_png else None,
-                               match=bool(ok_sel) and score >= match_min)
+                               match=bool(ok_sel) and bool(visible) and score >= match_min)
                     if not rec["match"]:
                         rec["why"] = ("the dialog selection is not this row" if not ok_sel else
-                                      f"KiCad focused {d_mm} mm from the row's items: focus_score {score} < "
+                                      "the row's marker is not on screen (KiCad did not scroll to it)" if not visible
+                                      else f"KiCad focused {d_mm} mm from the row's items: focus_score {score} < "
                                       f"match_min {match_min} (scale {scale} mm)")
                 except G.STEP_ERRORS as ex:  # this row failed: say so, go on with the next row in the same session
                     rec.update(match=False, error=G.describe(ex))

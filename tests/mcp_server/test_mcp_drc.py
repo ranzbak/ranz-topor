@@ -283,6 +283,7 @@ def test_session_start_writes_nothing_outside_its_dir(tmp_path, monkeypatch):
 
 class _FakeSession:
     """GuiSession stand-in: records starts; the helper-facing steps return canned rows."""
+    mm_px = (1.0, 1.0)  # the fake view's scale (tests: a tiny scale puts every marker far off the 1000 px view)
 
     def __init__(self, board, rows):
         self.board, self.rows, self.board_state, self.drc_state_of = board, rows, "as opened", None
@@ -318,14 +319,18 @@ class _FakeSession:
     def xid(self, t):
         return "0x2"
 
+    def set_zoom(self, v):
+        return v
+
     def drc_walk(self, ks):
         self.walked = list(ks)
         for n, k in enumerate(ks):
             self.cur = n
             yield k, self.rows[k]["text"], None
 
-    def focus(self):  # KiCad centred the n-th marker
-        return {"focus_mm": list(self.marks[self.cur]), "canvas": [0, 0, 10, 10], "spot_px": [5, 5]}
+    def focus(self):  # KiCad centred the n-th marker (the view: 1 mm per px, 1000 px wide, focus at px 500)
+        return {"focus_mm": list(self.marks[self.cur]), "canvas": [0, 0, 1000, 1000], "spot_px": [500, 500],
+                "mm_px": list(self.mm_px), "view_px": [0, 0, 1000, 1000]}
 
     def stop(self):
         pass
@@ -336,7 +341,9 @@ def _spots(tmp_path, monkeypatch, off_mm=0.0, warn_second=False, **kw):
     warn_second: the second row is a warning (index row + its dialog line)."""
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     from PIL import Image
-    Image.new("RGB", (20, 20)).save(tmp_path / "shot.png")
+    im = Image.new("RGB", (1000, 1000))  # each pixel's colour encodes its own position (4 px steps)
+    im.putdata([(x // 4, y // 4, 7) for y in range(1000) for x in range(1000)])
+    im.save(tmp_path / "shot.png")
     routed = _j("wiccon-routed-drc.json")
     rows = [{"k": k, "text": "Error: " + v["description"], "items": [i["description"] for i in v["items"]]}
             for k, v in enumerate(x for x in routed["violations"] if x["type"] == "solder_mask_bridge")]
@@ -675,26 +682,48 @@ def test_escaped_net_names_match_the_drc_text():
     assert out["D out/in"]["new"][0]["conns"][0]["conn"] == 4 and out["D out/in"]["lost_copper"][0]["conns"] == [4]
 
 
-def _walk_session(tmp_path, model, shown, click_line=0):
+def _walk_session(tmp_path, model, shown, click_line=0, lag=0, fail_once=None):
     """GuiSession whose dialog shows `shown` (a flat list of line texts) while drc_rows (the model read) is `model`;
-    keys move a cursor over `shown`, a click on the first line selects shown[click_line]."""
+    keys move a cursor over `shown`, a click on the first line selects shown[click_line].
+    lag: the selection read stays on the old line for this many reads after a key (KiCad busy).
+    fail_once: the n-th selection read (1-based) raises a helper RuntimeError."""
     s = G.GuiSession(tmp_path / "b.kicad_pcb", tmp_path / "s", display=":29")
     s.drc_rows = model
-    cur = {"i": None}
+    cur = {"i": None, "pending": None, "wait": 0, "reads": 0}
+    s.log = []
+
+    def settle():
+        pass
 
     def call(cmd, **a):
         if cmd == "drc_selected":
+            cur["reads"] += 1
+            if fail_once == cur["reads"]:
+                raise RuntimeError("helper: boom")
+            if cur["pending"] is not None:
+                if cur["wait"] > 0:
+                    cur["wait"] -= 1
+                else:
+                    cur["i"], cur["pending"] = cur["pending"], None
+                    settle()
             return {"selected": None if cur["i"] is None else shown[cur["i"]]}
         if cmd == "drc_list_rect":
             return {"rect": [0, 0, 100, 100]}
         raise AssertionError(cmd)
 
     def x(*args, **kw):
+        s.log.append(args[1:])
         if args[:2] == ("xdotool", "key"):
-            cur["i"] = max(0, min(len(shown) - 1, cur["i"] + (1 if args[2] == "Down" else -1)))
+            nxt = max(0, min(len(shown) - 1, cur["i"] + (1 if args[2] == "Down" else -1)))
+            if lag:
+                cur["pending"], cur["wait"] = nxt, lag
+            else:
+                cur["i"] = nxt
+                settle()
 
     def click(*a):
         cur["i"] = click_line
+        settle()
     s.call, s.activate, s.alive = call, (lambda t: None), (lambda: True)
     s.e = type("E", (), {"x": staticmethod(x), "click_abs": staticmethod(click), "log": staticmethod(lambda m: None),
                             "shot": staticmethod(lambda *a, **k: None)})()
@@ -714,12 +743,158 @@ def test_drc_walk_relocates_when_the_dialog_shows_other_item_lines(tmp_path, mon
 
 
 def test_drc_walk_unreachable_row_is_reported_and_the_walk_goes_on(tmp_path, monkeypatch):
-    """A first-line click that selects nothing known, or a selection no line has, fails that row only."""
+    """A first-line click that selects nothing known fails that row only; the next row starts from a new click."""
     monkeypatch.setattr(G.time, "sleep", lambda t: None)
     model = [{"k": 0, "text": "A", "items": ["a1"]}, {"k": 1, "text": "B", "items": ["b1"]}]
-    s = _walk_session(tmp_path, model, ["A", "zz", "B", "b1"])  # line 1 shows a text the model never read
-    out = list(s.drc_walk([0, 1]))
-    assert out[0] == (0, "A", None) and out[1][0] == 1 and out[1][1] is None and "'zz'" in out[1][2]
     s = _walk_session(tmp_path, model, ["?", "A", "a1", "B", "b1"], click_line=0)  # the click lands on '?'
     out = list(s.drc_walk([0, 1]))
     assert [o[0] for o in out] == [0, 1] and all(o[1] is None and o[2] for o in out)
+
+
+_MODEL3 = [{"k": 0, "text": "A", "items": ["a1"]}, {"k": 1, "text": "B", "items": ["b1"]},
+           {"k": 2, "text": "C", "items": ["c1"]}]
+
+
+def test_drc_walk_an_unread_dialog_line_does_not_make_later_rows_unreachable(tmp_path, monkeypatch):
+    """verify r6 N2: the dialog shows a line the model never read ('zz'): the key goes on the same way until a known
+    line shows, so row 1 and every later row are reached (before: each restarted and died on 'zz' again)."""
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    s = _walk_session(tmp_path, _MODEL3, ["A", "a1", "zz", "B", "b1", "C", "c1"])
+    assert list(s.drc_walk([0, 1, 2])) == [(0, "A", None), (1, "B", None), (2, "C", None)]
+    assert any(st["step"] == "drc walk unknown line" for st in s.steps)
+
+
+def test_drc_walk_unknown_line_that_never_ends_fails_the_row_not_the_walk(tmp_path, monkeypatch):
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    model = [{"k": 0, "text": "A", "items": []}, {"k": 1, "text": "B", "items": []}]
+    s = _walk_session(tmp_path, model, ["A", "zz", "yy", "xx"])  # B is never shown
+    out = list(s.drc_walk([0, 1]))
+    assert out[0] == (0, "A", None) and out[1][0] == 1 and out[1][1] is None and "never read" in out[1][2]
+
+
+def test_drc_walk_a_busy_kicad_does_not_use_up_the_relocation_allowance(tmp_path, monkeypatch):
+    """verify r6 N3: the selection reads back the OLD line for a while (KiCad busy): wait, not a relocation."""
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    shown = ["A", "a1", "B", "b1", "C", "c1"]
+    s = _walk_session(tmp_path, _MODEL3, shown, lag=2)
+    assert list(s.drc_walk([0, 1, 2], max_resyncs=0, busy_polls=4)) == [(0, "A", None), (1, "B", None), (2, "C", None)]
+    assert not any(st["step"] == "drc walk resync" for st in s.steps)
+
+
+def test_drc_walk_a_failed_helper_step_fails_that_row_and_the_walk_goes_on(tmp_path, monkeypatch):
+    """verify r6 M6: a helper error on one row is yielded with its error; the next row is reached."""
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    shown = ["A", "a1", "B", "b1", "C", "c1"]
+    s = _walk_session(tmp_path, _MODEL3, shown, fail_once=2)  # read 1 = the first click, read 2 = row 0's own selection read
+    out = list(s.drc_walk([0, 1, 2]))
+    assert out[0][0] == 0 and out[0][1] is None and "boom" in out[0][2]
+    assert out[1:] == [(1, "B", None), (2, "C", None)]
+
+
+def test_spot_records_scale_from_the_row_extent_and_match_min_is_honoured(tmp_path, monkeypatch):
+    """verify r6 M13/M14: focus_scale_mm = 1 mm + half the row's geometry extent (read from the routed copper);
+    a stricter / looser match_min flips match for the same focus."""
+    r, _, idx = _spots(tmp_path, monkeypatch, off_mm=1.0)
+    geom = D.board_items((FIX / "wiccon-routed-mini.kicad_pcb").read_text())
+    for rec, row in zip(r["records"], idx["rows"]):
+        want = round(tools.FOCUS_TOL_MM + tools.FOCUS_EXTENT_SHARE * D.row_extent(row, geom), 3)
+        assert rec["focus_scale_mm"] == want and want > 10  # long tracks: far above the 1 mm floor
+    assert all(x["match"] for x in r["records"]) and r["match_min"] == tools.MATCH_MIN
+    (tmp_path / "strict").mkdir()
+    r2, _, _ = _spots(tmp_path / "strict", monkeypatch, off_mm=1.0, match_min=0.9999)
+    assert [x["match"] for x in r2["records"]] == [False, False] and r2["match_min"] == 0.9999
+    assert all("match_min 0.9999" in x["why"] for x in r2["records"])
+    (tmp_path / "loose").mkdir()
+    r3, _, _ = _spots(tmp_path / "loose", monkeypatch, off_mm=50.0, match_min=0.0)
+    assert [x["match"] for x in r3["records"]] == [True, True]
+
+
+def test_spot_flags_a_focus_that_repeats_although_the_marker_moved(tmp_path, monkeypatch):
+    monkeypatch.setattr(_FakeSession, "focus", lambda self: {"focus_mm": [1.0, 2.0], "canvas": [0, 0, 1000, 1000],
+                                                              "spot_px": [500, 500], "mm_px": [1.0, 1.0],
+                                                              "view_px": [0, 0, 1000, 1000]})
+    r, _, idx = _spots(tmp_path, monkeypatch)
+    far = ((idx["rows"][0]["x"] - idx["rows"][1]["x"]) ** 2 + (idx["rows"][0]["y"] - idx["rows"][1]["y"]) ** 2) ** .5
+    assert far > 1.0
+    assert [x.get("focus_repeat", False) for x in r["records"]] == [False, True]
+
+
+def test_mcp_drc_collects_without_plugin_on_the_path():
+    """verify r6 N4: `import mcp_server.drc` first (as pytest tests/mcp_server/test_mcp_drc.py alone) finds topor."""
+    import subprocess
+    import sys
+    code = "import mcp_server.drc, sys; print('topor' in sys.modules)"
+    env = {k: v for k, v in __import__('os').environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, %r); " % str(ROOT) + code],
+                       capture_output=True, text=True, env=env, cwd="/")
+    assert r.returncode == 0, r.stderr[-400:]
+
+
+def test_the_ring_goes_on_the_rows_own_marker_not_on_where_kicad_centred(tmp_path, monkeypatch):
+    """verify r6 N1: KiCad centres the row's items (for tracks the middle of their bounding box), possibly mm away from
+    the marker; the ring / crop is put on the row's marker by the measured view transform, and a marker that is not
+    on screen is reported (no ring on the wrong spot)."""
+    r, _, idx = _spots(tmp_path, monkeypatch, off_mm=0.0)
+    for rec, row in zip(r["records"], idx["rows"]):
+        G_marker = want = tools.marker_px({"mm_px": [1.0, 1.0], "spot_px": [500, 500], "focus_mm": rec["focus_mm"]},
+                                          row["x"], row["y"])
+        assert rec["marker_px"] == [round(want[0]), round(want[1])] and rec["marker_visible"] and G_marker
+        assert rec["marker_px"] != [500, 500]  # not the spot where KiCad centred the items
+        rx, ry = _ring_centre(rec["board_png"])
+        assert abs(rx - rec["marker_px"][0]) <= 4 and abs(ry - rec["marker_px"][1]) <= 4, (rx, ry, rec["marker_px"])
+    (tmp_path / "far").mkdir()
+    monkeypatch.setattr(_FakeSession, "mm_px", (0.001, 0.001))  # the marker 10-60 mm from KiCad's focus: 10000+ px off
+    r2, _, _ = _spots(tmp_path / "far", monkeypatch, off_mm=0.0)  # KiCad focused ON the row's track: a good score
+    assert [x["focus_score"] for x in r2["records"]] == [1.0, 1.0]
+    assert [x["marker_visible"] for x in r2["records"]] == [False, False] and not any(x["match"] for x in r2["records"])
+    assert all("not on screen" in x["why"] for x in r2["records"])
+
+
+def _ring_centre(png, marker_px=None, half=350):
+    """Position in the SCREENSHOT of the yellow ring's centre in a drc_spots crop (the test screenshot encodes each
+    pixel's own position in its colour, 4 px steps; the crop is cut at the image's left / top edge)."""
+    from PIL import Image
+    im = Image.open(png).convert("RGB")
+    pts = [(x, y) for x in range(im.width) for y in range(im.height) if im.getpixel((x, y)) == (255, 230, 0)]
+    assert pts, "no ring in the crop"
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    c = ((min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2)
+    r, g, _ = im.getpixel(c)  # the pixel inside the ring: where on the screenshot it was cut from
+    return (r * 4, g * 4)
+
+
+def test_marker_px_follows_the_view_transform_and_needs_a_scale():
+    f = {"mm_px": [0.014, 0.014], "spot_px": [700, 500], "focus_mm": [100.0, 50.0]}
+    assert tools.marker_px(f, 101.4, 49.3) == pytest.approx((800.0, 450.0))
+    assert tools.marker_px({**f, "mm_px": [None, 0.014]}, 101.4, 49.3) is None
+
+
+def test_gui_focus_reads_x_y_at_the_spot_and_measures_the_scale_once_per_zoom(tmp_path, monkeypatch):
+    monkeypatch.setattr(G.time, "sleep", lambda t: None)
+    s = G.GuiSession(tmp_path / "b.kicad_pcb", tmp_path / "s", display=":29")
+    ptr = {"p": (0, 0)}
+    moves = []
+
+    def x(*args, **kw):
+        if args[:2] == ("xdotool", "mousemove"):
+            ptr["p"] = (int(args[2]), int(args[3]))
+            moves.append(ptr["p"])
+
+    def call(cmd, **a):
+        if cmd == "canvas_rect":
+            return [340, 178, 1312, 840]
+        if cmd == "status":  # X = 100 + 0.014 * px, Y = 50 + 0.014 * py (0.01 grid)
+            return [f"X {100 + 0.014 * ptr['p'][0]:.2f}  Y {50 + 0.014 * ptr['p'][1]:.2f}".replace("  ", " ")]
+        raise AssertionError(cmd)
+    s.call, s.e = call, type("E", (), {"x": staticmethod(x)})()
+    f = s.focus()
+    sx, sy = 340 + (G.DRC_RECT[0] - 340) // 2, 178 + 420
+    assert f["spot_px"] == [sx, sy] and f["focus_mm"] == [round(100 + 0.014 * sx, 2), round(50 + 0.014 * sy, 2)]
+    assert f["mm_px"][0] == pytest.approx(0.014, rel=0.02) and f["mm_px"][1] == pytest.approx(0.014, rel=0.02)
+    assert f["view_px"] == [340, 178, G.DRC_RECT[0], 1018]
+    n = len(moves)
+    s.focus()
+    assert len(moves) - n < n  # the scale is kept: no far read the second time
+    s.must = lambda cmd, step, **a: {"zoom": "Zoom 20,00"}
+    s.set_zoom(20)
+    assert s._scale is None  # a new zoom asks for a new scale

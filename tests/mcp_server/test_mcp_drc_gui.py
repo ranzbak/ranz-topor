@@ -94,7 +94,10 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
     need_wiccon()
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     hand, inp, _ = strip.prepare("wiccon-2023", tmp_path / "boards", name="w")
-    add_short(hand.pcb)
+    skip: set = set()
+    for _ in range(3):  # several shorts: their markers are close, so a stale focus (no scroll) would show
+        seg = add_short(hand.pcb, skip=skip)[1]
+        skip.add(re.search(r'"([0-9a-f-]{36})"\)\)$', seg.strip()).group(1))
     add_dangling(hand.pcb)  # one warning row of ours: the default (errors only) walk must skip it
     rid = tools.register_run(str(hand.pcb), str(inp.pcb), name="w")["run_id"]
     d = tools.drc(rid)
@@ -112,6 +115,14 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
         recs = s["records"]
         assert len(recs) == s["wanted"] and all(r["match"] for r in recs), [r.get("error") for r in recs]
         assert all(Path(r["board_png"]).is_file() and Path(r["dlg_png"]).is_file() for r in recs)
+        # verify r6 N1: the ring is on each row's OWN marker (from the measured view transform), which is on screen
+        # (KiCad centres a track row's items, here up to ~5 mm from the marker): the clearance row's ring is not the
+        # shorts' ring, and every ring pixel is where that row's marker is on the screen
+        assert all(r["marker_visible"] and r["marker_px"] for r in recs), [(r["id"], r["marker_px"]) for r in recs]
+        for a, b in zip(recs, recs[1:]):
+            if math.dist((a["x"], a["y"]), (b["x"], b["y"])) > 0.3:
+                assert a["marker_px"] != b["marker_px"] or a["focus_mm"] != b["focus_mm"], (a["id"], b["id"])
+        assert len({tuple(r["marker_px"]) for r in recs}) >= 2, [(r["id"], r["marker_px"]) for r in recs]
         # errors only: Warnings unticked in the live dialog before the walk, the list = kicad-cli's error rows,
         # no warning row visited; both severities counted
         assert s["severities"] == ["error"] and not {r["id"] for r in recs} & warn_ids
@@ -141,9 +152,9 @@ def test_wiccon_spots_and_cleanup_share_one_kicad(tmp_path, monkeypatch):
                                                       "kicad-cli")),
                     reason="needs Xephyr, xdotool, wmctrl, xwd, metacity and KiCad 10")
 def test_wiccon_topor_route_connection_ids_end_to_end(tmp_path, monkeypatch):
-    need_wiccon()
     """route (result.json) -> one synthetic short between two of OUR tracks -> drc rows carry engine connection ids
     -> cleanup's newly unconnected connections name ids of that result.json."""
+    need_wiccon()
     monkeypatch.setenv("TOPOR_MCP_STATE", str(tmp_path / "state"))
     if not (ROOT / ".venv").is_dir():
         monkeypatch.setenv("TOPOR_VENV", sys.prefix)
