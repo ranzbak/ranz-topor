@@ -668,7 +668,7 @@ impl Drawer<'_> {
         }
         let wi = &self.st.wires[w];
         let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax: 0.0 };
-        let (mut strip, own_gates) = self.open_strip(w, k0, k1, layer, &taut);
+        let (mut strip, own_gates, bands) = self.open_strip(w, k0, k1, layer, &taut);
         #[cfg(test)]
         let own_gates = if OCTI_NO_OWN_GATES.with(|f| f.get()) { Vec::new() } else { own_gates };
         strip.walls.extend(self.via_walls(w, k0, k1, layer));
@@ -777,7 +777,15 @@ impl Drawer<'_> {
         strip.walls.extend(lane_walls);
         let pitch = wi.w + wi.s;
         let region: Aabb = bbox_of(&taut).grow(2.0 * MM + 4.0 * pitch);
-        let cors = if fd45_off("loser") { Vec::new() } else { self.loser_corridors(w, layer, &taut, &region) };
+        let mut cors = if fd45_off("loser") { Vec::new() } else { self.loser_corridors(w, layer, &taut, &region) };
+        // fd45 r11: the P2 bands (room + crossing price); a band that is a loser corridor too
+        // gets the crossing price on that corridor (its room is priced once).
+        for bnd in bands {
+            match cors.iter_mut().find(|c| c.wire == bnd.wire && c.path == bnd.path) {
+                Some(c) => c.viol_nm = bnd.viol_nm,
+                None => cors.push(bnd),
+            }
+        }
         let ents = self.local_ents(&wp, region.grow(self.qgrow));
         let nr = self.near(ents.clone(), &wp);
         // Cumulative length of the taut path, for the node order.
@@ -965,7 +973,8 @@ impl Drawer<'_> {
         // `planned_room` price of the leg `a-b`: its length inside the planned room of an undrawn
         // lane neighbour (`zones`), each piece weighted by `x + x^2`, `x` = depth over the pitch
         // (midpoint rule, pieces of at most a quarter pitch or 1/24 of the leg).
-        let room_none = (zones.is_empty() && gates.is_empty() && cors.is_empty()) || cfg.room <= 0.0;
+        let cross_none = !cors.iter().any(|c| c.viol_nm > 0.0);
+        let room_none = (zones.is_empty() && gates.is_empty() && cors.is_empty()) || (cfg.room <= 0.0 && cross_none);
         let room_f = |a: Vec2, b: Vec2| -> f64 {
             let l = (b - a).len();
             let mut tot = 0.0;
@@ -1013,7 +1022,7 @@ impl Drawer<'_> {
                     tot += pitch * (x + x * x);
                 }
             }
-            cfg.room * tot
+            cfg.room * tot + corridor_cross(&cors, a, b)
         };
         // The same two prices with the per-leg work cut, exactly (see `RoomPre`, `FollowIdx`);
         // the cached loop's (the scans above are the reference loop's, `OCTI_REF`).
@@ -1026,7 +1035,7 @@ impl Drawer<'_> {
             best
         };
         let room_x = |a: Vec2, b: Vec2| -> f64 {
-            let v = cfg.room * rpre.room(pitch, a, b);
+            let v = cfg.room * rpre.room(pitch, a, b) + rpre.cross(a, b);
             #[cfg(test)]
             OCTI_HITS.with(|h| h.set([h.get()[0], h.get()[1] + usize::from(v > 0.0)]));
             v
@@ -1631,6 +1640,13 @@ impl Drawer<'_> {
                 i += 1;
             }
         }
+        // fd45 r11 debug (`TOPO_BANDDBG`, copper-neutral): a form that crosses a P2 band, with the
+        // undrawn wire, the draw kind (first / forced) and the run's ends.
+        if std::env::var_os("TOPO_BANDDBG").is_some() {
+            for (ow, nx) in band_crossings(&cors, &out) {
+                eprintln!("BANDX w{w} net {} L{layer} {} crosses w{ow} net {} x{nx} from ({:.3},{:.3}) to ({:.3},{:.3})", wi.net, if forced { "forced" } else { "first" }, self.st.wires[ow].net, out[0].x / MM, -out[0].y / MM, out[out.len() - 1].x / MM, -out[out.len() - 1].y / MM);
+            }
+        }
         if out == taut {
             return None;
         }
@@ -1699,7 +1715,7 @@ impl Drawer<'_> {
     /// length, span lo, span hi)`. An edge the taut path crosses on both sides of an undrawn
     /// wire's planned crossing stays a wall.
     #[allow(clippy::type_complexity)]
-    pub(super) fn open_strip(&self, w: WireId, k0: usize, k1: usize, layer: usize, taut: &[Vec2]) -> (Strip, Vec<(Vec2, Vec2, f64, f64, f64)>) {
+    pub(super) fn open_strip(&self, w: WireId, k0: usize, k1: usize, layer: usize, taut: &[Vec2]) -> (Strip, Vec<(Vec2, Vec2, f64, f64, f64)>, Vec<Corridor>) {
         const OPEN_RINGS: usize = 6;
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
@@ -1859,21 +1875,40 @@ impl Drawer<'_> {
         // triangle and cross it there (Y4's octilinear rescue in the joint check entered the
         // triangle above Y1's crossing of the opened edge through an edge Y1 does not cross,
         // and crossed Y1's band in it: a short, the selector cut Y1 back). The planned path of
-        // every undrawn same-layer wire on an opened edge is a wall: its ERBS on this layer (the
-        // reserved copper the joint check commits), unless the run's own taut path crosses it
-        // (the plan's own crossing, left to the clearance check). Without an ERBS the per-edge
-        // walls above stay its only guard. O(opened wires x band points x taut points).
+        // every undrawn same-layer wire on an opened edge, its ERBS on this layer (the reserved
+        // copper the joint check commits), keeps its room, unless the run's own taut path
+        // crosses it (the plan's own crossing, left to the clearance check). Without an ERBS the
+        // per-edge walls above stay its only guard.
+        //
+        // fd45 r11 (graded factors, costly not failed): that band is a price, not a wall (r10's
+        // hard walls left the forced DP of esp +3V3 R2.1 only a form through IO21_TX's via, a
+        // short). A [`Corridor`] per band: a leg inside it pays the `planned_room` price by
+        // depth, a leg across its centre line the clearance violation the undrawn wire would
+        // get there, `violation` x [`violation_amount`](super::factors::violation_amount)
+        // (reach, crossed length) ([`corridor_cross`]). The first draw's taut run stays legal and
+        // far cheaper, so a crossing wins only in a forced run, where it costs far less than a
+        // short. Debug arms: `TOPO_FD45_OFF=p2w` (no band price), `TOPO_FD45_ON=p2wall` (the
+        // r10 hard walls). O(opened wires x band points x taut points).
+        let mut bands: Vec<Corridor> = Vec::new();
         if self.opts.realise == "erbs" && !fd45_off("p2w") {
+            let wi = &st.wires[w];
             for &ow in &opened_for {
-                for b in self.erbs.get(&ow).map_or(&[][..], |v| v.as_slice()).iter().filter(|b| b.layer == layer) {
+                let oi = &st.wires[ow];
+                let reach = 0.5 * oi.w + oi.s.max(wi.s) + 0.5 * wi.w;
+                for b in self.erbs.get(&ow).map_or(&[][..], |v| v.as_slice()).iter().filter(|b| b.layer == layer && b.path.len() >= 2) {
                     let crosses = b.path.windows(2).any(|x| taut.windows(2).any(|y| super::draw::seg_proper(x[0], x[1], y[0], y[1])));
-                    if !crosses {
+                    if crosses {
+                        continue;
+                    }
+                    if fd45_on("p2wall") {
                         walls.extend(b.path.windows(2).filter(|x| (x[1] - x[0]).len2() >= 1.0).map(|x| (x[0], x[1])));
+                    } else {
+                        bands.push(Corridor { path: b.path.clone(), reach, pitch: (oi.w + oi.s.max(wi.s)).max(1.0), bb: bbox_of(&b.path).grow(reach), viol_nm: self.octi.viol_nm, wire: ow });
                     }
                 }
             }
         }
-        (Strip::new(tris, walls), gates)
+        (Strip::new(tris, walls), gates, bands)
     }
 
     /// first-draw-45 r10 (mechanism C, lead-approved; "reserve planned room" for joint losers):
@@ -1911,7 +1946,7 @@ impl Drawer<'_> {
                 if b.path.windows(2).any(|x| taut.windows(2).any(|y| super::draw::seg_proper(x[0], x[1], y[0], y[1]))) {
                     continue;
                 }
-                out.push(Corridor { path: b.path.clone(), reach, pitch: (oi.w + oi.s.max(wi.s)).max(1.0), bb });
+                out.push(Corridor { path: b.path.clone(), reach, pitch: (oi.w + oi.s.max(wi.s)).max(1.0), bb, viol_nm: 0.0, wire: o });
             }
         }
         out
@@ -1995,12 +2030,63 @@ pub(super) struct RoomPre {
 /// drawn yet, its ERBS path on the layer (`path`), the room `reach` either side of it (its half
 /// width, the larger clearance and the drawn run's half width), its `pitch` (width plus
 /// clearance) and the box `path` grown by `reach`.
+///
+/// fd45 r11: also the band of an undrawn wire on an edge P2 opened ([`Drawer::open_strip`]);
+/// `viol_nm` > 0 prices a leg across its centre line ([`corridor_cross`]; 0 for a joint loser's
+/// corridor). `wire` = the undrawn wire (debug lines).
 #[derive(Clone, Debug)]
 pub(super) struct Corridor {
     pub path: Vec<Vec2>,
     pub reach: f64,
     pub pitch: f64,
     pub bb: Aabb,
+    pub viol_nm: f64,
+    pub wire: WireId,
+}
+
+/// fd45 r11: the price (nm, after every factor) of the leg `a-b` crossing the centre lines of the
+/// corridors `cors` that carry a crossing price (`viol_nm` > 0): per proper crossing with a
+/// segment of the path, `viol_nm x violation_amount(reach, cl)`, `cl` = the leg's length inside
+/// the band at that crossing, `2 reach / sin(angle)` capped at the leg's length: the clearance
+/// violation the undrawn wire would get if drawn on its plan (full depth over the crossed
+/// length). Graded: a shallower crossing costs more, a deeper band (wider wire, larger
+/// clearance) costs more, a leg that only enters the band pays the room price alone
+/// ([`corridor_room`]). No threshold, no wall: a forced run may still cross (costly, not failed).
+/// O(corridors x path points).
+pub(super) fn corridor_cross(cors: &[Corridor], a: Vec2, b: Vec2) -> f64 {
+    let d = b - a;
+    let l = d.len();
+    if l < 1.0 {
+        return 0.0;
+    }
+    let lb = bbox_of(&[a, b]);
+    let mut tot = 0.0;
+    for c in cors.iter().filter(|c| c.viol_nm > 0.0) {
+        if lb.max.x < c.bb.min.x || lb.min.x > c.bb.max.x || lb.max.y < c.bb.min.y || lb.min.y > c.bb.max.y {
+            continue;
+        }
+        for x in c.path.windows(2) {
+            let e = x[1] - x[0];
+            let el = e.len();
+            if el < 1.0 || !super::draw::seg_proper(a, b, x[0], x[1]) {
+                continue;
+            }
+            let sin = (d.cross(e) / (l * el)).abs().max(1e-3);
+            let cl = (2.0 * c.reach / sin).min(l);
+            tot += c.viol_nm * super::factors::violation_amount(c.reach, cl);
+        }
+    }
+    tot
+}
+
+/// fd45 r11 debug (`TOPO_BANDDBG`, copper-neutral): the band crossings of a drawn run `pts`,
+/// (undrawn wire, crossings) per band with a crossing price.
+pub(super) fn band_crossings(cors: &[Corridor], pts: &[Vec2]) -> Vec<(WireId, usize)> {
+    cors.iter()
+        .filter(|c| c.viol_nm > 0.0)
+        .map(|c| (c.wire, pts.windows(2).map(|y| c.path.windows(2).filter(|x| super::draw::seg_proper(y[0], y[1], x[0], x[1])).count()).sum::<usize>()))
+        .filter(|x| x.1 > 0)
+        .collect()
 }
 
 /// The `planned_room` price (before the `room` factor) of the leg `a-b` inside the corridors
@@ -2046,6 +2132,11 @@ impl RoomPre {
             .collect();
         let gates = gates.iter().map(|&(gp, gu, glen, glo, ghi)| (gp, gp + gu * glen, glen, glo, ghi)).collect();
         RoomPre { zones, gates, cors: cors.to_vec() }
+    }
+
+    /// fd45 r11: the band crossing price of the leg `a-b` ([`corridor_cross`], after the factors).
+    pub(super) fn cross(&self, a: Vec2, b: Vec2) -> f64 {
+        corridor_cross(&self.cors, a, b)
     }
 
     /// The room price of the leg `a-b` before the `room` factor (the scan's `tot`). O(zones x
@@ -2380,7 +2471,8 @@ mod tests {
     fn loser_corridor_prices_the_room_by_depth() {
         let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
         let path = vec![v(0.0, 0.0), v(10.0, 0.0)];
-        let c = Corridor { bb: bbox_of(&path).grow(0.45 * MM), path, reach: 0.45 * MM, pitch: 0.45 * MM };
+        let c = Corridor { bb: bbox_of(&path).grow(0.45 * MM), path, reach: 0.45 * MM, pitch: 0.45 * MM, viol_nm: 0.0, wire: 1 };
+        assert_eq!(corridor_cross(std::slice::from_ref(&c), v(5.0, -1.0), v(5.0, 1.0)), 0.0, "a loser corridor has no crossing price");
         let at = |y: f64| corridor_room(std::slice::from_ref(&c), 0.45 * MM, v(2.0, y), v(6.0, y));
         assert_eq!(at(0.5), 0.0);
         assert_eq!(corridor_room(std::slice::from_ref(&c), 0.45 * MM, v(12.0, 0.0), v(14.0, 0.0)), 0.0);
@@ -2388,6 +2480,38 @@ mod tests {
         assert!(0.0 < shallow && shallow < deep && deep < on, "{shallow} {deep} {on}");
         // On the path: 4 mm at depth 1 pitch, x + x^2 = 2.
         assert!((on - 8.0 * MM).abs() < 1e-3 * MM, "{on}");
+    }
+
+    /// fd45 r11: a leg across a P2 band's centre line pays the undrawn wire's clearance violation
+    /// there, `violation x violation_amount(reach, crossed length)`: at least one violation unit
+    /// (far above any length or bend price, far below a short), more at a shallower angle and for
+    /// a wider band; a leg that only enters the band, or crosses no band, pays no crossing price;
+    /// one leg crossing a bent path three times pays three times.
+    #[test]
+    fn band_crossing_is_priced_as_the_undrawn_wires_violation() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+        let viol = OctiCfg::default().viol_nm;
+        let band = |reach: f64| {
+            let path = vec![v(0.0, 0.0), v(10.0, 0.0)];
+            Corridor { bb: bbox_of(&path).grow(reach), path, reach, pitch: reach, viol_nm: viol, wire: 1 }
+        };
+        let c = [band(0.3 * MM)];
+        let square = corridor_cross(&c, v(5.0, -1.0), v(5.0, 1.0));
+        let diag = corridor_cross(&c, v(4.0, -1.0), v(6.0, 1.0));
+        let want = viol * super::super::factors::violation_amount(0.3 * MM, 0.6 * MM);
+        assert!((square - want).abs() < 1e-6 * want, "{square} {want}");
+        assert!(square >= viol && square < OctiCfg::default().short_nm, "{square}");
+        assert!(diag > square, "a shallower crossing is longer in the band: {diag} {square}");
+        assert!(corridor_cross(&[band(0.5 * MM)], v(5.0, -1.0), v(5.0, 1.0)) > square, "a wider band costs more");
+        assert_eq!(corridor_cross(&c, v(2.0, 0.2), v(6.0, 0.2)), 0.0, "entering without crossing: room only");
+        assert!(corridor_room(&c, 0.3 * MM, v(2.0, 0.2), v(6.0, 0.2)) > 0.0);
+        assert_eq!(corridor_cross(&c, v(12.0, -1.0), v(12.0, 1.0)), 0.0, "past the band's end");
+        let bent = Corridor { path: vec![v(0.0, 0.0), v(5.0, 0.0), v(5.0, 5.0), v(10.0, 5.0)], bb: Aabb { min: v(-1.0, -1.0), max: v(11.0, 6.0) }, ..band(0.3 * MM) };
+        // (3,-1)-(7,6) crosses y = 0, x = 5 and y = 5: three times, each at a shallower angle than 90
+        let thrice = corridor_cross(std::slice::from_ref(&bent), v(3.0, -1.0), v(7.0, 6.0));
+        let once = corridor_cross(std::slice::from_ref(&bent), v(3.0, -1.0), v(3.0, 1.0));
+        assert!(thrice > 3.0 * once, "{thrice} {once}");
+        assert_eq!(band_crossings(std::slice::from_ref(&bent), &[v(3.0, -1.0), v(7.0, 6.0)]), vec![(1, 3)]);
     }
 
     /// fd45 r10 (verifier F8): at `bend_mm = 0` ("only length counts") a staircase still costs
