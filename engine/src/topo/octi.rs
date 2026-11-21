@@ -118,6 +118,9 @@ pub struct OctiCfg {
     pub bend_nm: f64,
     /// `L_pref` of the jog penalty (nm).
     pub spacing_nm: f64,
+    /// first-draw-45 r7 (`[drawing] short_leg_mm`): weight (nm) of the short-leg price
+    /// ([`short_leg_price`]).
+    pub short_leg_nm: f64,
     /// `any_angle` factor weight (nm per stretch; plus 2/15 of it per mm).
     pub any_nm: f64,
     pub any_forbidden: bool,
@@ -247,6 +250,7 @@ impl OctiCfg {
             on: o.draw_style == "octilinear",
             bend_nm: o.bend_mm.max(0.0) * MM,
             spacing_nm: o.bend_spacing_mm.max(0.0) * MM,
+            short_leg_nm: o.short_leg_mm.max(0.0) * MM,
             any_nm: reg.weight("any_angle").unwrap_or(15.0) * MM,
             any_forbidden: o.any_angle == "forbidden",
             acute_nm: reg.weight("acute_bend").unwrap_or(50.0) * MM,
@@ -261,7 +265,7 @@ impl OctiCfg {
 
 impl Default for OctiCfg {
     fn default() -> Self {
-        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST }
+        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, short_leg_nm: 0.0, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST }
     }
 }
 
@@ -367,9 +371,25 @@ pub fn bend_price(cfg: &OctiCfg, leff: f64, u: Vec2, l_in: f64, v: Vec2) -> f64 
         p += cfg.acute_nm * acute_amount(t);
     }
     if l_in < leff {
-        p += 2.0 * cfg.bend_nm * (1.0 - l_in / leff).powi(2);
+        p += 2.0 * cfg.bend_nm * (1.0 - l_in / leff).powi(2) + short_leg_price(cfg, leff, l_in);
     }
     p
+}
+
+/// first-draw-45 r7 (`[drawing] short_leg_mm`, lead 2026-11-21: graded, no cutoff): the price of a
+/// leg of `l` nm that ends in a bend, below the jog leg `leff` ([`jog_leg`]): `short_leg_nm ((leff
+/// - l) / (l + leff / 8))^2`. 0 at and above `leff` (and its slope there), rising smoothly as the
+/// leg shrinks: `0.64 x` the weight at `leff / 2`, `64 x` for a vanishing leg (bounded below the
+/// violation scale). The jog penalty above saturates at `2 bend_nm`, so a fine staircase of
+/// 0.1 mm steps (each step one more KiCad item; esp +3V3 r6: 11 items where KiCad then counted one
+/// clearance item per step against the IO8_SCL crossing) stayed far cheaper than one free-angle
+/// stretch. O(1).
+pub fn short_leg_price(cfg: &OctiCfg, leff: f64, l: f64) -> f64 {
+    if l >= leff || cfg.short_leg_nm <= 0.0 {
+        return 0.0;
+    }
+    let x = (leff - l.max(0.0)) / (l.max(0.0) + leff / 8.0);
+    cfg.short_leg_nm * x * x
 }
 
 /// octi-bundle r2 (fuse octilinear, the user's A1c rule: every redraw path prices on the first
@@ -734,7 +754,9 @@ impl Drawer<'_> {
                 if octi_dir(d).is_some() || l < 2.0 * pitch_of(wi) {
                     continue;
                 }
-                let step = pitch_of(wi).max(l / CHORD_NODES as f64);
+                // r7: at least the jog leg apart (a step between neighbouring chord nodes then
+                // need not be a sub-jog leg; a thick wire keeps its pitch).
+                let step = pitch_of(wi).max(jog_leg(&cfg, pitch_of(wi))).max(l / CHORD_NODES as f64);
                 let m = (l / step).floor() as usize;
                 for j in 1..m {
                     let f = j as f64 * step / l;

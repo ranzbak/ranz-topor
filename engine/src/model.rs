@@ -1496,6 +1496,12 @@ pub struct Options {
     /// M-45 (`[drawing] bend_spacing_mm`): preferred least length between two bends (`L_pref`); a
     /// shorter leg pays more the shorter it is (jog penalty), down to `min(L_pref, 2 (w + s))`.
     pub bend_spacing_mm: f64,
+    /// first-draw-45 r7 (`[drawing] short_leg_mm`): price weight (mm) of a leg shorter than the
+    /// jog leg (`min(L_pref, 2 (w + s))`) that ends in a bend, on top of the jog penalty and
+    /// growing without a step as the leg gets shorter: `w ((L - l) / (l + L / 8))^2`, 0 at or
+    /// above the jog leg, `0.64 w` at half of it, `64 w` for a vanishing leg (bounded, so a
+    /// violation still costs more). A staircase of tiny steps is many KiCad items; 0 = off.
+    pub short_leg_mm: f64,
     /// M-45 (`[drawing] octilinear_room`): with the octilinear style, the planner (P3 / P4) and
     /// the drawing's packing count the room an octilinear wire takes in a passage (the octagon
     /// around a wrapped corner, the 0/45 degree legs of a slanted stretch; `demand::octi_stretch`)
@@ -1902,6 +1908,7 @@ impl Default for Options {
             acute: "costly".into(),
             bend_mm: 0.25,
             bend_spacing_mm: 0.5,
+            short_leg_mm: 2.0,
             octi_room: true,
             draw_pull_taut: true,
             realise: "erbs".into(),

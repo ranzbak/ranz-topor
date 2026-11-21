@@ -1844,6 +1844,66 @@ mod tests {
         f(&mut dr);
     }
 
+    /// first-draw-45 r7 (`[drawing] short_leg_mm`, the esp +3V3 staircase): a net-1 run from A
+    /// (2, 12) to B (8, 10) mm, the taut chord at 18.4 degrees, in a corridor of two foreign net-2
+    /// tracks parallel to it, each `dw` beyond the chord's clearance. Every octilinear form in the
+    /// corridor is a staircase whose steps stay within `dw` of the chord: legs far below the jog
+    /// leg. Without the short-leg price (weight 0) the first-draw DP takes such a staircase (its
+    /// bends and jogs cost less than one free-angle stretch); with it (the default weight) no leg
+    /// ending in a bend is below half the jog leg: the chord stays as drawn (free-angle, one item)
+    /// or the steps are long. Returns (sub-half-jog legs at weight 0, at the default).
+    fn short_legs_in_corridor(dw: f64) -> (usize, usize) {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        let (a, b) = (v(2.0, 12.0), v(8.0, 10.0));
+        let mut got = (0, 0);
+        two_pads((2.0, 12.0), (8.0, 10.0), &mut |dr| {
+            let u = (b - a).unit().expect("A != B");
+            let left = Vec2 { x: -u.y, y: u.x };
+            let wi = dr.st.wires[0].clone();
+            let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+            let tw = 150_000.0;
+            dr.commit(&track_item(2, 0, tw, a + left * 20.0 * MM, b + left * 20.0 * MM, None));
+            let need = dr.need_of(dr.ents.len() - 1, &wp, wi.w);
+            for sg in [-1.0, 1.0] {
+                dr.commit(&track_item(2, 0, tw, a + u * 0.8 * MM + left * sg * (need + dw), b - u * 0.8 * MM + left * sg * (need + dw), None));
+            }
+            let k1 = dr.st.wires[0].passes.len();
+            let leff = super::super::octi::jog_leg(&dr.octi, wi.w + wi.s);
+            let short = |pts: &[Vec2]| -> usize {
+                let segs: Vec<Vec2> = pts.windows(2).map(|x| x[1] - x[0]).filter(|d| d.len2() > 1.0).collect();
+                segs.windows(2).filter(|x| super::super::octi::turn_deg(x[0], x[1]) > 0.5 && x[0].len() < 0.5 * leff).count()
+            };
+            let pts = vec![a, b];
+            let form = |dr: &Drawer| dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).map_or(pts.clone(), |o| o.pts);
+            let keep = dr.octi;
+            assert!(keep.short_leg_nm > 0.0, "the default weight is on");
+            dr.octi.short_leg_nm = 0.0;
+            let f0 = form(dr);
+            dr.octi = keep;
+            let f1 = form(dr);
+            eprintln!("dw {dw}: weight 0 {} legs {} short; default {} legs {} short", f0.len() - 1, short(&f0), f1.len() - 1, short(&f1));
+            got = (short(&f0), short(&f1));
+        });
+        got
+    }
+
+    #[test]
+    fn short_leg_price_keeps_the_steps_long() {
+        let mut seen = Vec::new();
+        for dw in [0.03 * MM, 0.06 * MM] {
+            let (s0, s1) = short_legs_in_corridor(dw);
+            seen.push((dw / MM, s0, s1));
+            assert_eq!(s1, 0, "dw {} mm: a leg below half the jog leg with the short-leg price: {seen:?}", dw / MM);
+        }
+        assert!(seen.iter().any(|x| x.1 > 0), "the fixture must make the unpriced DP staircase: {seen:?}");
+        // The price itself: 0 at and above the jog leg, graded below it, bounded.
+        let cfg = super::super::octi::OctiCfg { short_leg_nm: 1.0 * MM, ..Default::default() };
+        let p = |l: f64| super::super::octi::short_leg_price(&cfg, 0.5 * MM, l * MM) / MM;
+        assert!(p(0.5) == 0.0 && p(0.7) == 0.0 && p(0.499) > 0.0 && p(0.499) < 1e-4);
+        assert!((p(0.25) - 0.64).abs() < 1e-9 && (p(0.0) - 64.0).abs() < 1e-9);
+        assert!(p(0.1) > p(0.2) && p(0.2) > p(0.3) && p(0.3) > p(0.4));
+    }
+
     /// first-draw-45 P1: an octilinear piece of the taut run is a chain of the DP as drawn, without
     /// the leg test, priced by its clearance below the rule and counted. A run from A (2, 12)
     /// along the line y = 12 to M (8, 12), then any-angle to B (12, 9); foreign net-2 tracks

@@ -218,6 +218,8 @@ SETTINGS: list[Setting] = [
        unit="mm", range=(0, 100), engine="bend_mm"),
     _s("drawing", "bend_spacing_mm", "float", 0.5, "Topological core, octilinear style: preferred least length of a segment between two bends; a shorter one (a jog) pays more the shorter it is, up to twice bend_mm. In pin fields the limit drops to twice the trace's width plus clearance, so short pieces between pins stay possible.",
        unit="mm", range=(0, 50), engine="bend_spacing_mm"),
+    _s("drawing", "short_leg_mm", "float", 2.0, "Topological core, octilinear style: extra price of a segment shorter than the jog limit of bend_spacing_mm that ends in a bend, growing smoothly the shorter it is: 0 at the limit, 0.64 x this at half of it, at most 64 x this for a vanishing piece. A staircase of tiny steps hugging a diagonal is many KiCad track items (each one reported on its own by the DRC where something crosses it); with this price the drawing takes fewer, longer steps or keeps the piece at its free angle. 0 = only the jog penalty of bend_spacing_mm (the behaviour before this key).",
+       unit="mm", range=(0, 100), engine="short_leg_mm"),
     # ---- [diffpair]
     _s("diffpair", "enabled", "bool", True, "Topological core: route differential pairs as coupled pairs: each pair connection is planned as one wire as wide as both tracks and the gap (so it takes its place early, crosses other wires once and changes layer with one via pair) and drawn as two tracks at the pair gap, joined to the pads by short fan-out stubs. false = their connections stay unrouted and are listed (DIFF_PAIRS_SKIPPED), the behaviour before 0.4.2.",
        engine="diffpair_route", kicad="KiCad → net names ending in +/- or P/N (digits and _ after them allowed): Schematic net labels"),
