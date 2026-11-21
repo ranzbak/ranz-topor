@@ -54,7 +54,15 @@ fi
 if [ "$mode" = ladder ]; then
   X="$*"
   q() { while [ "$(jobs -rp | wc -l)" -ge 4 ]; do wait -n; done; hzq run --threads 4 --name "$HZ_TAG-$1" -- bash -c "$2" 9>&- & }
-  q qm "TOPO_FREEDBG=1 unit qm \$QM $X"; q esp "TOPO_FREEDBG=1 unit esp \$ESP $X"
+  free() { # name board: forensics of the unit's copper (read-only), table + cluster PNG
+    local n=$1 b=$2 d; d=$(ls -d "$OUT/$n"/*/s0 | head -1)
+    python3 tools/fd45r9_free.py --log "$OUT/$n.s0log.gz" --pcb "$d/$b-topor/$b.kicad_pcb" --input "$d/$b-input/$b.kicad_pcb" \
+      --json "$OUT/free-$n.json" --md "$OUT/free-$n.md" --png "$OUT/free-$n.png" --board "$b" > "$OUT/free-$n.log" 2>&1
+    note "free $n rc $?"
+  }
+  export -f free
+  q qm "TOPO_FREEDBG=1 TOPO_RUNPROV=1 TOPO_TIMES=1 unit qm \$QM $X && free qm qmtech-minimig"
+  q esp "TOPO_FREEDBG=1 TOPO_RUNPROV=1 TOPO_TIMES=1 unit esp \$ESP $X && free esp esp-rust-board"
   q wic "unit wic \$WIC $X"; q ep "unit ep \$EP \$EPX $X"
   wait
   note "all done"; exit 0

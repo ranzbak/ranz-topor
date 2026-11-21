@@ -81,6 +81,26 @@ fn forced_free_line(octi_on: bool, s: &draw::DrawStats) -> Option<String> {
 /// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
 /// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
 #[allow(clippy::too_many_arguments)]
+/// first-draw-45 r9 forensics (`TOPO_FREEDBG`, copper-neutral): the free-angle segments (not at
+/// 0/45/90 degrees) of every drawn wire after the step `stage` of the drawing, one stderr line
+/// each (mm, KiCad frame), so a segment of the final copper can be traced to the step that wrote
+/// it (the r9 forensics script). Read only.
+fn free_snap(stage: &str, drawn: &BTreeMap<WireId, WireOut>, st: &State) {
+    if std::env::var_os("TOPO_FREEDBG").is_none() {
+        return;
+    }
+    eprintln!("FREESTAGE {stage}");
+    for (w, wo) in drawn {
+        for (layer, pts) in &wo.runs {
+            for s in pts.windows(2) {
+                if (s[1] - s[0]).len() >= 1_000.0 && super::octi::octi_dir(s[1] - s[0]).is_none() {
+                    eprintln!("FREESNAP {stage} w{w} net {} L{layer} {:.6} {:.6} {:.6} {:.6}", st.wires[*w].net, s[0].x / MM, -s[0].y / MM, s[1].x / MM, -s[1].y / MM);
+                }
+            }
+        }
+    }
+}
+
 fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State) {
     let o = &mut out[ci];
     o.routed = true;
@@ -7996,8 +8016,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             floor: Some(floor),
             fail_first: ctl.test_point("fail erbs sleeve"),
             octi_order: super::erbs::OctiOrder::parse(&opts.octi_order).unwrap_or_else(|| {
-                warnings.push(format!("[drawing] octi_order = {:?} is not \"sweep\" or \"bends\": \"bends\" used", opts.octi_order));
-                super::erbs::OctiOrder::Bends
+                warnings.push(format!("[drawing] octi_order = {:?} is not \"sweep\" or \"bends\": \"sweep\" (the default) used", opts.octi_order));
+                super::erbs::OctiOrder::Sweep
             }),
             ..super::erbs::ErbsOpts::default()
         };
@@ -8675,6 +8695,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // room, its middle legs beside them (each segment pushed onto the transformed ones, PDF pp.
     // 16, 33). Keep points: the other wires' ends and vias of the net on it ([`super::netconn::feet_on`]);
     // the split guard as for the fuse and the polish.
+    free_snap("draw", &drawn, &st);
     if octi_on && opts.octi_straighten && !super::octi::fd45_off("p4s") {
         let t_str = Instant::now();
         let (mut n_str, mut str_nm, mut str_refused) = (0usize, 0.0, 0usize);
@@ -8724,6 +8745,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, !pass_changed, t_str.elapsed().as_secs_f64()));
         }
     }
+    free_snap("straighten", &drawn, &st);
     ctl.stage(rnd, rnds, "via reduction and fuse");
     let t_red = Instant::now();
     // The result as drawn is a variant of its own (more vias, maybe shorter).
@@ -8778,6 +8800,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     } else {
         warnings.push(format!("via reduction after drawing: off; {causes_before}"));
     }
+    free_snap("reduce", &drawn, &st);
     // ---- Fuse (D6b): a branch that leaves its junction (or a pad) beside its trunk leaves the
     // trunk's copper where the two part (TopoR FreeStyle auto move of T-points, black-box E8c-e;
     // overlap removal, REPORT section 4.C). Geometric, after everything is drawn: the checker sees
@@ -9040,6 +9063,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             version = draw::lazy_taken(&mut pool, version, net);
         }
     }
+    free_snap("fuse", &drawn, &st);
     // M-45: what the steps after the drawing left not at 0/45/90 degrees (a fused branch end)
     // becomes an elbow or Z where the checker accepts it.
     if octi_on {
@@ -9127,6 +9151,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ));
         }
     }
+    free_snap("polish", &drawn, &st);
     if !moves.is_empty() {
         use super::fusepour;
         let t_pc = Instant::now();

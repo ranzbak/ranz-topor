@@ -1,5 +1,5 @@
 //! first-draw-45 (docs/dev/design/first-draw-45.md): the first draw's octilinear form where a 45
-//! degree form fits. P3 `[drawing] octi_order = "sweep"` (an option; the default stays "bends" until P4): the wires get their octilinear form in
+//! degree form fits. P3 `[drawing] octi_order = "sweep"` (the default since r9; "bends" is the other order): the wires get their octilinear form in
 //! Staepelaere's sweep order (1992, OrderSegments, PDF pp. 22, 29), so a bundle is drawn from one
 //! side to the other and each wire's DP has its neighbours' room on one side only.
 //!
@@ -117,12 +117,13 @@ fn bends(pts: &[[f64; 2]]) -> usize {
 /// leg is octilinear (PAD-EXIT-AXIS closed: 45 degrees from the pad is fine, free-angle is not).
 #[test]
 fn u6_pinrow_long_bundle_is_one_octilinear_bundle() {
-    // The bends order (the default) also draws U6 without free-angle copper, but S5 leaves the
-    // bundle there (its level 2 mm below S7's): the one-bundle shape needs the sweep order.
-    let b = route("pinrow_long_bundle", &[]);
+    // The bends order also draws U6 without free-angle copper, but S5 leaves the bundle there
+    // (its level 2 mm below S7's): the one-bundle shape needs the sweep order, the default since
+    // first-draw-45 r9 (so the run below sets nothing: a default back at "bends" fails it).
+    let b = route("pinrow_long_bundle", &[("octi_order", serde_json::json!("bends"))]);
     clean(&b);
     assert!(free_angle(&b).is_empty(), "bends order: free-angle {:?}", free_angle(&b));
-    let r = route("pinrow_long_bundle", &[("octi_order", serde_json::json!("sweep"))]);
+    let r = route("pinrow_long_bundle", &[]);
     // Debug: the tracks as JSON (net, layer, start, end in mm, KiCad frame) for the PNG.
     if let Ok(path) = std::env::var("FD45_DUMP") {
         let segs: Vec<serde_json::Value> = r

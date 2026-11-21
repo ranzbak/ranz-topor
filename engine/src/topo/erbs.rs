@@ -128,7 +128,7 @@ pub struct ErbsOpts {
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, limit: None, draw_start: None, floor: None, fail_first: false, margin: 0.0, octi_order: OctiOrder::Bends }
+        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, limit: None, draw_start: None, floor: None, fail_first: false, margin: 0.0, octi_order: OctiOrder::Sweep }
     }
 }
 
@@ -2271,11 +2271,11 @@ fn greedy_keep(comp: &[usize], keys: &[(u8, usize)], adj: &[BTreeSet<usize>], mo
 pub enum OctiOrder {
     /// The bend relation ([`precedes`]) plus the sweep relation ([`sweep_scores`]); a cycle is
     /// broken at the wire with the fewest unmet predecessors. Fixes K5-type bundles; with P4 it
-    /// draws long-chord pin-row bundles (U6) as one parallel bundle.
-    Sweep,
-    /// The bend relation only, a cycle broken at the earliest wire of the given order (the
-    /// default; first-draw-45 r6 re-judge with P4).
+    /// draws long-chord pin-row bundles (U6) as one parallel bundle. The default (first-draw-45
+    /// r9, lead decision on the r8 ladder).
     #[default]
+    Sweep,
+    /// The bend relation only, a cycle broken at the earliest wire of the given order.
     Bends,
 }
 

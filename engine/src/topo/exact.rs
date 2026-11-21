@@ -1925,6 +1925,56 @@ mod tests {
         assert!(st(&on, &stair) > st(&off, &stair) + 2.0 * MM, "a staircase pays: {} vs {}", st(&on, &stair), st(&off, &stair));
     }
 
+    /// first-draw-45 r9 (`[drawing] bundle_pull_range_mm` in the DP, user: a configurable bundle
+    /// pull range): a net-1 run from A (2, 12) to B (12, 9) mm (KiCad frame) and a drawn net-2
+    /// track along y = 12 + need + 0.3 mm from x = 3 to 8 (need = the centre distance at the
+    /// clearance), below the run's own octilinear forms (the elbows along y = 12 or y = 9). Only
+    /// the DP's own bundle reach can give the hug: the track's octagon corners are nodes up to 2
+    /// pitches past its clearance from the taut chord (here about 0.9 mm), and from the corner
+    /// node an elbow runs along the track at its clearance (0.3 mm below y = 12, 5 mm beside it:
+    /// the `bundle_pull` share of that length outweighs its two bends and 0.25 mm of length).
+    /// Range off (0, the default): the form has that hug leg. Range 0.5 mm (below the corners'
+    /// distance from the chord): no corner of the track is a node, no leg beside it; the form is
+    /// an elbow of the run's own (on y = 12 or y = 9). The straightening is not involved (the DP
+    /// output itself is checked).
+    #[test]
+    fn bundle_pull_range_limits_the_dp_reach() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        let (a, b) = (v(2.0, 12.0), v(12.0, 9.0));
+        let tw = 150_000.0;
+        let mut got: Vec<(f64, bool, f64, Vec<Vec2>)> = Vec::new();
+        for range in [f64::INFINITY, 0.5 * MM] {
+            two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
+                let wi = dr.st.wires[0].clone();
+                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                // the need of a net-2 track of width tw: its half width + the clearance + the run's half width
+                let h = dr.commit(&track_item(2, 0, tw, v(3.0, 30.0), v(8.0, 30.0), None));
+                let id = dr.handles[h].1;
+                let need = dr.need_of(id, &wp, wi.w);
+                dr.uncommit(h);
+                let ny = 12.0 + need / MM + 0.3;
+                dr.commit(&track_item(2, 0, tw, v(3.0, ny), v(8.0, ny), None));
+                dr.octi.pull_range = range;
+                let k1 = dr.st.wires[0].passes.len();
+                let pts = vec![a, b];
+                let dr: &Drawer = dr;
+                let o = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).expect("a form");
+                assert!(o.pts.windows(2).all(|x| super::super::octi::octi_dir(x[1] - x[0]).is_some()), "range {range}: free-angle in {:?}", o.pts);
+                // the longest horizontal leg at the hug level (the track's clearance line, KiCad y = ny - need)
+                let hug_y = -(ny * MM - need);
+                let hug: f64 = o.pts.windows(2).filter(|x| (x[0].y - hug_y).abs() < 2_000.0 && (x[1].y - hug_y).abs() < 2_000.0).map(|x| (x[1] - x[0]).len()).fold(0.0, f64::max);
+                let own = o.pts.windows(2).any(|x| (x[1] - x[0]).len() > 4.0 * MM && ((x[0].y - a.y).abs() < 2_000.0 && (x[1].y - a.y).abs() < 2_000.0 || (x[0].y - b.y).abs() < 2_000.0 && (x[1].y - b.y).abs() < 2_000.0));
+                got.push((range, own, hug, o.pts.clone()));
+            });
+        }
+        let mm = |q: &[Vec2]| q.iter().map(|p| format!("({:.3},{:.3})", p.x / MM, -p.y / MM)).collect::<Vec<_>>().join(" ");
+        for g in &got {
+            eprintln!("range {} mm: own elbow leg {}, hug leg {:.3} mm: {}", g.0 / MM, g.1, g.2 / MM, mm(&g.3));
+        }
+        assert!(got[0].2 >= 4.0 * MM, "no limit: the DP's form runs beside the drawn track (hug leg >= 4 mm): {}", mm(&got[0].3));
+        assert!(got[1].2 < 1_000.0 && got[1].1, "range 0.5 mm: the run keeps an elbow of its own, no leg beside the track: {}", mm(&got[1].3));
+    }
+
     /// first-draw-45 P1: an octilinear piece of the taut run is a chain of the DP as drawn, without
     /// the leg test, priced by its clearance below the rule and counted. A run from A (2, 12)
     /// along the line y = 12 to M (8, 12), then any-angle to B (12, 9); foreign net-2 tracks

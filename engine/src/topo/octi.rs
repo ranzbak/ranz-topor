@@ -131,10 +131,10 @@ pub struct OctiCfg {
     /// runs parallel to a drawn wire of another net at that wire's clearance (it follows its
     /// neighbour, so a bundle keeps its pitch through its bends).
     pub pull: f64,
-    /// `[drawing] bundle_pull_range_mm` (nm): how far the straightening's hug forms may move a run
-    /// to run beside a drawn neighbour ([`hug_within_range`]); infinite = no limit beyond the
-    /// search area (the default). The DP's own bundle reach (corners up to 2 pitches past the
-    /// clearance) does not read it.
+    /// `[drawing] bundle_pull_range_mm` (nm): how far the bundle pull may move a run to run beside
+    /// a drawn neighbour: the straightening's hug forms ([`hug_within_range`]) and, r9, the DP's
+    /// bundle reach (a drawn wire's corner is a node up to 2 pitches past its clearance and no
+    /// further from the taut path than the range); infinite = no limit beyond those (the default).
     pub pull_range: f64,
     /// `planned_room` factor weight: price per nm of drawn shape inside the room the plan keeps
     /// for a lane neighbour not drawn yet, times `x + x^2` (`x` = depth over the pitch).
@@ -813,9 +813,11 @@ impl Drawer<'_> {
         for &id in &ents {
             cand.clear();
             self.octagon_nodes(id, &wp, &region, &mut cand);
-            // A drawn wire's corners further out too: the run may follow it (bundles).
+            // A drawn wire's corners further out too: the run may follow it (bundles), up to 2
+            // pitches past the clearance, and (r9, `[drawing] bundle_pull_range_mm`) no further
+            // from the taut path than the range (never below the reach of any other corner).
             let need = self.need_of(id, &wp, wp.w);
-            let reach = if id >= self.n_static && cfg.pull > 0.0 { need + 2.0 * pitch } else { near + 0.15 * need };
+            let reach = if id >= self.n_static && cfg.pull > 0.0 { (need + 2.0 * pitch).min(cfg.pull_range.max(near + 0.15 * need)) } else { near + 0.15 * need };
             for &p in &cand {
                 let (d, t, f) = proj(p);
                 if d <= reach && t > 0.0 && t < *cum.last().unwrap() {
@@ -1545,6 +1547,31 @@ impl Drawer<'_> {
                         }
                     } else {
                         open = None;
+                    }
+                    from = e;
+                }
+            }
+        }
+        // first-draw-45 r9 forensics (`TOPO_FREEDBG`, copper-neutral): every free-angle leg the chain
+        // takes, with the octilinear connectors between its ends whose legs all pass the leg test.
+        if std::env::var_os("TOPO_FREEDBG").is_some() {
+            let mut from = taut[0];
+            for s in &chain {
+                for &(e, dk) in s {
+                    if dk.is_none() && (e - from).len2() >= 1.0 {
+                        let forms = connectors(from, e);
+                        let legal = forms
+                            .iter()
+                            .filter(|sh| {
+                                let mut a = from;
+                                sh.iter().all(|&(q, _)| {
+                                    let ok = (q - a).len2() < 1.0 || legal_f(a, q);
+                                    a = q;
+                                    ok
+                                })
+                            })
+                            .count();
+                        eprintln!("FREEDP w{w} L{layer} forced {forced} ({:.6}, {:.6}) ({:.6}, {:.6}) len {:.4} legal_octi_forms {legal}/{}", from.x / MM, -from.y / MM, e.x / MM, -e.y / MM, (e - from).len() / MM, forms.len());
                     }
                     from = e;
                 }

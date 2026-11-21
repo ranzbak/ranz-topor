@@ -3250,6 +3250,13 @@ impl<'a> Drawer<'a> {
         self.idx.remove(i);
         if let Some(en) = self.ents.get_mut(e) {
             en.live = false;
+            // first-draw-45 r9 (esp runtime): the dead object leaves the spatial grid too. Every
+            // grid query skips dead objects, so the answers are the same; but each refit that
+            // the checker refuses (straightening, polish, fuse) commits the run's old tracks
+            // again as new objects, and the dead ones piled up in the grid cells (esp: the
+            // via reduction's repair queries 12 x slower). O(cells of the object).
+            let bb = self.ent_box[e].grow(en.grow + en.clear + 1.0);
+            self.grid.remove(bb, e);
         }
         self.joint.on_uncommit(handle, i);
     }
@@ -3569,6 +3576,8 @@ impl<'a> Drawer<'a> {
                     let (mut pts, mut items, mut pneck_out) = (pts, items, pneck_out);
                     // Debug (`TOPO_ERBS_DEBUG`): the run before its octilinear form and pull.
                     let pre_octi = (band.is_some() && std::env::var_os("TOPO_ERBS_DEBUG").is_some()).then(|| pts.clone());
+                    // first-draw-45 r9 forensics (`TOPO_RUNPROV`): the run's octilinear outcome.
+                    let mut otag: &str = if restored { "erbs-kept" } else if neck.is_some() { "neck" } else { "skip" };
                     if self.octi.on && (neck.is_some() || restored) && std::env::var_os("TOPO_OCTIDBG").is_some() {
                         eprintln!("OCTISKIP wire {w} net {} L{layer} neck {} restored {restored} from ({:.4},{:.4})", wi.net, neck.is_some(), pts[0].x / 1e6, -pts[0].y / 1e6);
                     }
@@ -3610,6 +3619,7 @@ impl<'a> Drawer<'a> {
                             },
                             None => "none",
                         };
+                        otag = tag;
                         if dbg {
                             let (any, _) = super::octi::breaks(&pts);
                             eprintln!(
@@ -3693,6 +3703,7 @@ impl<'a> Drawer<'a> {
                             }
                         } else {
                             (pts, items, pneck_out, neck, src) = (k.2, k.3, k.4, k.5, -1);
+                            otag = "erbs-long-kept";
                         }
                     }
                     let first = committed.len();
@@ -3757,7 +3768,7 @@ impl<'a> Drawer<'a> {
                     if src >= 0 && band.is_some() && !replaced {
                         self.stats.erbs_fallback += 1;
                     }
-                    run_prov("ladder", w, wi.net, layer, src, "-", &pts);
+                    run_prov("ladder", w, wi.net, layer, src, otag, &pts);
                     out.items.extend(items);
                     out.runs.push((layer, pts));
                     out.run_src.push(if self.opts.realise != "erbs" {
@@ -5768,6 +5779,39 @@ mod tests {
             let mut w2 = wo.clone();
             assert!(!dr.refit_legal(&wo, 0, &p13) && !dr.refit_run(&mut w2, 0, p13), "the blocked link is illegal for both");
         }
+    }
+
+    /// first-draw-45 r9 (esp runtime, 53 s -> 650 s at r8): a refit the checker refuses commits the
+    /// run's old tracks again as new objects; the dead ones must leave the spatial grid, or every
+    /// grid query near the run (the repair, the exact search, the octilinear DP) scans a pile that
+    /// grows with each refused refit (esp: the straightening's refused forms, then 22 via
+    /// reduction tries of 3-55 s each). A run from pad A (3, 20) to pad B (13, 20) and a foreign
+    /// track across y = 17; 200 refused refits (a run through that track) leave the grid as large
+    /// as after the first, its queries return no dead object, and the run's copper is the same.
+    #[test]
+    fn refused_refits_leave_no_dead_objects_in_the_grid() {
+        let m = fx_model(&[(1, 3.0, 20.0), (1, 13.0, 20.0)]);
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let o = Options::default();
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..b.proj.obstacles.len()).find(|&i| (b.proj.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(3.0, 20.0), obs(13.0, 20.0));
+        let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+        dr.commit(&track_item(2, 0, 0.25 * FMM, fp(5.0, 17.0), fp(11.0, 17.0), None));
+        let run = vec![fp(3.0, 20.0), fp(13.0, 20.0)];
+        let mut wo = fx_drawn(&mut dr, w, run.clone());
+        let bad = vec![fp(3.0, 20.0), fp(8.0, 15.0), fp(13.0, 20.0)];
+        assert!(!dr.refit_run(&mut wo, 0, bad.clone()), "the run through the foreign track is refused");
+        let n1 = dr.grid.len();
+        for _ in 0..200 {
+            assert!(!dr.refit_run(&mut wo, 0, bad.clone()));
+        }
+        assert_eq!(dr.grid.len(), n1, "refused refits piled dead objects into the grid");
+        let ids = dr.grid.query(bbox_of(&run).grow(5.0 * FMM));
+        assert!(ids.iter().all(|&i| dr.ents[i].live), "a grid query returned a dead object");
+        assert_eq!(wo.runs[0].1, run, "the run keeps its copper");
+        assert!(wo.handles.iter().all(|&h| dr.ents[dr.handles[h].1].live), "the run's tracks are live");
     }
 
     /// first-draw-45 r7 (kills the r6 survivor "no end-leg rule"): the straightening keeps the

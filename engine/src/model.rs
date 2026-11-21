@@ -1526,12 +1526,12 @@ pub struct Options {
     pub erbs_conflict_keep: String,
     /// first-draw-45 P3 (`[drawing] octi_order`): with realise = "erbs", the order in which the
     /// wires whose band is not kept as is get their octilinear form ([`crate::topo::erbs::OctiOrder`]):
-    /// `"bends"` (default: the bend relation only, a cycle broken at the earliest wire) or `"sweep"`
-    /// (Staepelaere 1992 OrderSegments, PDF pp. 22, 29: the bend relation plus one sweep axis per
-    /// group of cut neighbours, a cycle broken at the fewest unmet predecessors). Sweep fixes
-    /// K5-type bundles and draws U6 as one parallel bundle; with P4 (chord nodes, straightening)
-    /// neither order wins on every count on the test boards, so "bends" stays the default
-    /// (first-draw-45 r6 re-judge, reports/first-draw-45-r6-*.md).
+    /// `"sweep"` (default; Staepelaere 1992 OrderSegments, PDF pp. 22, 29: the bend relation plus
+    /// one sweep axis per group of cut neighbours, a cycle broken at the fewest unmet predecessors)
+    /// or `"bends"` (the bend relation only, a cycle broken at the earliest wire). Sweep fixes
+    /// K5-type bundles and draws U6 as one parallel bundle (the user-approved shape); on the r8
+    /// ladder (det s0, 4 boards) it has 12 fewer new DRC items than bends with the same
+    /// unconnected, vias and routed (first-draw-45 r9, lead decision 2026-11-21).
     pub octi_order: String,
     /// first-draw-45 P2 (`[drawing] octi_own_portals`): in the first draw's octilinear form, an
     /// edge the run's own taut path crosses (no portal of its sleeve) opens in the room the plan
@@ -1918,7 +1918,7 @@ impl Default for Options {
             draw_pull_taut: true,
             realise: "erbs".into(),
             erbs_conflict_keep: "tier".into(),
-            octi_order: "bends".into(),
+            octi_order: "sweep".into(),
             octi_own_portals: true,
             octi_straighten: true,
             erbs_gap_keep_max_mm: 0.15,
