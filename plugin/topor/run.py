@@ -49,6 +49,7 @@ from toporlib.drc import classify, new_routing, run_drc
 from toporlib.drcloop import DrcJudgement
 from toporlib.kicad_cli import KicadCliCancelled, KicadCliTimeout
 
+from . import grid as grid_mod
 from . import messages
 from . import preflight as preflight_mod
 from . import postrun, runlock
@@ -941,6 +942,15 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     # 4. route + DRC loop
     opts = build_options(cfg, engine, plan=plan, rip=rip, model=model, priorities=priorities)
     known = json.loads(engine.default_options())
+    # grid-snap: the user's KiCad grid (topor.toml [drawing] grid_mm, else KiCad's pcbnew.json, read only) and the
+    # board's grid origin, for the drawn copper's bends and vias (docs/dev/design/grid-snap.md)
+    if cfg.get("drawing", "grid_snap") != "off" and "grid_track_nm" in known:
+        settings = getattr(port, "kicad_settings_dir", None)
+        gopts, glines = grid_mod.resolve(cfg.get("drawing", "grid_mm"), copy_text, settings() if callable(settings) else None)
+        opts.update(gopts)
+        for line in glines:
+            log.line(line)
+        report.facts["grid"] = glines
     if getattr(ui, "waits_for_ok", False) and "stop_when_stable" in known:
         # M-B0: with the progress dialog the user ends the run (OK once the routes are stable); headless runs
         # (harness, MCP) stop at "Routes stable" + [optimize] stable_patience by themselves. User 2026-11-17 ("the

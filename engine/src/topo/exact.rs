@@ -2559,4 +2559,77 @@ mod tests {
             }
         }
     }
+
+    /// grid-snap: the fixture of the grid tests: pads A and B of net 1 (1 mm square) on the
+    /// 0.254 mm grid at (2.032, 12.192) and (20.066, 12.192) mm, and a 1 mm square pad of net 2 at
+    /// (11, 12.1) mm between them, so the run bends round it at the clearance, between two grid lines.
+    fn grid_json() -> String {
+        let p = |v: f64| (v * MM).round() as i64;
+        let pad = |i: usize, net: i32, x: f64, y: f64| format!(r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":{net},"attr":"smd","center":[{x},{y}],"rotation_deg":0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{s},"h":{s}}}}},"drill":null}}"#, x = p(x), y = p(y), s = p(1.0));
+        let c = [(0.0, 0.0), (24.0, 0.0), (24.0, 24.0), (0.0, 24.0)];
+        let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+        format!(
+            r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}}],"pads":[{},{},{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+            pad(0, 1, 2.032, 12.192),
+            pad(1, 1, 20.066, 12.192),
+            pad(2, 2, 11.0, 12.1),
+            segs.join(",")
+        )
+    }
+
+    /// grid-snap (design note: "prefer" puts the free bends on the grid, the pad ends stay, the
+    /// form stays octilinear; "off" is the DP without the feature; mutants G1-G4): the run round
+    /// the net-2 pad bends on octagon nodes off the grid; with the grid on, every interior bend is
+    /// on the 0.254 mm grid, the ends are the pad centres and it is at most a little longer (the
+    /// DP's own legality keeps every clearance).
+    #[test]
+    fn grid_prefer_puts_free_bends_on_the_grid() {
+        use crate::topo::gridsnap::{Lattice, Mode};
+        let m = BoardModel::from_json(&grid_json()).unwrap();
+        let bd = board::build(&m, &BuildOpts::default()).unwrap();
+        let conns = bd.connections(&m);
+        let mut st = State::new(&bd.proj);
+        let cn = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
+        st.route_conn(cn, &InitWeights::default(), (cn.w + cn.s) / 400_000.0).expect("routes");
+        let opts = Options::default();
+        let checker = Checker::new(&m, &opts);
+        let mut dr = Drawer::new(&m, &opts, &bd, &st, &checker);
+        let k1 = dr.st.wires[0].passes.len();
+        let (a, b) = (Vec2 { x: 2.032 * MM, y: -12.192 * MM }, Vec2 { x: 20.066 * MM, y: -12.192 * MM });
+        // the taut path round the top corners of the net-2 pad (top edge at 11.6 mm), a hair
+        // past the clearance radius
+        let r = 1.01 * (0.5 * dr.st.wires[0].w + dr.st.wires[0].s);
+        let taut = vec![a, Vec2 { x: 10.5 * MM, y: -(11.6 * MM - r) }, Vec2 { x: 11.5 * MM, y: -(11.6 * MM - r) }, b];
+        let lat = Lattice::new([254_000, 254_000], [0, 0]).unwrap();
+        let len = |p: &[Vec2]| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>();
+        let off_bends = |p: &[Vec2]| p[1..p.len() - 1].iter().filter(|&&q| !lat.on(q)).count();
+        dr.octi = crate::topo::octi::OctiCfg { on: true, ..dr.octi };
+        let plain = dr.octilinear(0, 0, k1, 0, &taut, None, [None, None], None).map_or(taut.clone(), |o| o.pts);
+        assert!(plain.len() > 2 && off_bends(&plain) > 0, "the plain form bends off the grid: {plain:?}");
+        // a lattice in the config but grid_snap off: the plain form
+        dr.octi = crate::topo::octi::OctiCfg { grid: Some(lat), grid_mode: Mode::Off, grid_nm: 0.15 * MM, ..dr.octi };
+        assert_eq!(dr.octilinear(0, 0, k1, 0, &taut, None, [None, None], None).map_or(taut.clone(), |o| o.pts), plain, "off = the plain form");
+        dr.octi = crate::topo::octi::OctiCfg { grid_mode: Mode::Prefer, ..dr.octi };
+        let g = dr.octilinear(0, 0, k1, 0, &taut, None, [None, None], None).expect("a grid form").pts;
+        assert!(g.windows(2).all(|q| crate::topo::octi::octi_dir(q[1] - q[0]).is_some()), "octilinear: {g:?}");
+        assert!((g[0] - a).len() < 1.0 && (g[g.len() - 1] - b).len() < 1.0, "the pad centres stay the ends: {g:?}");
+        assert_eq!(off_bends(&g), 0, "every interior bend on the grid: {g:?} (plain {plain:?})");
+        assert!(len(&g) <= len(&plain) + 4.0 * 0.15 * MM, "at most the saved grid price longer: {} vs {}", len(&g), len(&plain));
+        // an all-octilinear run with a bend off the grid (the plain form itself) is repriced with
+        // the grid on (mutant G3: the early return keeps it), kept as it is without
+        let again = dr.octilinear(0, 0, k1, 0, &plain, None, [None, None], None).expect("repriced with the grid on").pts;
+        assert_eq!(off_bends(&again), 0, "{again:?}");
+        let keep = crate::topo::octi::OctiCfg { grid_mode: Mode::Off, ..dr.octi };
+        let saved = std::mem::replace(&mut dr.octi, keep);
+        assert!(dr.octilinear(0, 0, k1, 0, &plain, None, [None, None], None).is_none(), "off: an all-octilinear run stays as it is");
+        dr.octi = saved;
+        // the fallback mode: the plain form has no any-angle stretch, so it stays
+        dr.octi = crate::topo::octi::OctiCfg { grid_mode: Mode::Fallback, ..dr.octi };
+        assert_eq!(dr.octilinear(0, 0, k1, 0, &taut, None, [None, None], None).map_or(taut.clone(), |o| o.pts), plain, "fallback without a stretch = plain");
+        // a zero price: the grid nodes alone do not pull the form off its shortest shape by more
+        // than they gain (no price, no reason to move): never longer than the plain form
+        dr.octi = crate::topo::octi::OctiCfg { grid_mode: Mode::Prefer, grid_nm: 0.0, ..dr.octi };
+        let z = dr.octilinear(0, 0, k1, 0, &taut, None, [None, None], None).map_or(taut.clone(), |o| o.pts);
+        assert!(len(&z) <= len(&plain) + 1.0, "price 0: no longer than plain ({} vs {})", len(&z), len(&plain));
+    }
 }

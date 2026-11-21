@@ -146,6 +146,11 @@ pub struct OctiCfg {
     /// short) in the forced DP's shorts-first variant, `viol_nm` x [`SHORT_FIRST`]: the DP's one
     /// scale carries the choice key's "shorts first" ([`super::draw::forced_form_key`]).
     pub short_nm: f64,
+    /// grid-snap (`[drawing] grid_snap`, docs/dev/design/grid-snap.md): the track grid (None =
+    /// off or no grid), the mode, and the `off_grid` price (nm per bend fully off the grid).
+    pub grid: Option<super::gridsnap::Lattice>,
+    pub grid_mode: super::gridsnap::Mode,
+    pub grid_nm: f64,
 }
 
 /// forced-draw: a short's violation unit costs this many clearance units in the shorts-first
@@ -270,13 +275,16 @@ impl OctiCfg {
             room: reg.weight("planned_room").unwrap_or(5.0).max(0.0),
             viol_nm: reg.weight("violation").unwrap_or(1000.0).max(0.0) * MM,
             short_nm: reg.weight("violation").unwrap_or(1000.0).max(0.0) * MM * SHORT_FIRST,
+            grid: super::gridsnap::Lattice::from_opts(o).0,
+            grid_mode: super::gridsnap::Mode::parse(&o.grid_snap),
+            grid_nm: super::gridsnap::price_nm(o),
         }
     }
 }
 
 impl Default for OctiCfg {
     fn default() -> Self {
-        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, short_leg_nm: 0.0, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, pull_range: f64::INFINITY, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST }
+        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, short_leg_nm: 0.0, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, pull_range: f64::INFINITY, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST, grid: None, grid_mode: super::gridsnap::Mode::Off, grid_nm: 0.0 }
     }
 }
 
@@ -633,8 +641,30 @@ impl Drawer<'_> {
     /// topology tests (region, strip, walls) stay. `None`: a leg must keep every clearance (the
     /// first draw).
     pub(super) fn octilinear(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>) -> Option<OctiOut> {
+        use super::gridsnap::Mode;
         let t = std::time::Instant::now();
-        let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced);
+        let on = self.octi.grid.is_some();
+        let r = match self.octi.grid_mode {
+            Mode::Prefer if on => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true),
+            Mode::Fallback if on => {
+                // grid-snap "fallback": the grid nodes only where the plain pass leaves an
+                // any-angle stretch (the last spacing fallback); the pass with fewer stretches wins
+                // (ties: the plain one).
+                let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false);
+                let stretches = |p: &[Vec2]| breaks(p).0.len();
+                let n0 = stretches(r.as_ref().map_or(pts, |o| &o.pts[..]));
+                if n0 > 0 {
+                    let g = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true);
+                    match g {
+                        Some(o) if stretches(&o.pts) < n0 => Some(o),
+                        _ => r,
+                    }
+                } else {
+                    r
+                }
+            }
+            _ => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false),
+        };
         // first-draw-45 r9 debug (`TOPO_REDUCEDBG`, copper-neutral): an octilinear call over 0.5 s.
         if std::env::var_os("TOPO_REDUCEDBG").is_some() && t.elapsed().as_secs_f64() > 0.5 {
             eprintln!("OCTISLOW w{w} L{layer} passes {k0}..{k1} taut pts {} forced {} -> {}: {:.2} s", pts.len(), forced.is_some(), r.as_ref().map_or(0, |o| o.pts.len()), t.elapsed().as_secs_f64());
@@ -655,8 +685,11 @@ impl Drawer<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>) -> Option<OctiOut> {
+    #[allow(clippy::too_many_arguments)]
+    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, grid: bool) -> Option<OctiOut> {
         let cfg = self.octi;
+        // grid-snap: the track grid of this pass (None: the plain pass, no grid node, no price).
+        let lat = if grid { cfg.grid } else { None };
         let (short_nm, forced) = (forced.unwrap_or(0.0), forced.is_some());
         let mut taut: Vec<Vec2> = pts.to_vec();
         taut.dedup_by(|a, b| (*a - *b).len2() < 1.0);
@@ -665,7 +698,9 @@ impl Drawer<'_> {
         }
         // pad-snap r2b (D3b): an all-octilinear taut run is kept as it is, unless its first (last)
         // leg is a stub wholly inside its own pad (tidy and Cleanup delete it): the DP reprices it.
-        if taut.windows(2).all(|p| octi_dir(p[1] - p[0]).is_some()) && exits.iter().all(|e| e.is_none()) && !self.run_pad_stubs(w, k0, k1, &taut).iter().any(|&x| x) {
+        // grid-snap: with the grid on, an interior vertex off the grid is repriced too.
+        let off_grid = lat.is_some_and(|l| taut[1..taut.len() - 1].iter().any(|&p| l.amount(p) > 0.0));
+        if taut.windows(2).all(|p| octi_dir(p[1] - p[0]).is_some()) && exits.iter().all(|e| e.is_none()) && !self.run_pad_stubs(w, k0, k1, &taut).iter().any(|&x| x) && !off_grid {
             return None;
         }
         let wi = &self.st.wires[w];
@@ -918,6 +953,42 @@ impl Drawer<'_> {
                 }
             }
         }
+        // grid-snap: per interior node off the grid, up to [`GRID_PER_NODE`] points of its grid
+        // cell (nearest first) that lie in the strip and keep every clearance, as extra nodes off
+        // the taut path (octilinear connectors only); at most [`GRID_NODES`] in all, on top of the
+        // nodes above (their set is unchanged). Connectors between two grid nodes bend on the
+        // grid (square grid), so a free stretch can lie on it; where the corridor is packed the
+        // cell points are not clear and the run keeps its tight nodes.
+        if let Some(l) = lat {
+            let base = nodes.len();
+            let mut added = 0usize;
+            'grid: for i in 0..base {
+                let (p, _, ti, _) = nodes[i];
+                if ti == Some(0) || ti == Some(taut.len() - 1) || l.amount(p) <= 0.0 {
+                    continue;
+                }
+                let mut cell = l.cell(p);
+                cell.sort_by(|a, b| (*a - p).len2().total_cmp(&(*b - p).len2()));
+                let mut here = 0usize;
+                for q in cell {
+                    if here >= GRID_PER_NODE {
+                        break;
+                    }
+                    if added >= GRID_NODES {
+                        break 'grid;
+                    }
+                    let (_, t, _) = proj(q);
+                    if t <= 0.0 || t >= *cum.last().unwrap() || nodes.iter().any(|n| (n.0 - q).len2() < 100.0) {
+                        continue;
+                    }
+                    if strip.contains(q) && self.seg_clear_near(&nr, q, q) {
+                        nodes.push((q, t, None, false));
+                        here += 1;
+                        added += 1;
+                    }
+                }
+            }
+        }
         nodes.sort_by(|a, b| a.1.total_cmp(&b.1).then(b.2.is_some().cmp(&a.2.is_some())).then(b.3.cmp(&a.3)));
         // The two ends stay first and last.
         let n = nodes.len();
@@ -934,6 +1005,10 @@ impl Drawer<'_> {
         // The next node on the taut path after each node on it.
         let next_on: Vec<Option<usize>> = (0..n).map(|i| if nodes[i].3 { (i + 1..n).find(|&j| nodes[j].3) } else { None }).collect();
         let leff = jog_leg(&cfg, pitch);
+        // grid-snap: the `off_grid` price of a bend at `p` (0 in the plain pass), and of every
+        // node (the run's two ends never: a pad centre, a via or a T point wins over the grid).
+        let gprice = |p: Vec2| lat.map_or(0.0, |l| cfg.grid_nm * l.amount(p));
+        let gnode: Vec<f64> = (0..n).map(|i| if i == 0 || i == n - 1 { 0.0 } else { gprice(nodes[i].0) }).collect();
         // Drawn octilinear segments of other nets near the run, with the centre distance at which
         // this wire would run beside them at the clearance (bundle following).
         let side: Vec<(Vec2, Vec2, usize, f64)> = if cfg.pull > 0.0 {
@@ -1141,7 +1216,7 @@ impl Drawer<'_> {
                         if (to - m).dot(d) <= 0.0 || (to - m).len2() < 1.0 {
                             continue;
                         }
-                        for mut s in if end == 0 { connectors(m, to) } else { connectors(to, m) } {
+                        for mut s in if end == 0 { connectors_g(m, to, lat.as_ref()) } else { connectors_g(to, m, lat.as_ref()) } {
                             if end == 0 {
                                 s.insert(0, (m, Some(k)));
                             } else {
@@ -1156,7 +1231,7 @@ impl Drawer<'_> {
             if i == 0 {
                 if let Some(t) = exits[0].as_ref().map(|x| (x.axis, x.reach)).filter(|&(u, t)| (q - p).dot(u) > t) {
                     let p2 = p + t.0 * t.1;
-                    for mut s in connectors(p2, q) {
+                    for mut s in connectors_g(p2, q, lat.as_ref()) {
                         s.insert(0, (p2, octi_dir(t.0)));
                         shapes.push(s);
                     }
@@ -1165,7 +1240,7 @@ impl Drawer<'_> {
             if j == n - 1 {
                 if let Some(t) = exits[1].as_ref().map(|x| (x.axis, x.reach)).filter(|&(u, t)| (p - q).dot(u) > t) {
                     let q2 = q + t.0 * t.1;
-                    for mut s in connectors(p, q2) {
+                    for mut s in connectors_g(p, q2, lat.as_ref()) {
                         s.push((q, octi_dir(-t.0)));
                         shapes.push(s);
                     }
@@ -1177,8 +1252,9 @@ impl Drawer<'_> {
         // per pair (on its first use) and shared by the states of node `i`, in the same order.
         struct Shape {
             s: Vec<Leg>,
-            // (leg index, length, unit direction, room price, follow length, direction)
-            legs: Vec<(usize, f64, Vec2, f64, f64, Option<usize>)>,
+            // (leg index, length, unit direction, room price, follow length, direction, grid-snap:
+            // the `off_grid` price of a bend at the leg's start)
+            legs: Vec<(usize, f64, Vec2, f64, f64, Option<usize>, f64)>,
             legal: Option<bool>,
         }
         let pull_on = cfg.pull > 0.0 && !side.is_empty();
@@ -1213,7 +1289,7 @@ impl Drawer<'_> {
                     }
                     for &j in &js {
                         let (p, q) = (nodes[i].0, nodes[j].0);
-                        let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
+                        let mut shapes: Vec<Vec<Leg>> = connectors_g(p, q, lat.as_ref());
                         exit_shapes(&mut shapes, i, j, p, q, 0);
                         // A piece of the taut path itself (any angle), between consecutive nodes on it.
                         let taut_from = shapes.len();
@@ -1251,6 +1327,10 @@ impl Drawer<'_> {
                                 c += len + b + room(from, e) + viol(from, e);
                                 if asis {
                                     c += asis_x(from, e);
+                                }
+                                if b > 0.0 {
+                                    // grid-snap: the bend at `from` (node `i` or a connector bend)
+                                    c += if k == 0 { gnode[i] } else { gprice(from) };
                                 }
                                 if let (Some(kk), true) = (dk, cfg.pull > 0.0 && !side.is_empty()) {
                                     c -= cfg.pull * follow(from, e, kk);
@@ -1314,7 +1394,7 @@ impl Drawer<'_> {
                 let (p, q) = (nodes[i].0, nodes[j].0);
                 let (sh_room, sh_follow, sh_legal, sh_viol) = (shared.map(|m| &m.room), shared.map(|m| &m.follow), shared.map(|m| &m.legal), shared.map(|m| &m.viol));
                 let (own_room, own_follow, own_legal, own_viol) = (&mut own.room, &mut own.follow, &mut own.legal, &mut own.viol);
-                let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
+                let mut shapes: Vec<Vec<Leg>> = connectors_g(p, q, lat.as_ref());
                 exit_shapes(&mut shapes, i, j, p, q, 0);
                 // A piece of the taut path itself (any angle), between consecutive nodes on it.
                 let taut_from = shapes.len();
@@ -1350,7 +1430,8 @@ impl Drawer<'_> {
                                 (Some(kk), true) => memo_get(sh_follow, own_follow, leg_key(from, e), || follow_x(from, e, kk)),
                                 _ => 0.0,
                             };
-                            legs.push((k, len, v, rv, fv, dk));
+                            let gv = if k == 0 { gnode[i] } else { gprice(from) };
+                            legs.push((k, len, v, rv, fv, dk, gv));
                             from = e;
                         }
                         Shape { s, legs, legal: if asis { Some(true) } else { None } }
@@ -1368,13 +1449,16 @@ impl Drawer<'_> {
                         let mut prev_any = din == 8 && i != 0;
                         let mut ok = true;
                         let sn = sh.s.len();
-                        for &(k, len, v, rv, fv, dk) in &sh.legs {
+                        for &(k, len, v, rv, fv, dk, gv) in &sh.legs {
                             let b = bend(u, l, lp, v);
                             if !b.is_finite() {
                                 ok = false;
                                 break;
                             }
                             c += len + b + rv;
+                            if b > 0.0 {
+                                c += gv;
+                            }
                             if let (Some(_), true) = (dk, pull_on) {
                                 c -= cfg.pull * fv;
                             }
@@ -2303,6 +2387,45 @@ fn connectors(p: Vec2, q: Vec2) -> Vec<Vec<Leg>> {
     ]
 }
 
+/// grid-snap: per interior node off the grid, at most this many points of its grid cell become
+/// extra nodes of the octilinear DP.
+const GRID_PER_NODE: usize = 2;
+/// grid-snap: at most this many grid nodes per run, on top of the [`MAX_NODES`] cap.
+const GRID_NODES: usize = 160;
+
+/// [`connectors`], plus with a grid (square: a 45 degree leg moves as far in x as in y) the two Z
+/// shapes with their middle leg moved to the nearest grid step from `p` and from `q` (the centred
+/// middle leg of a Z between two grid points lands half a step off the grid). O(1).
+fn connectors_g(p: Vec2, q: Vec2, lat: Option<&super::gridsnap::Lattice>) -> Vec<Vec<Leg>> {
+    let mut out = connectors(p, q);
+    let Some(l) = lat.filter(|l| l.square()) else { return out };
+    if out.len() != 4 {
+        return out;
+    }
+    let d = q - p;
+    let a = d.y.atan2(d.x).rem_euclid(std::f64::consts::TAU);
+    let k0 = ((a / FRAC_PI_4).floor() as usize) % 8;
+    let k1 = (k0 + 1) % 8;
+    let (d0, d1) = (dir(k0), dir(k1));
+    let den = d0.cross(d1);
+    let (al, be) = (d.cross(d1) / den, d0.cross(d) / den);
+    // (first direction, its length, second direction, its length, first index, second index)
+    for (da, la, db, lb, ka, kb) in [(d0, al, d1, be, k0, k1), (d1, be, d0, al, k1, k0)] {
+        let Some(st) = l.step_along(da) else { continue };
+        let mut ts: Vec<f64> = Vec::with_capacity(2);
+        for t in [(0.5 * la / st).round() * st, la - (0.5 * la / st).round() * st] {
+            if t > 1.0 && t < la - 1.0 && (t - 0.5 * la).abs() > 1.0 && !ts.iter().any(|&x| (x - t).abs() < 1.0) {
+                ts.push(t);
+            }
+        }
+        for t in ts {
+            let b1 = p + da * t;
+            out.push(vec![(b1, Some(ka)), (b1 + db * lb, Some(kb)), (q, Some(ka))]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2713,6 +2836,30 @@ mod tests {
         };
         assert!((len(&cs[0]) - (2e6 + 2f64.sqrt() * 1e6)).abs() < 1.0);
         assert!((len(&cs[2]) - len(&cs[0])).abs() < 1.0);
+    }
+
+    /// grid-snap: between two grid points, the extra Z shapes have their middle leg on a grid
+    /// step (from p and from q), so every bend lies on the grid; none on a rectangular grid or
+    /// without one.
+    #[test]
+    fn grid_connectors_add_z_shapes_on_the_grid() {
+        let l = crate::topo::gridsnap::Lattice::new([254_000, 254_000], [0, 0]).unwrap();
+        let g = 254_000.0;
+        let (p, q) = (v(0.0, 0.0), v(9.0 * g, 3.0 * g));
+        let base = connectors(p, q);
+        let with = connectors_g(p, q, Some(&l));
+        assert_eq!(&with[..4], &base[..], "the plain shapes first, unchanged");
+        assert!(with.len() > 4, "extra Z shapes: {with:?}");
+        // the centred Z between two grid points bends half a step off the grid
+        assert!(base[2..].iter().any(|s| s.iter().any(|x| !l.on(x.0))), "{base:?}");
+        for s in &with[4..] {
+            assert_eq!(s.len(), 3);
+            assert!(s.iter().all(|x| l.on(x.0)), "every bend on the grid: {s:?}");
+            assert!((s[2].0 - q).len() < 1e-6);
+        }
+        let r = crate::topo::gridsnap::Lattice::new([254_000, 127_000], [0, 0]).unwrap();
+        assert_eq!(connectors_g(p, q, Some(&r)).len(), 4);
+        assert_eq!(connectors_g(p, q, None).len(), 4);
     }
 
     #[test]

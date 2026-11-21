@@ -285,6 +285,8 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(neck_depth::NeckDepth),
         // TW6 part B: after the last, so the draws of every factor before it stay as they were.
         Box::new(via_site_social::ViaSiteSocial),
+        // grid-snap: after the last, so the draws of every factor before it stay as they were.
+        Box::new(style::OffGrid),
     ]
 }
 

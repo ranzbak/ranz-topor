@@ -339,6 +339,11 @@ pub struct ViaCtx<'a> {
     /// on the wires near the vias), and a via whose site predicts a violation moves only for a
     /// larger smallest gap (no move on the potential alone). false = as before.
     pub pair_room: bool,
+    /// grid-snap (`[drawing] grid_snap` on): the via grid and the `off_grid` price (nm per via
+    /// fully off the grid). After the force balance a via moves to a point of its grid cell on its
+    /// own track where that predicts no violation and loses at most the price in smallest gap
+    /// ([`grid_site`]). None = as before.
+    pub grid: Option<(super::gridsnap::Lattice, f64)>,
 }
 
 /// One via of the plan as the relocation sees it.
@@ -365,6 +370,8 @@ pub struct RelocReport {
     /// plan's geometry has no legal room there, so the drawing may not take the site on the
     /// plan's word alone (P6).
     pub tight: Vec<(WireId, usize)>,
+    /// grid-snap: vias moved onto the via grid after the force balance ([`grid_site`]).
+    pub gridded: usize,
 }
 
 /// The via intervals `(ka, sa, kb, sb)` of `events` (consecutive events whose labels differ), in
@@ -690,6 +697,24 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             sites[vi] = Site { wire: v.w, i: v.i, k: best.2, p: best.3 };
         }
     }
+    // grid-snap: the via grid after the force balance (graded: a site off the grid pays the
+    // `off_grid` price in smallest gap; Gauss-Seidel like the sweeps, each via sees the others'
+    // sites as they are now).
+    if let Some((lat, price)) = cx.grid {
+        for (vi, v) in vs.iter().enumerate() {
+            let net = st.wires[v.w].net;
+            let (rv, c) = ((cx.via_r)(net), (cx.clear)(net));
+            let tr = &tracks[v.w];
+            let turn_k: Vec<usize> = st.wires[v.w].turns.iter().map(|t| t.0).collect();
+            let ok_k = |k: usize| k >= v.ka && k <= v.kb && !turn_k.contains(&k) && !st.proj.tri_out[st.wires[v.w].tris[k.min(st.wires[v.w].tris.len() - 1)]];
+            let cur = sites[vi];
+            let gap = |p: Vec2, sites: &[Site]| gap_at(cx, &tracks, &v.near, sites, &pair, (v.w, v.i), net, rv, c, p);
+            if let Some((k, p)) = grid_site(&lat, price, tr, v.lo, v.hi, cur.p, &ok_k, &|p| gap(p, &sites)) {
+                rep.gridded += 1;
+                sites[vi] = Site { wire: v.w, i: v.i, k, p };
+            }
+        }
+    }
     let mut out = BTreeMap::new();
     for (vi, v) in vs.iter().enumerate() {
         let s = sites[vi];
@@ -713,6 +738,48 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
         out.insert((v.w, v.i), (s.k, s.p));
     }
     (out, rep)
+}
+
+/// grid-snap: the via site on the via grid for a via at `cur` on track `tr` (its interval
+/// `lo..hi`): of the four points of `cur`'s grid cell, the one with the largest smallest gap whose
+/// nearest track point lies in the interval at a traversal `ok_k` allows, that predicts no
+/// violation (`gap(p).0 >= 0`) and loses at most `price x amount(cur)` of smallest gap
+/// (`gap(p).1`) against `cur` (graded: the farther `cur` is off the grid, the more gap the grid
+/// may take; never a violation). None: `cur` stays (on the grid already, or no such point).
+/// The via leaves its track by at most half the cell diagonal; the drawing goes through it.
+/// O(4 gap queries).
+pub fn grid_site(lat: &super::gridsnap::Lattice, price: f64, tr: &Track, lo: f64, hi: f64, cur: Vec2, ok_k: &dyn Fn(usize) -> bool, gap: &dyn Fn(Vec2) -> (f64, f64, f64)) -> Option<(usize, Vec2)> {
+    let a = lat.amount(cur);
+    if a <= 0.0 || tr.pts.len() < 2 {
+        return None;
+    }
+    let g0 = gap(cur).1;
+    let mut best: Option<(f64, usize, Vec2)> = None;
+    for q in lat.cell(cur) {
+        // the nearest point of the track: its arc length (the via's traversal)
+        let mut near = (f64::INFINITY, 0.0);
+        for (i, w) in tr.pts.windows(2).enumerate() {
+            let (d, f) = seg_point(q, w[0], w[1]);
+            if d < near.0 {
+                near = (d, tr.cum[i] + (f - w[0]).len());
+            }
+        }
+        if near.1 < lo || near.1 > hi {
+            continue;
+        }
+        let k = tr.trav(near.1);
+        if !ok_k(k) {
+            continue;
+        }
+        let (r, g, _) = gap(q);
+        if r < 0.0 || g + price * a < g0 {
+            continue;
+        }
+        if best.is_none_or(|b| g > b.0 + 1.0) {
+            best = Some((g, k, q));
+        }
+    }
+    best.map(|b| (b.1, b.2))
 }
 
 /// A junction the plan moved ([`relocate_junctions`]).
@@ -1114,6 +1181,33 @@ mod tests {
         assert!((o - v(8.0, 7.0)).len() < 0.01e6, "{:?}", o);
         let tot: f64 = [v(3.0, 2.0), v(3.0, 12.0), v(17.0, 7.0)].iter().map(|&p| len8(p - o)).sum();
         assert!((tot - 23.1421e6).abs() < 0.01e6, "{tot}");
+    }
+
+    /// grid-snap: the via goes to the point of its grid cell with the largest gap that predicts
+    /// no violation, loses at most the price in gap and lies in its interval; a via on the grid
+    /// stays; a gap loss above the price keeps it (graded by how far it is off).
+    #[test]
+    fn grid_site_takes_the_best_legal_cell_point() {
+        let l = crate::topo::gridsnap::Lattice::new([254_000, 254_000], [0, 0]).unwrap();
+        let g = 254_000.0;
+        let v = |x: f64, y: f64| Vec2 { x, y };
+        let tr = Track { pts: vec![v(0.0, 0.1 * g), v(10.0 * g, 0.1 * g)], cum: vec![0.0, 10.0 * g], sig: vec![0.0] };
+        let cur = v(3.5 * g, 0.1 * g);
+        let any = |_: usize| true;
+        // gap grows with y (copper below): the upper cell points have the larger gap
+        let gap = |p: Vec2| (p.y + 50_000.0, p.y + 50_000.0, 0.0);
+        let got = grid_site(&l, 0.15e6, &tr, 0.0, 10.0 * g, cur, &any, &gap).expect("a grid site");
+        assert!(l.on(got.1) && (got.1.y - g).abs() < 1.0, "{got:?}");
+        // on the grid already: stays
+        assert!(grid_site(&l, 0.15e6, &tr, 0.0, 10.0 * g, v(3.0 * g, 0.0), &any, &gap).is_none());
+        // every cell point predicts a violation: stays
+        let bad = |p: Vec2| (if (p - cur).len() < 1.0 { 1.0 } else { -1.0 }, 0.0, 0.0);
+        assert!(grid_site(&l, 0.15e6, &tr, 0.0, 10.0 * g, cur, &any, &bad).is_none());
+        // the gap falls off the grid faster than the price: stays (price 0: only an equal gap)
+        let steep = |p: Vec2| (1.0, -(p - cur).len() * 10.0, 0.0);
+        assert!(grid_site(&l, 0.15e6, &tr, 0.0, 10.0 * g, cur, &any, &steep).is_none());
+        // outside the interval: stays
+        assert!(grid_site(&l, 0.15e6, &tr, 0.0, 1.0 * g, cur, &any, &gap).is_none());
     }
 
     #[test]

@@ -112,3 +112,30 @@ impl Factor for PlannedRoom {
         0.0
     }
 }
+
+/// grid-snap (docs/dev/design/grid-snap.md): a drawn bend off the user's KiCad grid, graded by its
+/// distance to the nearest grid point over half the grid diagonal (0 on the grid, 1 at a cell
+/// centre). Priced by the octilinear drawing only with `[drawing] grid_snap` on; run ends (pad
+/// centres, vias, T points) are never priced (the pad snap wins over the grid, as in KiCad).
+pub struct OffGrid;
+
+impl Factor for OffGrid {
+    fn name(&self) -> &'static str {
+        "off_grid"
+    }
+    fn doc(&self) -> &'static str {
+        "Octilinear drawing with [drawing] grid_snap on: a bend off the user's KiCad grid, graded by its distance to the nearest grid point over half the grid diagonal (0 on the grid, 1 at a cell centre); run ends (pad centres, vias, T points) are never priced."
+    }
+    fn unit(&self) -> &'static str {
+        "per bend fully off the grid"
+    }
+    fn default_weight(&self) -> f64 {
+        crate::topo::gridsnap::OFF_GRID_MM
+    }
+    fn default_report(&self) -> Report {
+        Report::Off
+    }
+    fn amount(&self, _ev: &Event) -> f64 {
+        0.0
+    }
+}
