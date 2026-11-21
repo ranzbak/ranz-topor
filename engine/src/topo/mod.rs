@@ -55,6 +55,7 @@ pub mod state;
 pub mod stitch;
 pub mod table;
 pub mod fusepour;
+pub mod netconn;
 pub mod tidy;
 pub mod stats;
 pub mod tree;

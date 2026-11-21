@@ -2278,6 +2278,21 @@ pub fn fuse_line(fused: &[(f64, f64)]) -> String {
     )
 }
 
+/// The split guard's report line (fuse-octi r4, H1 part 2), `None` when it had nothing to do:
+/// `fuse` fuse and `polish` polish steps not taken because they would have left a net's copper in
+/// more pieces, and `split` the nets that still ended in more pieces than before the fuse pass
+/// (an engine bug: some path the guard does not see, e.g. the fuse pour check's undo). O(nets).
+pub fn split_line(fuse: usize, polish: usize, split: &[String]) -> Option<String> {
+    if fuse == 0 && polish == 0 && split.is_empty() {
+        return None;
+    }
+    let mut l = format!("split guard after drawing: {fuse} fuse and {polish} polish steps not taken (each would have left a net's copper in more pieces: a dangling branch)");
+    if !split.is_empty() {
+        l.push_str(&format!("; engine bug: {} in more pieces after the steps after the drawing than before them: {}", if split.len() == 1 { "1 net" } else { "nets" }, split.join(", ")));
+    }
+    Some(l)
+}
+
 /// The octilinear polish's report line: `n` segments redrawn as an elbow or Z, which changed the
 /// copper's length by `added_mm` (an elbow is never shorter than the straight segment it
 /// replaces: after many fuses the polish gives back part of the length the fuse line reports
@@ -8655,6 +8670,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // all copper. A wire at a pad end fuses only onto a wire not fused there itself (no cycle).
     // (price gain, length gain mm) of every fuse applied, for the report line.
     let mut fused: Vec<(f64, f64)> = Vec::new();
+    // Points of a wire's copper that other copper ends on (a planned branch point, a fused foot): fixed
+    // vertices for the polish below (fuse-octi r4: a polish that redrew the segment under a foot orphaned
+    // the branch, qmtech JS2_9).
+    let mut anchors: BTreeMap<WireId, Vec<Vec2>> = BTreeMap::new();
     // Fuse pour check ([`super::fusepour`], after the octilinear polish: the variant table judges
     // the copper the steps after the fuse leave): each applied move with the state it replaced
     // (drawn wire, outcome, necked stretches of its connection), in the order made.
@@ -8665,13 +8684,60 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // `moves`) its own: the line is written after the check, without the undone moves (V5).
     let mut polish: Option<(usize, f64)> = None;
     let mut polish_of: BTreeMap<usize, (usize, f64)> = BTreeMap::new();
+    // fuse-octi r4 (H1 part 2): the split guard of the fuse and the polish ([`super::netconn`]): a
+    // step that leaves a net's drawn copper and pads in more pieces is not taken (qmtech JS2_9 r3 and
+    // main's JS1_2: a branch fused onto a free-angle trunk segment that the polish then redrew as an
+    // elbow without its foot, a dangling branch for KiCad Cleanup). `pieces`: the count per net as
+    // the copper is now (made at the net's first step), `pieces0`: before the fuse pass.
+    let mut net_wires: BTreeMap<i32, Vec<WireId>> = BTreeMap::new();
+    for &w in drawn.keys() {
+        net_wires.entry(st.wires[w].net).or_default().push(w);
+    }
+    let mut net_terms: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (o, ob) in proj.obstacles.iter().enumerate() {
+        if let Some(n) = ob.net.filter(|&n| n != 0 && !ob.bare) {
+            net_terms.entry(n).or_default().push(o);
+        }
+    }
+    // The pieces of net `net` with the drawn wires `drawn` (`extra`: one wire taken out of it).
+    let pieces_of = |net: i32, drawn: &BTreeMap<WireId, WireOut>, extra: Option<(WireId, &WireOut)>| -> usize {
+        let ws = net_wires.get(&net).map_or(&[][..], |v| v.as_slice());
+        let pcs: Vec<super::netconn::Piece> = ws
+            .iter()
+            .filter_map(|&w| {
+                let wo = match extra {
+                    Some((x, o)) if x == w => o,
+                    _ => drawn.get(&w)?,
+                };
+                Some(super::netconn::Piece { runs: &wo.runs, vias: wo.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w: st.wires[w].w / 2.0 })
+            })
+            .collect();
+        let ts: Vec<super::netconn::Term> = net_terms
+            .get(&net)
+            .map_or(&[][..], |v| v.as_slice())
+            .iter()
+            .map(|&o| {
+                let ob = &proj.obstacles[o];
+                super::netconn::Term { poly: &ob.poly, layers: ob.layers, center: ob.center }
+            })
+            .collect();
+        super::netconn::components(&pcs, &ts)
+    };
+    let mut pieces: BTreeMap<i32, usize> = BTreeMap::new();
+    let mut pieces0: BTreeMap<i32, usize> = BTreeMap::new();
+    // Steps not taken by the guard: (fuse, polish).
+    let mut split_refused = (0usize, 0usize);
+    let fdbg = std::env::var("TOPO_FUSEDBG").is_ok();
+    // Test hook "split guard off": the guard lets every step through (its self-check below then
+    // names the net a dropped foot split).
+    let guard_off = ctl.test_point("split guard off");
     if tree_free && opts.fuse_branches {
         let jw = reg.price(&Event::JunctionAngle { at: Vec2::default(), deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, &WireCtx::default());
         let js = tree::junctions(&st);
         let mut fused_at: BTreeSet<(WireId, usize)> = BTreeSet::new();
-        // Points of a wire's copper that other copper ends on (a branch's junction, a fused
-        // end): a fuse may not take away the stretch they lie on.
-        let mut anchors: BTreeMap<WireId, Vec<Vec2>> = BTreeMap::new();
+        // The candidates a take did not keep (refit refused, split guard): (wire, end, foot, i).
+        let mut refused: BTreeSet<(WireId, usize, i64, i64, usize)> = BTreeSet::new();
+        // A fuse may not take away the stretch an anchor lies on.
         for &(bw, end, tw, _, v) in &js {
             anchors.entry(tw).or_default().push(dr.end_at.get(&(bw, end)).copied().unwrap_or(proj.pos[v]));
         }
@@ -8684,147 +8750,169 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let pad_nm = opts.junction_pad_mm * MM;
         // octi-bundle r2: the links and prices of the octilinear first draw (A1c).
         let ocfg = dr.octi;
-        // fuse-octi r3: the ends are taken best gain first (graded, no cutoff), not in wire order: two
-        // wires that meet at one pad can only fuse one of them (`fused_at`), and the wire order let
-        // the first one's small legal gain (JS1_3 wire 383, 2.7 mm) take the pair before the
-        // other's large one (wire 480, 43 mm: the octilinear link that replaced a free-angle leg).
-        // The key is the best price gain of any link of the end on the state before the pass.
-        let mut order: Vec<(f64, WireId, usize)> = Vec::new();
+        // fuse-octi r4 (M1): the ends go best LEGAL gain first, lazily ([`draw::lazy_next`]): two wires
+        // that meet at one pad can fuse only one of them (`fused_at`), and the wire order let the first
+        // one's small legal gain (qmtech JS1_2 wire 383, 2.7 mm) take the pair before the other's large
+        // one (wire 480, 43 mm: the octilinear link that replaced a free-angle leg); r3's key (the best
+        // gain of any candidate, legal or not, on the copper before the pass) went stale after the
+        // first fuses (wiccon 3.3v +3.5 mm). Each key is the end's best legal candidate on the copper
+        // as it is when the key is made; the keys of the net of the last fuse are made again before
+        // the next take (the other nets' stay: a take finds a candidate another net's fuse blocked).
+        // The end's trunks: a branch end its planned trunk, a pad end every wire of the net at the same
+        // pad whose own end there is not fused (no cycle).
+        let trunks_of = |w: WireId, end: usize, fused_at: &BTreeSet<(WireId, usize)>| -> Vec<WireId> {
+            let wi = &st.wires[w];
+            let (pad, vert) = if end == 0 { (wi.pa, wi.a) } else { (wi.pb, wi.b) };
+            if pad == NO_OBS {
+                js.iter().filter(|j| j.0 == w && j.1 == end).map(|j| j.2).collect()
+            } else {
+                ids.iter()
+                    .copied()
+                    .filter(|&u| u != w && !jmoved.contains(&u) && st.wires[u].net == wi.net && ((st.wires[u].a == vert && !fused_at.contains(&(u, 0))) || (st.wires[u].b == vert && !fused_at.contains(&(u, 1)))))
+                    .collect()
+            }
+        };
+        // The best legal fuse of an end on the copper as it is: (price gain, length gain mm, trunk,
+        // run index, i, new run as drawn, foot, the cut part). The best over its trunks (the first
+        // trunk on a tie).
+        type FuseCand = (f64, f64, WireId, usize, usize, Vec<Vec2>, Vec2, Vec<Vec2>);
+        let best_of = |w: WireId, end: usize, drawn: &BTreeMap<WireId, WireOut>, dr: &Drawer<'_>, anchors: &BTreeMap<WireId, Vec<Vec2>>, fused_at: &BTreeSet<(WireId, usize)>, refused: &BTreeSet<(WireId, usize, i64, i64, usize)>| -> Option<FuseCand> {
+            let wi = &st.wires[w];
+            let trunks = trunks_of(w, end, fused_at);
+            let wo = drawn.get(&w)?;
+            if wo.runs.is_empty() || trunks.is_empty() {
+                return None;
+            }
+            let r = if end == 0 { 0 } else { wo.runs.len() - 1 };
+            let (layer, mut run) = wo.runs[r].clone();
+            if end == 1 {
+                run.reverse();
+            }
+            let ws_mm = (wi.w + wi.s) / MM;
+            let mut best: Option<FuseCand> = None;
+            for u in trunks {
+                let Some(uo) = drawn.get(&u) else { continue };
+                let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
+                let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
+                let mut skip = |gain: f64, i: usize, pts: &[Vec2]| -> bool {
+                    let q = pts[0];
+                    if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, &run[..=i]))) {
+                        if fdbg {
+                            eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: an anchor on the cut part");
+                        }
+                        return true;
+                    }
+                    // `junction_pad_mm`: no T that close to a pad of the net.
+                    if pad_nm > 0.0 && pad_verts.get(&wi.net).is_some_and(|ps| ps.iter().any(|&(v, _)| (proj.pos[v] - q).len() < pad_nm)) {
+                        if fdbg {
+                            eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: junction_pad_mm at ({:.3}, {:.3})", q.x / MM, -q.y / MM);
+                        }
+                        return true;
+                    }
+                    refused.contains(&(w, end, q.x.round() as i64, q.y.round() as i64, i))
+                };
+                if let Some((gain, len_gain, i, pts)) = dr.fuse_best_legal(wo, r, &run, end == 1, &tr, ws_mm, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s), &mut skip) {
+                    if best.as_ref().is_none_or(|b| gain > b.0) {
+                        let q = if end == 1 { pts[pts.len() - 1] } else { pts[0] };
+                        best = Some((gain, len_gain, u, r, i, pts, q, run[..=i].to_vec()));
+                    }
+                }
+            }
+            best
+        };
+        let mut pool: Vec<draw::FuseKey> = Vec::new();
+        let mut cands: Vec<Option<FuseCand>> = Vec::new();
         for &w in &ids {
             if pairs.width.contains_key(&st.wires[w].net) || jmoved.contains(&w) {
                 continue;
             }
             for end in 0..2 {
-                let wi = &st.wires[w];
-                let (pad, vert) = if end == 0 { (wi.pa, wi.a) } else { (wi.pb, wi.b) };
-                let trunks: Vec<WireId> = if pad == NO_OBS {
-                    js.iter().filter(|j| j.0 == w && j.1 == end).map(|j| j.2).collect()
-                } else {
-                    ids.iter()
-                        .copied()
-                        .filter(|&u| u != w && !jmoved.contains(&u) && st.wires[u].net == wi.net && ((st.wires[u].a == vert && !fused_at.contains(&(u, 0))) || (st.wires[u].b == vert && !fused_at.contains(&(u, 1)))))
-                        .collect()
-                };
-                let Some(wo) = drawn.get(&w) else { continue };
-                if wo.runs.is_empty() {
-                    continue;
-                }
-                let r = if end == 0 { 0 } else { wo.runs.len() - 1 };
-                let (layer, mut run) = wo.runs[r].clone();
-                if end == 1 {
-                    run.reverse();
-                }
-                let mut top = f64::NEG_INFINITY;
-                for u in trunks {
-                    let Some(uo) = drawn.get(&u) else { continue };
-                    let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
-                    let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
-                    if let Some(c) = draw::fuse_candidates(&run, &tr, (wi.w + wi.s) / MM, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s)).first() {
-                        top = top.max(c.0);
+                let c = best_of(w, end, &drawn, &dr, &anchors, &fused_at, &refused);
+                if fdbg {
+                    if let Some(c) = &c {
+                        eprintln!("FUSE key wire {w} net {} end {end}: best legal gain {:.2} mm onto {} at ({:.3}, {:.3})", st.wires[w].net, c.0, c.2, c.6.x / MM, -c.6.y / MM);
                     }
                 }
-                order.push((top, w, end));
+                pool.push(draw::FuseKey { key: c.as_ref().map_or(f64::NEG_INFINITY, |c| c.0), stamp: 0, w, end, net: st.wires[w].net });
+                cands.push(c);
             }
         }
-        draw::fuse_order(&mut order);
-        for &(_, w, end) in &order {
-            {
-                let wi = &st.wires[w];
-                let (pad, vert) = if end == 0 { (wi.pa, wi.a) } else { (wi.pb, wi.b) };
-                let trunks: Vec<WireId> = if pad == NO_OBS {
-                    js.iter().filter(|j| j.0 == w && j.1 == end).map(|j| j.2).collect()
-                } else {
-                    ids.iter()
-                        .copied()
-                        .filter(|&u| u != w && !jmoved.contains(&u) && st.wires[u].net == wi.net && ((st.wires[u].a == vert && !fused_at.contains(&(u, 0))) || (st.wires[u].b == vert && !fused_at.contains(&(u, 1)))))
-                        .collect()
-                };
-                let Some(wo) = drawn.get(&w) else { continue };
-                if wo.runs.is_empty() {
+        let mut version = 0usize;
+        loop {
+            let k = match draw::lazy_next(&pool, version) {
+                draw::LazyStep::Done => break,
+                draw::LazyStep::Reeval(k) => {
+                    let (w, end) = (pool[k].w, pool[k].end);
+                    let c = best_of(w, end, &drawn, &dr, &anchors, &fused_at, &refused);
+                    pool[k].key = c.as_ref().map_or(f64::NEG_INFINITY, |c| c.0);
+                    pool[k].stamp = version;
+                    cands[k] = c;
                     continue;
                 }
-                let r = if end == 0 { 0 } else { wo.runs.len() - 1 };
-                let (layer, mut run) = wo.runs[r].clone();
-                if end == 1 {
-                    run.reverse();
-                }
-                let ws_mm = (wi.w + wi.s) / MM;
-                let mut done = false;
-                if std::env::var("TOPO_FUSEDBG").is_ok() && !trunks.is_empty() {
-                    eprintln!("FUSE try wire {w} net {} end {end} layer {layer} trunks {trunks:?}", wi.net);
-                }
-                for u in trunks {
-                    let Some(uo) = drawn.get(&u) else { continue };
-                    let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
-                    let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
-                    for (gain, len_gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s)).into_iter().filter({
-                        // The cap counts run vertices (as main's one-link-per-vertex take(8) did), not link shapes: every
-                        // shape of the 8 best vertices is tried, cheapest first.
-                        let mut seen: Vec<usize> = Vec::new();
-                        move |c| {
-                            if !seen.contains(&c.2) {
-                                seen.push(c.2);
-                            }
-                            seen.len() <= 8
-                        }
-                    }) {
-                        let cut = &run[..=i];
-                        let fdbg = std::env::var("TOPO_FUSEDBG").is_ok();
-                        if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, cut))) {
-                            if fdbg {
-                                eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: an anchor on the cut part");
-                            }
-                            continue;
-                        }
-                        let q = pts[0];
-                        // `junction_pad_mm`: no T that close to a pad of the net.
-                        if pad_nm > 0.0 && pad_verts.get(&wi.net).is_some_and(|ps| ps.iter().any(|&(v, _)| (proj.pos[v] - q).len() < pad_nm)) {
-                            if fdbg {
-                                eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: junction_pad_mm at ({:.3}, {:.3})", q.x / MM, -q.y / MM);
-                            }
-                            continue;
-                        }
-                        if end == 1 {
-                            pts.reverse();
-                        }
-                        let saved: Option<Saved> = pour_check.then(|| {
-                            let ci = conn_of[wire_conn[w]];
-                            (drawn[&w].clone(), out[ci].clone(), necking.iter().filter(|(c, _)| *c == ci).cloned().collect())
-                        });
-                        let mut wo = drawn.remove(&w).expect("drawn wire");
-                        let ok = dr.refit_run(&mut wo, r, pts);
-                        if ok {
-                            let ci = conn_of[wire_conn[w]];
-                            necking.retain(|(c, _)| *c != ci);
-                            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
-                        }
-                        drawn.insert(w, wo);
-                        if !ok && fdbg {
-                            eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: refit not legal at ({:.3}, {:.3})", q.x / MM, -q.y / MM);
-                        }
-                        if ok {
-                            if let Some(sv) = saved {
-                                // Where the copper changed: the stretch taken away and the new link.
-                                let mut path = cut.to_vec();
-                                path.push(q);
-                                moves.push((super::fusepour::Move { w, onto: u, path: vec![path] }, sv));
-                            }
-                            fused.push((gain, len_gain));
-                            fused_at.insert((w, end));
-                            anchors.entry(u).or_default().push(q);
-                            if std::env::var("TOPO_FUSEDBG").is_ok() {
-                                let pl = |p: &[Vec2]| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM;
-                                eprintln!("FUSED round {round} wire {w} net {} end {end} onto {u} at ({:.3}, {:.3}) gain {gain:.2} mm, length gain {len_gain:.3} mm, i {i} of {} vertices, run {:.3} -> {:.3} mm, wire now {:.3} mm", wi.net, q.x / MM, -q.y / MM, run.len(), pl(&run), drawn[&w].runs[r].1.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM, drawn[&w].length_nm / MM);
-                            }
-                            done = true;
-                            break;
-                        }
+                draw::LazyStep::Take(k) => k,
+            };
+            let (w, end, net) = (pool[k].w, pool[k].end, pool[k].net);
+            let Some((gain, len_gain, u, r, i, pts, q, cut)) = cands[k].take() else {
+                pool[k].stamp = usize::MAX;
+                continue;
+            };
+            let saved: Option<Saved> = pour_check.then(|| {
+                let ci = conn_of[wire_conn[w]];
+                (drawn[&w].clone(), out[ci].clone(), necking.iter().filter(|(c, _)| *c == ci).cloned().collect())
+            });
+            let before = *pieces.entry(net).or_insert_with(|| {
+                let n = pieces_of(net, &drawn, None);
+                pieces0.insert(net, n);
+                n
+            });
+            let pre = drawn[&w].clone();
+            let mut wo = drawn.remove(&w).expect("drawn wire");
+            let mut ok = dr.refit_run(&mut wo, r, pts);
+            drawn.insert(w, wo);
+            if ok {
+                // The split guard: the step is not taken when it leaves the net in more pieces.
+                let after = pieces_of(net, &drawn, None);
+                if after > before && !guard_off {
+                    let now = drawn.remove(&w).expect("drawn wire");
+                    let back = dr.restore_wire(&now, &pre);
+                    drawn.insert(w, back);
+                    split_refused.0 += 1;
+                    ok = false;
+                    if fdbg {
+                        eprintln!("FUSE refused wire {w} end {end} onto {u} i {i} gain {gain:.2}: the net would be {after} pieces, {before} before (split guard)");
                     }
-                    if done {
-                        break;
-                    }
+                } else {
+                    pieces.insert(net, after);
                 }
             }
+            if !ok {
+                if fdbg {
+                    eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: refit not taken at ({:.3}, {:.3})", q.x / MM, -q.y / MM);
+                }
+                refused.insert((w, end, q.x.round() as i64, q.y.round() as i64, i));
+                pool[k].stamp = usize::MAX;
+                continue;
+            }
+            let ci = conn_of[wire_conn[w]];
+            necking.retain(|(c, _)| *c != ci);
+            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st);
+            if let Some(sv) = saved {
+                // Where the copper changed: the stretch taken away and the new link.
+                let mut path = cut.clone();
+                path.push(q);
+                moves.push((super::fusepour::Move { w, onto: u, path: vec![path] }, sv));
+            }
+            fused.push((gain, len_gain));
+            fused_at.insert((w, end));
+            anchors.entry(u).or_default().push(q);
+            if fdbg {
+                let wi = &st.wires[w];
+                let pl = |p: &[Vec2]| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>() / MM;
+                eprintln!("FUSED round {round} wire {w} net {} end {end} onto {u} at ({:.3}, {:.3}) gain {gain:.2} mm, length gain {len_gain:.3} mm, i {i}, cut {:.3} mm, wire now {:.3} mm", wi.net, q.x / MM, -q.y / MM, pl(&cut), drawn[&w].length_nm / MM);
+            }
+            pool.swap_remove(k);
+            cands.swap_remove(k);
+            version = draw::lazy_taken(&mut pool, version, net);
         }
     }
     // M-45: what the steps after the drawing left not at 0/45/90 degrees (a fused branch end)
@@ -8832,12 +8920,35 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if octi_on {
         let ids: Vec<WireId> = drawn.keys().copied().collect();
         let (mut n_pol, mut pol_nm) = (0usize, 0.0);
+        // Test hook "polish drops feet": the polish gets no fixed vertices (the r3 bug), so only the
+        // split guard keeps the feet on their trunks.
+        let drop_feet = ctl.test_point("polish drops feet");
         for w in ids {
             let mut wo = drawn.remove(&w).expect("drawn wire");
             let len0 = wo.length_nm;
             let ci = conn_of[wire_conn[w]];
             let saved: Option<Saved> = pour_check.then(|| (wo.clone(), out[ci].clone(), necking.iter().filter(|(c, _)| *c == ci).cloned().collect()));
-            let k = dr.octi_polish(&mut wo);
+            let net = st.wires[w].net;
+            // The split guard (H1 part 2): each redrawn segment keeps the net's pieces.
+            let mut joined = |pre: &WireOut, now: &WireOut| -> bool {
+                let before = *pieces.entry(net).or_insert_with(|| {
+                    let n = pieces_of(net, &drawn, Some((w, pre)));
+                    pieces0.entry(net).or_insert(n);
+                    n
+                });
+                let after = pieces_of(net, &drawn, Some((w, now)));
+                if after > before && !guard_off {
+                    split_refused.1 += 1;
+                    if fdbg {
+                        eprintln!("POLISH refused wire {w} net {net}: the net would be {after} pieces, {before} before (split guard)");
+                    }
+                    return false;
+                }
+                pieces.insert(net, after);
+                true
+            };
+            let keep = if drop_feet { &[][..] } else { anchors.get(&w).map_or(&[][..], |a| a.as_slice()) };
+            let k = dr.octi_polish(&mut wo, keep, &mut joined);
             if k > 0 {
                 if let Some(sv) = saved {
                     let path = super::fusepour::changed(&sv.0.runs, &wo.runs);
@@ -9024,6 +9135,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if tree_free && opts.fuse_branches {
         warnings.push(fuse_line(&fused));
     }
+    // The split guard's self-check (rule 12: every path, the fuse pour check's undo too): a net
+    // the steps after the drawing touched that ends in more pieces than before them.
+    let split_nets: Vec<String> = pieces0
+        .iter()
+        .filter(|&(&net, &n0)| pieces_of(net, &drawn, None) > n0)
+        .map(|(&net, _)| model.nets.iter().find(|n| n.code == net).map_or_else(|| net.to_string(), |n| n.name.clone()))
+        .collect();
+    warnings.extend(split_line(split_refused.0, split_refused.1, &split_nets));
     // Vias in a narrow pass (the `via_squeeze` factor's report): a drawn wire via whose
     // passages keep less slack than half its diameter in the drawing's packing.
     {

@@ -1715,12 +1715,27 @@ impl Drawer<'_> {
     /// Post-pass of the octilinear style over a drawn wire (`wo`, plain legal copper only, as
     /// [`Drawer::refit_run`]): every segment not at 0/45/90 degrees that a later step drew (a
     /// branch end fused onto its trunk) is replaced by the elbow or Z shape with the least turning
-    /// that the checker accepts against everything drawn; else it stays. Returns the number of
-    /// segments replaced. O(segments x shapes x checker query).
-    pub fn octi_polish(&mut self, wo: &mut super::draw::WireOut) -> usize {
+    /// that the checker accepts against everything drawn and `joined` lets through (fuse-octi r4,
+    /// H1 part 2: the split guard, `joined(wire before, wire as redrawn)` is false when the step
+    /// would split the net; the segment then goes back as it was); else it stays. `keep`: the points other copper
+    /// ends on (planned branch points, fused feet), fixed vertices. Returns the number of segments
+    /// replaced. O(segments x shapes x checker query).
+    pub fn octi_polish(&mut self, wo: &mut super::draw::WireOut, keep: &[Vec2], joined: &mut dyn FnMut(&super::draw::WireOut, &super::draw::WireOut) -> bool) -> usize {
         let mut n = 0;
         for r in 0..wo.runs.len() {
             let mut cur = wo.runs[r].1.clone();
+            // Every point other copper ends on (`keep`: a planned branch point or a fused foot) lying inside a
+            // segment becomes a vertex of it, so the segment is redrawn in two pieces that both end on it
+            // (fuse-octi r4: the elbow of the whole segment dropped the foot and orphaned the branch).
+            for &p in keep {
+                if let Some(i) = (0..cur.len().saturating_sub(1)).find(|&i| {
+                    let ab = cur[i + 1] - cur[i];
+                    let t = (p - cur[i]).dot(ab) / ab.len2().max(1.0);
+                    t > 0.0 && t < 1.0 && (cur[i] + ab * t - p).len() < 1_000.0 && (p - cur[i]).len() > 1_000.0 && (p - cur[i + 1]).len() > 1_000.0
+                }) {
+                    cur.insert(i + 1, p);
+                }
+            }
             if breaks(&cur).0.is_empty() {
                 continue;
             }
@@ -1754,7 +1769,13 @@ impl Drawer<'_> {
                     let mut trial = cur[..=i].to_vec();
                     trial.extend(s.iter().copied());
                     trial.extend_from_slice(&cur[i + 2..]);
+                    let snap = wo.clone();
                     if self.refit_run(wo, r, trial.clone()) {
+                        if !joined(&snap, wo) {
+                            let back = self.restore_wire(wo, &snap);
+                            *wo = back;
+                            continue;
+                        }
                         i += s.len();
                         cur = trial;
                         n += 1;
