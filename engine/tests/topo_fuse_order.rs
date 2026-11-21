@@ -291,3 +291,39 @@ fn an_end_with_two_trunks_is_keyed_by_its_best_trunk() {
     assert!(copper_near(&r, 15.0, 12.0) < 1e-3 && copper_near(&r, 15.0, 15.0) > 1.0, "A leaves B's copper at (22, 12): {:?}", tracks(&r));
     assert_eq!(pieces(&r, &pads), (1, 0), "{:?}", tracks(&r));
 }
+
+/// fuse-guard r1 (survivor core_fuse_guard_true of the fuse-octi r6 verifier; PROPOSED pattern):
+/// `fuse_free_trunk` with a fourth pad D (25.5, 16.5) beside pad B. The fuse of the end of the wire
+/// that reaches the trunk B-C would cut away a part that carries a wire's end; the cut part is not
+/// taken. Without the skip only the split guard stands between that step and a split net.
+const CUT_PART: [(f64, f64); 4] = [(5.0, 5.0), (25.0, 15.0), (11.0, 25.0), (25.5, 16.5)];
+
+fn cut_part(hooks: &'static [&'static str]) -> RouteResult {
+    let m = model(CUT_PART.iter().zip(["A", "B", "C", "D"]).map(|(&(x, y), n)| pad(n, 1, x, y, 1.0)).collect());
+    route_h(&m, &[("factors", serde_json::json!({"weight": {"any_angle": 0.0}})), ("via_reduce", serde_json::json!(false))], hooks)
+}
+
+/// The skip finds the copper on the geometry: with the bookkeeping anchors taken away (hook "fuse
+/// drops anchors") the result is the same, no step reaches the guard, one piece, no dangling end.
+#[test]
+fn the_fuse_skips_a_cut_part_that_carries_copper_it_finds_on_the_geometry() {
+    let (r, g) = (cut_part(&[]), cut_part(&["fuse drops anchors"]));
+    assert_eq!(pieces(&r, &CUT_PART), (1, 0), "{:?}", tracks(&r));
+    assert_eq!(tracks(&g), tracks(&r));
+    assert!(line(&g, "split guard").is_none(), "{:?}", line(&g, "split guard"));
+}
+
+/// The split guard is the second line (rule 12: every path). With the fuse's cut-part skip off
+/// (hook "fuse skips no anchors") the step is tried and refused: one fuse step not taken, one piece.
+/// With the guard off as well the net splits and dangles.
+#[test]
+fn the_split_guard_refuses_a_fuse_that_cuts_away_joined_copper() {
+    let r = cut_part(&["fuse skips no anchors"]);
+    assert_eq!(pieces(&r, &CUT_PART), (1, 0), "{:?}", tracks(&r));
+    let l = line(&r, "split guard after drawing: ").expect("split guard line");
+    assert!(l.starts_with("split guard after drawing: 1 fuse and 0 polish steps not taken") && !l.contains("engine bug"), "{l}");
+    let off = cut_part(&["fuse skips no anchors", "split guard off"]);
+    assert_eq!(pieces(&off, &CUT_PART), (2, 1), "{:?}", tracks(&off));
+    let l = line(&off, "split guard after drawing: ").expect("self-check line");
+    assert!(l.contains("engine bug"), "{l}");
+}
