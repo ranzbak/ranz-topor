@@ -5243,6 +5243,21 @@ mod tests {
         // fails if the chord's direction were used for all.
         let firsts: std::collections::HashSet<i64> = c.iter().map(|x| ((x.3[1] - x.3[0]).y / mm * 100.0).round() as i64).collect();
         assert!(firsts.len() >= 2, "{firsts:?}");
+        // A run that leaves the trunk sideways: the first legs of the links are 90 and 135 degrees
+        // from the trunk arm, the chord 112 degrees (psi 0.04 / 0 / 0.0003), so a junction price
+        // taken from the chord instead of the first leg gives a different gain.
+        let side = [p(0.0, 0.0), p(3.0, 0.0), p(3.0, -2.0), p(5.0, -2.0)];
+        let c = fuse_candidates(&side, &[&trunk], ws, jw, Some((&cfg, pitch)));
+        let mut legs: Vec<i64> = Vec::new();
+        for (gain, _, i, pts) in c.iter().filter(|x| x.2 == 3) {
+            let link = &pts[..pts.len()];
+            let want = len(&side[..=*i]) + psi(side[1] - side[0]) - len(link) - psi(pts[1] - pts[0]) + st(&cfg, &side) - st(&cfg, pts);
+            assert!((gain - want).abs() < 1e-9, "i {i} {pts:?}: gain {gain} want {want}");
+            legs.push(((pts[1] - pts[0]).y / mm * 10.0).round() as i64);
+        }
+        legs.sort();
+        legs.dedup();
+        assert!(legs.len() >= 2 && psi(p(3.0, 0.0)) > psi(p(1.0, -1.0)), "first legs {legs:?}");
         // `any_angle = "forbidden"`: the old run holds a free-angle piece; it is priced with the ban
         // lifted (finite), so the octilinear links still gain by the style price.
         let free = [p(0.0, 0.0), p(1.0, -4.0), p(1.0, -5.0), p(3.0, -6.0)];
