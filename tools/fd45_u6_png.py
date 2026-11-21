@@ -63,18 +63,14 @@ def base(ax, model, title):
     for p in model["pads"]:
         cx, cy = p["center"][0] / 1e6, p["center"][1] / 1e6
         sh = next(iter(p["shapes"].values()))
-        w, h = sh.get("w", 0) / 1e6, sh.get("h", 0) / 1e6
+        w, h = sh.get("w", sh.get("d", 0)) / 1e6, sh.get("h", 0) / 1e6
         fc = "#c9b26b" if p.get("drill") else "#e8b4b4"
         if sh["kind"] == "circle":
             ax.add_patch(Circle((cx, cy), w / 2, fc=fc, ec="#555", lw=0.5))
         else:
             ax.add_patch(Rectangle((cx - w / 2, cy - h / 2), w, h, fc=fc, ec="#555", lw=0.5))
         if p.get("drill"):
-            ax.add_patch(Circle((cx, cy), p["drill"] / 2e6 if p["drill"] > 100 else 0.5, fc="white", ec="#555", lw=0.5))
-    for h in model.get("holes", []):
-        c = h.get("center") or h.get("at")
-        if c:
-            ax.add_patch(Circle((c[0] / 1e6, c[1] / 1e6), h.get("d", h.get("drill", 0)) / 2e6, fc="white", ec="#555"))
+            ax.add_patch(Circle((cx, cy), p["drill"]["w"] / 2e6, fc="white", ec="#555", lw=0.5))
 
 
 def draw(ax, polys, mark=True):

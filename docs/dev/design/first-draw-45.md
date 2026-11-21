@@ -66,11 +66,15 @@ and the DP has no nodes along a long chord to build one (octi.rs:556-564).
     - Price, on the DP's scale: length + `style_price` (bends by angle, jog penalty) − `bundle_pull` × the length that follows a neighbour.
       - Where the bend lands (the depth of the long stretch) is a tie on length. The pull breaks it towards the drawn neighbour. Remaining ties go by form order.
     - An end leg of the run keeps its direction, and at least its length or the jog leg. Feet of the net's other wires stay vertices.
+    - A step is taken only where the whole run's price drops by more than 1 nm (r6g). The stretch price alone is not enough: `style_price` is not a sum over stretches (a jog reads both legs beside it), so two overlapping stretches could each look cheaper than the other. On K5 that swapped forever (r6f, SIGKILL). With the whole-run price, every step lowers a bounded price, so the pass ends.
     - The replacement must pass `refit_run` (the full checker against everything drawn) and the split guard.
     - Option `[drawing] octi_straighten` (default true); debug arm `TOPO_FD45_OFF=p4s`.
     - Lead r6: the pattern's straight pad exit is not asserted. It goes to the shopping list as PAD-EXIT-AXIS, the DP's off-axis exit price.
   - Invariants: the result is legal or unchanged (refit_run), deterministic (vertex order; shapes by price, then index), and never longer than the price allows.
-  - Test: `u6_pinrow_long_bundle_is_one_octilinear_bundle`: 0 free-angle, clean, every wire at its octilinear pad-to-pad length + 1 mm, and the bundle neighbours' long stretches parallel at ≤ 0.5 mm (lead r6).
+  - Test: `u6_pinrow_long_bundle_is_one_octilinear_bundle` (lead r6):
+    - 0 free-angle, clean;
+    - every wire at most 0.25 mm longer than its reference track (the pattern's formula). The bound is the reference length, not the octilinear pad-to-pad distance, because the second-row pads S6/S7 need their vertical leg between the first-row pads;
+    - one bundle: every wire has a horizontal level of at least 4 mm, and neighbours in pin-row order are 0 to 0.5 mm apart, each below the one before. The level's y is not asserted (a tie).
 
 Not in this branch (decision for the lead/user):
 - **U6.** One option is P4, "S-route chord nodes": staircase nodes along each non-octilinear taut segment, so the DP can build one-sided 45/0 staircases. It is graded by the bend and jog price, and drawn neighbours already give the pitch-offset nodes. The result is octilinear and as short, but it has many more bends than the expected clean bundle. Removing those bends is Staepelaere's StraightenLayer, a reverse sweep (PDF p. 15, ch. 5). Needs a PNG approval first.
