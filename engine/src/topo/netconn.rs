@@ -231,6 +231,22 @@ pub fn worse(before: &Conn, after: &Conn) -> bool {
     splits(&before.part, &after.part) || after.dangling.difference(&before.dangling).next().is_some()
 }
 
+/// Whether the cut part of a fuse carries copper that KiCad joins to it and that nothing kept
+/// joins (fuse-guard r1; the geometric version of the fuse's bookkeeping-anchor skip): a wire of
+/// `others` (same net, not the fusing wire) that overlaps `cut` (an end 0.1-0.2 mm off the line, a
+/// crossing, a via) and overlaps none of `keep` (the trunk and the new run), or a pad of `terms`
+/// that `cut` overlaps (the run passes through it) and none of `keep` does. Cutting the part away
+/// would leave that copper apart from the fused wire. O(others x segments), a bounding-box test first.
+pub fn cut_holds(cut: &Piece, others: &[Piece], keep: &[Piece], terms: &[Term]) -> bool {
+    let cb = bbox(cut);
+    let kb: Vec<(Vec2, Vec2)> = keep.iter().map(bbox).collect();
+    let kept = |o: &Piece, ob: (Vec2, Vec2)| keep.iter().zip(&kb).any(|(k, &b)| boxes_meet(b, ob) && overlap(k, o));
+    others.iter().any(|o| {
+        let ob = bbox(o);
+        boxes_meet(cb, ob) && overlap(cut, o) && !kept(o, ob)
+    }) || terms.iter().any(|t| on_pad(cut, t) && !keep.iter().any(|k| on_pad(k, t)))
+}
+
 /// The feet of other copper on the wire `own` (fuse-octi r6, r5 verifier L2): where an end of a
 /// run or a via of `others` (same net) lies within KiCad's reach of a segment of `own` (the sum of
 /// the half widths, a via's radius plus `own`'s half width), its projection onto that segment, when
@@ -366,6 +382,38 @@ mod tests {
         let f = feet_on(&own, &others);
         assert_eq!(f.len(), 2, "{f:?}");
         assert!((f[0] - v(3.0, 0.0)).len() < 1.0 && (f[1] - v(6.0, 0.0)).len() < 1.0, "{f:?}");
+    }
+
+    /// fuse-guard r1: copper KiCad joins to a fuse's cut part. Cut part along y = 0 from x 0 to 5;
+    /// the trunk is the vertical x = 5 (the fuse point), the new run goes from there up. An end 0.15
+    /// mm off the cut part, a crossing and a pad it passes hold; the same copper that also reaches the
+    /// trunk, an end 0.5 mm off and a pad on another layer do not.
+    #[test]
+    fn the_cut_part_holds_what_kicad_joins_to_it() {
+        let one = LayerMask(1);
+        let cut_runs = vec![(0usize, vec![v(0.0, 0.0), v(5.0, 0.0)])];
+        let trunk_runs = vec![(0usize, vec![v(5.0, -5.0), v(5.0, 5.0)])];
+        let new_runs = vec![(0usize, vec![v(5.0, 0.0), v(9.0, 4.0)])];
+        let cut = pc(&cut_runs, 0.1);
+        let keep = [pc(&trunk_runs, 0.1), pc(&new_runs, 0.1)];
+        let holds = |others: &[Piece], terms: &[Term]| cut_holds(&cut, others, &keep, terms);
+        let off = vec![(0usize, vec![v(2.0, 0.15), v(2.0, 3.0)])];
+        assert!(holds(&[pc(&off, 0.1)], &[]), "an end 0.15 mm off");
+        let far = vec![(0usize, vec![v(2.0, 0.5), v(2.0, 3.0)])];
+        assert!(!holds(&[pc(&far, 0.1)], &[]), "an end 0.5 mm off is no contact");
+        let other_layer = vec![(1usize, vec![v(2.0, 0.0), v(2.0, 3.0)])];
+        assert!(!holds(&[pc(&other_layer, 0.1)], &[]), "another layer");
+        let cross = vec![(0usize, vec![v(3.0, -2.0), v(3.0, 2.0)])];
+        assert!(holds(&[pc(&cross, 0.1)], &[]), "a crossing with no end on the cut part");
+        let on_trunk = vec![(0usize, vec![v(4.0, 0.0), v(5.0, 2.0)])];
+        assert!(!holds(&[pc(&on_trunk, 0.1)], &[]), "reaches the trunk too: stays joined");
+        let via = Piece { runs: &other_layer, vias: vec![(v(3.0, 0.3), 0.3 * MM)], half_w: 0.1 * MM };
+        assert!(holds(&[via], &[]), "a via overlapping the cut part");
+        let pad = sq(v(1.0, 0.55), 0.5);
+        assert!(holds(&[], &[Term { poly: &pad, layers: one, center: v(1.0, 0.55) }]), "a pad the cut part passes");
+        assert!(!holds(&[], &[Term { poly: &pad, layers: LayerMask(2), center: v(1.0, 0.55) }]), "a pad on another layer");
+        let pad_t = sq(v(5.0, 0.0), 0.5);
+        assert!(!holds(&[], &[Term { poly: &pad_t, layers: one, center: v(5.0, 0.0) }]), "a pad on the trunk stays joined");
     }
 
     /// A branch whose foot is left 2 mm off the trunk but which still crosses it: one piece, yet a

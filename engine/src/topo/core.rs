@@ -8731,6 +8731,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Test hook "split guard off": the guard lets every step through (its self-check below then
     // names the net a dropped foot split).
     let guard_off = ctl.test_point("split guard off");
+    // Test hook "fuse skips no anchors": the fuse's cut-part skip (bookkeeping anchors and copper
+    // KiCad joins to it) is off, so only the split guard keeps the net together at the fuse.
+    let no_anchor_skip = ctl.test_point("fuse skips no anchors");
+    // Test hook "fuse drops anchors": only the bookkeeping anchors go; the copper found on the
+    // geometry still keeps the fuse off its cut part.
+    let drop_anchor_skip = ctl.test_point("fuse drops anchors");
     if tree_free && opts.fuse_branches {
         let jw = reg.price(&Event::JunctionAngle { at: Vec2::default(), deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, &WireCtx::default());
         let js = tree::junctions(&st);
@@ -8794,9 +8800,43 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let Some(uo) = drawn.get(&u) else { continue };
                 let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
                 let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
+                // fuse-guard r1: the other copper of the net as it is drawn, the pads of the net but the
+                // wire's own end pad: what KiCad joins to the cut part (`netconn::cut_holds`).
+                let nbrs: Vec<super::netconn::Piece> = net_wires
+                    .get(&wi.net)
+                    .map_or(&[][..], |v| v.as_slice())
+                    .iter()
+                    .filter(|&&x| x != w)
+                    .filter_map(|&x| drawn.get(&x).map(|o| super::netconn::Piece { runs: &o.runs, vias: o.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w: st.wires[x].w / 2.0 }))
+                    .collect();
+                let own_pad = if end == 0 { wi.pa } else { wi.pb };
+                let tterms: Vec<super::netconn::Term> = net_terms
+                    .get(&wi.net)
+                    .map_or(&[][..], |v| v.as_slice())
+                    .iter()
+                    .filter(|&&o| o != own_pad)
+                    .map(|&o| {
+                        let ob = &proj.obstacles[o];
+                        super::netconn::Term { poly: &ob.poly, layers: ob.layers, center: ob.center }
+                    })
+                    .collect();
+                let trunk_piece = super::netconn::Piece { runs: &uo.runs, vias: uo.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w: st.wires[u].w / 2.0 };
                 let mut skip = |gain: f64, i: usize, pts: &[Vec2]| -> bool {
                     let q = pts[0];
-                    if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, &run[..=i]))) {
+                    if !no_anchor_skip {
+                        let cut_runs = [(layer, run[..=i].to_vec())];
+                        let new_runs = [(layer, pts.to_vec())];
+                        let cut = super::netconn::Piece { runs: &cut_runs, vias: Vec::new(), half_w: wi.w / 2.0 };
+                        let new = super::netconn::Piece { runs: &new_runs, vias: Vec::new(), half_w: wi.w / 2.0 };
+                        let keep = [super::netconn::Piece { runs: trunk_piece.runs, vias: trunk_piece.vias.clone(), half_w: trunk_piece.half_w }, new];
+                        if super::netconn::cut_holds(&cut, &nbrs, &keep, &tterms) {
+                            if fdbg {
+                                eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: copper joined to the cut part (KiCad overlap)");
+                            }
+                            return true;
+                        }
+                    }
+                    if !no_anchor_skip && !drop_anchor_skip && anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, &run[..=i]))) {
                         if fdbg {
                             eprintln!("FUSE skip wire {w} end {end} onto {u} i {i} gain {gain:.2}: an anchor on the cut part");
                         }
