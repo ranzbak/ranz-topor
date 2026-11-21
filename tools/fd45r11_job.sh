@@ -41,3 +41,7 @@ if [ "$mode" = base ]; then
   q qmB "$DBG unit qmB \$QM"; q espB "$DBG unit espB \$ESP"
   wait; note "all done"; exit 0
 fi
+if [ "$mode" = mut ]; then
+  q mut 'cd $TREE && bash tools/fd45r11_mut.sh $OUT > $OUT/mut.log 2>&1 9>&-; note "mut rc $?"' 8
+  wait; note "all done"; exit 0
+fi
