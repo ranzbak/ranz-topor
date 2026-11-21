@@ -3,7 +3,7 @@
 //!
 //! * `drawing_feedback` acts with `[optimize] loop = "cycles"` only; with the TopoR loop a true
 //!   value is ignored with the warning `FEEDBACK_IGNORED` (the picked plan is drawn once, M2).
-//! * The fuse pass reports the length it saved in mm and the junction-angle price apart (F-3: the
+//! * The fuse pass reports the length it saved in mm and the junction-angle and style price apart (F-3: the
 //!   sum of both was printed as "mm cheaper", 1281560.3 mm on esp-rust-board).
 //!
 //! Fixture: `harness/mechfix.py fx_narrow_gap_forced` (one connection, a gap too narrow for it),
@@ -11,7 +11,7 @@
 
 use topor_engine::model::{BoardModel, Options};
 use topor_engine::route::route;
-use topor_engine::topo::core::{fuse_line, polish_line, CYCLES_MEMORY, FEEDBACK_IGNORED};
+use topor_engine::topo::core::{fuse_line, polish_line, split_line, CYCLES_MEMORY, FEEDBACK_IGNORED};
 
 fn gap() -> BoardModel {
     BoardModel::from_json(include_str!("fixtures/fx-narrow-gap.json")).expect("fixture parses")
@@ -54,18 +54,32 @@ fn fuse_line_keeps_length_and_angle_price_apart() {
     // junction-angle price 4.0 + 3.58 = 7.58 lower.
     let l = fuse_line(&[(7.0, 3.0), (5.39, 1.81)]);
     assert!(l.starts_with("fuse after drawing: 2 trace ends moved onto their trunk's copper"), "{l}");
-    assert!(l.contains(": 4.8 mm saved in length, junction-angle price ([factors] junction_angle) lower by 7.6"), "{l}");
+    assert!(l.contains(": 4.8 mm saved in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) lower by 7.6"), "{l}");
     assert!(!l.contains("mm cheaper"), "{l}");
     // A fuse that trades length for a better angle says "added"; a worse angle "higher".
     let l = fuse_line(&[(1281555.7, -0.3)]);
-    assert!(l.contains(": 0.3 mm added in length, junction-angle price ([factors] junction_angle) lower by 1281556.0"), "{l}");
-    assert!(fuse_line(&[(0.5 - 2.0, 0.5)]).contains("0.5 mm saved in length, junction-angle price ([factors] junction_angle) higher by 2.0"));
-    assert!(fuse_line(&[]).starts_with("fuse after drawing: 0 trace ends moved onto their trunk's copper where the two part: 0.0 mm saved in length, junction-angle price ([factors] junction_angle) lower by 0.0"));
+    assert!(l.contains(": 0.3 mm added in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) lower by 1281556.0"), "{l}");
+    assert!(fuse_line(&[(0.5 - 2.0, 0.5)]).contains("0.5 mm saved in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) higher by 2.0"));
+    assert!(fuse_line(&[]).starts_with("fuse after drawing: 0 trace ends moved onto their trunk's copper where the two part: 0.0 mm saved in length, junction-angle and style price ([factors] junction_angle, any_angle; [drawing] bend_mm) lower by 0.0"));
     // The polish line says the length its elbows and Zs changed, "added" (never shorter) or
     // "saved" by its sign.
     assert!(polish_line(34, 3.013).ends_with(": 34 segments not at 0/45/90 degrees (fused branch ends) redrawn as an elbow or Z: 3.0 mm added in length"));
     assert!(polish_line(0, 0.0).ends_with(": 0.0 mm added in length"));
     assert!(polish_line(1, -0.26).ends_with(": 0.3 mm saved in length"));
+}
+
+/// fuse-octi r4 (H1 part 2): the split guard's line, every form: nothing to say, steps refused by
+/// the fuse and the polish, and the self-check's nets (one, several).
+#[test]
+fn split_line_names_the_refused_steps_and_the_split_nets() {
+    assert_eq!(split_line(0, 0, &[]), None);
+    let l = split_line(2, 0, &[]).unwrap();
+    assert_eq!(l, "split guard after drawing: 2 fuse and 0 polish steps not taken (each would have split copper of a net that was joined or left a new dangling end: a dangling branch)");
+    assert!(split_line(0, 4, &[]).unwrap().starts_with("split guard after drawing: 0 fuse and 4 polish steps not taken ("));
+    let l = split_line(0, 0, &["JS2_9".into()]).unwrap();
+    assert!(l.starts_with("split guard after drawing: 0 fuse and 0 polish steps") && l.ends_with("; engine bug: 1 net with copper apart or a new dangling end after the steps after the drawing: JS2_9"), "{l}");
+    let l = split_line(1, 1, &["A".into(), "B".into()]).unwrap();
+    assert!(l.ends_with("; engine bug: nets with copper apart or a new dangling end after the steps after the drawing: A, B"), "{l}");
 }
 
 #[test]

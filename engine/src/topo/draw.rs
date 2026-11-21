@@ -385,16 +385,110 @@ pub fn no_run_reason(model: &BoardModel, lid: u32) -> String {
     )
 }
 
+/// How many run vertices the fuse pass tries per wire end and trunk (main's `take(8)`, one link per vertex).
+pub const FUSE_VERTEX_CAP: usize = 8;
+
+/// The candidates of the `cap` best vertices (best = first in the gain order), in their order: every shape
+/// of those vertices is kept, also one that comes after a later vertex's first candidate (fuse-octi r4: a
+/// running filter dropped the later shapes of an early vertex once a 9th vertex had appeared). O(n cap).
+pub fn fuse_cap(c: Vec<(f64, f64, usize, Vec<Vec2>)>, cap: usize) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
+    let mut seen: Vec<usize> = Vec::new();
+    for x in &c {
+        if !seen.contains(&x.2) && seen.len() < cap {
+            seen.push(x.2);
+        }
+    }
+    c.into_iter().filter(|x| seen.contains(&x.2)).collect()
+}
+
+/// One wire end in the fuse pass's queue (fuse-octi r4, M1): `key` = the price gain of its best
+/// LEGAL fuse (`-inf`: none) as evaluated at the queue's version `stamp` (the version counts the
+/// fuses taken; a key older than its net's last fuse is stale: that fuse moved trunks and anchors
+/// or took a pad, so it may be too high or too low; [`lazy_taken`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FuseKey {
+    pub key: f64,
+    pub stamp: usize,
+    pub w: WireId,
+    pub end: usize,
+    pub net: i32,
+}
+
+/// The fuse queue's next step ([`lazy_next`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LazyStep {
+    /// Take the end at this index: its key is fresh and the best.
+    Take(usize),
+    /// Evaluate the end at this index again on the current copper (its key is stale).
+    Reeval(usize),
+    Done,
+}
+
+/// The best-first order of the fuse pass with lazy re-evaluation (fuse-octi r4, M1; after the
+/// accelerated greedy of Minoux 1978, "Accelerated greedy algorithms for maximizing submodular set
+/// functions", LNCIS 7, pp. 234-243, and CELF, Leskovec et al. 2007, KDD, sec. 4.1: keep the keys,
+/// make again only those a step made stale): the end with the best key goes first (ties by wire id,
+/// then end: deterministic). A stale key is made again before anything is taken: a fuse can raise
+/// as well as lower the gains of its own net (its new link is copper the next foot can land on; its
+/// foot is an anchor; it took a pad), so a stale key is no bound (the submodular case of Minoux's
+/// lazy test does not hold) and only the stale ones are made again ([`lazy_taken`]: the net of the
+/// last fuse). Two wires that meet at one pad can fuse only one of them, so the large legal gain must
+/// go first whatever the wire ids (fuse-octi r3: an id order let a 2.7 mm fuse block a 43 mm one on
+/// qmtech JS1_2). `Done` once every end left has a fresh `-inf` (no legal candidate). O(pool).
+pub fn lazy_next(pool: &[FuseKey], version: usize) -> LazyStep {
+    if let Some(i) = (0..pool.len()).filter(|&i| pool[i].stamp != version).min_by_key(|&i| (pool[i].w, pool[i].end)) {
+        return LazyStep::Reeval(i);
+    }
+    (0..pool.len())
+        .filter(|&i| pool[i].key.is_finite())
+        .min_by(|&a, &b| {
+            let (x, y) = (&pool[a], &pool[b]);
+            y.key.total_cmp(&x.key).then(x.w.cmp(&y.w)).then(x.end.cmp(&y.end))
+        })
+        .map_or(LazyStep::Done, LazyStep::Take)
+}
+
+/// After a fuse of net `net` at queue version `version`: the new version; the keys of the other
+/// nets that were fresh stay fresh (a fuse changes the candidates of its own net only: its trunks,
+/// anchors and pads; its copper can block another net's candidate, which [`Drawer::refit_run`]
+/// finds when that one is taken, and then it is evaluated again). Known limit (r5 verifier L3): a
+/// fuse also FREES the room its old copper took, so another net's candidate that was illegal there
+/// can become legal; its key stays the lower one it had (deterministic, at worst a smaller fuse than
+/// possible for that end; re-pricing every net after each fuse costs a pass per fuse). O(pool).
+pub fn lazy_taken(pool: &mut [FuseKey], version: usize, net: i32) -> usize {
+    for k in pool.iter_mut() {
+        if k.net != net && k.stamp == version {
+            k.stamp = version + 1;
+        }
+    }
+    version + 1
+}
+
+/// The style the fuse prices its links with: the octilinear style's config and the wire's pitch
+/// (w + s, nm: the jog leg), `None` in the smooth style (the fuse is then length and junction
+/// angle only). O(1).
+pub fn fuse_style(octilinear: bool, cfg: &super::octi::OctiCfg, pitch: f64) -> Option<(&super::octi::OctiCfg, f64)> {
+    octilinear.then_some((cfg, pitch))
+}
+
 /// Shortcuts of a branch run onto its trunk (D6b fuse; TopoR's FreeStyle auto move of T-points,
 /// black-box E8c-E8e): `run` starts on the trunk's copper (`trunk`, the trunk's polylines on the
 /// run's layer, math frame); leaving the trunk at the foot `q` of a later vertex `run[i]`
-/// instead replaces `run[0..=i]` by `q -> run[i]`. Price per candidate (mm): its length plus the
-/// `junction_angle` price `jw x ws_mm x psi(angle to the trunk)`; returns the candidates that are
-/// cheaper than the run as it is, the cheapest first, as `(price gain, length gain mm, i, new
-/// run)`: the price gain is the length gain plus the junction-angle price gain (a price, not a
-/// length: psi grows without bound as the branch leaves the trunk tangentially).
-/// O(run vertices x trunk segments).
-pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
+/// instead replaces `run[0..=i]` by a link `q -> run[i]`. Price per candidate (mm): its length
+/// plus the `junction_angle` price `jw x ws_mm x psi(angle to the trunk)`, and with `style`
+/// (`[drawing] style = "octilinear"`: the DP's prices and the wire's pitch w + s, nm) the
+/// octilinear DP's style price of the whole run ([`super::octi::style_price`]: bends, jogs, acute
+/// bends, `any_angle` per stretch), so a fuse prices on the first draw's scale (octi-bundle r2,
+/// the user's A1c rule: every redraw path uses the first draw's rules). With `style` the links
+/// are the DP's connectors ([`super::octi::link_shapes`]: straight, two elbows, two centred Zs)
+/// and the straight any-angle link, which pays `any_angle` (allowed, graded, no cutoff); without,
+/// the straight link only. Returns the candidates that are cheaper than the run as it is, the
+/// cheapest first, as `(price gain, length gain mm, i, new run)`: the price gain is the length
+/// gain plus the junction-angle and style price gains (a price, not a length: psi grows without
+/// bound as the branch leaves the trunk tangentially). The caller checks each with the full
+/// checker (every clearance against all drawn copper, [`Drawer::refit_run`]).
+/// O(run vertices x (trunk segments + shapes x run vertices)).
+pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
     let price = |dir: Vec2, arms: &[Vec2]| -> f64 {
         let Some(u) = dir.unit() else { return 0.0 };
         if arms.is_empty() || jw <= 0.0 {
@@ -403,6 +497,7 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> 
         let deg = arms.iter().map(|a| a.dot(u).clamp(-1.0, 1.0).acos().to_degrees()).fold(180.0, f64::min);
         jw * ws_mm * super::factors::junction_psi(deg)
     };
+    let style_mm = |pts: &[Vec2]| -> f64 { style.map_or(0.0, |(cfg, pitch)| super::octi::style_price(cfg, pitch, pts) / 1e6) };
     let mut out = Vec::new();
     if run.len() < 2 {
         return out;
@@ -410,16 +505,42 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64) -> 
     let Some((_, arms0)) = trunk_foot(trunk, run[0]) else { return out };
     let mut along = 0.0;
     let old0 = price(run[1] - run[0], &arms0);
+    // The run as drawn may hold a piece the style forbids (kept where nothing else fitted): it is
+    // priced with the bans lifted; a reversal in it (no finite price) leaves the style out of the
+    // comparison, as without `style`.
+    let old_style = style.map_or(0.0, |(cfg, pitch)| {
+        let soft = super::octi::OctiCfg { any_forbidden: false, acute_forbidden: false, ..*cfg };
+        super::octi::style_price(&soft, pitch, run) / 1e6
+    });
     for i in 1..run.len() {
         along += (run[i] - run[i - 1]).len() / 1e6;
         let Some((q, arms)) = trunk_foot(trunk, run[i]) else { continue };
-        let d = (run[i] - q).len() / 1e6;
-        let gain = along + old0 - d - price(run[i] - q, &arms);
-        if gain > 1e-3 {
+        // The links q -> run[i]: the straight one, and with the style the DP's connectors.
+        let mut links: Vec<Vec<Vec2>> = vec![vec![run[i]]];
+        if style.is_some() && super::octi::octi_dir(run[i] - q).is_none() {
+            links.extend(super::octi::link_shapes(q, run[i]));
+        }
+        for link in links {
             let mut pts = vec![q];
+            pts.extend_from_slice(&link[..link.len() - 1]);
             pts.extend_from_slice(&run[i..]);
             pts.dedup_by(|a, b| (*a - *b).len2() < 1.0);
-            if pts.len() >= 2 {
+            if pts.len() < 2 {
+                continue;
+            }
+            let mut from = q;
+            let mut d = 0.0;
+            for &p in &link {
+                d += (p - from).len() / 1e6;
+                from = p;
+            }
+            let new_style = style_mm(&pts);
+            if !new_style.is_finite() {
+                continue;
+            }
+            let style_gain = if old_style.is_finite() { old_style - new_style } else { 0.0 };
+            let gain = along + old0 - d - price(pts[1] - pts[0], &arms) + style_gain;
+            if gain > 1e-3 {
                 out.push((gain, along - d, i, pts));
             }
         }
@@ -3942,6 +4063,48 @@ impl<'a> Drawer<'a> {
         ok
     }
 
+    /// Whether [`Drawer::refit_run`]`(wo, r, pts)` would be accepted, changing nothing (fuse-octi r4,
+    /// M1: the fuse ranks its ends by their best LEGAL gain): the same preconditions and the same
+    /// checker query, with the run's own tracks skipped instead of taken out. O(run segments x
+    /// checker query).
+    pub fn refit_legal(&self, wo: &WireOut, r: usize, pts: &[Vec2]) -> bool {
+        let w = wo.wire;
+        let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
+        let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
+        if r >= wo.runs.len() || !wo.viol.is_empty() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
+            return false;
+        }
+        let off: usize = counts[..r].iter().sum();
+        let mut skip: Vec<usize> = wo.handles[off..off + counts[r]].iter().map(|&h| self.handles[h].0).collect();
+        skip.sort_unstable();
+        let new_items = self.run_items(w, wo.runs[r].0, pts);
+        !new_items.is_empty() && self.checker.check_against(&self.idx, &new_items, &skip).violations.is_empty() && self.track_own_pad_ok(w, &new_items)
+    }
+
+    /// The best LEGAL fuse of run `r` of `wo` onto one trunk (fuse-octi r4, M1): the candidates of
+    /// [`fuse_candidates`] of the [`FUSE_VERTEX_CAP`] best vertices ([`fuse_cap`]) in gain order, the
+    /// first one that `skip` lets through (`skip(gain, i, points)`: the caller's rules, an anchor on
+    /// the cut part, `junction_pad_mm`, a step refused before) and that [`Drawer::refit_legal`]
+    /// accepts. `run` starts at the end that fuses (`rev`: the run is drawn the other way, end 1);
+    /// `trunk` = the trunk's polylines on the run's layer; `ws_mm`, `jw`, `style` as for
+    /// [`fuse_candidates`]. Returns `(price gain, length gain mm, i, new run as drawn)`.
+    /// O(candidates x checker query).
+    #[allow(clippy::too_many_arguments)]
+    pub fn fuse_best_legal(&self, wo: &WireOut, r: usize, run: &[Vec2], rev: bool, trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>, skip: &mut dyn FnMut(f64, usize, &[Vec2]) -> bool) -> Option<(f64, f64, usize, Vec<Vec2>)> {
+        for (gain, len_gain, i, mut pts) in fuse_cap(fuse_candidates(run, trunk, ws_mm, jw, style), FUSE_VERTEX_CAP) {
+            if skip(gain, i, &pts) {
+                continue;
+            }
+            if rev {
+                pts.reverse();
+            }
+            if self.refit_legal(wo, r, &pts) {
+                return Some((gain, len_gain, i, pts));
+            }
+        }
+        None
+    }
+
     /// The rule violations of the tracks of `wo` (committed, plain tracks first in its items)
     /// against the board and the rest of the drawing (its own tracks skipped): the re-check of
     /// the moves kept after a partial undo of the fuse pour check compares it before and after
@@ -5110,7 +5273,7 @@ mod tests {
         let mm = 1e6;
         let trunk = [v(-10.0 * mm, 0.0), v(10.0 * mm, 0.0)];
         let run = [v(0.0, 0.0), v(1.0 * mm, 0.5 * mm), v(5.0 * mm, 0.5 * mm), v(6.0 * mm, 3.0 * mm)];
-        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0);
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None);
         assert!(!c.is_empty());
         let (gain, len_gain, i, pts) = &c[0];
         assert_eq!(*i, 3);
@@ -5122,7 +5285,208 @@ mod tests {
         // psi(26.6 deg) = 1.73 before, psi(90 deg) = 0.04 after: 12.39 mm.
         assert!((*gain - 12.39).abs() < 0.02, "{gain}");
         // A branch that leaves straight away has nothing to gain.
-        assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0).is_empty());
+        assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0, None).is_empty());
+    }
+
+    /// octi-bundle r2 (A1c: the fuse prices on the first draw's scale): a 45/90 staircase branch
+    /// that starts at the end of a vertical trunk (the wiccon GPIO14 shape: the chord leaves the
+    /// trunk arm at 149 degrees, psi = 0, so the junction angle gains nothing). Without the style
+    /// the cheapest fuse is the straight free-angle chord (length only); with it the chord pays
+    /// `any_angle` (15 + 2 x 6.71 = 28.4 mm) and loses, and the cheapest link is the DP's elbow
+    /// (vertical then 45 degrees, as long as the staircase, 5 bends fewer).
+    #[test]
+    fn fuse_prices_the_link_on_the_octilinear_dp_scale() {
+        let mm = 1e6;
+        let p = |x: f64, y: f64| v(x * mm, y * mm);
+        let trunk = [p(0.0, 5.0), p(0.0, 0.0)];
+        let run = [p(0.0, 0.0), p(0.0, -1.0), p(1.0, -2.0), p(1.0, -3.0), p(2.0, -4.0), p(2.0, -5.0), p(3.0, -6.0)];
+        let plain = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None);
+        assert!(super::super::octi::any_price(&plain[0].3) > 0.0, "length only: the free-angle chord first {:?}", plain[0]);
+        let cfg = super::super::octi::OctiCfg { on: true, ..Default::default() };
+        let pitch = 0.45 * mm;
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, Some((&cfg, pitch)));
+        assert!(!c.is_empty());
+        let (gain, len_gain, _, pts) = &c[0];
+        assert_eq!(super::super::octi::any_price(pts), 0.0, "{pts:?}");
+        // One elbow: a single bend (at i = 5 the elbow's leg goes on through the last vertex).
+        let bends = pts.windows(3).filter(|x| super::super::octi::turn_deg(x[1] - x[0], x[2] - x[1]) > 0.5).count();
+        assert_eq!(bends, 1, "one elbow {pts:?}");
+        // Same length as the staircase (both monotone in the same two directions).
+        assert!(len_gain.abs() < 1e-6, "{len_gain}");
+        // The price gain is the style price gain alone, on the DP's scale (bends and jogs).
+        let st = |x: &[Vec2]| super::super::octi::style_price(&cfg, pitch, x) / 1e6;
+        assert!((*gain - (st(&run) - st(pts))).abs() < 1e-9 && *gain > 0.9, "{gain}");
+        // Every free-angle link that is offered pays `any_angle`: none gains here (graded, not
+        // cut off: see the next case).
+        assert!(c.iter().all(|x| super::super::octi::any_price(&x.3) == 0.0), "{c:?}");
+        // A long octilinear detour (20 out, 3 across, 14 back) against its free-angle chord from
+        // the trunk end (6.71 mm, any_angle 15 + 13.4): the chord still gains 2.9 and is offered,
+        // far below the elbow (3 + 4.24 mm, gain 30.5).
+        let run = [p(0.0, 0.0), p(0.0, -20.0), p(3.0, -20.0), p(3.0, -6.0)];
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, Some((&cfg, pitch)));
+        let chord = c.iter().find(|x| x.2 == 3 && x.3.len() == 2).expect("the free-angle chord is offered");
+        let elbow = c.iter().position(|x| x.2 == 3 && x.3.len() == 3 && super::super::octi::any_price(&x.3) == 0.0).expect("elbow");
+        assert!(c[elbow].0 > chord.0, "{c:?}");
+        let any_mm = 15.0 * super::super::octi::any_angle_amount((p(3.0, -6.0) - p(0.0, 0.0)).len());
+        assert!((chord.0 - (chord.1 + st(&run) - any_mm)).abs() < 1e-6, "{chord:?}");
+    }
+
+    /// fuse-octi r2: the junction price of a link candidate is the one of its FIRST LEG (not of the
+    /// chord), and a run that holds a piece the style forbids is priced with the bans lifted.
+    #[test]
+    fn fuse_prices_the_first_leg_and_lifts_the_bans_of_the_old_run() {
+        let mm = 1e6;
+        let p = |x: f64, y: f64| v(x * mm, y * mm);
+        let trunk = [p(0.0, 5.0), p(0.0, 0.0)];
+        let (ws, jw) = (0.45, 10.0);
+        let cfg = super::super::octi::OctiCfg { on: true, ..Default::default() };
+        let pitch = 0.45 * mm;
+        let st = |c: &super::super::octi::OctiCfg, x: &[Vec2]| super::super::octi::style_price(c, pitch, x) / 1e6;
+        let len = |x: &[Vec2]| x.windows(2).map(|w| (w[1] - w[0]).len()).sum::<f64>() / 1e6;
+        let psi = |first: Vec2| {
+            let deg = first.unit().unwrap().dot(p(0.0, 1.0)).clamp(-1.0, 1.0).acos().to_degrees();
+            jw * ws * super::super::factors::junction_psi(deg)
+        };
+        // A staircase run leaving the trunk end straight down.
+        let run = [p(0.0, 0.0), p(0.0, -1.0), p(1.0, -2.0), p(1.0, -3.0), p(2.0, -4.0), p(2.0, -5.0), p(3.0, -6.0)];
+        let c = fuse_candidates(&run, &[&trunk], ws, jw, Some((&cfg, pitch)));
+        let mut checked = 0;
+        for (gain, _, i, pts) in &c {
+            // pts = foot, link legs (ending at run[i]), run[i+1..]
+            let tail = run.len() - 1 - i;
+            let link = &pts[..pts.len() - tail];
+            let want = len(&run[..=*i]) + psi(run[1] - run[0]) - len(link) - psi(pts[1] - pts[0]) + st(&cfg, &run) - st(&cfg, pts);
+            assert!((gain - want).abs() < 1e-9, "i {i} {pts:?}: gain {gain} want {want}");
+            checked += 1;
+        }
+        assert!(checked >= 4, "{c:?}");
+        // The first legs differ (vertical or 45 degrees), so the junction prices differ: the test
+        // fails if the chord's direction were used for all.
+        let firsts: std::collections::HashSet<i64> = c.iter().map(|x| ((x.3[1] - x.3[0]).y / mm * 100.0).round() as i64).collect();
+        assert!(firsts.len() >= 2, "{firsts:?}");
+        // A run that leaves the trunk sideways: the first legs of the links are 90 and 135 degrees
+        // from the trunk arm, the chord 112 degrees (psi 0.04 / 0 / 0.0003), so a junction price
+        // taken from the chord instead of the first leg gives a different gain.
+        let side = [p(0.0, 0.0), p(3.0, 0.0), p(3.0, -2.0), p(5.0, -2.0)];
+        let c = fuse_candidates(&side, &[&trunk], ws, jw, Some((&cfg, pitch)));
+        let mut legs: Vec<i64> = Vec::new();
+        for (gain, _, i, pts) in c.iter().filter(|x| x.2 == 3) {
+            let link = &pts[..pts.len()];
+            let want = len(&side[..=*i]) + psi(side[1] - side[0]) - len(link) - psi(pts[1] - pts[0]) + st(&cfg, &side) - st(&cfg, pts);
+            assert!((gain - want).abs() < 1e-9, "i {i} {pts:?}: gain {gain} want {want}");
+            legs.push(((pts[1] - pts[0]).y / mm * 10.0).round() as i64);
+        }
+        legs.sort();
+        legs.dedup();
+        assert!(legs.len() >= 2 && psi(p(3.0, 0.0)) > psi(p(1.0, -1.0)), "first legs {legs:?}");
+        // `any_angle = "forbidden"`: the old run holds a free-angle piece; it is priced with the ban
+        // lifted (finite), so the octilinear links still gain by the style price.
+        let free = [p(0.0, 0.0), p(1.0, -4.0), p(1.0, -5.0), p(3.0, -6.0)];
+        let fcfg = super::super::octi::OctiCfg { any_forbidden: true, ..cfg };
+        let soft = super::super::octi::OctiCfg { any_forbidden: false, ..cfg };
+        let c = fuse_candidates(&free, &[&trunk], ws, jw, Some((&fcfg, pitch)));
+        assert!(!c.is_empty());
+        for (gain, _, i, pts) in &c {
+            assert!(st(&fcfg, pts).is_finite(), "forbidden pieces are never offered");
+            let tail = free.len() - 1 - i;
+            let link = &pts[..pts.len() - tail];
+            let want = len(&free[..=*i]) + psi(free[1] - free[0]) - len(link) - psi(pts[1] - pts[0]) + st(&soft, &free) - st(&fcfg, pts);
+            assert!((gain - want).abs() < 1e-9, "i {i} {pts:?}: gain {gain} want {want}");
+        }
+    }
+
+    #[test]
+    fn fuse_style_is_off_in_the_smooth_style_and_carries_the_pitch() {
+        let cfg = super::super::octi::OctiCfg { on: true, ..Default::default() };
+        assert!(fuse_style(false, &cfg, 450_000.0).is_none());
+        let (c, pitch) = fuse_style(true, &cfg, 450_000.0).expect("octilinear");
+        assert!(c.on && (pitch - 450_000.0).abs() < 1e-9);
+    }
+
+    /// The fuse queue run to its end with `gain(i, taken)` as the evaluation (the key of item `i`
+    /// on the copper after the fuses `taken`; `None`: no legal candidate): the order taken.
+    fn lazy_run(items: &[(WireId, usize, i32)], gain: &dyn Fn(usize, &[usize]) -> Option<f64>) -> (Vec<usize>, usize) {
+        let mut taken: Vec<usize> = Vec::new();
+        let mut idx: Vec<usize> = (0..items.len()).collect();
+        let mut pool: Vec<FuseKey> = items.iter().enumerate().map(|(i, &(w, end, net))| FuseKey { key: gain(i, &taken).unwrap_or(f64::NEG_INFINITY), stamp: 0, w, end, net }).collect();
+        let (mut version, mut evals) = (0, 0);
+        loop {
+            match lazy_next(&pool, version) {
+                LazyStep::Done => break,
+                LazyStep::Reeval(k) => {
+                    evals += 1;
+                    pool[k].key = gain(idx[k], &taken).unwrap_or(f64::NEG_INFINITY);
+                    pool[k].stamp = version;
+                }
+                LazyStep::Take(k) => {
+                    taken.push(idx[k]);
+                    let net = pool[k].net;
+                    pool.swap_remove(k);
+                    idx.swap_remove(k);
+                    version = lazy_taken(&mut pool, version, net);
+                }
+            }
+            assert!(evals < 100, "the queue does not end");
+        }
+        (taken, evals)
+    }
+
+    /// fuse-octi r4 (M1): best legal gain first, a stale key made again before its end is taken.
+    #[test]
+    fn the_fuse_queue_takes_the_best_fresh_gain_first() {
+        // qmtech JS1_2: wire 383 (2.67) and wire 480 (43.3) share a pad; whichever fuses there takes
+        // it from the other. The large one goes first whatever the ids, both ways round.
+        for (a, b) in [(383, 480), (480, 383)] {
+            let items = [(a, 0, 78), (b, 1, 78)];
+            let g = |i: usize, t: &[usize]| if !t.is_empty() { None } else { Some(if items[i].0 == 480 { 43.3 } else { 2.67 }) };
+            let (t, _) = lazy_run(&items, &g);
+            assert_eq!(t.iter().map(|&i| items[i].0).collect::<Vec<_>>(), vec![480], "ids {a} {b}");
+        }
+        // D (net 1, 12) first; it drops C (net 1) from 10 to 1, so E (net 2, 5) goes before C; F (net 1)
+        // had no candidate until D fused and then gets one (3): order D, E, F, C.
+        let items = [(1, 0, 1), (2, 0, 1), (3, 0, 2), (4, 0, 1)]; // C, D, E, F
+        let g = |i: usize, t: &[usize]| -> Option<f64> {
+            let d = t.contains(&1);
+            match i {
+                0 => Some(if d { 1.0 } else { 10.0 }),
+                1 => Some(12.0),
+                2 => Some(5.0),
+                _ => d.then_some(3.0),
+            }
+        };
+        let (t, evals) = lazy_run(&items, &g);
+        assert_eq!(t, vec![1, 2, 3, 0]);
+        // Lazy: C and F made again after D (same net), C again after F; E never (other net), nothing after E.
+        assert_eq!(evals, 3);
+        // Ties: by wire id, then end; an end without a candidate is never taken.
+        let items = [(9, 1, 1), (9, 0, 2), (5, 1, 3), (7, 0, 4)];
+        let g = |i: usize, _: &[usize]| if i == 3 { None } else { Some(2.0) };
+        assert_eq!(lazy_run(&items, &g).0, vec![2, 1, 0]);
+        // A fresh best is taken at once; any stale key (also a low or `-inf` one) is made again first.
+        let k = |key: f64, stamp: usize, w: WireId| FuseKey { key, stamp, w, end: 0, net: 1 };
+        assert_eq!(lazy_next(&[k(1.0, 3, 1), k(5.0, 3, 2)], 3), LazyStep::Take(1));
+        assert_eq!(lazy_next(&[k(1.0, 3, 1), k(5.0, 2, 2)], 3), LazyStep::Reeval(1));
+        assert_eq!(lazy_next(&[k(1.0, 2, 1), k(5.0, 3, 2)], 3), LazyStep::Reeval(0));
+        assert_eq!(lazy_next(&[k(f64::NEG_INFINITY, 3, 1)], 3), LazyStep::Done);
+        assert_eq!(lazy_next(&[k(9.0, 3, 1), k(f64::NEG_INFINITY, 1, 2)], 3), LazyStep::Reeval(1));
+        assert_eq!(lazy_next(&[], 0), LazyStep::Done);
+        // A fuse keeps the other nets' fresh keys fresh, its own net's stale; an older stale one stays stale.
+        let mut p = [FuseKey { net: 1, ..k(1.0, 4, 1) }, FuseKey { net: 2, ..k(1.0, 4, 2) }, FuseKey { net: 2, ..k(1.0, 3, 3) }];
+        assert_eq!(lazy_taken(&mut p, 4, 1), 5);
+        assert_eq!(p.map(|x| x.stamp), [4, 5, 3]);
+    }
+
+    #[test]
+    fn the_fuse_cap_counts_vertices_and_keeps_every_shape_of_them() {
+        let c = |g: f64, i: usize| (g, 0.0, i, vec![v(0.0, 0.0)]);
+        // vertex 1 has shapes at gain 9 and 1 (the second after vertices 2, 3 appeared); cap 2 keeps vertices 1 and 2.
+        let all = vec![c(9.0, 1), c(8.0, 2), c(7.0, 3), c(1.0, 1), c(0.5, 4), c(0.4, 2)];
+        let got = fuse_cap(all.clone(), 2);
+        assert_eq!(got.iter().map(|x| (x.2, x.0)).collect::<Vec<_>>(), vec![(1, 9.0), (2, 8.0), (1, 1.0), (2, 0.4)]);
+        // a cap above the vertex count keeps everything; cap 0 nothing.
+        assert_eq!(fuse_cap(all.clone(), 99).len(), 6);
+        assert!(fuse_cap(all, 0).is_empty());
+        assert_eq!(FUSE_VERTEX_CAP, 8);
     }
 
     #[test]
@@ -5146,5 +5510,180 @@ mod tests {
         assert_eq!(p.layers, vec![0, 1]);
         assert_eq!(p.vias, vec![(2, 4)]);
         assert_eq!(plan(&[], 2), Plan { layers: vec![1], vias: vec![], at: vec![] });
+    }
+
+    // ---- fuse-octi r4: Drawer-level tests of the polish's split guard and the fuse's best legal candidate.
+
+    const FMM: f64 = 1e6;
+
+    /// A 40 x 30 mm board, F.Cu only (B.Cu a keepout), 1 mm square SMD pads `(net, x, y)` in the
+    /// KiCad frame; clearance 0.2 mm, width 0.25 mm.
+    fn fx_model(pads: &[(i32, f64, f64)]) -> BoardModel {
+        let n = |v: f64| (v * FMM).round() as i64;
+        let (w, h) = (n(40.0), n(30.0));
+        let pj: Vec<serde_json::Value> = pads
+            .iter()
+            .enumerate()
+            .map(|(i, &(net, x, y))| {
+                serde_json::json!({"uuid": format!("00000000-0000-4000-8000-{i:012}"), "ref": format!("P{i}"), "number": "1", "net": net, "attr": "smd",
+                    "center": [n(x), n(y)], "rotation_deg": 0.0, "layers": [0], "shapes": {"0": {"kind": "rect", "w": n(1.0), "h": n(1.0)}},
+                    "drill": null, "local_clearance": null, "net_tie_group": null, "spoke_angle_deg": 45.0})
+            })
+            .collect();
+        let cls = serde_json::json!({"clearance": 200000, "width": 250000, "via_d": 600000, "via_drill": 300000, "netclass": "Default", "width_source": "default", "min_width": 0});
+        let j = serde_json::json!({
+            "units": "nm", "board": "fx",
+            "layers": [{"id": 0, "name": "F.Cu", "kind": "signal", "routable": true}, {"id": 2, "name": "B.Cu", "kind": "signal", "routable": true}],
+            "nets": [{"code": 1, "name": "N"}, {"code": 2, "name": "M"}], "pads": pj,
+            "vias": [], "kept": [], "copper_shapes": [], "holes": [],
+            "outline": [{"kind": "seg", "a": [0, 0], "b": [w, 0]}, {"kind": "seg", "a": [w, 0], "b": [w, h]}, {"kind": "seg", "a": [w, h], "b": [0, h]}, {"kind": "seg", "a": [0, h], "b": [0, 0]}],
+            "keepouts": [{"name": "", "layers": [2], "poly": [[0, 0], [w, 0], [w, h], [0, h]], "no_tracks": true, "no_vias": true, "no_pour": false, "no_pads": false, "no_footprints": false}],
+            "net_ties": [], "pours": [], "teardrops": [], "dangling_ends": [],
+            "rules": {"min_clearance": 200000, "min_track_width": 250000, "min_via_diameter": 400000, "min_via_drill": 300000, "min_annular": 50000, "hole_clearance": 250000, "via_hole_clearance": 250000, "hole_to_hole": 250000, "edge_clearance": 500000, "max_error": 5000, "min_connection": 0, "profile": "board", "predefined_vias": [], "default": cls, "per_net": {"1": cls, "2": cls}, "floors_applied": [], "fallbacks": [], "warnings": [], "ignored_checks": [], "clearance_regions": [], "outline_half_stroke": 25000}
+        });
+        BoardModel::from_json(&j.to_string()).unwrap()
+    }
+
+    /// Math-frame point of the KiCad-frame mm coordinates.
+    fn fp(x: f64, y: f64) -> Vec2 {
+        Vec2 { x: x * FMM, y: -y * FMM }
+    }
+
+    /// A wire of net 1 between the pads `pa` and `pb` (obstacle ids), no passes.
+    fn fx_wire(st: &mut State, b: &Board, pa: usize, pb: usize) -> WireId {
+        let (a, z) = (b.centre[pa].unwrap(), b.centre[pb].unwrap());
+        let t = b.proj.vert_tris[a][0];
+        st.insert(super::super::state::Wire { net: 1, w: 0.25 * FMM, s: 0.2 * FMM, a, b: z, pa, pb, turns: vec![], passes: vec![], tris: vec![], alive: true }, &[], vec![t])
+    }
+
+    /// The drawn wire `w` with the one run `pts` on F.Cu, committed.
+    fn fx_drawn(dr: &mut Drawer, w: WireId, pts: Vec<Vec2>) -> WireOut {
+        let items = dr.run_items(w, 0, &pts);
+        let handles = items.iter().map(|it| dr.commit(it)).collect();
+        WireOut { wire: w, ok: true, items, runs: vec![(0, pts)], handles, ..WireOut::default() }
+    }
+
+    fn pieces_of(model: &BoardModel, b: &Board, wires: &[&WireOut]) -> super::super::netconn::Conn {
+        let _ = model;
+        let pcs: Vec<super::super::netconn::Piece> = wires.iter().map(|wo| super::super::netconn::Piece { runs: &wo.runs, vias: vec![], half_w: 0.125 * FMM }).collect();
+        let ts: Vec<super::super::netconn::Term> = b.proj.obstacles.iter().filter(|o| o.net == Some(1)).map(|o| super::super::netconn::Term { poly: &o.poly, layers: o.layers, center: o.center }).collect();
+        super::super::netconn::conn(&pcs, &ts)
+    }
+
+    fn octilinear(pts: &[Vec2]) -> bool {
+        pts.windows(2).all(|p| (p[1] - p[0]).len2() <= 1.0 || super::super::octi::octi_dir(p[1] - p[0]).is_some())
+    }
+
+    /// fuse-octi r4, H1 (qmtech JS2_9, main's JS1_2): a trunk A-B drawn as one free-angle segment
+    /// with a branch from C whose foot F lies on it (no elbow or Z of A-B passes F). Part 1: the
+    /// polish keeps F as a vertex, so both pieces end on it and the net stays one piece. Part 2: the
+    /// split guard: without F as a vertex every shape drops the foot, and the guard refuses them all.
+    #[test]
+    fn the_polish_keeps_a_branch_foot_on_the_trunk_or_refuses_the_step() {
+        let m = fx_model(&[(1, 5.0, 5.0), (1, 25.0, 15.0), (1, 11.0, 25.0)]);
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let o = Options::default();
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..b.proj.obstacles.len()).find(|&i| (b.proj.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let (oa, ob, oc) = (obs(5.0, 5.0), obs(25.0, 15.0), obs(11.0, 25.0));
+        let wt = fx_wire(&mut st, &b, oa, ob);
+        let wb = fx_wire(&mut st, &b, oc, oa);
+        let (a, z, c, f) = (fp(5.0, 5.0), fp(25.0, 15.0), fp(11.0, 25.0), fp(11.0, 8.0));
+        let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+        let branch = fx_drawn(&mut dr, wb, vec![c, f]);
+        let trunk0 = fx_drawn(&mut dr, wt, vec![a, z]);
+        let c0 = pieces_of(&m, &b, &[&trunk0, &branch]);
+        assert!(c0.n() == 1 && c0.dangling.is_empty(), "{c0:?}");
+        // Part 1: the foot kept as a vertex.
+        let mut t = trunk0.clone();
+        let k = dr.octi_polish(&mut t, &[f], &mut |_, _| true);
+        assert!(k >= 2 && octilinear(&t.runs[0].1), "{k} {:?}", t.runs[0].1);
+        // The foot stays on the centre line (a vertex while the two halves are redrawn; r6: merged
+        // into one straight segment where both halves leave it in one direction, as KiCad Cleanup would).
+        assert!(t.runs[0].1.windows(2).any(|s| crate::geom::point_seg(f, &crate::geom::Seg { a: s[0], b: s[1] }) < 1.0), "the foot is on the trunk: {:?}", t.runs[0].1);
+        assert_eq!(t.runs[0].1, crate::topo::octi::drop_collinear(&t.runs[0].1), "no collinear vertex left");
+        assert!(!super::super::netconn::worse(&c0, &pieces_of(&m, &b, &[&t, &branch])));
+        // Part 2: the guard (netconn: partition and dangling ends) refuses every shape that drops the
+        // foot (each elbow / Z either leaves the branch apart or crossing it with its foot dangling).
+        let back = dr.restore_wire(&t, &trunk0);
+        let mut t = back.clone();
+        let mut refused = 0;
+        let mut guard = |_: &WireOut, now: &WireOut| {
+            let ok = !super::super::netconn::worse(&c0, &pieces_of(&m, &b, &[now, &branch]));
+            refused += usize::from(!ok);
+            ok
+        };
+        let k = dr.octi_polish(&mut t, &[], &mut guard);
+        assert_eq!(k, 0, "{:?}", t.runs[0].1);
+        assert!(refused >= 4, "both elbows and both Zs tried: {refused}");
+        assert_eq!(t.runs[0].1, vec![a, z]);
+        assert!(dr.handles_hold(&t), "the refused shapes leave the drawing's index as it was");
+        // Without the guard the same polish leaves the foot dangling (the r3 bug).
+        let mut t2 = t.clone();
+        assert!(dr.octi_polish(&mut t2, &[], &mut |_, _| true) >= 1);
+        let c2 = pieces_of(&m, &b, &[&t2, &branch]);
+        assert!(super::super::netconn::worse(&c0, &c2) && !c2.dangling.is_empty(), "{c2:?}");
+    }
+
+    /// fuse-octi r4 (M1, F1/L1): the fuse's best LEGAL candidate onto one trunk: a branch from the
+    /// trunk's pad A that runs 2 mm beside the trunk past twelve vertices; the further along, the
+    /// larger the gain. The best legal one is taken; a vertex whose link a foreign pad blocks is
+    /// passed over; only the 8 best vertices are tried ([`FUSE_VERTEX_CAP`], every shape of them).
+    #[test]
+    fn the_fuse_takes_the_best_legal_candidate_of_the_capped_vertices() {
+        for blocked in [false, true] {
+            // The foreign pad (net 2) on the straight link of the best vertex (x = 31): (31, 19).
+            let mut pads = vec![(1, 3.0, 20.0), (1, 37.0, 20.0), (1, 33.0, 18.0)];
+            if blocked {
+                pads.push((2, 31.0, 19.0));
+            }
+            let m = fx_model(&pads);
+            let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+            let o = Options::default();
+            let ck = Checker::new(&m, &o);
+            let mut st = State::new(&b.proj);
+            let obs = |x: f64, y: f64| (0..b.proj.obstacles.len()).find(|&i| (b.proj.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+            let (oa, ob, oc) = (obs(3.0, 20.0), obs(37.0, 20.0), obs(33.0, 18.0));
+            let wt = fx_wire(&mut st, &b, oa, ob);
+            let wb = fx_wire(&mut st, &b, oa, oc);
+            let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+            let trunk = vec![fp(3.0, 20.0), fp(37.0, 20.0)];
+            let _t = fx_drawn(&mut dr, wt, trunk.clone());
+            // Branch: A, 45 degrees up to y = 18, east past x = 9, 11, ..., 31 (vertices 2..=13) to the
+            // pad C at (33, 18) (i 14). The gain of vertex i (2 mm link) grows with i.
+            let mut run = vec![fp(3.0, 20.0), fp(5.0, 18.0)];
+            run.extend((0..12).map(|k| fp(9.0 + 2.0 * k as f64, 18.0)));
+            run.push(fp(33.0, 18.0));
+            let wo = fx_drawn(&mut dr, wb, run.clone());
+            let tr: Vec<&[Vec2]> = vec![trunk.as_slice()];
+            let best = |skip: &mut dyn FnMut(f64, usize, &[Vec2]) -> bool| dr.fuse_best_legal(&wo, 0, &run, false, &tr, 0.45, 0.0, None, skip);
+            // Unblocked: the vertex furthest along, the pad C (i 14: its foot (33, 20), a 2 mm link).
+            let (gain, _, i, pts) = best(&mut |_, _, _| false).expect("a legal fuse");
+            if !blocked {
+                assert_eq!(i, 14, "{gain} {pts:?}");
+                assert!((pts[0] - fp(33.0, 20.0)).len() < 1.0);
+                // The legal test is refit_run's: taken there too.
+                let mut w2 = wo.clone();
+                assert!(dr.refit_run(&mut w2, 0, pts.clone()));
+                let back = dr.restore_wire(&w2, &wo);
+                assert!(dr.handles_hold(&back));
+                continue;
+            }
+            // Blocked: the foreign pad at (31, 19) sits on the straight link of x = 31 (i 13) only;
+            // x = 33's stays legal and is still the best.
+            assert_eq!(i, 14, "{gain} {pts:?}");
+            // Skip the best (i 14): the next legal one is i 12 (x = 29), not the blocked i 13.
+            let (_, _, i, _) = best(&mut |_, i, _| i == 14).unwrap();
+            assert_eq!(i, 12);
+            // The cap: with the 7 best vertices skipped the 8th best (i 7) is still tried; with the 8
+            // best skipped nothing is (the 9th best, i 6, would be legal).
+            let (_, _, i, _) = best(&mut |_, i, _| i >= 8).unwrap();
+            assert_eq!(i, 7);
+            assert!(best(&mut |_, i, _| i >= 7).is_none());
+            let p13: Vec<Vec2> = std::iter::once(fp(31.0, 20.0)).chain(run[13..].iter().copied()).collect();
+            let mut w2 = wo.clone();
+            assert!(!dr.refit_legal(&wo, 0, &p13) && !dr.refit_run(&mut w2, 0, p13), "the blocked link is illegal for both");
+        }
     }
 }

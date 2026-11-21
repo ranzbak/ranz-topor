@@ -11,10 +11,11 @@
 //! "a design-rule violation cannot be compensated by any reduction of wire length", Polubasov
 //! 2010; TopoR 6.3 manual p. 72: variants sorted by violations, then by length): the copper with
 //! and without the fuse moves is stitched ([`super::stitch::stitch_until`], the same pass the
-//! variant table runs), and when the moved copper leaves more pieces cut off, the moves nearest
-//! the pieces only it leaves are undone (with the moves that depend on them), at most
-//! [`ROUNDS`] times; still worse, every move is undone. Length gain stays the tie-break: a fuse
-//! that leaves no more pieces cut off is kept whole. The pure parts live here (unit tests); the
+//! variant table runs), and when the moved copper cuts off a piece the copper without the moves
+//! keeps connected ([`fused_ok`]: piece sets, not counts), the moves nearest the pieces only it
+//! leaves are undone (with the moves that depend on them), at most `[search] fuse_pour_rounds`
+//! times; still a new piece, every move is undone. Length gain stays the tie-break: moves that
+//! cut no new piece off are kept whole. The pure parts live here (unit tests); the
 //! saved wire states and the undo are in [`super::core`].
 
 use crate::geom::{point_seg, Seg, Vec2};
@@ -72,9 +73,14 @@ pub fn same_piece(a: &Cut, b: &Cut) -> bool {
     a.pads.is_empty() && b.pads.is_empty() && a.vias.is_empty() && b.vias.is_empty() && (a.at - b.at).len() < SAME_NM
 }
 
-/// The pieces of `fused` that `unfused` does not leave cut off. O(F x U x piece).
+/// The pieces of `fused` that `unfused` does not leave cut off: no piece of `unfused` matches it,
+/// or it holds a pad or via that no piece of `unfused` holds (a cut-off piece that GREW, taking
+/// in copper the copper without the moves keeps connected; r5 verifier L1: unfused {27} -> fused
+/// {27, 23} cuts pad 23 off although a piece with pad 27 was cut off before). O(F x U x piece).
 pub fn new_pieces<'a>(fused: &'a [Cut], unfused: &[Cut]) -> Vec<&'a Cut> {
-    fused.iter().filter(|c| !unfused.iter().any(|u| same_piece(c, u))).collect()
+    let pads: BTreeSet<usize> = unfused.iter().flat_map(|u| u.pads.iter().copied()).collect();
+    let grew = |c: &Cut| c.pads.iter().any(|p| !pads.contains(p)) || c.vias.iter().any(|&v| !unfused.iter().any(|u| u.net == c.net && u.vias.iter().any(|&w| (w - v).len() < SAME_NM)));
+    fused.iter().filter(|c| grew(c) || !unfused.iter().any(|u| same_piece(c, u))).collect()
 }
 
 /// Where a piece is (math frame): its pads' centres, its vias, and its islands' centroid.
@@ -157,10 +163,14 @@ pub fn recheck_seed(moves: &[Move], live: &[bool], pre: &std::collections::BTree
     with_dependents(moves, &clash_seed(moves, live, &|w| viols(w) > pre.get(&w).copied().unwrap_or(0)))
 }
 
-/// The moved copper is kept as it is when it leaves no more pieces cut off than the copper
-/// without the moves (the errors criterion first; length decides the rest). O(1).
-pub fn fused_ok(fused_left: usize, unfused_left: usize) -> bool {
-    fused_left <= unfused_left
+/// The moved copper is kept as it is when it cuts off no pour piece that the copper without the
+/// moves keeps connected: the piece SETS are compared, not their counts (fuse-octi r5, qmtech GND
+/// at the ADV7511: the ADV_HPD fuse cut one new GND piece off and joined two, a count of one
+/// fewer, so the count check kept it and KiCad's DRC listed the new piece). A piece the moves
+/// join is a gain but never pays for one they cut off (the errors criterion first; length
+/// decides the rest). O(F x U x piece).
+pub fn fused_ok(fused: &[Cut], unfused: &[Cut]) -> bool {
+    new_pieces(fused, unfused).is_empty()
 }
 
 #[cfg(test)]
@@ -195,8 +205,37 @@ mod tests {
         let fused = [cut(1, &[20], v(5.0, 0.0)), cut(1, &[30], v(9.0, 0.0)), cut(1, &[40], v(12.0, 0.0))];
         let new: Vec<Vec<usize>> = new_pieces(&fused, &unfused).iter().map(|c| c.pads.clone()).collect();
         assert_eq!(new, vec![vec![30], vec![40]]);
-        assert!(!fused_ok(fused.len(), unfused.len()));
-        assert!(fused_ok(2, 2), "as many pieces: the fuse stays (length decides)");
+        assert!(!fused_ok(&fused, &unfused));
+        assert!(fused_ok(&unfused[1..], &unfused), "fewer pieces, none new: the fuse stays");
+        assert!(fused_ok(&unfused, &unfused), "the same pieces: the fuse stays (length decides)");
+    }
+
+    /// qmtech GND at the ADV7511 (r4): the moves cut one piece off (pad 23 with 27 and 31 behind
+    /// it) and join two (U5.9, D10.2): one piece fewer, yet the new one is an unconnected item in
+    /// KiCad's DRC. The count check kept the moves; the set check undoes them. Same count, other
+    /// pieces: not kept either.
+    #[test]
+    fn a_fuse_that_cuts_a_new_piece_off_is_not_taken_whatever_it_joins() {
+        let unfused = [cut(1, &[9], v(0.0, 0.0)), cut(1, &[10], v(5.0, 0.0))];
+        let fused = [cut(1, &[23, 27, 31], v(9.0, 0.0))];
+        assert!(fused.len() < unfused.len(), "the count check would keep it");
+        assert!(!fused_ok(&fused, &unfused));
+        let swapped = [cut(1, &[9], v(0.0, 0.0)), cut(1, &[23], v(9.0, 0.0))];
+        assert!(!fused_ok(&swapped, &unfused), "as many pieces, one of them new");
+        let island = |at| cut(1, &[], at);
+        assert!(fused_ok(&[island(v(1.0, 1.0))], &[island(v(1.4, 1.0)), island(v(8.0, 8.0))]), "the same island, its centroid moved a little");
+    }
+
+    /// r5 verifier L1: a cut-off piece that grows (pad 27 cut off before, pads 27 and 23 after) is
+    /// new copper cut off: pad 23 was connected without the moves. A piece that shrinks is not.
+    #[test]
+    fn a_cut_off_piece_that_grows_is_not_taken() {
+        let unfused = [cut(1, &[27], v(0.0, 0.0))];
+        assert!(!fused_ok(&[cut(1, &[23, 27], v(0.5, 0.0))], &unfused), "pad 23 newly cut off");
+        assert!(fused_ok(&[cut(1, &[27], v(0.0, 0.0))], &[cut(1, &[23, 27], v(0.5, 0.0))]), "a piece that shrinks");
+        let via = |vs: &[Vec2]| Cut { vias: vs.to_vec(), ..cut(1, &[27], v(0.0, 0.0)) };
+        assert!(!fused_ok(&[via(&[v(1.0, 1.0), v(4.0, 4.0)])], &[via(&[v(1.0, 1.0)])]), "a via newly cut off");
+        assert!(fused_ok(&[via(&[v(1.2, 1.0)])], &[via(&[v(1.0, 1.0)])]), "the same via, 0.2 mm apart");
     }
 
     #[test]
