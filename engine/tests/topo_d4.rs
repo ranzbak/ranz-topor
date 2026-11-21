@@ -4,7 +4,7 @@ use topor_engine::geom::quant::{IVec2, TrackPrim};
 use topor_engine::model::{BoardModel, Item, Options, TrackItem};
 use topor_engine::pourcheck::check_pour_reach;
 use topor_engine::topo::factors::{standard_factors, FactorConfig, Registry};
-use topor_engine::topo::stitch::stitch;
+use topor_engine::topo::stitch::{lattice_pitch, stitch, want_vias};
 
 const MM: i64 = 1_000_000;
 
@@ -65,12 +65,21 @@ fn a_cut_off_island_with_a_pad_gets_a_stitch_via() {
     let before = check_pour_reach(&m, &items, &[]);
     assert_eq!(before.cuts.len(), 1, "{:?}", before.notes);
     assert_eq!(before.cuts[0].pads, vec![0]);
-    let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
-    assert_eq!((s.before, s.after, s.island_vias, s.pad_stubs), (1, 0, 1, 0), "{:?}", s.notes);
+    let o = Options::default();
+    let s = stitch(&m, &o, &reg(), &items, &[], None);
+    // stitch-vias: at least 2, one per pitch² of the piece (131.6 mm² / 25 mm² -> 6).
+    let want = want_vias(before.cuts[0].area, lattice_pitch(&o), o.stitch_min_vias);
+    assert_eq!(want, 6);
+    assert_eq!((s.before, s.after, s.island_vias, s.pad_stubs), (1, 0, want, 0), "{:?}", s.notes);
     let Item::Via(v) = &s.items[0] else { panic!("{:?}", s.items) };
     assert_eq!(v.net, 1);
-    // Left of the cut, near the pad.
+    // The first one left of the cut, near the pad.
     assert!(v.at.x < 7 * MM - 300_000 && (v.at.x - 4 * MM).abs() + (v.at.y - 15 * MM).abs() < 4 * MM, "{:?}", v.at);
+    // All on the 5 mm lattice from the grid origin (0, 0), left of the cut.
+    for it in &s.items {
+        let Item::Via(v) = it else { panic!("{it:?}") };
+        assert!(v.at.x % (5 * MM) == 0 && v.at.y % (5 * MM) == 0 && v.at.x < 7 * MM, "{:?}", v.at);
+    }
     let mut all = items.to_vec();
     all.extend(s.items.iter().cloned());
     assert!(check_pour_reach(&m, &all, &[]).cuts.is_empty());
@@ -99,7 +108,7 @@ fn an_empty_island_counts_only_when_kicad_keeps_it() {
     let r = check_pour_reach(&m, &items, &[]);
     assert_eq!(r.cuts.len(), 1, "{:?}", r.notes);
     let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
-    assert_eq!((s.before, s.after, s.island_vias), (1, 0, 1), "{:?}", s.notes);
+    assert_eq!((s.before, s.after, s.island_vias), (1, 0, 6), "{:?}", s.notes);
 }
 
 /// The planner's static via-site test and the drawing look at the same nine points of a

@@ -650,7 +650,7 @@ the preview summary names the warnings (*After routing, check: …*), report.md 
 | [`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped) | differential pairs left unrouted because `[diffpair] enabled = false` (also announced in the pre-flight); see [Differential pairs](#differential-pairs) |
 | [`UNROUTED`](troubleshoot.md#unrouted) | connections that could not be finished, counted by reason (no room for a via, no room at the clearance when drawn, …) |
 | [`CONNECTION_WIDTH`](troubleshoot.md#connection_width) | traces not drawn because they would graze their own pad or via (KiCad's minimum connection width) |
-| [`POUR_ISLANDS`](troubleshoot.md#pour_islands) / [`POUR_STITCHED`](troubleshoot.md#pour_stitched) | pour pieces the new copper cut off: left over / joined again by stitching vias or pad stubs |
+| [`POUR_ISLANDS`](troubleshoot.md#pour_islands) / [`POUR_STITCHED`](troubleshoot.md#pour_stitched) / [`STITCH_VIAS`](troubleshoot.md#stitch_vias) | pour pieces the new copper cut off: left over / joined again by stitching vias or pad stubs; stitching vias in islands KiCad would drop, behind thin necks or on the area grid |
 | [`POUR_UNJOINED`](troubleshoot.md#pour_unjoined) | KiCad's own DRC after the zone refill: pour pieces cut off (counted in the preview legend) and pads not joined to their pour (blue ring in the preview) |
 | [`PLANE_PAD_SIGNAL`](troubleshoot.md#plane_pad_signal) / [`PLANE_VIA_OUTSIDE_POUR`](troubleshoot.md#plane_via_outside_pour) | plane pads joined by a trace instead of a via into their pour / a plane via outside the fill |
 | [`VIA_SQUEEZE`](troubleshoot.md#via_squeeze) | vias in a narrow pass (the via_squeeze social factor) |

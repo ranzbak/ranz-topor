@@ -383,6 +383,11 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     }
     best.timed_out = (time_hit || draw_cut) && !(cancel && ok_kept);
     best.converged = !best.timed_out;
+    // stitch-vias classes 2-4, once on the picked result, before the hand-off (the plugin
+    // refills the zones after it).
+    if opts.stitch_islands {
+        stitch_regions_on(model, opts, &mut best, &|| ctl.is_cancelled() && !ok_kept);
+    }
     post(&mut best);
     best.runtime_s = t0.elapsed().as_secs_f64();
     if best.timed_out {
@@ -2167,6 +2172,28 @@ fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, dead
         best.item_conn.push(usize::MAX);
     }
     s.after
+}
+
+/// stitch-vias region stitching ([`super::stitch::stitch_regions`]) on the picked result: its vias
+/// join the items (`item_conn` = `usize::MAX`) and its lines go to the warnings. `stop` (Cancel)
+/// ends it between pieces.
+fn stitch_regions_on(model: &BoardModel, opts: &Options, best: &mut RouteResult, stop: &dyn Fn() -> bool) {
+    if model.pours.is_empty() {
+        return;
+    }
+    let routed_pads = super::stitch::routed_pour_pads(model, &best.connections);
+    let (reg, _) = Registry::from_config(standard_factors(), &opts.factors);
+    let t = Instant::now();
+    let s = super::stitch::stitch_regions(model, opts, &reg, &best.items, &routed_pads, None, stop);
+    if s.notes.is_empty() {
+        return;
+    }
+    best.warnings.push(format!("{} ({:.2} s)", s.notes[0], t.elapsed().as_secs_f64()));
+    best.warnings.extend(s.notes.into_iter().skip(1));
+    for it in s.items {
+        best.items.push(it);
+        best.item_conn.push(usize::MAX);
+    }
 }
 
 /// Outcomes and necked stretches of a route at one moment (the variant before the via reduction).

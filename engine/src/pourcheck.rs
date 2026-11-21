@@ -143,6 +143,111 @@ impl Raster {
         self.res
     }
 
+    /// Number of islands (ids 1..=n).
+    pub fn islands(&self) -> usize {
+        self.n_islands()
+    }
+
+    /// Fill area of island `l`, nm² (0 for an unknown id).
+    pub fn island_area(&self, l: u32) -> f64 {
+        self.area.get(l as usize).copied().filter(|_| l != 0).unwrap_or(0.0)
+    }
+
+    /// stitch-vias lattice: the points `origin + (i, j) * pitch` (math frame) inside the raster
+    /// whose cell is in island `l` with fill depth at least `min_depth` (deterministic, row-major
+    /// in lattice order). O(raster area / pitch²).
+    pub fn lattice_sites(&self, l: u32, min_depth: f64, pitch: f64, origin: Vec2) -> Vec<Vec2> {
+        let mut out = Vec::new();
+        if pitch <= 0.0 || l == 0 {
+            return out;
+        }
+        let (x1, y1) = (self.x0 + self.nx as f64 * self.res, self.y0 + self.ny as f64 * self.res);
+        let i0 = ((self.x0 - origin.x) / pitch).ceil() as i64;
+        let i1 = ((x1 - origin.x) / pitch).floor() as i64;
+        let j0 = ((self.y0 - origin.y) / pitch).ceil() as i64;
+        let j1 = ((y1 - origin.y) / pitch).floor() as i64;
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                let p = Vec2 { x: origin.x + i as f64 * pitch, y: origin.y + j as f64 * pitch };
+                if self.label_at(p) == l && self.depth_at(p) >= min_depth {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// stitch-vias class 3 (thin): the cores of the islands in `keep` (island ids) — the
+    /// 4-connected components of their cells at least `min_depth` deep, i.e. the parts that a
+    /// neck narrower than `2 * min_depth` separates. Returns (core id per cell, 0 = none; per
+    /// core id from 1: (island id, area nm²)). O(cells).
+    pub fn cores(&self, keep: &dyn Fn(u32) -> bool, min_depth: f64) -> (Vec<u32>, Vec<(u32, f64)>) {
+        let n = self.nx * self.ny;
+        let mut core = vec![0u32; n];
+        let mut info: Vec<(u32, f64)> = vec![(0, 0.0)];
+        let deep = |c: usize| self.label[c] != 0 && self.depth[c] as f64 * self.res / 8.0 >= min_depth && keep(self.label[c]);
+        let mut stack: Vec<usize> = Vec::new();
+        for c0 in 0..n {
+            if core[c0] != 0 || !deep(c0) {
+                continue;
+            }
+            let id = info.len() as u32;
+            let isl = self.label[c0];
+            let mut cells = 0usize;
+            core[c0] = id;
+            stack.push(c0);
+            while let Some(c) = stack.pop() {
+                cells += 1;
+                let (i, j) = (c % self.nx, c / self.nx);
+                let mut nb = [usize::MAX; 4];
+                if i > 0 {
+                    nb[0] = c - 1;
+                }
+                if i + 1 < self.nx {
+                    nb[1] = c + 1;
+                }
+                if j > 0 {
+                    nb[2] = c - self.nx;
+                }
+                if j + 1 < self.ny {
+                    nb[3] = c + self.nx;
+                }
+                for d in nb {
+                    if d != usize::MAX && core[d] == 0 && self.label[d] == isl && deep(d) {
+                        core[d] = id;
+                        stack.push(d);
+                    }
+                }
+            }
+            info.push((isl, cells as f64 * self.res * self.res));
+        }
+        (core, info)
+    }
+
+    /// The core id ([`Raster::cores`] grid `core`) of every core cell within `r` of `p` (sorted,
+    /// dedup). O((r / res)²).
+    pub fn cores_within(&self, core: &[u32], p: Vec2, r: f64) -> Vec<u32> {
+        let bb = Aabb { min: p, max: p }.grow(r);
+        let (i0, i1, j0, j1) = self.range(&bb);
+        let mut out = Vec::new();
+        for j in j0..j1 {
+            for i in i0..i1 {
+                let c = core[j * self.nx + i];
+                if c != 0 && (self.centre(i, j) - p).len() <= r {
+                    out.push(c);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The core id at `p` (0 outside every core or the raster).
+    pub fn core_at(&self, core: &[u32], p: Vec2) -> u32 {
+        self.cell(p).map_or(0, |c| core[c])
+    }
+
     /// Centres of the cells of island `l` whose fill depth is at least `min_depth`, on a lattice
     /// of every `step`-th cell (deterministic, row-major). O(cells).
     pub fn island_sites(&self, l: u32, min_depth: f64, step: usize) -> Vec<Vec2> {
@@ -600,6 +705,22 @@ pub struct PourReach {
     /// Copper of a pour net that KiCad keeps but that is not joined to the net's main
     /// component (each one is a DRC "missing connection"), by net, then smallest pad index.
     pub cuts: Vec<Cut>,
+    /// Islands of a pour net that KiCad's island removal drops (no pad, via or track of the net
+    /// in their component, and the zone's removal mode does not keep them), by net, then raster
+    /// key order (stitch-vias class 2: a via joining one to the net keeps its copper).
+    pub dropped: Vec<Dropped>,
+}
+
+/// An island KiCad drops ([`PourReach::dropped`]).
+#[derive(Clone, Debug, Default)]
+pub struct Dropped {
+    pub net: i32,
+    /// `(pour, layer, island id)`.
+    pub island: (usize, u32, u32),
+    /// Fill area, nm².
+    pub area: f64,
+    /// Centroid (math frame).
+    pub at: Vec2,
 }
 
 /// One component of a pour net's copper (islands, pads, vias, tracks) that is cut off from the
@@ -1156,6 +1277,14 @@ pub fn check_pour_reach_cells(
             }
             for (root, mut c) in comp {
                 let keep = must.contains(&root) || (items.contains(&root) && !c.islands.is_empty());
+                if root != main && !keep {
+                    // stitch-vias class 2: islands KiCad's island removal drops (no item of the
+                    // net in their component).
+                    for &(zi, l, isl) in &c.islands {
+                        let r = &rasters[&(zi, l)];
+                        out.dropped.push(Dropped { net, island: (zi, l, isl), area: r.area[isl as usize], at: r.centroid[isl as usize] });
+                    }
+                }
                 if root == main || !keep {
                     continue;
                 }

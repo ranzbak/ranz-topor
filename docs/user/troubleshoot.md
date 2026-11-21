@@ -706,6 +706,14 @@ copper violates a rule anywhere else, file a bug.
 
 **Fix.** Select other footprints in the PCB editor, change run.scope_mode, or check that nets are assigned (KiCad → Tools → Update PCB from Schematic).
 
+### STITCH_VIAS
+
+*Severity: info.*
+
+**Cause.** topor added stitching vias between the copper pours of a net on two layers, before the zone refill: in islands KiCad would otherwise remove (planes.stitch_dropped), in parts of a pour joined to the rest only by a thin neck (planes.stitch_thin_mm), and with planes.stitch_area on a regular grid (planes.stitch_pitch_mm from the board's grid origin). Each piece and its vias are listed.
+
+**Fix.** Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). Set the pitch with planes.stitch_pitch_mm and the grid origin with KiCad → Place → Grid Origin; planes.stitch_dropped = false and planes.stitch_thin_mm = 0 switch the stitching off.
+
 ### TIME_BUDGET_HIT
 
 *Severity: warning.*

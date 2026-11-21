@@ -118,6 +118,25 @@ def test_island_join_is_a_stitch():
     assert "1 of those join(s) run more than 3 mm from the pad" in msg
 
 
+def test_stitch_vias_finding_lists_the_pieces():
+    """stitch-vias: the region stitching summary (engine/tests/topo_stitch_vias.rs pins its words) becomes
+    STITCH_VIAS with one item per piece that got a via; none when it placed no via."""
+    head = ("stitching vias (pitch 5.00 mm from the grid origin, at least 2 per piece): dropped islands 1 of 2 stitched "
+            "(3 vias), thin-neck cores 0 of 1 (0 vias), area 0 vias; {} vias in all (0.02 s)")
+    pieces = ["stitch (dropped island): GND on F.Cu 80.00 mm² near (15.000, 19.000): 3 of 4 via(s) (10.000, 15.000) "
+              "(20.000, 25.000) (15.000, 20.000)",
+              "stitch (dropped island): GND on F.Cu 9.00 mm² near (5.000, 5.000): 0 of 2 via(s)",
+              "stitch (thin neck < 1.00 mm): GND on B.Cu core 30.00 mm²: 0 of 2 via(s)"]
+    res = {"connections": [_c("GND", "routed")], "warnings": [head.format(3)] + pieces}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    f = fs["STITCH_VIAS"]
+    assert f.severity == "info" and f.message.startswith("3 stitching via(s)") and "dropped islands 1 of 2" in f.message
+    assert list(f.items) == [pieces[0].removeprefix("stitch ")]
+    assert f.fix == MESSAGES["STITCH_VIAS"].fix
+    res["warnings"][0] = head.format(0)
+    assert "STITCH_VIAS" not in {f.code for f in postrun.route_findings(res)}
+
+
 def test_a_drawing_cut_by_the_hard_limit_is_a_loud_finding():
     """verify-m2c 3: the engine's line (engine/tests/topo_m2_draw_once.rs pins its words) becomes TIME_DRAWING_CUT,
     with the counts and what to change for a complete board."""

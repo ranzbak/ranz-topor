@@ -566,6 +566,9 @@ pub struct BoardModel {
     pub dangling_ends: Vec<DanglingEnd>,
     pub pours: Vec<Pour>,
     pub rules: Rules,
+    /// The board's grid origin (KiCad `(setup (grid_origin x y))`, KiCad frame, nm; math frame
+    /// after [`BoardModel::from_json`]): the origin of the stitching lattice (stitch-vias).
+    pub grid_origin: [i64; 2],
 }
 
 impl BoardModel {
@@ -618,6 +621,7 @@ impl BoardModel {
             d.end.flip();
             d.direction[1] = -d.direction[1];
         }
+        self.grid_origin[1] = -self.grid_origin[1];
     }
 
     /// Pad skeleton for `layer` (math frame); falls back to any layer's shape.
@@ -1056,6 +1060,26 @@ pub struct Options {
     /// = distance from the pad's edge ([`crate::topo::stitch::join_price`]), no cutoff, a warning
     /// beyond 3 mm. False: such an island is only reported.
     pub plane_join_islands: bool,
+    /// stitch-vias (`topor.toml [planes] stitch_min_vias`, default 2, lead 2026-11-21: redundancy):
+    /// the vias a cut-off pour piece (class 1), a dropped island (class 2) or a thinly connected
+    /// core (class 3) gets at least, where room allows; more by area, one per `stitch_pitch_nm`².
+    pub stitch_min_vias: usize,
+    /// stitch-vias (`[planes] stitch_pitch_mm`, default 5 mm, about lambda_g/20 at 1.5 GHz in FR4):
+    /// the stitching lattice pitch (rounded to 0.05 mm), from the board's grid origin; also the
+    /// area per via (pitch²) and the value of a via of classes 2-4 against its site price.
+    pub stitch_pitch_nm: i64,
+    /// stitch-vias class 2 (`[planes] stitch_dropped`, default true, lead 2026-11-21): an island
+    /// of a pour that KiCad's island removal would drop (no pad, via or track of its net) and of
+    /// at least pitch²/4 gets stitching vias into solid pour of its net on another layer, so its
+    /// copper stays.
+    pub stitch_dropped: bool,
+    /// stitch-vias class 3 (`[planes] stitch_thin_mm`, default 1 mm, 0 = off): a part of a pour
+    /// island that a neck narrower than this separates from the rest and that holds no via or
+    /// through-hole pad of the net gets stitching vias.
+    pub stitch_thin_nm: i64,
+    /// stitch-vias class 4 (`[planes] stitch_area`, default false): classic area stitching, a via
+    /// on every lattice site of a pour farther than the pitch from every via of its net.
+    pub stitch_area: bool,
     /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
     /// pour is a terminal of its net like a pad, which may carry vias. Only fill connected to the
     /// rest of its net before the run (the main component of [`crate::pourcheck`] on the board as
@@ -1838,6 +1862,11 @@ impl Default for Options {
             via_reduce: true,
             stitch_islands: true,
             plane_join_islands: true,
+            stitch_min_vias: 2,
+            stitch_pitch_nm: 5_000_000,
+            stitch_dropped: true,
+            stitch_thin_nm: 1_000_000,
+            stitch_area: false,
             plane_terminals: true,
             plane_share_vias: "outside_bga".into(),
             plane_bga_refs: Vec::new(),
