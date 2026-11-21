@@ -2506,6 +2506,10 @@ mod tests {
         assert_eq!(corridor_cross(&c, v(2.0, 0.2), v(6.0, 0.2)), 0.0, "entering without crossing: room only");
         assert!(corridor_room(&c, 0.3 * MM, v(2.0, 0.2), v(6.0, 0.2)) > 0.0);
         assert_eq!(corridor_cross(&c, v(12.0, -1.0), v(12.0, 1.0)), 0.0, "past the band's end");
+        // a leg almost along the path: the crossed length is the leg's own (capped), not 2 reach / sin
+        let along = corridor_cross(&c, v(0.5, -0.01), v(9.5, 0.01));
+        let cap = viol * super::super::factors::violation_amount(0.3 * MM, (v(9.5, 0.01) - v(0.5, -0.01)).len());
+        assert!((along - cap).abs() < 1e-6 * cap, "{along} {cap}");
         let bent = Corridor { path: vec![v(0.0, 0.0), v(5.0, 0.0), v(5.0, 5.0), v(10.0, 5.0)], bb: Aabb { min: v(-1.0, -1.0), max: v(11.0, 6.0) }, ..band(0.3 * MM) };
         // (3,-1)-(7,6) crosses y = 0, x = 5 and y = 5: three times, each at a shallower angle than 90
         let thrice = corridor_cross(std::slice::from_ref(&bent), v(3.0, -1.0), v(7.0, 6.0));
