@@ -80,6 +80,38 @@ def _copper(ax, segs, vias):
         ax.add_patch(Circle((x, y), d / 4, fc="white", ec="k", lw=0.3, zorder=6))
 
 
+def _grid(ax, pat: Pat):
+    """grid-snap: the pattern's grid (expect grid_mm) as light dots."""
+    g = pat.expect.get("grid_mm")
+    if not g:
+        return
+    Wd, Hd = pat.size
+    xs = [i * g for i in range(int(Wd / g) + 1)]
+    ys = [j * g for j in range(int(Hd / g) + 1)]
+    ax.scatter([x for x in xs for _ in ys], [y for _ in xs for y in ys], s=0.15, c="#9a9a9a", zorder=1, linewidths=0)
+
+
+def off_grid_bends(pat: Pat, segs) -> list[tuple[float, float]]:
+    """grid-snap: bends (corners where two segments of a net meet at an angle) off the pattern's grid (> 1 um)."""
+    g = pat.expect.get("grid_mm")
+    if not g:
+        return []
+    ends = {}
+    for _layer, net, _w, pts in segs:
+        if len(pts) != 2 or math.dist(*pts) < 1e-4:
+            continue
+        for p, q in ((pts[0], pts[1]), (pts[1], pts[0])):
+            ends.setdefault((net, round(p[0], 4), round(p[1], 4)), []).append((p, math.atan2(q[1] - p[1], q[0] - p[0])))
+    out = []
+    for v in ends.values():
+        if len(v) == 2:
+            d = abs((v[0][1] - v[1][1] + math.pi) % (2 * math.pi) - math.pi)
+            p = v[0][0]
+            if abs(d - math.pi) > math.radians(1) and any(abs(c / g - round(c / g)) * g > 0.001 for c in p):
+                out.append((round(p[0], 4), round(p[1], 4)))
+    return sorted(out)
+
+
 def _marks(ax, pat: Pat):
     for m in pat.marks:
         ax.annotate(m["text"], xy=m["xy"], xytext=(m["xy"][0] + 0.8, m["xy"][1] - 0.8), fontsize=6, color="#555",
@@ -213,6 +245,9 @@ def judge(pat: Pat, segs, vias, m: dict, drc: list[dict]) -> dict:
         same = same and r["free_angle_segments"] == 0
     if "bends" in e:
         same = same and all(r["bends"].get(n, 0) <= b for n, b in e["bends"].items())
+    if e.get("grid_mm"):
+        r["off_grid_bends"] = off_grid_bends(pat, new)
+        same = same and len(r["off_grid_bends"]) <= e.get("grid_off_bends_max", 0)
     if e.get("pad_ends_at_centre"):
         r["off_centre_ends"] = len(off_centre_ends(pat, new))
         same = same and r["off_centre_ends"] == 0
@@ -233,6 +268,8 @@ def main(argv: list[str] | None = None) -> int:
         n = 2 + len(cfgs)
         fig, ax = plt.subplots(1, n, figsize=(4.6 * n, 4.6 * Hd / Wd + 1.6))
         _base(ax[0], pat, "setup (problem board; dashed = connections to make)")
+        for x in ax:
+            _grid(x, pat)
         _rats(ax[0], pat)
         _marks(ax[0], pat)
         _base(ax[1], pat, f"expected (sketch, KiCad DRC 0): {pat.expect.get('vias', 0)} via(s), {sum(plen(t.pts) for t in pat.ref_tracks):.2f} mm")
@@ -259,6 +296,10 @@ def main(argv: list[str] | None = None) -> int:
                     ax[k].annotate(f"end {d:.2f} mm off centre", xy=(x, y), xytext=(x - 1.6, y + 1.0), fontsize=6,
                                    color="#7a5d00", arrowprops={"arrowstyle": "->", "color": "#b08a00", "lw": 0.6}, zorder=11)
                 ax[k].set_title(ax[k].get_title() + f"\npad ends off centre: {r.get('off_centre_ends', 0)} (yellow)", fontsize=8)
+            if pat.expect.get("grid_mm"):
+                for x, y in r.get("off_grid_bends", []):
+                    ax[k].plot([x], [y], marker="x", ms=5, mew=1.2, color="#e07000", zorder=11)
+                ax[k].set_title(ax[k].get_title() + f"\nbends off the grid: {len(r.get('off_grid_bends', []))} (orange x)", fontsize=8)
         tag = f" [{ROUND[name]}]" if name in ROUND else ""
         fig.suptitle(f"{pat.cluster} {name}{tag}: {pat.title}\n[{"APPROVED (expected answer in tests/test_drc_patterns_e2e.py)" if "approved" in ROUND.get(name, "") else STATUS}]  F.Cu red, B.Cu blue, hatched = kept hand copper, "
                      "grey = PTH, dashed frame = copper-to-edge line, yellow ring = KiCad DRC of the routed copy", fontsize=9)

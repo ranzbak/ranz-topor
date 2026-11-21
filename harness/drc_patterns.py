@@ -1123,9 +1123,60 @@ def pad_end_centre() -> Pat:
         marks=[{"xy": [xs[2], tip], "text": "pad tip"}])
 
 
+# ------------------------------------------------------------------------------------------------ GRID-SNAP grid_snap_bends
+def grid_snap_bends() -> Pat:
+    """grid-snap (docs/dev/design/grid-snap.md): the user's 0.254 mm (10 mil) grid, origin (0, 0); route with
+    --set drawing.grid_snap='"prefer"' --set drawing.grid_mm=0.254."""
+    Wd, Hd, g = 20.0, 10.0, 0.254
+    gx = lambda k: _r(k * g)  # noqa: E731
+    # part 1: A between two on-grid pads round a 1 mm blocker (top edge y 1.6): the tight line y = 1.6 - CL - W/2 =
+    # 1.35 lies between the grid lines 1.27 and 1.524; the grid line 1.27 (outward) costs 0.066 mm, its two bends
+    # land on the grid
+    a1, a2 = (gx(8), gx(8)), (gx(70), gx(8))
+    blk = Fp("X1", [Pad("1", None, (10.0, 2.1), (1.0, 1.0), "rect")], "a blocker without a net")
+    ya = gx(5)
+    ref = [Trk("A", "F.Cu", W, [a1, (_r(a1[0] + a1[1] - ya), ya), (_r(a2[0] - a2[1] + ya), ya), a2])]
+    ja = Fp("J1", [Pad("1", "A", a1, (0.6, 0.6), "circle")])
+    jb = Fp("J2", [Pad("1", "A", a2, (0.6, 0.6), "circle")])
+    # part 2: three pins of a 0.65 mm pitch row placed off the grid (x 4.0 / 4.65 / 5.3, y 8.0) to test pads on grid
+    # lines: the first bend of each (on the leg through the off-grid pad centre) cannot be on the grid (KiCad's own
+    # router gives the same, pad snap wins); every later bend can, at no extra length (all monotone octilinear paths
+    # from the pin to its pad are equally long)
+    nets = ["B", "C", "D"]
+    xs, yr = [4.0, 4.65, 5.3], 8.0
+    u = Fp("U1", [Pad(str(i + 1), n, (x, yr), (0.45, 1.45), "roundrect") for i, (n, x) in enumerate(zip(nets, xs))],
+           "Package_SO:TSSOP-8_4.4x3mm_P0.65mm (row pitch, pad size)")
+    lv = {"B": gx(20), "C": gx(23), "D": gx(26)}
+    xt = gx(70)
+    tps = [Fp(f"T{n}", [Pad("1", n, (xt, lv[n]), (0.6, 0.6), "circle")]) for n in nets]
+    for n, x, m in zip(nets, xs, (23, 23, 22)):
+        yb = _r(m * g - x + lv[n])  # the pad leg's bend (off the grid in x, the pad's own column)
+        ref.append(Trk(n, "F.Cu", W, [(x, yr), (x, yb), (gx(m), lv[n]), (xt, lv[n])]))
+    total = sum(plen(t.pts) for t in ref)
+    return Pat(
+        name="grid_snap_bends", cluster="GRID-SNAP", title="Bends on the user's 0.254 mm grid where room allows; pad ends stay at the pad centre",
+        purpose="Grid 0.254 mm (10 mil), origin (0, 0), drawn as dots. Part 1: net A between two on-grid pads round a 1 mm "
+                "blocker. Part 2: nets B, C, D from three pins of a 0.65 mm pitch row placed off the grid to test pads on "
+                "grid lines. F.Cu only. Run with [drawing] grid_snap = \"prefer\", grid_mm = 0.254.",
+        answer=f"0 vias. A: 45 deg up onto the grid line y 1.27 (one grid line out from the tight line 1.35, +0.066 mm), "
+               f"over the blocker, 45 deg down: both bends on the grid. B, C, D: up from the pin centre along the pad, then "
+               f"45 deg onto the test pad's grid line, horizontal to it: the first bend is off the grid (it lies on the leg "
+               f"through the off-grid pin centre: pad snap wins, as in KiCad), the second on it, at no extra length. "
+               f"{total:.3f} mm in all. Every track end on a pad at the pad centre.",
+        why="Users fix autorouted boards by hand in KiCad with grid snap on (user 2026-11-17); off-grid bends make "
+            "those edits awkward. The grid is a graded price (off_grid, 0.15 mm per bend fully off), never a rule: "
+            "a wire leaves the grid where clearance, packing or the 45 deg form need it (user 2026-11-21).",
+        size=(Wd, Hd), nets=["A"] + nets, fps=[ja, jb, blk, u] + tps,
+        connections=[("A", "J1.1", "J2.1")] + [(n, f"U1.{i + 1}", f"T{n}.1") for i, n in enumerate(nets)],
+        ref_tracks=ref, expect={"vias": 0, "layers": {n: ["F.Cu"] for n in ["A"] + nets}, "octilinear": True,
+                                "pad_ends_at_centre": True, "grid_mm": g, "grid_off_bends_max": 3},
+        marks=[{"xy": [10.0, 1.27], "text": "grid line 1.27"}, {"xy": [4.0, 6.922], "text": "pad leg bend (off grid)"}])
+
+
 PATTERNS = {f.__name__: f for f in (usbc_pair_esd, fpc_exit_fanout, via_pair_cross, via_grid_10, kept_wide_gnd_arc,
                                     jst_fanout_45, jst_fanout_45_close, pth_wrap_pin, via_in_fanin, via_before_crossing,
-                                    cc_lines_esd, through_other_copper, narrow_passage_pair, own_net_neck, pad_end_centre)}
+                                    cc_lines_esd, through_other_copper, narrow_passage_pair, own_net_neck, pad_end_centre,
+                                    grid_snap_bends)}
 # parked / regression set: no repro left on the board, no further work (user, round 3)
 PARKED = {f.__name__: f for f in (roundrect_corner_pass, via_slot_30, via_slot_60, pair_crossing_layered)}
 # what changed in the latest review round per pattern (round 3 = user review of the round 2 PNGs)
@@ -1133,7 +1184,8 @@ ROUND = {"kept_wide_gnd_arc": "round 3: changed", "jst_fanout_45": "round 3: cha
          "jst_fanout_45_close": "round 3: changed (8 pins)", "pth_wrap_pin": "round 3: changed (wrap via the bottom)",
          "via_before_crossing": "round 3b: new (K8 rebuilt, edge closed)", "cc_lines_esd": "round 3: new", "through_other_copper": "round 3b: new (edge closed)",
          "narrow_passage_pair": "round 3b: new (B.Cu closed)", "own_net_neck": "round 3: new", "via_in_fanin": "round 3: approved (e2e test)",
-         "pad_end_centre": "A1b: new (pad-snap), PROPOSED: D1 awaits user approval", "usbc_pair_esd": "round 2: changed", "fpc_exit_fanout": "round 2: changed", "via_grid_10": "round 2: new",
+         "pad_end_centre": "A1b: new (pad-snap), PROPOSED: D1 awaits user approval",
+         "grid_snap_bends": "GRID-SNAP: new, PROPOSED: awaits user approval", "usbc_pair_esd": "round 2: changed", "fpc_exit_fanout": "round 2: changed", "via_grid_10": "round 2: new",
          "roundrect_corner_pass": "parked", "via_slot_30": "parked", "via_slot_60": "parked",
          "pair_crossing_layered": "parked (K8 rebuilt as via_before_crossing)"}
 
