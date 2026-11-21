@@ -8,7 +8,7 @@
 //! the pad is not a fix: the first segment from the centre must leave the pad.
 //!
 //! Fixture `padsnap/model-pad_end_centre.json`: the PROPOSED drc pattern `pad_end_centre`
-//! (harness/drc_patterns.py), exported by `harness.g0 export` (the problem board).
+//! (harness/drc_patterns.py; still PROPOSED until the user approves it, decision D1), exported by `harness.g0 export` (the problem board).
 
 use topor_engine::control::RunControl;
 use topor_engine::model::{BoardModel, Options};

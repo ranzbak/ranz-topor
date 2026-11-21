@@ -150,21 +150,25 @@ const STUB_TOL_NM: f64 = 5_000.0;
 
 /// pad-snap: price of a first (last) leg of a run whose far (near) end lies so deep inside the
 /// run's own pad that the stub from the pad centre is wholly inside it (nm of length: 4 bends at
-/// the default 0.25 mm). tidy and KiCad's Cleanup delete that stub, so the track ends off the pad
+/// the default 0.25 mm; [`OctiCfg::stub_nm`] derives it from the config, this is its default). tidy and KiCad's Cleanup delete that stub, so the track ends off the pad
 /// centre, where KiCad's push-and-shove router does not link it to the pad (`pns_node.cpp`
 /// `NODE::addSolid`: the pad's joint is its anchor). Graded by how far off the centre the end
 /// lands: times `1 + off / extent` (extent = the pad's farthest outline point from the end).
 /// Costly, not failed: a legal shape is never dropped for it.
 pub const STUB_NM: f64 = 1.0e6;
 
+/// Share of one violation unit's price ([`OctiCfg::viol_nm`]) the dearest stub (2 x base) may cost:
+/// 0.8 < 1, so short > clearance > stub holds for every `violation` weight.
+const STUB_VIOL_SHARE: f64 = 0.4;
+
 /// pad-snap: the [`STUB_NM`] price of a stub from `c` (a run end at its own pad `poly`, `ext` =
 /// the farthest outline point from `c`) to `j`, for a track of width `w`: 0 unless `j` lies in the
 /// pad at least `w / 2` (less tidy's tolerance) from its outline. O(outline).
-pub fn stub_price(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2) -> f64 {
+pub fn stub_price(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2, base: f64) -> f64 {
     if (j - c).len2() < 1.0 || !point_in_poly(j, poly) || super::padend::boundary_dist(j, poly) < 0.5 * w - STUB_TOL_NM {
         return 0.0;
     }
-    STUB_NM * (1.0 + (j - c).len() / ext.max(1.0))
+    base * (1.0 + (j - c).len() / ext.max(1.0))
 }
 
 /// pad-snap r2b (D3b): the leave point of a run end `c` inside its own pad `poly` in the unit
@@ -214,6 +218,14 @@ pub fn leave_point(poly: &[Vec2], c: Vec2, d: Vec2, w: f64) -> Option<Vec2> {
 }
 
 impl OctiCfg {
+    /// pad-snap: base price of a pad stub (see [`STUB_NM`]): `4 x bend_nm` (design note), but at
+    /// most [`STUB_VIOL_SHARE`] of one violation unit's price, so the order short > clearance >
+    /// stub (dearest stub = 2 x base < one violation unit) holds for every `violation` weight the
+    /// config accepts (a weight of 0 makes violations free and the stub free with it).
+    pub fn stub_nm(&self) -> f64 {
+        (4.0 * self.bend_nm).min(STUB_VIOL_SHARE * self.viol_nm)
+    }
+
     /// From the engine options: `[drawing]` and the `any_angle` / `acute_bend` weights of
     /// `[factors]` (unfluctuated: the drawing's prices stay put across cycles).
     pub fn from_opts(o: &crate::model::Options) -> OctiCfg {
@@ -464,17 +476,28 @@ impl Drawer<'_> {
             return [false; 2];
         }
         [0usize, 1].map(|end| {
-            let (ob, at_end) = if end == 0 { (wi.pa, k0 == 0) } else { (wi.pb, k1 == wi.passes.len()) };
-            if !at_end || ob == NO_OBS || ob >= self.b.proj.obstacles.len() || self.end_at.contains_key(&(w, end)) || self.b.kept_ends.iter().any(|k| k.obs == ob && k.lead.is_some()) {
-                return false;
-            }
-            let poly: &[Vec2] = &self.b.proj.obstacles[ob].poly;
+            let at_end = if end == 0 { k0 == 0 } else { k1 == wi.passes.len() };
             let (c, j) = if end == 0 { (pts[0], pts[1]) } else { (pts[n - 1], pts[n - 2]) };
-            if poly.len() < 3 || !point_in_poly(c, poly) {
-                return false;
-            }
-            stub_price(poly, c, poly.iter().map(|&q| (q - c).len()).fold(0.0, f64::max), wi.w, j) > 0.0
+            self.own_pad_end(w, end, at_end, false, c).is_some_and(|(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, 1.0) > 0.0)
         })
+    }
+
+    /// pad-snap: the ONE predicate for "the run end `c` (`end` 0: start, 1: end of wire `w`) is an
+    /// own-pad end whose stub is priced": the run really ends there (`at_end`, no continued lead:
+    /// neither a kept lead on that pad nor `lead_cont`), the pad is an obstacle and not anchored
+    /// elsewhere (`end_at`), and `c` lies in the pad outline. Gives (outline, `c`, the farthest
+    /// outline point from `c`). Used by the DP's price and by [`Drawer::run_pad_stubs`].
+    pub(super) fn own_pad_end(&self, w: WireId, end: usize, at_end: bool, lead_cont: bool, c: Vec2) -> Option<(&[Vec2], Vec2, f64)> {
+        let wi = &self.st.wires[w];
+        let ob = if end == 0 { wi.pa } else { wi.pb };
+        if !at_end || lead_cont || ob == NO_OBS || ob >= self.b.proj.obstacles.len() || self.end_at.contains_key(&(w, end)) || self.b.kept_ends.iter().any(|k| k.obs == ob && k.lead.is_some()) {
+            return None;
+        }
+        let poly: &[Vec2] = &self.b.proj.obstacles[ob].poly;
+        if poly.len() < 3 || !point_in_poly(c, poly) {
+            return None;
+        }
+        Some((poly, c, poly.iter().map(|&q| (q - c).len()).fold(0.0, f64::max)))
     }
 
     /// The run `pts` (passes `k0..k1` of `w` on `layer`, legal as drawn) redrawn octilinear in its
@@ -847,19 +870,12 @@ impl Drawer<'_> {
         // point from it). A first (last) leg that leaves a stub wholly inside it pays
         // [`stub_price`].
         let own_pad: [Option<(&[Vec2], Vec2, f64)>; 2] = [0usize, 1].map(|end| {
-            let at_end = if end == 0 { k0 == 0 && lead_in.is_none() } else { k1 == n_pass && lead_out.is_none() };
-            let ob = if end == 0 { wi.pa } else { wi.pb };
-            if !at_end || ob == NO_OBS || ob >= self.b.proj.obstacles.len() || self.end_at.contains_key(&(w, end)) {
-                return None;
-            }
-            let poly: &[Vec2] = &self.b.proj.obstacles[ob].poly;
+            let (at_end, lead_cont) = if end == 0 { (k0 == 0, lead_in.is_some()) } else { (k1 == n_pass, lead_out.is_some()) };
             let c = if end == 0 { taut[0] } else { taut[taut.len() - 1] };
-            if poly.len() < 3 || !point_in_poly(c, poly) {
-                return None;
-            }
-            Some((poly, c, poly.iter().map(|&q| (q - c).len()).fold(0.0, f64::max)))
+            self.own_pad_end(w, end, at_end, lead_cont, c)
         });
-        let stub = |end: usize, j: Vec2| own_pad[end].map_or(0.0, |(poly, c, ext)| stub_price(poly, c, ext, wi.w, j));
+        let stub_nm = cfg.stub_nm();
+        let stub = |end: usize, j: Vec2| own_pad[end].map_or(0.0, |(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, stub_nm));
         // pad-snap r2b (D3b): per own-pad end and octilinear direction `k`, the leave point: the
         // nearest point on the ray from the run end whose round end sticks out of the pad by
         // [`LEAVE_NM`] ([`leave_point`]). Every own pad, also one too short for an [`Exit`].
@@ -1818,6 +1834,10 @@ mod tests {
         assert_eq!(octi_dir(v(2e6, 1e6)), None);
     }
 
+    fn stub_price_d(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2) -> f64 {
+        stub_price(poly, c, ext, w, j, STUB_NM)
+    }
+
     /// pad-snap: the stub price is 0 for a joint outside the pad, on its outline or within half the
     /// width of it (the stub's round end sticks out: kept by tidy and Cleanup), and at the centre;
     /// deeper inside it is STUB_NM graded by the distance from the centre.
@@ -1826,7 +1846,16 @@ mod tests {
         // pad-snap r2 (rule order short > clearance > off-centre stub): the dearest stub (an end
         // at the pad's far side, 2 x STUB_NM) is cheaper than the least clearance violation the
         // forced DP prices (one violation unit at the default weight)
-        assert!(2.0 * STUB_NM < OctiCfg::default().viol_nm, "{} vs {}", 2.0 * STUB_NM, OctiCfg::default().viol_nm);
+        assert_eq!(OctiCfg::default().stub_nm(), STUB_NM, "4 x bend_nm at the defaults");
+        // every violation weight the config accepts (>= 0) and a range of bend prices
+        for wt in [0.0, 0.01, 0.5, 1.0, 1.9, 2.0, 5.0, 1000.0] {
+            for bend in [0.0, 0.1, 0.25, 1.0, 5.0] {
+                let cfg = OctiCfg { viol_nm: wt * MM, short_nm: wt * MM * SHORT_FIRST, bend_nm: bend * MM, ..OctiCfg::default() };
+                let dearest = 2.0 * cfg.stub_nm();
+                assert!(dearest <= 0.8 * cfg.viol_nm + 1e-9 && (dearest < cfg.viol_nm || wt == 0.0), "w {wt} bend {bend}: {dearest} vs {}", cfg.viol_nm);
+                assert!(cfg.viol_nm <= cfg.short_nm);
+            }
+        }
     }
 
     #[test]
@@ -1836,16 +1865,16 @@ mod tests {
         let c = v(0.0, 0.0);
         let ext = (0.3e6f64).hypot(0.975e6);
         let w = 0.2e6;
-        assert_eq!(stub_price(&poly, c, ext, w, c), 0.0);
-        assert_eq!(stub_price(&poly, c, ext, w, v(0.0, 1.2e6)), 0.0, "outside");
-        assert_eq!(stub_price(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + LEAVE_NM)), 0.0, "the leave point");
-        assert_eq!(stub_price(&poly, c, ext, w, v(0.3e6 - 0.05e6, 0.0)), 0.0, "near the long side");
-        let deep = stub_price(&poly, c, ext, w, v(0.0, 0.5e6));
+        assert_eq!(stub_price_d(&poly, c, ext, w, c), 0.0);
+        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.0, 1.2e6)), 0.0, "outside");
+        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + LEAVE_NM)), 0.0, "the leave point");
+        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.3e6 - 0.05e6, 0.0)), 0.0, "near the long side");
+        let deep = stub_price_d(&poly, c, ext, w, v(0.0, 0.5e6));
         assert!((deep - STUB_NM * (1.0 + 0.5e6 / ext)).abs() < 1e-6, "{deep}");
-        let deeper = stub_price(&poly, c, ext, w, v(0.0, 0.8e6));
+        let deeper = stub_price_d(&poly, c, ext, w, v(0.0, 0.8e6));
         assert!(deeper > deep, "graded by the distance from the centre: {deeper} vs {deep}");
         // within tidy's tolerance of half the width: inside (tidy drops it), so priced
-        assert!(stub_price(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + 0.5 * STUB_TOL_NM)) > 0.0);
+        assert!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + 0.5 * STUB_TOL_NM)) > 0.0);
     }
 
     /// pad-snap r2b: the leave point lies on the ray where the round end of a stub from the centre
@@ -1861,8 +1890,8 @@ mod tests {
         for (d, want) in [(v(0.0, 1.0), v(0.0, 0.895e6)), (v(-1.0, 0.0), v(-0.22e6, 0.0)), (v(s2, s2), v(0.22e6, 0.22e6)), (v(s2, -s2), v(0.22e6, -0.22e6))] {
             let m = leave_point(&poly, c, d, w).expect("a leave point");
             assert!((m - want).len() < 10.0, "{m:?} vs {want:?}");
-            assert_eq!(stub_price(&poly, c, ext, w, m), 0.0);
-            assert!(stub_price(&poly, c, ext, w, m - d * 30_000.0) > 0.0, "30 um before the leave point the stub is wholly inside");
+            assert_eq!(stub_price_d(&poly, c, ext, w, m), 0.0);
+            assert!(stub_price_d(&poly, c, ext, w, m - d * 30_000.0) > 0.0, "30 um before the leave point the stub is wholly inside");
         }
         let thin = vec![v(-0.075e6, -0.975e6), v(0.075e6, -0.975e6), v(0.075e6, 0.975e6), v(-0.075e6, 0.975e6)];
         assert!(leave_point(&thin, c, v(0.0, 1.0), w).is_none());

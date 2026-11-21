@@ -28,7 +28,7 @@ reach"); the elbows of `connectors(centre, pivot)` bend 0.45 mm inside the pad. 
    full-reach shape stays).
 2. Price (graded, costly not failed): a first / last leg whose far end lies inside the own pad by at
    least half the width less tidy's `PAD_TOL_NM` (= the stub tidy and Cleanup delete) pays
-   `4 x bend_nm x (1 + off / pad extent)`, off = how far the end lands from the centre. Every pad end,
+   `stub_nm x (1 + off / pad extent)`, `stub_nm` = `min(4 x bend_nm, 0.4 x violation weight price)` (`OctiCfg::stub_nm`: short > clearance > stub holds for every weight; 4 x bend_nm = 1 mm at the defaults), off = how far the end lands from the centre. Every pad end,
    elongated or not. No new topor.toml key (an internal drawing price on the bend scale like
    `axis_price`); survivors are counted.
 3. Count: the result's `pad ends:` warning line gets "N track ends off their pad centre (largest x mm)",
@@ -41,7 +41,7 @@ off centre by design and are reported as before.
 the DP never loses a legal shape it had (only shapes added, one price added); copper identical for any
 thread / lane count (pure function of the same inputs).
 
-**Tests.** `engine/tests/topo_pad_snap.rs` on the pattern's model (both realise modes; fails on main);
+**Tests.** (pattern `pad_end_centre` stays PROPOSED until the user approves it, D1.) `engine/tests/topo_pad_snap.rs` on the pattern's model (both realise modes; fails on main);
 a unit test of the leave point and the stub price (square pad and elongated pad); mutants of the
 added shape, the price and the leave margin. Ladder qmtech + esp det s0: DRC / unconnected / Cleanup
 sets per net vs main, off-centre terminal counts before/after.

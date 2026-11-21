@@ -1133,7 +1133,7 @@ ROUND = {"kept_wide_gnd_arc": "round 3: changed", "jst_fanout_45": "round 3: cha
          "jst_fanout_45_close": "round 3: changed (8 pins)", "pth_wrap_pin": "round 3: changed (wrap via the bottom)",
          "via_before_crossing": "round 3b: new (K8 rebuilt, edge closed)", "cc_lines_esd": "round 3: new", "through_other_copper": "round 3b: new (edge closed)",
          "narrow_passage_pair": "round 3b: new (B.Cu closed)", "own_net_neck": "round 3: new", "via_in_fanin": "round 3: approved (e2e test)",
-         "pad_end_centre": "A1b: new (pad-snap)", "usbc_pair_esd": "round 2: changed", "fpc_exit_fanout": "round 2: changed", "via_grid_10": "round 2: new",
+         "pad_end_centre": "A1b: new (pad-snap), PROPOSED: D1 awaits user approval", "usbc_pair_esd": "round 2: changed", "fpc_exit_fanout": "round 2: changed", "via_grid_10": "round 2: new",
          "roundrect_corner_pass": "parked", "via_slot_30": "parked", "via_slot_60": "parked",
          "pair_crossing_layered": "parked (K8 rebuilt as via_before_crossing)"}
 
