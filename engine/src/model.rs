@@ -1523,8 +1523,9 @@ pub struct Options {
     /// `"bends"` (default: the bend relation only, a cycle broken at the earliest wire) or `"sweep"`
     /// (Staepelaere 1992 OrderSegments, PDF pp. 22, 29: the bend relation plus one sweep axis per
     /// group of cut neighbours, a cycle broken at the fewest unmet predecessors). Sweep fixes
-    /// K5-type bundles; long-chord bundles (U6, qmtech JS_*) need the staircase nodes of P4 first,
-    /// so "bends" stays the default until P4 (lead 2026-11-21, first-draw-45 r3).
+    /// K5-type bundles and draws U6 as one parallel bundle; with P4 (chord nodes, straightening)
+    /// neither order wins on every count on the test boards, so "bends" stays the default
+    /// (first-draw-45 r6 re-judge, reports/first-draw-45-r6-*.md).
     pub octi_order: String,
     /// first-draw-45 P2 (`[drawing] octi_own_portals`): in the first draw's octilinear form, an
     /// edge the run's own taut path crosses (no portal of its sleeve) opens in the room the plan

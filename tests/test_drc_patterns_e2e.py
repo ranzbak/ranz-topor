@@ -67,5 +67,5 @@ def test_jst_fanout_45_close_octilinear_bundle(tmp_path):
     45 deg / horizontal / 45 deg bundle on B.Cu: 0 free-angle segments, 0 vias, no DRC, within 5 % of the reference.
     Base 5571d1bd kept 2 free-angle legs (D1, D2): the draw order started in the middle of the bundle and each 45 deg
     form crossed the reserved bands of the undrawn neighbours; fixed by the sweep order (first-draw-45 P3,
-    [drawing] octi_order = "sweep"; not the default until P4, so set here)."""
+    [drawing] octi_order = "sweep"; not the default, so set here)."""
     _bundle_octilinear("jst_fanout_45_close", tmp_path, ("drawing.octi_order=sweep",))

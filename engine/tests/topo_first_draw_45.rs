@@ -17,9 +17,6 @@ fn route(p: &str, extra: &[(&str, serde_json::Value)]) -> RouteResult {
     let mut val = serde_json::to_value(Options::default()).unwrap();
     val["runs"] = serde_json::json!(1);
     val["topo_rounds"] = serde_json::json!(1);
-    if let Ok(o) = std::env::var("FD45_ORDER_TMP") {
-        val["octi_order"] = serde_json::json!(o);
-    }
     for (k, v) in extra {
         val[*k] = v.clone();
     }
@@ -119,7 +116,12 @@ fn bends(pts: &[[f64; 2]]) -> usize {
 /// towards the drawn neighbour, `bundle_pull`) and the straight pad exit (PAD-EXIT-AXIS, below).
 #[test]
 fn u6_pinrow_long_bundle_is_one_octilinear_bundle() {
-    let r = route("pinrow_long_bundle", &[]);
+    // The bends order (the default) also draws U6 without free-angle copper, but S5 leaves the
+    // bundle there (its level 2 mm below S7's): the one-bundle shape needs the sweep order.
+    let b = route("pinrow_long_bundle", &[]);
+    clean(&b);
+    assert!(free_angle(&b).is_empty(), "bends order: free-angle {:?}", free_angle(&b));
+    let r = route("pinrow_long_bundle", &[("octi_order", serde_json::json!("sweep"))]);
     // Debug: the tracks as JSON (net, layer, start, end in mm, KiCad frame) for the PNG.
     if let Ok(path) = std::env::var("FD45_DUMP") {
         let segs: Vec<serde_json::Value> = r
