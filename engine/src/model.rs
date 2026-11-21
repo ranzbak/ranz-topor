@@ -1565,9 +1565,11 @@ pub struct Options {
     /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
     pub bundle_pull: f64,
     /// first-draw-45 r7 (`[drawing] bundle_pull_range_mm`): how far (mm) a drawn trace of another
-    /// net may pull a trace off its own path to run beside it in the straightening pass
-    /// (`bundle_pull`, the tie on depth broken towards the neighbour). 0 = no limit beyond the
-    /// search area (the behaviour before this key).
+    /// net may pull a trace off its own path to run beside it (`bundle_pull`): in the
+    /// straightening pass (the tie on depth broken towards the neighbour) and, r9, in the
+    /// octilinear DP (a drawn neighbour's corner is a node only within the range of the taut
+    /// path, and up to 2 pitches past its clearance as before). 0 = no limit beyond those (the
+    /// behaviour before this key).
     pub bundle_pull_range_mm: f64,
     /// Inflated sketch U0 (`topor.toml [capacity] mixed_clearance`): how the per-layer cut test
     /// (`topo::sheet`, `topo::cutflow`) spaces neighbours of different nets on a cut:

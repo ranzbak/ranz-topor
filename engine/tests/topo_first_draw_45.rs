@@ -196,11 +196,16 @@ fn u6_pinrow_long_bundle_is_one_octilinear_bundle() {
     }
 }
 
-/// An unknown value falls back to the default with a warning.
+/// An unknown value falls back to the default ("sweep") with a warning: on U6 (where the two
+/// orders leave different bundles) its copper is the default's (r9: kills a fallback to "bends").
 #[test]
 fn unknown_octi_order_warns() {
-    let r = route("jst_fanout_45_close", &[("octi_order", serde_json::json!("zigzag"))]);
+    let r = route("pinrow_long_bundle", &[("octi_order", serde_json::json!("zigzag"))]);
     assert!(r.warnings.iter().any(|w| w.contains("octi_order = \"zigzag\"")), "{:?}", r.warnings);
+    let d = route("pinrow_long_bundle", &[]);
+    assert_eq!(tracks(&r), tracks(&d), "the fallback is not the default's copper");
+    let b = route("pinrow_long_bundle", &[("octi_order", serde_json::json!("bends"))]);
+    assert_ne!(tracks(&b), tracks(&d), "the fixture no longer tells the two orders apart");
 }
 
 /// first-draw-45 r7 (kills the r6 survivor STRAIGHTEN_PASSES = 1): the straightening's passes
@@ -216,6 +221,9 @@ fn straightening_reaches_its_fixpoint() {
     let mut val = serde_json::to_value(Options::default()).unwrap();
     val["runs"] = serde_json::json!(1);
     val["topo_rounds"] = serde_json::json!(1);
+    // The bends order (the default before r9): there the corner needs 3 passes; in the sweep
+    // order its 2nd pass already changes nothing, which a bound of 2 would pass.
+    val["octi_order"] = serde_json::json!("bends");
     let o: Options = serde_json::from_value(val).unwrap();
     let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
     let line = r.warnings.iter().find(|w| w.starts_with("octilinear straightening after drawing")).unwrap_or_else(|| panic!("no straightening line: {:?}", r.warnings));
