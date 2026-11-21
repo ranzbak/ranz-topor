@@ -194,18 +194,19 @@ impl Topo {
     }
     /// Debug: [`Topo::path_price`] per factor of the alive wire `w` where it lies, summed by name.
     pub fn wire_price_by(&self, st: &mut State, w: WireId, ci: usize, reg: &Registry) -> std::collections::BTreeMap<&'static str, f64> {
-        let path = st.detach(w);
-        let wire = st.wires[w].clone();
-        let mv = Move::Insert { wire: &wire, path: &path, tris: &wire.tris, scale: self.scale(ci) };
-        let ctx = self.ctx(ci);
-        let mut m = std::collections::BTreeMap::new();
-        for e in super::factors::events(st, &mv) {
-            for (n, v) in reg.price_by(&e, &ctx) {
-                *m.entry(n).or_insert(0.0) += v;
+        // A debug read must leave the state as it was: detach + reattach reorders the traversals
+        // and refits the neighbours' neck widths (TOPO_LOOPDBG once changed copper that way).
+        st.probe_detached(w, |st, wire, path| {
+            let mv = Move::Insert { wire, path, tris: &wire.tris, scale: self.scale(ci) };
+            let ctx = self.ctx(ci);
+            let mut m = std::collections::BTreeMap::new();
+            for e in super::factors::events(st, &mv) {
+                for (n, v) in reg.price_by(&e, &ctx) {
+                    *m.entry(n).or_insert(0.0) += v;
+                }
             }
-        }
-        st.reattach(w, &path);
-        m
+            m
+        })
     }
     /// What `w` could gain at most by moving: its price minus the price of its straight pad-to-pad
     /// length (the length factor alone). O(path x traversals).

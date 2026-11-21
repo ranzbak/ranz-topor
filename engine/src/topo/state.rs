@@ -567,6 +567,14 @@ impl Topology {
     }
 }
 
+/// What [`State::snap_around`] keeps.
+pub struct AroundSnap {
+    edge_order: Vec<(EdgeId, Vec<PassId>)>,
+    tri_trav: Vec<(usize, Vec<(WireId, usize)>)>,
+    pass_w: Vec<f64>,
+    pass_d: Vec<f64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct State<'p> {
     pub proj: &'p Projection,
@@ -1620,6 +1628,52 @@ impl<'p> State<'p> {
             .collect();
         self.remove(w);
         path
+    }
+
+    /// Debug read-only probes (`TOPO_LOOPDBG`'s per-factor prices): everything [`State::detach`] +
+    /// [`State::reattach`] of `w` can change beyond the wire itself, kept so
+    /// [`State::restore_around`] puts it back bit for bit: the order of the passes on the wire's
+    /// edges, the order of the traversals in its triangles and the pass widths (the refits of
+    /// `remove` / `reattach` take the neck floors from the layering of the moment, not from the one
+    /// they were laid under). O(passes of the wires + their edge loads).
+    pub fn snap_around(&self, w: WireId) -> AroundSnap {
+        let mut edges: Vec<EdgeId> = self.wires[w].passes.iter().map(|&p| self.passes[p].edge).collect();
+        edges.sort_unstable();
+        edges.dedup();
+        let mut tris = self.wires[w].tris.clone();
+        tris.sort_unstable();
+        tris.dedup();
+        AroundSnap {
+            edge_order: edges.into_iter().map(|e| (e, self.edge_order[e].clone())).collect(),
+            tri_trav: tris.into_iter().map(|t| (t, self.tri_trav[t].clone())).collect(),
+            pass_w: self.pass_w.clone(),
+            pass_d: self.pass_d.clone(),
+        }
+    }
+
+    /// Read-only probe of the alive wire `w` with it taken out (a debug price of the wire where it
+    /// lies): `f` sees the state without `w`, its own copy and its path; afterwards the state is
+    /// exactly as it was ([`State::snap_around`]). O(state of the wire's edges + pass widths).
+    pub fn probe_detached<R>(&mut self, w: WireId, f: impl FnOnce(&State, &Wire, &[(EdgeId, usize)]) -> R) -> R {
+        let snap = self.snap_around(w);
+        let path = self.detach(w);
+        let wire = self.wires[w].clone();
+        let r = f(self, &wire, &path);
+        self.reattach(w, &path);
+        self.restore_around(snap);
+        r
+    }
+
+    /// [`State::snap_around`]'s state back (after a detach + reattach of the same wire).
+    pub fn restore_around(&mut self, s: AroundSnap) {
+        for (e, v) in s.edge_order {
+            self.edge_order[e] = v;
+        }
+        for (t, v) in s.tri_trav {
+            self.tri_trav[t] = v;
+        }
+        self.pass_w = s.pass_w;
+        self.pass_d = s.pass_d;
     }
 
     /// Put the detached wire `w` back along `path` (gaps as in [`State::insert`], one per pass of
