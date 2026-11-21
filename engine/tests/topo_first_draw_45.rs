@@ -113,7 +113,8 @@ fn bends(pts: &[[f64; 2]]) -> usize {
 /// length (pad to pad, within 1 mm), the neighbours in the bundle parallel on their long stretch
 /// at no more than the reference's 0.5 mm level spacing (no crossing: clean). Not asserted: where
 /// the bends land (the depth of the long stretch, a tie on length; the straightening breaks it
-/// towards the drawn neighbour, `bundle_pull`) and the straight pad exit (PAD-EXIT-AXIS, below).
+/// towards the drawn neighbour, `bundle_pull`, approved by the user 2026-11-21). The pad exit
+/// leg is octilinear (PAD-EXIT-AXIS closed: 45 degrees from the pad is fine, free-angle is not).
 #[test]
 fn u6_pinrow_long_bundle_is_one_octilinear_bundle() {
     // The bends order (the default) also draws U6 without free-angle copper, but S5 leaves the
@@ -171,10 +172,13 @@ fn u6_pinrow_long_bundle_is_one_octilinear_bundle() {
     for (net, pts) in &lines {
         let p = row_first(pts);
         assert!(plen(&p) <= ref_len(*net) + 0.25, "net {net}: length {:.3} mm, reference {:.3} mm: {p:?}", plen(&p), ref_len(*net));
-        // The pattern's straight pad exit out of the pin row is NOT asserted (PAD-EXIT-AXIS,
-        // shopping list, a user decision): a run that starts at the pad's tip anchor leaves it at
-        // 45 degrees because the DP's off-axis exit price (2 bend_mm x off/45) is 0.01 mm below a
-        // straight leg to the tip reach plus its bend; raising it changes pad exits on every board.
+        // The pad exit (PAD-EXIT-AXIS, closed by the user 2026-11-21: "it should adhere to the
+        // 45°"): no straight-first rule; the exit leg out of the pin-row pad is octilinear (0, 45
+        // or 90 degrees from the pad's axis, here the board's y axis), never free-angle.
+        let (e0, e1) = (p[0], p[1]);
+        let (dx, dy) = ((e1[0] - e0[0]).abs(), (e1[1] - e0[1]).abs());
+        assert!(dx.hypot(dy) > 1e-3, "net {net}: zero exit leg: {p:?}");
+        assert!(dx < 1e-3 || dy < 1e-3 || (dx - dy).abs() < 1e-3, "net {net}: exit leg {e0:?} -> {e1:?} is not 0/45/90 degrees from the pad: {p:?}");
     }
     // One bundle: every wire has a level of at least 4 mm, neighbours in the pin-row order at most
     // 0.5 mm apart (the reference's level spacing), each one below the one before (no crossing).
@@ -219,4 +223,29 @@ fn straightening_reaches_its_fixpoint() {
     assert!(straighten_line(3, 0.54, 0, 3, true, 0.1).starts_with("octilinear straightening after drawing (draw order, 3 passes, the last without a change): 3 stretches"));
     let cut = straighten_line(9, -1.0, 2, 4, false, 0.1);
     assert!(cut.contains("(draw order, 4 passes, stopped at the bound of 4 passes with changes in the last): 9 stretches") && cut.contains("1.0 mm saved in length; 2 refused by the split guard"), "{cut}");
+}
+
+/// first-draw-45 r7 (`[drawing] bundle_pull_range_mm`, user 2026-11-21: the depth tie broken by
+/// the bundle hug, with a configurable pull range): U6 in the sweep order. With no range (the
+/// default, `u6_pinrow_long_bundle_is_one_octilinear_bundle`) S7 and S5 move about 2.5 mm up to
+/// run beside S4 (one bundle). With a 0.5 mm range that move is out of reach: S7's level stays
+/// where its own shape puts it, more than 1 mm below S4's (clean, octilinear). With a 3 mm range
+/// the hug reaches again: one bundle, neighbours at most 0.5 mm apart.
+#[test]
+fn bundle_pull_range_limits_the_hug() {
+    let order = [1, 6, 2, 3, 4, 7, 5];
+    let level = |p: &[[f64; 2]]| p.windows(2).filter(|x| (x[1][1] - x[0][1]).abs() < 1e-4).map(|x| [x[0], x[1]]).max_by(|a, b| (a[1][0] - a[0][0]).abs().total_cmp(&(b[1][0] - b[0][0]).abs()));
+    let gaps = |rg: f64| -> Vec<f64> {
+        let r = route("pinrow_long_bundle", &[("octi_order", serde_json::json!("sweep")), ("bundle_pull_range_mm", serde_json::json!(rg))]);
+        clean(&r);
+        assert!(free_angle(&r).is_empty(), "range {rg}: free-angle {:?}", free_angle(&r));
+        let lines: std::collections::BTreeMap<i32, Vec<[f64; 2]>> = polylines(&r).into_iter().collect();
+        let ys: Vec<f64> = order.iter().map(|n| level(&lines[n]).map(|l| l[0][1]).unwrap_or(f64::NAN)).collect();
+        eprintln!("range {rg}: levels {ys:?}");
+        ys.windows(2).map(|y| y[1] - y[0]).collect()
+    };
+    let near = gaps(0.5);
+    assert!(near[4] > 1.0, "range 0.5 mm: S7 pulled up to S4 anyway: gaps {near:?}");
+    let far = gaps(3.0);
+    assert!(far.iter().all(|&g| g > 0.0 && g <= 0.5 + 1e-3), "range 3 mm: not one bundle: gaps {far:?}");
 }

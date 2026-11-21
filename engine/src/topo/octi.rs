@@ -131,6 +131,11 @@ pub struct OctiCfg {
     /// runs parallel to a drawn wire of another net at that wire's clearance (it follows its
     /// neighbour, so a bundle keeps its pitch through its bends).
     pub pull: f64,
+    /// `[drawing] bundle_pull_range_mm` (nm): how far the straightening's hug forms may move a run
+    /// to run beside a drawn neighbour ([`hug_within_range`]); infinite = no limit beyond the
+    /// search area (the default). The DP's own bundle reach (corners up to 2 pitches past the
+    /// clearance) does not read it.
+    pub pull_range: f64,
     /// `planned_room` factor weight: price per nm of drawn shape inside the room the plan keeps
     /// for a lane neighbour not drawn yet, times `x + x^2` (`x` = depth over the pitch).
     pub room: f64,
@@ -256,6 +261,7 @@ impl OctiCfg {
             acute_nm: reg.weight("acute_bend").unwrap_or(50.0) * MM,
             acute_forbidden: o.acute == "forbidden",
             pull: o.bundle_pull.clamp(0.0, 0.9),
+            pull_range: if o.bundle_pull_range_mm > 0.0 { o.bundle_pull_range_mm * MM } else { f64::INFINITY },
             room: reg.weight("planned_room").unwrap_or(5.0).max(0.0),
             viol_nm: reg.weight("violation").unwrap_or(1000.0).max(0.0) * MM,
             short_nm: reg.weight("violation").unwrap_or(1000.0).max(0.0) * MM * SHORT_FIRST,
@@ -265,7 +271,7 @@ impl OctiCfg {
 
 impl Default for OctiCfg {
     fn default() -> Self {
-        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, short_leg_nm: 0.0, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST }
+        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, short_leg_nm: 0.0, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, pull_range: f64::INFINITY, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST }
     }
 }
 
@@ -386,6 +392,20 @@ pub fn bend_price_seq(cfg: &OctiCfg, leff: f64, u: Vec2, l_in: f64, l_prev: f64,
     } else {
         p
     }
+}
+
+/// first-draw-45 r7 (`[drawing] bundle_pull_range_mm`, lead 2026-11-21): a hug form whose
+/// middle leg `p1-p2` lies beside a drawn neighbour pulls the run only where that leg stays within
+/// the range of the run's stretch it replaces (`old`): the farthest of 9 points along the leg
+/// from `old` is at most the range (always with no range set). O(|old|).
+pub fn hug_within_range(cfg: &OctiCfg, old: &[Vec2], p1: Vec2, p2: Vec2) -> bool {
+    if !cfg.pull_range.is_finite() {
+        return true;
+    }
+    (0..=8).all(|t| {
+        let q = p1 + (p2 - p1) * (t as f64 / 8.0);
+        old.windows(2).any(|s| super::draw::seg_dist(q, s[0], s[1]) <= cfg.pull_range)
+    })
 }
 
 /// first-draw-45 r7 (`[drawing] short_leg_mm`, lead 2026-11-21: graded, no cutoff): the graded
@@ -2451,7 +2471,9 @@ impl Drawer<'_> {
                                     if s > 1_000.0 && s < lu - 1_000.0 {
                                         let p1 = a + u * s;
                                         let p2 = p1 + um * if mk == k1 { be } else { al };
-                                        forms.push(vec![p1, p2, b]);
+                                        if hug_within_range(&cfg, &cur[i..=j], p1, p2) {
+                                            forms.push(vec![p1, p2, b]);
+                                        }
                                     }
                                 }
                             }

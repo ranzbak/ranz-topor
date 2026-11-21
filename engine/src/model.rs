@@ -1564,6 +1564,11 @@ pub struct Options {
     /// taken off its price where it runs beside a drawn trace of another net at the clearance, so
     /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
     pub bundle_pull: f64,
+    /// first-draw-45 r7 (`[drawing] bundle_pull_range_mm`): how far (mm) a drawn trace of another
+    /// net may pull a trace off its own path to run beside it in the straightening pass
+    /// (`bundle_pull`, the tie on depth broken towards the neighbour). 0 = no limit beyond the
+    /// search area (the behaviour before this key).
+    pub bundle_pull_range_mm: f64,
     /// Inflated sketch U0 (`topor.toml [capacity] mixed_clearance`): how the per-layer cut test
     /// (`topo::sheet`, `topo::cutflow`) spaces neighbours of different nets on a cut:
     /// `"conservative"` (default; every gap at the largest clearance of the cut's items, the
@@ -1920,6 +1925,7 @@ impl Default for Options {
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
             bundle_pull: 0.3,
+            bundle_pull_range_mm: 0.0,
             reserve_via_sites: true,
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
