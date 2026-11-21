@@ -5,14 +5,16 @@ approval").
 
     python -m harness.stitch_patterns [OUT]      # OUT/stitch_pieces/problem/stitch_pieces.kicad_pcb + expected.json
 
-Pieces (kept copper: a closed loop of a signal net between two pads 1 mm apart, so the fill cannot pass the gap):
+Pieces (kept copper: a closed loop of a signal net between two pads 1 mm apart, so the fill cannot pass the gap; B and
+D: a kept U closed by a routed connection whose straight path is the optimal one):
   A cut:     F.Cu loop [14, 4]-[24, 12] around the GND SMD pad C1.1: KiCad keeps the piece (it holds a pad), it is cut off
              -> class 1, at least 2 vias (one per 25 mm²), the first near C1.1;
-  B dropped: F.Cu loop [28, 4]-[38, 14], no GND copper inside: KiCad would remove the piece -> class 2, vias keep it;
+  B dropped: F.Cu U [28, 4]-[38, 14] closed by the routed CB at y = 14, no GND copper inside: KiCad would remove the
+             piece -> class 2, vias keep it;
   C thin:    the F.Cu fill above y = 20 joins the rest only through a 0.7 mm neck between TP2 and TP3 and holds no
              GND via or THT pad -> class 3, vias;
-  D none:    an F.Cu loop [3, 23]-[10, 28] with a B.Cu loop under it: no solid GND on another layer -> no via (never
-             dangling).
+  D none:    an F.Cu U [3, 23]-[10, 28] closed by the routed CD, with a closed B.Cu loop under it: no solid GND on
+             another layer -> no via (never dangling).
 Expected: vias on the 5 mm lattice from the grid origin where legal; nothing else changes. One signal connection (SIG,
 J1.2 -> R1.1) is routed so the run has a result to stitch.
 """
@@ -40,12 +42,23 @@ def _loop(net: str, layer: str, ref: str, x0: float, y0: float, x1: float, y1: f
 
 
 def pattern() -> D.Pat:
-    fps, kept = [], []
-    for args in (("SA", "F.Cu", "LA", 14, 4, 24, 12), ("SB", "F.Cu", "LB", 28, 4, 38, 14),
-                 ("SD", "F.Cu", "LD", 3, 23, 10, 28), ("SE", "B.Cu", "LE", 2.5, 22.5, 10.5, 28.5)):
+    fps, kept, conns, ref = [], [], [], []
+    for args in (("SA", "F.Cu", "LA", 14, 4, 24, 12), ("SE", "B.Cu", "LE", 2.5, 22.5, 10.5, 28.5)):
         f, t = _loop(*args)
         fps.append(f)
         kept.append(t)
+    # B and D: a kept U (three sides) and a connection the router closes it with (the straight, optimal path), so the
+    # piece inside is cut off by ROUTED copper (a piece the kept copper alone cut off is not in the pre-route fill:
+    # KiCad already removed it).
+    for (net, cnet, ref_, x0, y0, x1, y1) in (("SB", "CB", "UB", 28, 4, 38, 14), ("SD", "CD", "UD", 3, 23, 10, 28)):
+        # pads 0.6 mm, 0.9 mm apart: a 0.3 mm gap (>= the 0.15 clearance, too narrow for the fill)
+        fps.append(D.Fp(ref_ + "1", [D.Pad("1", net, (x0, y1), (0.6, 0.6))]))
+        fps.append(D.Fp(ref_ + "4", [D.Pad("1", net, (x1, y1), (0.6, 0.6))]))
+        kept.append(D.Trk(net, "F.Cu", D.W, [(x0, y1), (x0, y0), (x1, y0), (x1, y1)], locked=True))
+        fps.append(D.Fp(ref_ + "2", [D.Pad("1", cnet, (x0 + 0.9, y1), (0.6, 0.6))]))
+        fps.append(D.Fp(ref_ + "3", [D.Pad("1", cnet, (x1 - 0.9, y1), (0.6, 0.6))]))
+        conns.append((cnet, f"{ref_}2.1", f"{ref_}3.1"))
+        ref.append(D.Trk(cnet, "F.Cu", D.W, [(x0 + 0.9, y1), (x1 - 0.9, y1)]))
     # The thin neck: SIG4 from TP1 (edge) to TP2, SIG5 from TP3 to TP4 (edge); TP2 / TP3 edges 1.0 mm apart.
     tp = lambda ref, net, x: D.Fp(ref, [D.Pad("1", net, (x, 20.0), (0.8, 0.8))])  # noqa: E731
     fps += [tp("TP1", "SIG4", 0.9), tp("TP2", "SIG4", 26.0), tp("TP3", "SIG5", 27.8), tp("TP4", "SIG5", 39.1)]
@@ -59,8 +72,9 @@ def pattern() -> D.Pat:
         purpose="stitch-vias classes 1-3 and the never-dangling rule on one board",
         answer="A >= 3 vias (first near C1.1), B >= 4 vias, C vias above y = 20, D none; all on the 5 mm lattice where legal",
         why="GND is poured on both layers; a via joins an F.Cu piece to the solid B.Cu pour",
-        size=(40.0, 30.0), nets=["GND", "SIG", "SIG4", "SIG5", "SA", "SB", "SD", "SE"], fps=fps,
-        connections=[("SIG", "J1.2", "R1.1")], ref_tracks=[D.Trk("SIG", "F.Cu", D.W, [(4.0, 16.27), (9.0, 16.27)])],
+        size=(40.0, 30.0), nets=["GND", "SIG", "SIG4", "SIG5", "SA", "SB", "SD", "SE", "CB", "CD"], fps=fps,
+        connections=[("SIG", "J1.2", "R1.1")] + conns,
+        ref_tracks=[D.Trk("SIG", "F.Cu", D.W, [(4.0, 16.27), (9.0, 16.27)])] + ref,
         kept=kept,
         expect={"vias_min": {"A": 3, "B": 4, "C": 2, "D": 0},
                 "pieces": {"A": [14, 4, 24, 12], "B": [28, 4, 38, 14], "C": [0, 20, 40, 30], "D": [3, 23, 10, 28]}},

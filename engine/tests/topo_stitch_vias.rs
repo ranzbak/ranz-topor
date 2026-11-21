@@ -13,11 +13,18 @@ const MM: i64 = 1_000_000;
 /// "remove islands: always"; THT GND pad U3.1 at (20, 8) joins the layers; signal net 2.
 /// `extra_pads`: more pad JSON objects.
 fn model(extra_pads: &[String]) -> BoardModel {
+    model_with(extra_pads, false)
+}
+
+/// [`model`]; `relief`: U3.1 has a thermal connection and the fills carry KiCad's thermal relief hole around U3.1 (a 2.4 mm square, the pad's
+/// 1.5 mm disc + a 0.45 mm gap; the spokes' ends lie in the fill), as a real refill does.
+fn model_with(extra_pads: &[String], relief: bool) -> BoardModel {
     let mut pads = vec![r#"{ "uuid": "U3", "ref": "U3", "number": "1", "net": 1, "attr": "pth", "center": [20000000, 8000000], "layers": [0, 31],
         "shapes": { "0": { "kind": "circle", "d": 1500000 }, "31": { "kind": "circle", "d": 1500000 } } }"#
         .to_string()];
     pads.extend(extra_pads.iter().cloned());
-    let fill = |l: u32| format!(r#"{{ "layer": {l}, "outer": [[2000000, 2000000], [32000000, 2000000], [32000000, 32000000], [2000000, 32000000]] }}"#);
+    let hole = if relief { r#", "holes": [[[18800000, 6800000], [21200000, 6800000], [21200000, 9200000], [18800000, 9200000]]]"# } else { "" };
+    let fill = |l: u32| format!(r#"{{ "layer": {l}, "outer": [[2000000, 2000000], [32000000, 2000000], [32000000, 32000000], [2000000, 32000000]]{hole} }}"#);
     let s = format!(
         r#"{{ "layers": [ {{ "id": 0, "name": "F.Cu" }}, {{ "id": 31, "name": "B.Cu" }} ],
           "nets": [ {{ "code": 1, "name": "GND" }}, {{ "code": 2, "name": "SIG" }} ],
@@ -28,10 +35,11 @@ fn model(extra_pads: &[String]) -> BoardModel {
           "pads": [ {} ],
           "pours": [ {{ "uuid": "zz", "net": 1, "layers": [0, 31], "pads": ["U3.1"],
             "vias": [], "clearance": 200000, "min_thickness": 254000, "thermal_gap": 500000,
-            "spoke_width": 500000, "pad_connection": 2, "island_removal": 0,
+            "spoke_width": 500000, "pad_connection": {}, "island_removal": 0,
             "fills": [ {}, {} ] }} ],
           "rules": {{ "default": {{ "clearance": 200000, "width": 250000 }}, "min_clearance": 0 }} }}"#,
         pads.join(","),
+        if relief { 1 } else { 2 },
         fill(0),
         fill(31)
     );
@@ -170,6 +178,15 @@ fn a_part_behind_a_thin_neck_gets_vias() {
     assert!(v.iter().all(|p| p.1 > 20 * MM), "{v:?}");
     let off = stitch_regions(&m, &opts(false, 0.0, false), &reg(), &items, &[], None, &|| false);
     assert!(off.items.is_empty());
+    // The same with the thermal relief hole around U3.1 in the fill (as KiCad fills it): U3.1 still
+    // anchors the lower part across its thermal gap; only the upper part gets vias.
+    let mr = model_with(&[], true);
+    let rr = check_pour_reach(&mr, &items, &[]);
+    assert!(rr.cuts.is_empty(), "{:?} {:?}", rr.notes, rr.cuts);
+    let s = stitch_regions(&mr, &opts(false, 1.0, false), &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert_eq!((s.thin[0], s.thin[1]), (1, 1), "{:?}", s.notes);
+    assert!(!v.is_empty() && v.iter().all(|p| p.1 > 20 * MM), "{v:?}");
     // A neck wider than the threshold (3 mm gap): no thin part.
     let wide = vec![seg(2, 0, (MM, 20 * MM), (16 * MM, 20 * MM)), seg(2, 0, (19 * MM, 20 * MM), (33 * MM, 20 * MM))];
     let s = stitch_regions(&m, &opts(false, 1.0, false), &reg(), &wide, &[], None, &|| false);

@@ -4,7 +4,7 @@
 # unit also routes the PROPOSED stitch pattern (harness/stitch_patterns.py) with its PNG.
 set -u
 OUT=$HZ_RUN_DIR
-ARM=${ARM:-tip}
+case "${HZ_TAG:-}" in *base*) ARM=base ;; *) ARM=tip ;; esac
 cd "${TOPOR_TREE:-/root/topor}"
 S="--set optimize.runs=1 --set optimize.rounds=1 --set optimize.stable_patience=1"
 unit() { # name board-pcb
@@ -20,9 +20,20 @@ pattern() {
   local P=$OUT/pattern-boards/stitch_pieces/problem/stitch_pieces.kicad_pcb
   TOPOR_HAND_LABEL=problem tools/route_board.sh "$P" "$OUT/$ARM-pattern" --keep-copper >> "$OUT/pattern.log" 2>&1
   local rc=$?
-  local pcb; pcb=$(find "$OUT/$ARM-pattern" -name 'stitch_pieces.kicad_pcb' -path '*topor*' | head -1)
-  [ -n "$pcb" ] && python -m tools.stitchvias_measure "$pcb" --out "$OUT/$ARM-pattern-measure.json" >> "$OUT/pattern.log" 2>&1
-  echo "pattern rc $rc measure $?" >> "$OUT/rc.txt"
+  # the routed copy by its explicit path (never a find/glob: AGENT_RULES 14b)
+  python -m tools.stitchvias_measure "$OUT/$ARM-pattern/stitch_pieces-topor/stitch_pieces.kicad_pcb" --out "$OUT/$ARM-pattern-measure.json" >> "$OUT/pattern.log" 2>&1
+  local m=$?
+  # label the PNGs (user approval pending)
+  for png in "$OUT/$ARM-pattern"/stitch_pieces-compare.png; do
+    python - "$png" <<'PY' >> "$OUT/pattern.log" 2>&1
+import sys
+from PIL import Image, ImageDraw
+im = Image.open(sys.argv[1]).convert("RGB"); d = ImageDraw.Draw(im)
+d.rectangle([0, 0, 560, 22], fill=(255, 255, 160)); d.text((6, 5), "PROPOSED (awaiting approval): stitch_pieces", fill=(0, 0, 0))
+im.save(sys.argv[1])
+PY
+  done
+  echo "pattern rc $rc measure $m" >> "$OUT/rc.txt"
 }
 export -f unit pattern; export OUT S ARM
 EP=$(ls scratch/boards/eprom-to-kernal/*/eprom-to-kernal.kicad_pcb | head -1)

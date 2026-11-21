@@ -871,8 +871,11 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
                 let (core, info) = ras.cores(&|isl| reach.island_in_main(zi, l, isl), half);
                 let mut anchored = vec![false; info.len()];
                 let anchors = anchors_on(model, &cx.all, z.net, l);
+                // An anchor reaches the cores its fill touches: the fill starts at most a thermal gap
+                // from its copper and a core cell lies `half` deeper still (plus a cell of slack).
+                let gap = model.pours.iter().filter(|q| q.net == z.net).map(|q| q.thermal_gap.max(0) as f64).fold(0.0, f64::max);
                 for &(a, ra) in &anchors {
-                    for k in ras.cores_within(&core, a, ra + half + ras.res()) {
+                    for k in ras.cores_within(&core, a, ra + gap + 2.0 * half + 2.0 * ras.res()) {
                         anchored[k as usize] = true;
                     }
                 }
