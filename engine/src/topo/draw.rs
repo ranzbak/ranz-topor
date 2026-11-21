@@ -958,6 +958,23 @@ pub fn viol_key(vs: &[Viol]) -> (f64, f64) {
     (vs.iter().filter(|v| v.kind == "short").map(Viol::amount).sum(), vs.iter().map(Viol::amount).sum())
 }
 
+/// The DRC class of checker violation `v` of a via (`via`) or track item, as KiCad names it:
+/// `edge_clearance`; a via's drill check or a via against a hole (`hole:`, `viahole:`):
+/// `hole_clearance`; copper overlap: `short`; else `clearance`. grid-snap r3: by the checker's
+/// `drill` flag, not by the rule value (with the hole clearance equal to the copper clearance a
+/// via's copper deficit read as `hole_clearance`). O(1).
+pub fn viol_kind(v: &Violation, via: bool) -> &'static str {
+    if v.against == "edge" {
+        "edge_clearance"
+    } else if via && (v.drill || v.against.starts_with("hole") || v.against.starts_with("viahole")) {
+        "hole_clearance"
+    } else if v.gap < 0 {
+        "short"
+    } else {
+        "clearance"
+    }
+}
+
 /// The choice key of a forced via site ([`Drawer::force_via`]) with violations `vs`, the further
 /// price `extra` (wrong chord side, reach) and the run's safety margin `margin` (nm):
 /// `[short amount, hole amount, violation amounts + extra]`, compared in that order
@@ -971,9 +988,6 @@ pub fn viol_key(vs: &[Viol]) -> (f64, f64) {
 ///   drill too close to copper is its own DRC class, above plain clearance: a site with copper
 ///   clearance deficits only wins over one whose drill is too close (esp r2: IO8_SCL 0.007 mm).
 pub fn force_via_key(vs: &[Viol], extra: f64, margin: f64) -> [f64; 3] {
-    if diag_flag(&DIAG_NO_SHORT_FIRST, "TOPOR_DIAG_NO_SHORT_FIRST") {
-        return [0.0, 0.0, vs.iter().map(Viol::amount).sum::<f64>() + extra];
-    }
     let hole: f64 = vs
         .iter()
         .filter(|v| v.kind == "hole_clearance" && v.depth_nm > margin)
@@ -995,14 +1009,6 @@ pub fn force_via_better(a: [f64; 3], b: [f64; 3]) -> bool {
     false
 }
 
-/// grid-snap r3 isolation (diagnosis only, read once per process): `TOPOR_DIAG_NO_SHORT_FIRST`
-/// = the forced via key of r1 (one sum), `TOPOR_DIAG_NO_DRILL_PRICE` = no drill amount in the
-/// forced DP ([`Drawer::ent_deficit`]).
-pub(super) static DIAG_NO_SHORT_FIRST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-pub(super) static DIAG_NO_DRILL_PRICE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-pub(super) fn diag_flag(f: &std::sync::OnceLock<bool>, name: &str) -> bool {
-    *f.get_or_init(|| std::env::var_os(name).is_some())
-}
 
 /// forced-draw (docs/dev/design/forced-draw.md): the graded choice key of one form of a forced
 /// run (never drop), its taut candidate or that candidate's octilinear form: `(short amount,
@@ -1097,10 +1103,6 @@ pub struct Drawer<'a> {
     pub(super) n_static: usize,
     /// The wire of each drawn (dynamic) object that has one, by ent id ([`Drawer::pair_disc_clear`]).
     ent_wire: BTreeMap<usize, usize>,
-    /// grid-snap r2: the drill radius of each via object (existing and drawn), by ent id. A
-    /// forced run's short over a via also pays the drill's `hole_clearance`, which KiCad's DRC
-    /// reports on top of the short ([`Drawer::ent_deficit`]).
-    pub(super) via_hole: BTreeMap<usize, f64>,
     /// Diagnosis: ignore the copper drawn so far.
     pub(super) only_static: std::sync::atomic::AtomicBool,
     /// Trial drawing (via reduction): a rejected run is not diagnosed or recorded.
@@ -1253,7 +1255,6 @@ impl<'a> Drawer<'a> {
             qgrow: 0.0,
             n_static: 0,
             ent_wire: BTreeMap::new(),
-            via_hole: BTreeMap::new(),
             only_static: std::sync::atomic::AtomicBool::new(false),
             quiet: false,
             widths: None,
@@ -1404,8 +1405,7 @@ impl<'a> Drawer<'a> {
         for v in &model.vias {
             let m = if v.layers.is_empty() { all } else { lmask(&v.layers) | if v.layers.contains(&0) && v.layers.contains(&2) { all } else { 0 } };
             let clear = via_clear(model, v.net, v.d, v.drill);
-            let id = self.add_ent(Ent { core: Core::Pt(v.at.to_vec2()), grow: 0.5 * v.d as f64, mask: m, net: (v.net > 0).then_some(v.net), clear, fixed: false, live: true, shape: false });
-            self.via_hole.insert(id, 0.5 * v.drill as f64);
+            self.add_ent(Ent { core: Core::Pt(v.at.to_vec2()), grow: 0.5 * v.d as f64, mask: m, net: (v.net > 0).then_some(v.net), clear, fixed: false, live: true, shape: false });
         }
         for k in &model.kept {
             let m = lmask(&[k.layer]);
@@ -1466,7 +1466,7 @@ impl<'a> Drawer<'a> {
             Item::Via(v) => {
                 let nl = b.signal_layers.len();
                 let clear = via_clear(self.model, v.net, v.d, v.drill);
-                let id = self.add_ent(Ent {
+                self.add_ent(Ent {
                     core: Core::Pt(Vec2 { x: v.at.x as f64, y: -(v.at.y as f64) }),
                     grow: 0.5 * v.d as f64,
                     mask: if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 },
@@ -1475,9 +1475,7 @@ impl<'a> Drawer<'a> {
                     fixed: false,
                     live: true,
                     shape: false,
-                });
-                self.via_hole.insert(id, 0.5 * v.drill as f64);
-                id
+                })
             }
         }
     }
@@ -2798,9 +2796,8 @@ pub fn viols_with(model: &BoardModel, opts: &Options, checker: &Checker, idx: &I
 /// [`viol_key`] (and the price) of the floor violations is at most the measured one, also in
 /// floating point (the same terms in the same order, each no larger). O(violations) without
 /// probes; with them see [`Drawer::viols_of`].
-pub fn viols_measured(model: &BoardModel, opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport, probe: bool) -> Vec<Viol> {
+pub fn viols_measured(model: &BoardModel, _opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport, probe: bool) -> Vec<Viol> {
     {
-        let r = &model.rules;
         // Routed copper (`item:N`) is named by its net: "track of SIG (item:12)".
         let name = |against: &str| -> String {
             let Some(id) = against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()) else { return against.to_string() };
@@ -2813,22 +2810,11 @@ pub fn viols_measured(model: &BoardModel, opts: &Options, checker: &Checker, idx
                 None => against.to_string(),
             }
         };
-        let hole_reqs = [r.hole_to_hole + opts.margin_nm, r.via_hole_clear() + opts.margin_nm];
         let mut out = Vec::new();
         for v in &rep.violations {
             let Some(item) = items.get(v.item) else { continue };
             let depth = (v.required - v.gap).max(1) as f64;
-            let kind = |via: bool| -> &'static str {
-                if v.against == "edge" {
-                    "edge_clearance"
-                } else if via && (v.against.starts_with("hole") || hole_reqs.contains(&v.required)) {
-                    "hole_clearance"
-                } else if v.gap < 0 {
-                    "short"
-                } else {
-                    "clearance"
-                }
-            };
+            let kind = |via: bool| viol_kind(v, via);
             match item {
                 Item::Via(x) => out.push(Viol {
                     kind: kind(true),
@@ -5006,6 +4992,19 @@ mod tests {
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }
+    }
+
+    /// grid-snap r3: the DRC class by the checker's drill flag: a via's copper deficit at a rule
+    /// equal to the hole clearance is `clearance` (or `short`), its drill's is `hole_clearance`.
+    #[test]
+    fn viol_kind_reads_the_drill_flag() {
+        let v = |against: &str, gap: i64, drill: bool| Violation { item: 0, against: against.into(), layer: 0, gap, required: 127_000, drill };
+        assert_eq!(viol_kind(&v("item:3", 20_000, false), true), "clearance");
+        assert_eq!(viol_kind(&v("item:3", -5_000, false), true), "short");
+        assert_eq!(viol_kind(&v("item:3", 120_000, true), true), "hole_clearance");
+        assert_eq!(viol_kind(&v("viahole:u", 120_000, false), true), "hole_clearance");
+        assert_eq!(viol_kind(&v("item:3", 120_000, true), false), "clearance");
+        assert_eq!(viol_kind(&v("edge", 0, false), true), "edge_clearance");
     }
 
     /// grid-snap r2: a forced via site on foreign copper (a short, here with its drill's hole

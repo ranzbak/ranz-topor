@@ -44,6 +44,12 @@ pub struct Violation {
     pub gap: i64,
     /// Requirement including the margin, nm (rounded).
     pub required: i64,
+    /// grid-snap r3: a drill check of a via item (its drill against foreign copper or a hole,
+    /// its copper against a foreign hole): KiCad's `hole_clearance` / `hole_to_hole`, kept apart
+    /// from the copper clearance to the same object even when both rules have the same value
+    /// (KiCad reports both; merged, the drill's own gap was lost under the copper's).
+    #[serde(default)]
+    pub drill: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -736,7 +742,7 @@ impl Checker {
                         if short_of(gap, req) {
                             let (g, r) = (gap.round() as i64, req.round() as i64);
                             match found.iter_mut().find(|v| {
-                                v.against == o.label && v.layer == layer && v.required == r
+                                v.against == o.label && v.layer == layer && v.required == r && v.drill
                             }) {
                                 Some(v) => v.gap = v.gap.min(g),
                                 None => found.push(Violation {
@@ -745,6 +751,7 @@ impl Checker {
                                     layer,
                                     gap: g,
                                     required: r,
+                                    drill: true,
                                 }),
                             }
                         }
@@ -765,9 +772,9 @@ impl Checker {
                     let req = self.via_hole_clearance + self.margin;
                     if short_of(gap, req) {
                         let (g, r) = (gap.round() as i64, req.round() as i64);
-                        match found.iter_mut().find(|v| v.against == o.label && v.layer == layer && v.required == r) {
+                        match found.iter_mut().find(|v| v.against == o.label && v.layer == layer && v.required == r && v.drill == is_via) {
                             Some(v) => v.gap = v.gap.min(g),
-                            None => found.push(Violation { item: i, against: o.label.clone(), layer, gap: g, required: r }),
+                            None => found.push(Violation { item: i, against: o.label.clone(), layer, gap: g, required: r, drill: is_via }),
                         }
                     }
                 }
@@ -777,7 +784,7 @@ impl Checker {
                     let (g, r) = (gap.round() as i64, req.round() as i64);
                     match found
                         .iter_mut()
-                        .find(|v| v.against == o.label && v.layer == layer && v.required == r)
+                        .find(|v| v.against == o.label && v.layer == layer && v.required == r && !v.drill)
                     {
                         Some(v) => v.gap = v.gap.min(g),
                         None => found.push(Violation {
@@ -786,6 +793,7 @@ impl Checker {
                             layer,
                             gap: g,
                             required: r,
+                            drill: false,
                         }),
                     }
                 }
@@ -844,6 +852,7 @@ impl Checker {
                                 layer,
                                 gap: g,
                                 required: req.round() as i64,
+                                drill: false,
                             }),
                         }
                     }

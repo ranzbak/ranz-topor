@@ -18,15 +18,17 @@ M = {
     "G6": ("engine/src/topo/octi.rs", "    grid.is_finite() && grid < plain - 1e-6\n", "    grid.is_finite() && grid <= plain + 1e-6\n"),
     "G7": ("engine/src/topo/octi.rs", "                                    c += if k == 0 { gnode[i] } else { gprice(from) };", "                                    c += 0.0;"),
     # r2
-    "G8": ("engine/src/topo/exact.rs", "            [0.0, amt + hole]\n", "            [0.0, amt + 0.0 * hole]\n"),
     "G9": ("engine/src/topo/draw.rs", "    [viol_key(vs).0, hole, vs.iter()", "    [0.0, hole, vs.iter()"),
     "G13": ("engine/src/topo/draw.rs", "    [viol_key(vs).0, hole, vs.iter()", "    [viol_key(vs).0, 0.0 * hole, vs.iter()"),
     "G14": ("engine/src/topo/draw.rs", "v.kind == \"hole_clearance\" && v.depth_nm > margin)", "v.kind == \"hole_clearance\")"),
     "G10": ("engine/src/topo/viaopt.rs", "        if !ok_k(k) || !ok_q(q) {", "        if !ok_k(k) {"),
     "G11": ("engine/src/topo/pourplan.rs", "    if pour_cuts(model, &now, pb).1 <= base + 1e-9 {", "    if true || pour_cuts(model, &now, pb).1 <= base + 1e-9 {"),
     "G12": ("engine/src/topo/pourplan.rs", "    for &(w, i, s0) in moves.iter().filter(|m| bound.contains(&m.0)) {", "    for &(w, i, s0) in moves.iter().filter(|m| bound.contains(&m.0) && false) {"),
+    # r3
+    "G15": ("engine/src/topo/draw.rs", "    } else if via && (v.drill || v.against", "    } else if via && (v.against"),
+    "G16": ("engine/src/check.rs", "required: r, drill: is_via }),", "required: r, drill: false }),"),
 }
-TESTS = ["grid", "octilinear", "fallback", "force_via", "deficit", "pour"]
+TESTS = ["grid", "octilinear", "fallback", "force_via", "deficit", "pour", "viol_kind"]
 
 
 def main() -> int:
@@ -41,7 +43,8 @@ def main() -> int:
             continue
         p.write_text(src.replace(old, new))
         try:
-            r = subprocess.run(["cargo", "test", "--release", "--lib", "--", *TESTS], cwd=tree / "engine",
+            sel = ["--test", "check_via_holes"] if mid == "G16" else ["--lib", "--", *TESTS]
+            r = subprocess.run(["cargo", "test", "--release", *sel], cwd=tree / "engine",
                                capture_output=True, text=True, timeout=1200)
             out = r.stdout + r.stderr
             failed = re.findall(r"^test (\S+) \.\.\. FAILED", out, re.M)

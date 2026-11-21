@@ -134,3 +134,24 @@ fn via_drill_to_copper_tolerance_is_a_fraction_of_a_nm() {
         assert!(v.iter().all(|x| x.required == 500_000), "only the drill rule is in reach: {v:?}");
     }
 }
+
+/// grid-snap r3: with the copper clearance equal to the hole clearance (0.2 mm both), a new via
+/// next to an existing foreign via gets two violations against it, as KiCad reports them: its
+/// copper (gap 0.02 mm, `clearance`) and its drill against the via's copper (drill edge, gap
+/// 0.17 mm, `hole_clearance`, `drill`). Merged by rule value, the drill's gap was lost under the
+/// copper's (esp: KiCad 0.007 mm below the hole rule, the engine 0.107 mm).
+#[test]
+fn via_drill_and_copper_violations_stay_apart_at_equal_rules() {
+    let s = r#"{ "layers": [ { "id": 0, "routable": true }, { "id": 31, "routable": true } ],
+            "nets": [ { "code": 1, "name": "SIG" }, { "code": 2, "name": "GND" } ],
+            "vias": [ { "uuid": "v1", "net": 2, "at": [5000000, 5000000], "d": 600000,
+                         "drill": 300000, "layers": [0, 31] } ],
+            "rules": { "min_clearance": 0, "hole_clearance": 200000, "hole_to_hole": 250000,
+                        "default": { "clearance": 200000 } } }"#;
+    let m = BoardModel::from_json(s).unwrap();
+    let c = Checker::new(&m, &Options::default());
+    let rep = c.check_items(&[via(1, 5_620_000, 5_000_000)]);
+    let on = |drill: bool| rep.violations.iter().filter(|v| v.against == "via:v1" && v.layer == 0 && v.drill == drill && v.required == 200_000).map(|v| v.gap).collect::<Vec<_>>();
+    assert_eq!(on(false), vec![20_000], "{:?}", rep.violations);
+    assert_eq!(on(true), vec![170_000], "{:?}", rep.violations);
+}
