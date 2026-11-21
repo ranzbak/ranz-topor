@@ -8684,11 +8684,51 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let pad_nm = opts.junction_pad_mm * MM;
         // octi-bundle r2: the links and prices of the octilinear first draw (A1c).
         let ocfg = dr.octi;
+        // fuse-octi r3: the ends are taken best gain first (graded, no cutoff), not in wire order: two
+        // wires that meet at one pad can only fuse one of them (`fused_at`), and the wire order let
+        // the first one's small legal gain (JS1_3 wire 383, 2.7 mm) take the pair before the
+        // other's large one (wire 480, 43 mm: the octilinear link that replaced a free-angle leg).
+        // The key is the best price gain of any link of the end on the state before the pass.
+        let mut order: Vec<(f64, WireId, usize)> = Vec::new();
         for &w in &ids {
             if pairs.width.contains_key(&st.wires[w].net) || jmoved.contains(&w) {
                 continue;
             }
             for end in 0..2 {
+                let wi = &st.wires[w];
+                let (pad, vert) = if end == 0 { (wi.pa, wi.a) } else { (wi.pb, wi.b) };
+                let trunks: Vec<WireId> = if pad == NO_OBS {
+                    js.iter().filter(|j| j.0 == w && j.1 == end).map(|j| j.2).collect()
+                } else {
+                    ids.iter()
+                        .copied()
+                        .filter(|&u| u != w && !jmoved.contains(&u) && st.wires[u].net == wi.net && ((st.wires[u].a == vert && !fused_at.contains(&(u, 0))) || (st.wires[u].b == vert && !fused_at.contains(&(u, 1)))))
+                        .collect()
+                };
+                let Some(wo) = drawn.get(&w) else { continue };
+                if wo.runs.is_empty() {
+                    continue;
+                }
+                let r = if end == 0 { 0 } else { wo.runs.len() - 1 };
+                let (layer, mut run) = wo.runs[r].clone();
+                if end == 1 {
+                    run.reverse();
+                }
+                let mut top = f64::NEG_INFINITY;
+                for u in trunks {
+                    let Some(uo) = drawn.get(&u) else { continue };
+                    let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
+                    let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
+                    if let Some(c) = draw::fuse_candidates(&run, &tr, (wi.w + wi.s) / MM, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s)).first() {
+                        top = top.max(c.0);
+                    }
+                }
+                order.push((top, w, end));
+            }
+        }
+        order.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+        for &(_, w, end) in &order {
+            {
                 let wi = &st.wires[w];
                 let (pad, vert) = if end == 0 { (wi.pa, wi.a) } else { (wi.pb, wi.b) };
                 let trunks: Vec<WireId> = if pad == NO_OBS {
