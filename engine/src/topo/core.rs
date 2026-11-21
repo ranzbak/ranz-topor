@@ -1472,8 +1472,18 @@ struct SketchBook {
 }
 
 /// last-preview: a sketch of `items` with `crit`'s numbers. O(1) + the move.
-fn sketch_of(run: u32, cycle: usize, kind: &str, crit: &Criteria, items: Vec<Item>) -> crate::control::Sketch {
-    crate::control::Sketch { run, cycle: cycle as u32, kind: kind.into(), errors: crit.errors, open: crit.open, violations: crit.violations, vias: crit.vias, length_mm: crit.length_mm, items, ..Default::default() }
+fn sketch_of(run: u32, cycle: usize, kind: &str, crit: &Criteria, items: Vec<Item>, errors_at: Vec<[i64; 2]>) -> crate::control::Sketch {
+    crate::control::Sketch { run, cycle: cycle as u32, kind: kind.into(), errors: crit.errors, open: crit.open, violations: crit.violations, vias: crit.vias, length_mm: crit.length_mm, items, errors_at, ..Default::default() }
+}
+
+/// last-preview: the places of a drawn result's rule violations (the dialog's yellow dots); the
+/// positions the drawing already reported, nothing computed. O(violations).
+fn errors_at_of(r: &RouteResult) -> Vec<[i64; 2]> {
+    places_of(&r.violations)
+}
+
+fn places_of(v: &[crate::route::ViolationReport]) -> Vec<[i64; 2]> {
+    v.iter().map(|v| v.at).collect()
 }
 
 /// last-preview: loop cycle `cycle` of run `run` (1-based) ended at `at` s with its own state's
@@ -1762,11 +1772,11 @@ impl Run {
         // last-preview: the copper of the variant the round is judged by (only while the caller
         // shows sketches: the last round's sketch).
         // The same choice as `note_judged`: the better of the variants by the objective.
-        let judged_items: std::cell::RefCell<Option<(Criteria, Vec<Item>)>> = std::cell::RefCell::new(None);
+        let judged_items: std::cell::RefCell<Option<(Criteria, Vec<Item>, Vec<[i64; 2]>)>> = std::cell::RefCell::new(None);
         let keep_items = |c: &Criteria, r: &RouteResult| {
             let mut ji = judged_items.borrow_mut();
-            if ctl.sketches.enabled() && ji.as_ref().is_none_or(|(b, _)| obj.better(c, b)) {
-                *ji = Some((*c, r.items.clone()));
+            if ctl.sketches.enabled() && ji.as_ref().is_none_or(|(b, _, _)| obj.better(c, b)) {
+                *ji = Some((*c, r.items.clone(), errors_at_of(r)));
             }
         };
         // The limit cut this cycle's pour stitching (set below; verify-sl3 F1).
@@ -1888,14 +1898,14 @@ impl Run {
             }
             if ctl.sketches.enabled() {
                 let items_of = |i: usize| self.arch.items[i].payload.result.items.clone();
-                if let (Some(j), Some((c, items))) = (judged, judged_items.borrow_mut().take()) {
+                if let (Some(j), Some((c, items, at))) = (judged, judged_items.borrow_mut().take()) {
                     if c == j.crit {
-                        ctl.publish_sketch(sketch_of(run, cycle, "copper", &j.crit, items), crate::control::SketchTo { last: true, best: false });
+                        ctl.publish_sketch(sketch_of(run, cycle, "copper", &j.crit, items, at), crate::control::SketchTo { last: true, best: false });
                     }
                 }
                 if changed {
                     let bc = self.arch.items[pick].payload.cycle;
-                    ctl.publish_sketch(sketch_of(run, bc, "copper", &pc, items_of(pick)), crate::control::SketchTo { last: false, best: true });
+                    ctl.publish_sketch(sketch_of(run, bc, "copper", &pc, items_of(pick), errors_at_of(&self.arch.items[pick].payload.result)), crate::control::SketchTo { last: false, best: true });
                 }
             }
         }
@@ -5019,7 +5029,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             fn plan_sketch(&self, cycle: usize, crit: &Criteria) -> crate::control::Sketch {
                 let t0 = std::time::Instant::now();
                 let items = super::pourplan::plan_items(self.st, self.packer, self.board, &self.lr.events, self.bottom);
-                let sk = sketch_of(self.ctl.run.max(1), cycle, "plan", crit, items);
+                let sk = sketch_of(self.ctl.run.max(1), cycle, "plan", crit, items, Vec::new());
                 let dt = t0.elapsed().as_secs_f64();
                 self.ctl.with_progress(|p| p.sketch_build_s += dt);
                 sk
@@ -10134,6 +10144,23 @@ fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, pour_on: bool,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sketch_of_carries_the_violation_places_of_a_drawn_result_and_none_for_a_plan() {
+        let viols = vec![
+            crate::route::ViolationReport { at: [1_000, 2_000], ..Default::default() },
+            crate::route::ViolationReport { at: [-3_000, 4_000], ..Default::default() },
+        ];
+        let at = super::places_of(&viols);
+        assert_eq!(at, vec![[1_000, 2_000], [-3_000, 4_000]]);
+        let c = Criteria { errors: 2, violations: 2, ..Default::default() };
+        let sk = super::sketch_of(1, 3, "copper", &c, Vec::new(), at.clone());
+        assert_eq!((sk.errors, sk.errors_at.clone()), (2, at));
+        assert!(super::sketch_of(1, 0, "plan", &c, Vec::new(), Vec::new()).errors_at.is_empty());
+        // an older sketch JSON without the field still parses
+        let js = serde_json::to_string(&sk).unwrap().replace(",\"errors_at\":[[1000,2000],[-3000,4000]]", "");
+        assert!(serde_json::from_str::<crate::control::Sketch>(&js).unwrap().errors_at.is_empty());
+    }
+
     /// forced-draw (T5): the never-drop octilinear line, every case of its text: no line with the
     /// octilinear style off or no forced run; the counts of each candidate kind summed; zero and
     /// nonzero free-angle counts.
