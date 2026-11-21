@@ -385,6 +385,14 @@ pub fn no_run_reason(model: &BoardModel, lid: u32) -> String {
     )
 }
 
+/// The order the fuse pass takes the wire ends in: `(best price gain, wire, end)` by descending gain,
+/// ties by wire id then end (fuse-octi r3: two wires that meet at one pad can fuse only one of them,
+/// so the large gain must go first whatever the wire ids; an id order let a 2.7 mm fuse block a 43 mm
+/// one on qmtech JS1_3). A gain without a candidate is `-inf` and goes last. O(n log n).
+pub fn fuse_order(keys: &mut [(f64, WireId, usize)]) {
+    keys.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+}
+
 /// The style the fuse prices its links with: the octilinear style's config and the wire's pitch
 /// (w + s, nm: the jog leg), `None` in the smooth style (the fuse is then length and junction
 /// angle only). O(1).
@@ -5280,6 +5288,22 @@ mod tests {
         assert!(fuse_style(false, &cfg, 450_000.0).is_none());
         let (c, pitch) = fuse_style(true, &cfg, 450_000.0).expect("octilinear");
         assert!(c.on && (pitch - 450_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_fuse_takes_the_large_gain_before_the_small_one_whatever_the_wire_ids() {
+        // qmtech JS1_3: wire 383 (gain 2.67) shares a pad with wire 480 (gain 43.32); ids ascending
+        // must not put the small one first. Ties and "no candidate" keep a fixed order.
+        let mut k = [(2.67, 383, 0), (43.32, 480, 1), (f64::NEG_INFINITY, 5, 0), (2.67, 12, 1), (2.67, 12, 0)];
+        fuse_order(&mut k);
+        assert_eq!(k.map(|x| (x.1, x.2)), [(480, 1), (12, 0), (12, 1), (383, 0), (5, 0)]);
+        // The same gains with the ids swapped give the same winner first.
+        let mut k = [(43.32, 3, 1), (2.67, 900, 0)];
+        fuse_order(&mut k);
+        assert_eq!(k[0].1, 3);
+        let mut k = [(2.67, 3, 1), (43.32, 900, 0)];
+        fuse_order(&mut k);
+        assert_eq!(k[0].1, 900);
     }
 
     #[test]

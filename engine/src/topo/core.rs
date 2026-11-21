@@ -8726,7 +8726,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 order.push((top, w, end));
             }
         }
-        order.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+        draw::fuse_order(&mut order);
         for &(_, w, end) in &order {
             {
                 let wi = &st.wires[w];
