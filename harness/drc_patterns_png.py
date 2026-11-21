@@ -169,6 +169,29 @@ def bends(segs) -> dict:
     return dict(sorted(out.items()))
 
 
+def off_centre_ends(pat: Pat, segs) -> list[tuple[float, float, float]]:
+    """Track ends that end inside a pad of their net off its centre (pad-snap, A1b): ends no other segment end of the
+    net meets (within 2 um), inside the pad's shape, more than 1 um from its centre: (x, y, distance mm)."""
+    from shapely.geometry import Point
+
+    ends = {}
+    for _layer, net, _w, pts in segs:
+        for q in (pts[0], pts[-1]):
+            ends.setdefault((net, round(q[0], 3), round(q[1], 3)), []).append(q)
+    out = []
+    for (net, _x, _y), qs in ends.items():
+        if len(qs) != 1:
+            continue
+        q = qs[0]
+        for f in pat.fps:
+            for pd in f.pads:
+                if pd.net == net and pad_geom(pd).buffer(1e-6).contains(Point(q)):
+                    d = math.dist(q, pd.pos)
+                    if d > 0.001:
+                        out.append((q[0], q[1], round(d, 3)))
+    return sorted(out)
+
+
 def judge(pat: Pat, segs, vias, m: dict, drc: list[dict]) -> dict:
     new = [s for s in segs if not _is_kept(s, pat)]
     ln = sum(plen(p) for _, _, _, p in new)
@@ -190,6 +213,9 @@ def judge(pat: Pat, segs, vias, m: dict, drc: list[dict]) -> dict:
         same = same and r["free_angle_segments"] == 0
     if "bends" in e:
         same = same and all(r["bends"].get(n, 0) <= b for n, b in e["bends"].items())
+    if e.get("pad_ends_at_centre"):
+        r["off_centre_ends"] = len(off_centre_ends(pat, new))
+        same = same and r["off_centre_ends"] == 0
     r["verdict"] = "REPRODUCES (DRC/unrouted)" if bad else ("matches expected" if same else "clean, differs from expected")
     return r
 
@@ -227,6 +253,12 @@ def main(argv: list[str] | None = None) -> int:
             _copper(ax[k], [s for s in segs if not _is_kept(s, pat)], vias)
             for v in drc:
                 ax[k].add_patch(Circle(v["xy"], 0.45, fc="none", ec="#f2c200", lw=2.2, zorder=10))
+            if pat.expect.get("pad_ends_at_centre"):
+                for x, y, d in off_centre_ends(pat, [s for s in segs if not _is_kept(s, pat)]):
+                    ax[k].add_patch(Circle((x, y), 0.3, fc="none", ec="#f2c200", lw=2.2, zorder=10))
+                    ax[k].annotate(f"end {d:.2f} mm off centre", xy=(x, y), xytext=(x - 1.6, y + 1.0), fontsize=6,
+                                   color="#7a5d00", arrowprops={"arrowstyle": "->", "color": "#b08a00", "lw": 0.6}, zorder=11)
+                ax[k].set_title(ax[k].get_title() + f"\npad ends off centre: {r.get('off_centre_ends', 0)} (yellow)", fontsize=8)
         tag = f" [{ROUND[name]}]" if name in ROUND else ""
         fig.suptitle(f"{pat.cluster} {name}{tag}: {pat.title}\n[{"APPROVED (expected answer in tests/test_drc_patterns_e2e.py)" if "approved" in ROUND.get(name, "") else STATUS}]  F.Cu red, B.Cu blue, hatched = kept hand copper, "
                      "grey = PTH, dashed frame = copper-to-edge line, yellow ring = KiCad DRC of the routed copy", fontsize=9)

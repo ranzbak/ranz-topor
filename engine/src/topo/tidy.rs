@@ -281,6 +281,82 @@ pub fn pad_ends_off_edge(model: &BoardModel, items: &mut [Item]) -> Vec<EdgeTrim
     out
 }
 
+/// pad-snap (A1b): the track ends that end inside a pad of their net off its centre, as written
+/// (after [`tidy`]): `(count, largest distance from the centre nm)`. A terminal end (no other track
+/// end of the net and layer at that point, no via there) inside a pad of its net (depth >= 0 on the
+/// track's layer) more than 1 um from the pad's anchor. KiCad's connectivity connects it, but the
+/// push-and-shove router links a pad only at its anchor (`pns_node.cpp` `NODE::addSolid`), so for
+/// dragging and footprint moves the end is loose. O(T x P_net) for T terminal ends and P_net
+/// pads of their net.
+pub fn off_centre_pad_ends(model: &BoardModel, items: &[Item]) -> (usize, f64) {
+    let mut ends: HashMap<(i32, u32, P), usize> = HashMap::new();
+    let mut vias: HashSet<(i32, P)> = model.vias.iter().map(|v| (v.net, (v.at.x, -v.at.y))).collect();
+    // pad-snap r2b debug (`TOPO_PADSNAPDBG`): the wire of each off-centre end
+    let dbg = std::env::var_os("TOPO_PADSNAPDBG").is_some();
+    let mut wire_of: HashMap<(i32, u32, P), Option<usize>> = HashMap::new();
+    for it in items {
+        match it {
+            Item::Track(t) => {
+                let (a, b) = match t.prim {
+                    TrackPrim::Seg { a, b } => (a, b),
+                    TrackPrim::Arc { start, end, .. } => (start, end),
+                };
+                for q in [p_of(a), p_of(b)] {
+                    *ends.entry((t.net, t.layer, q)).or_insert(0) += 1;
+                    if dbg {
+                        wire_of.insert((t.net, t.layer, q), t.wire);
+                    }
+                }
+            }
+            Item::Via(v) => {
+                vias.insert((v.net, (v.at.x, v.at.y)));
+            }
+        }
+    }
+    for k in &model.kept {
+        let (a, b) = match k.prim {
+            TrackPrim::Seg { a, b } => (a, b),
+            TrackPrim::Arc { start, end, .. } => (start, end),
+        };
+        for q in [a, b] {
+            *ends.entry((k.net, k.layer, (i64::from(q.x), -i64::from(q.y)))).or_insert(0) += 1;
+        }
+    }
+    let mut pads_of: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (pi, pad) in model.pads.iter().enumerate() {
+        pads_of.entry(pad.net).or_default().push(pi);
+    }
+    let mut sk_cache: HashMap<(usize, u32), Skeleton> = HashMap::new();
+    let (mut n, mut worst) = (0usize, 0.0f64);
+    let mut keys: Vec<&(i32, u32, P)> = ends.iter().filter(|(_, &c)| c == 1).map(|(k, _)| k).collect();
+    keys.sort_unstable();
+    for &(net, layer, q) in keys {
+        if net == 0 || vias.contains(&(net, q)) {
+            continue;
+        }
+        for &pi in pads_of.get(&net).map_or(&[][..], |v| &v[..]) {
+            let pad = &model.pads[pi];
+            if !(pad.layers.is_empty() || pad.layers.contains(&layer)) {
+                continue;
+            }
+            let sk = sk_cache.entry((pi, layer)).or_insert_with(|| model.skeleton(pad, layer));
+            if depth(sk, math(q)) < 0.0 {
+                continue;
+            }
+            let d = ((q.0 - pad.center.x) as f64).hypot((q.1 + pad.center.y) as f64);
+            if d > 1_000.0 {
+                n += 1;
+                worst = worst.max(d);
+                if dbg {
+                    eprintln!("PADOFF wire {:?} net {net} L{layer} end ({:.4},{:.4}) pad {}.{} off {:.4} mm", wire_of.get(&(net, layer, q)).copied().flatten(), q.0 as f64 / 1e6, q.1 as f64 / 1e6, pad.ref_, pad.number, d / 1e6);
+                }
+            }
+            break;
+        }
+    }
+    (n, worst)
+}
+
 /// Make `items` (KiCad frame, with `conn[i]` the connection of item `i`) stable under KiCad's
 /// Cleanup Tracks & Vias (module doc). O(see module).
 pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) -> TidyStats {
@@ -382,6 +458,11 @@ pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) ->
                     }
                 };
                 if inside || redundant {
+                    if std::env::var_os("TOPO_PADSNAPDBG").is_some() {
+                        // pad-snap r2 debug: which run left a stub in its pad (wire id: OCTI / OCTIFORCEDBG lines)
+                        let c = model.pads[pi].center;
+                        eprintln!("PADSTUB wire {:?} net {} L{} w {} ({:.4},{:.4})-({:.4},{:.4}) pad ({:.4},{:.4}) {}", t.wire, t.net, t.layer, t.width, a.0 as f64 / 1e6, a.1 as f64 / 1e6, b.0 as f64 / 1e6, b.1 as f64 / 1e6, c.x as f64 / 1e6, -c.y as f64 / 1e6, if inside { "inside" } else { "redundant" });
+                    }
                     keep[i] = false;
                     st.in_pad += 1;
                     dropped += 1;
@@ -730,6 +811,26 @@ mod tests {
         let st = tidy(m, &mut items, &mut c);
         assert_eq!(items.len(), c.len());
         (items, st)
+    }
+
+    /// pad-snap: a terminal end inside its pad off the centre counts, at the centre it does not, a
+    /// joined end (two track ends) or an end on a via does not, nor an end of another net or outside
+    /// the pad; the largest distance is reported.
+    #[test]
+    fn off_centre_pad_ends_counts_terminals_off_the_anchor() {
+        let m = model_with_pad(1, (0, 0), 600_000, 1_950_000);
+        let at_centre = vec![seg(1, (0, 0), (0, -2_000_000))];
+        assert_eq!(off_centre_pad_ends(&m, &at_centre), (0, 0.0));
+        let off = vec![seg(1, (0, -525_000), (500_000, -1_100_000))];
+        assert_eq!(off_centre_pad_ends(&m, &off), (1, 525_000.0));
+        let joined = vec![seg(1, (0, -525_000), (500_000, -1_100_000)), seg(1, (0, -525_000), (0, -2_000_000))];
+        assert_eq!(off_centre_pad_ends(&m, &joined), (0, 0.0));
+        let via = vec![seg(1, (0, -525_000), (500_000, -1_100_000)), Item::Via(crate::model::ViaItem { kind: "via".into(), net: 1, at: crate::model::Pt { x: 0, y: -525_000 }, d: 600_000, drill: 300_000, layers: vec![0, 2], group: None, wire: None })];
+        assert_eq!(off_centre_pad_ends(&m, &via).0, 0);
+        let foreign = vec![seg(2, (0, -525_000), (500_000, -1_100_000))];
+        assert_eq!(off_centre_pad_ends(&m, &foreign).0, 0);
+        let outside = vec![seg(1, (0, -1_200_000), (0, -2_000_000))];
+        assert_eq!(off_centre_pad_ends(&m, &outside).0, 0);
     }
 
     fn edge_model(edge_clear: i64, ignored: bool) -> BoardModel {

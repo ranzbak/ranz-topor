@@ -32,7 +32,7 @@
 
 use super::draw::{bbox_of, Core, Drawer};
 use super::exact::{Neck, Strip, Wp};
-use super::state::{WireId, NO_OBS};
+use super::state::{point_in_poly, WireId, NO_OBS};
 use crate::geom::prim::Aabb;
 use crate::geom::Vec2;
 use crate::fxhash::FxHashMap;
@@ -138,7 +138,94 @@ pub struct OctiCfg {
 /// like a clearance unit, and the key picks ([`super::draw::forced_form_pick`]).
 pub const SHORT_FIRST: f64 = 1e4;
 
+/// pad-snap (A1b, docs/dev/design/pad-snap.md): how far the round end of a pad exit's axis leg
+/// sticks out of its pad at the *leave point* (nm). More than tidy's `PAD_TOL_NM` (5 um) and
+/// KiCad's default maximum error (5 um, `ERROR_INSIDE` polygons), so neither topor's tidy nor
+/// KiCad's Cleanup (`deleteTracksInPads`: the track polygon minus the pad polygon empty) sees the
+/// centre stub as lying wholly inside the pad.
+pub const LEAVE_NM: f64 = 20_000.0;
+
+/// pad-snap: tidy's tolerance for a segment wholly inside a pad (`tidy.rs` `PAD_TOL_NM`).
+const STUB_TOL_NM: f64 = 5_000.0;
+
+/// pad-snap: price of a first (last) leg of a run whose far (near) end lies so deep inside the
+/// run's own pad that the stub from the pad centre is wholly inside it (nm of length: 4 bends at
+/// the default 0.25 mm; [`OctiCfg::stub_nm`] derives it from the config, this is its default). tidy and KiCad's Cleanup delete that stub, so the track ends off the pad
+/// centre, where KiCad's push-and-shove router does not link it to the pad (`pns_node.cpp`
+/// `NODE::addSolid`: the pad's joint is its anchor). Graded by how far off the centre the end
+/// lands: times `1 + off / extent` (extent = the pad's farthest outline point from the end).
+/// Costly, not failed: a legal shape is never dropped for it.
+pub const STUB_NM: f64 = 1.0e6;
+
+/// Share of one violation unit's price ([`OctiCfg::viol_nm`]) the dearest stub (2 x base) may cost:
+/// 0.8 < 1, so short > clearance > stub holds for every `violation` weight.
+const STUB_VIOL_SHARE: f64 = 0.4;
+
+/// pad-snap: the [`STUB_NM`] price of a stub from `c` (a run end at its own pad `poly`, `ext` =
+/// the farthest outline point from `c`) to `j`, for a track of width `w`: 0 unless `j` lies in the
+/// pad at least `w / 2` (less tidy's tolerance) from its outline. O(outline).
+pub fn stub_price(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2, base: f64) -> f64 {
+    if (j - c).len2() < 1.0 || !point_in_poly(j, poly) || super::padend::boundary_dist(j, poly) < 0.5 * w - STUB_TOL_NM {
+        return 0.0;
+    }
+    base * (1.0 + (j - c).len() / ext.max(1.0))
+}
+
+/// pad-snap r2b (D3b): the leave point of a run end `c` inside its own pad `poly` in the unit
+/// direction `d` for a track of width `w`: the nearest point `c + t d` from which a stub from `c`
+/// is not wholly inside the pad (its round end sticks out by [`LEAVE_NM`]: the point's distance to
+/// the outline is at most `w / 2 - LEAVE_NM`, or it lies outside). `None` when `c` already is that
+/// near the outline (no stub can lie wholly inside) or the ray does not leave the pad.
+/// Bisection on `t` between `c` and the ray's exit from the pad. O(outline x 40).
+pub fn leave_point(poly: &[Vec2], c: Vec2, d: Vec2, w: f64) -> Option<Vec2> {
+    let lim = 0.5 * w - LEAVE_NM;
+    let out = |t: f64| {
+        let q = c + d * t;
+        !point_in_poly(q, poly) || super::padend::boundary_dist(q, poly) <= lim
+    };
+    if poly.len() < 3 || out(0.0) {
+        return None;
+    }
+    // the ray's exit: the nearest crossing with an outline edge
+    let n = poly.len();
+    let mut hi = f64::INFINITY;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        let e = b - a;
+        let den = d.cross(e);
+        if den.abs() < 1e-12 {
+            continue;
+        }
+        let t = (a - c).cross(e) / den;
+        let u = (a - c).cross(d) / den;
+        if t > 0.0 && (-1e-9..=1.0 + 1e-9).contains(&u) {
+            hi = hi.min(t);
+        }
+    }
+    if !hi.is_finite() {
+        return None;
+    }
+    let mut lo = 0.0;
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if out(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(c + d * hi)
+}
+
 impl OctiCfg {
+    /// pad-snap: base price of a pad stub (see [`STUB_NM`]): `4 x bend_nm` (design note), but at
+    /// most [`STUB_VIOL_SHARE`] of one violation unit's price, so the order short > clearance >
+    /// stub (dearest stub = 2 x base < one violation unit) holds for every `violation` weight the
+    /// config accepts (a weight of 0 makes violations free and the stub free with it).
+    pub fn stub_nm(&self) -> f64 {
+        (4.0 * self.bend_nm).min(STUB_VIOL_SHARE * self.viol_nm)
+    }
+
     /// From the engine options: `[drawing]` and the `any_angle` / `acute_bend` weights of
     /// `[factors]` (unfluctuated: the drawing's prices stay put across cycles).
     pub fn from_opts(o: &crate::model::Options) -> OctiCfg {
@@ -378,6 +465,41 @@ impl Drawer<'_> {
         Some(Exit { axis: u, reach })
     }
 
+    /// pad-snap r2: the first (last) leg of the run `pts` (passes `k0..k1` of `w`) is a stub wholly
+    /// inside the wire's own pad at that end, which tidy and KiCad's Cleanup delete (a positive
+    /// [`stub_price`]; not at a branch end or a continued lead). The DP reprices an all-octilinear
+    /// run with one instead of keeping it as it is.
+    pub(super) fn run_pad_stubs(&self, w: WireId, k0: usize, k1: usize, pts: &[Vec2]) -> [bool; 2] {
+        let wi = &self.st.wires[w];
+        let n = pts.len();
+        if n < 3 {
+            return [false; 2];
+        }
+        [0usize, 1].map(|end| {
+            let at_end = if end == 0 { k0 == 0 } else { k1 == wi.passes.len() };
+            let (c, j) = if end == 0 { (pts[0], pts[1]) } else { (pts[n - 1], pts[n - 2]) };
+            self.own_pad_end(w, end, at_end, false, c).is_some_and(|(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, 1.0) > 0.0)
+        })
+    }
+
+    /// pad-snap: the ONE predicate for "the run end `c` (`end` 0: start, 1: end of wire `w`) is an
+    /// own-pad end whose stub is priced": the run really ends there (`at_end`, no continued lead:
+    /// neither a kept lead on that pad nor `lead_cont`), the pad is an obstacle and not anchored
+    /// elsewhere (`end_at`), and `c` lies in the pad outline. Gives (outline, `c`, the farthest
+    /// outline point from `c`). Used by the DP's price and by [`Drawer::run_pad_stubs`].
+    pub(super) fn own_pad_end(&self, w: WireId, end: usize, at_end: bool, lead_cont: bool, c: Vec2) -> Option<(&[Vec2], Vec2, f64)> {
+        let wi = &self.st.wires[w];
+        let ob = if end == 0 { wi.pa } else { wi.pb };
+        if !at_end || lead_cont || ob == NO_OBS || ob >= self.b.proj.obstacles.len() || self.end_at.contains_key(&(w, end)) || self.b.kept_ends.iter().any(|k| k.obs == ob && k.lead.is_some()) {
+            return None;
+        }
+        let poly: &[Vec2] = &self.b.proj.obstacles[ob].poly;
+        if poly.len() < 3 || !point_in_poly(c, poly) {
+            return None;
+        }
+        Some((poly, c, poly.iter().map(|&q| (q - c).len()).fold(0.0, f64::max)))
+    }
+
     /// The run `pts` (passes `k0..k1` of `w` on `layer`, legal as drawn) redrawn octilinear in its
     /// sleeve (see the module doc). `None` when nothing changes or the run is too short.
     #[allow(clippy::too_many_arguments)]
@@ -415,7 +537,9 @@ impl Drawer<'_> {
         if taut.len() < 2 {
             return None;
         }
-        if taut.windows(2).all(|p| octi_dir(p[1] - p[0]).is_some()) && exits.iter().all(|e| e.is_none()) {
+        // pad-snap r2b (D3b): an all-octilinear taut run is kept as it is, unless its first (last)
+        // leg is a stub wholly inside its own pad (tidy and Cleanup delete it): the DP reprices it.
+        if taut.windows(2).all(|p| octi_dir(p[1] - p[0]).is_some()) && exits.iter().all(|e| e.is_none()) && !self.run_pad_stubs(w, k0, k1, &taut).iter().any(|&x| x) {
             return None;
         }
         let wi = &self.st.wires[w];
@@ -719,26 +843,6 @@ impl Drawer<'_> {
                 && !strip.crosses_wall(a, b)
                 && (forced || self.seg_clear_near(&nr, a, b))
         };
-        // forced-draw: the violation price of the leg `a-b` (0 in the first draw, where a leg keeps
-        // every clearance or is not taken): a short (copper over foreign copper) at `short_nm`,
-        // the rest at `viol_nm`.
-        let viol_x = |a: Vec2, b: Vec2| -> f64 {
-            if !forced {
-                return 0.0;
-            }
-            let [c, sh] = self.seg_deficit_parts_near(&nr, a, b);
-            cfg.viol_nm * c + short_nm * sh
-        };
-        let mut memo = Memo::default();
-        // DP state per node: arrival direction 0..7, or 8 (the start / an any-angle leg).
-        const ND: usize = 9;
-        let mut dist = vec![[f64::INFINITY; ND]; n];
-        // (previous node, previous state, shape id, legs)
-        #[allow(clippy::type_complexity)]
-        let mut back: Vec<[Option<(usize, usize, Vec<Leg>)>; ND]> = vec![std::array::from_fn(|_| None); n];
-        // Last leg of the state: unit direction and length.
-        let mut last: Vec<[(Vec2, f64); ND]> = vec![[(Vec2::default(), f64::INFINITY); ND]; n];
-        dist[0][8] = 0.0;
         // exist-term r4 (the r3 I2C_SDA fold-back): a run that starts at a continued dangling
         // end's lead end goes on from the hand track, so it arrives there along the lead: a first
         // leg back along it is a full reversal (never), a sharp turn pays the bend and
@@ -761,6 +865,44 @@ impl Drawer<'_> {
         let n_pass = wi.passes.len();
         let lead_in = if k0 == 0 { lead_dir(0, taut[0]) } else { None };
         let lead_out = if k1 == n_pass { lead_dir(1, taut[taut.len() - 1]) } else { None };
+        // pad-snap (A1b): the run's own pad at each end it starts / ends on a pad (not on existing
+        // copper, not from a continued lead): (outline, the run's end point, farthest outline
+        // point from it). A first (last) leg that leaves a stub wholly inside it pays
+        // [`stub_price`].
+        let own_pad: [Option<(&[Vec2], Vec2, f64)>; 2] = [0usize, 1].map(|end| {
+            let (at_end, lead_cont) = if end == 0 { (k0 == 0, lead_in.is_some()) } else { (k1 == n_pass, lead_out.is_some()) };
+            let c = if end == 0 { taut[0] } else { taut[taut.len() - 1] };
+            self.own_pad_end(w, end, at_end, lead_cont, c)
+        });
+        let stub_nm = cfg.stub_nm();
+        let stub = |end: usize, j: Vec2| own_pad[end].map_or(0.0, |(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, stub_nm));
+        // pad-snap r2b (D3b): per own-pad end and octilinear direction `k`, the leave point: the
+        // nearest point on the ray from the run end whose round end sticks out of the pad by
+        // [`LEAVE_NM`] ([`leave_point`]). Every own pad, also one too short for an [`Exit`].
+        let leave8: [[Option<Vec2>; 8]; 2] = [0usize, 1].map(|end| match own_pad[end] {
+            Some((poly, c, _)) => std::array::from_fn(|k| leave_point(poly, c, dir(k), wi.w)),
+            None => [None; 8],
+        });
+        // forced-draw: the violation price of the leg `a-b` (0 in the first draw, where a leg keeps
+        // every clearance or is not taken): a short (copper over foreign copper) at `short_nm`,
+        // the rest at `viol_nm`.
+        let viol_x = |a: Vec2, b: Vec2| -> f64 {
+            if !forced {
+                return 0.0;
+            }
+            let [c, sh] = self.seg_deficit_parts_near(&nr, a, b);
+            cfg.viol_nm * c + short_nm * sh
+        };
+        let mut memo = Memo::default();
+        // DP state per node: arrival direction 0..7, or 8 (the start / an any-angle leg).
+        const ND: usize = 9;
+        let mut dist = vec![[f64::INFINITY; ND]; n];
+        // (previous node, previous state, shape id, legs)
+        #[allow(clippy::type_complexity)]
+        let mut back: Vec<[Option<(usize, usize, Vec<Leg>)>; ND]> = vec![std::array::from_fn(|_| None); n];
+        // Last leg of the state: unit direction and length.
+        let mut last: Vec<[(Vec2, f64); ND]> = vec![[(Vec2::default(), f64::INFINITY); ND]; n];
+        dist[0][8] = 0.0;
         if let Some(u) = lead_in {
             last[0][8] = (u, f64::INFINITY);
         }
@@ -780,6 +922,60 @@ impl Drawer<'_> {
                     }
                 }
                 None => 0.0,
+            }
+        };
+        // The pad-exit shapes of the node pair `i`-`j` (`p`-`q`). Mode 0: an axis leg out of the
+        // start pad to past its tip (`Exit::reach`), then a connector (`i` = 0), and a connector,
+        // then an axis leg into the end pad (`j` = the last node). Mode 3 (pad-snap, A1b/D3b): from
+        // every own-pad end, a leg in each of the 8 octilinear directions to its leave point
+        // ([`leave_point`]: the round end sticks out of the pad by [`LEAVE_NM`]), then a connector,
+        // where the run goes on forward from there: the axis leg to the leave point (r1) and the 45
+        // degree exit to the pad side (r2) are two of them, so a run whose next node is short of
+        // the full reach, or a pad too short for an [`Exit`], still leaves its pad centred.
+        let exit_shapes = |shapes: &mut Vec<Vec<Leg>>, i: usize, j: usize, p: Vec2, q: Vec2, mode: u8| {
+            // Mode 3 (pad-snap r2b, D3b): from an own-pad end, a leg in each octilinear direction to
+            // its leave point, then a connector, where the run goes on forward from there.
+            if mode == 3 {
+                for (end, ls) in leave8.iter().enumerate() {
+                    if (end == 0 && i != 0) || (end == 1 && j != n - 1) {
+                        continue;
+                    }
+                    let (from, to) = if end == 0 { (p, q) } else { (q, p) };
+                    for (k, m) in ls.iter().enumerate() {
+                        let Some(m) = *m else { continue };
+                        let d = m - from;
+                        if (to - m).dot(d) <= 0.0 || (to - m).len2() < 1.0 {
+                            continue;
+                        }
+                        for mut s in if end == 0 { connectors(m, to) } else { connectors(to, m) } {
+                            if end == 0 {
+                                s.insert(0, (m, Some(k)));
+                            } else {
+                                s.push((from, Some((k + 4) % 8)));
+                            }
+                            shapes.push(s);
+                        }
+                    }
+                }
+                return;
+            }
+            if i == 0 {
+                if let Some(t) = exits[0].as_ref().map(|x| (x.axis, x.reach)).filter(|&(u, t)| (q - p).dot(u) > t) {
+                    let p2 = p + t.0 * t.1;
+                    for mut s in connectors(p2, q) {
+                        s.insert(0, (p2, octi_dir(t.0)));
+                        shapes.push(s);
+                    }
+                }
+            }
+            if j == n - 1 {
+                if let Some(t) = exits[1].as_ref().map(|x| (x.axis, x.reach)).filter(|&(u, t)| (p - q).dot(u) > t) {
+                    let q2 = q + t.0 * t.1;
+                    for mut s in connectors(p, q2) {
+                        s.push((q, octi_dir(-t.0)));
+                        shapes.push(s);
+                    }
+                }
             }
         };
         // The connector shapes of a node pair, their legs' lengths, directions, `planned_room`
@@ -824,32 +1020,12 @@ impl Drawer<'_> {
                     for &j in &js {
                         let (p, q) = (nodes[i].0, nodes[j].0);
                         let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
-                        if i == 0 {
-                            if let Some(x) = exits[0] {
-                                let p2 = p + x.axis * x.reach;
-                                if (q - p).dot(x.axis) > x.reach {
-                                    for mut s in connectors(p2, q) {
-                                        s.insert(0, (p2, octi_dir(x.axis)));
-                                        shapes.push(s);
-                                    }
-                                }
-                            }
-                        }
-                        if j == n - 1 {
-                            if let Some(x) = exits[1] {
-                                let q2 = q + x.axis * x.reach;
-                                if (p - q).dot(x.axis) > x.reach {
-                                    for mut s in connectors(p, q2) {
-                                        s.push((q, octi_dir(-x.axis)));
-                                        shapes.push(s);
-                                    }
-                                }
-                            }
-                        }
+                        exit_shapes(&mut shapes, i, j, p, q, 0);
                         // A piece of the taut path itself (any angle), between consecutive nodes on it.
                         if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
                             shapes.push(vec![(q, None)]);
                         }
+                        exit_shapes(&mut shapes, i, j, p, q, 3);
                         for s in shapes {
                             // Price.
                             let mut c = 0.0;
@@ -879,10 +1055,10 @@ impl Drawer<'_> {
                                 }
                                 prev_any = dk.is_none();
                                 if i == 0 && k == 0 {
-                                    c += axis_price(&exits[0], v, len);
+                                    c += axis_price(&exits[0], v, len) + stub(0, e);
                                 }
                                 if j == n - 1 && k == s.len() - 1 {
-                                    c += axis_price(&exits[1], v, len);
+                                    c += axis_price(&exits[1], v, len) + stub(1, if k == 0 { p } else { s[k - 1].0 });
                                     if let Some(ul) = lead_out {
                                         // on into the lead (from its end back to the hand track)
                                         c += bend(v, len, -ul);
@@ -933,32 +1109,12 @@ impl Drawer<'_> {
                 let (sh_room, sh_follow, sh_legal, sh_viol) = (shared.map(|m| &m.room), shared.map(|m| &m.follow), shared.map(|m| &m.legal), shared.map(|m| &m.viol));
                 let (own_room, own_follow, own_legal, own_viol) = (&mut own.room, &mut own.follow, &mut own.legal, &mut own.viol);
                 let mut shapes: Vec<Vec<Leg>> = connectors(p, q);
-                if i == 0 {
-                    if let Some(x) = exits[0] {
-                        let p2 = p + x.axis * x.reach;
-                        if (q - p).dot(x.axis) > x.reach {
-                            for mut s in connectors(p2, q) {
-                                s.insert(0, (p2, octi_dir(x.axis)));
-                                shapes.push(s);
-                            }
-                        }
-                    }
-                }
-                if j == n - 1 {
-                    if let Some(x) = exits[1] {
-                        let q2 = q + x.axis * x.reach;
-                        if (p - q).dot(x.axis) > x.reach {
-                            for mut s in connectors(p, q2) {
-                                s.push((q, octi_dir(-x.axis)));
-                                shapes.push(s);
-                            }
-                        }
-                    }
-                }
+                exit_shapes(&mut shapes, i, j, p, q, 0);
                 // A piece of the taut path itself (any angle), between consecutive nodes on it.
                 if next_on[i] == Some(j) && octi_dir(q - p).is_none() && !cfg.any_forbidden {
                     shapes.push(vec![(q, None)]);
                 }
+                exit_shapes(&mut shapes, i, j, p, q, 3);
                 let mut shapes: Vec<Shape> = shapes
                     .into_iter()
                     .map(|s| {
@@ -1010,10 +1166,10 @@ impl Drawer<'_> {
                             }
                             prev_any = dk.is_none();
                             if i == 0 && k == 0 {
-                                c += axis_price(&exits[0], v, len);
+                                c += axis_price(&exits[0], v, len) + stub(0, sh.s[0].0);
                             }
                             if j == n - 1 && k == sn - 1 {
-                                c += axis_price(&exits[1], v, len);
+                                c += axis_price(&exits[1], v, len) + stub(1, if k == 0 { p } else { sh.s[k - 1].0 });
                                 if let Some(ul) = lead_out {
                                     // on into the lead (from its end back to the hand track)
                                     c += bend(v, len, -ul);
@@ -1676,6 +1832,69 @@ mod tests {
         assert_eq!(octi_dir(v(0.0, -2e6)), Some(6));
         assert_eq!(octi_dir(v(-1e6, 1e6 + 0.5)), Some(3));
         assert_eq!(octi_dir(v(2e6, 1e6)), None);
+    }
+
+    fn stub_price_d(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2) -> f64 {
+        stub_price(poly, c, ext, w, j, STUB_NM)
+    }
+
+    /// pad-snap: the stub price is 0 for a joint outside the pad, on its outline or within half the
+    /// width of it (the stub's round end sticks out: kept by tidy and Cleanup), and at the centre;
+    /// deeper inside it is STUB_NM graded by the distance from the centre.
+    #[test]
+    fn stub_price_ranks_below_one_violation() {
+        // pad-snap r2 (rule order short > clearance > off-centre stub): the dearest stub (an end
+        // at the pad's far side, 2 x STUB_NM) is cheaper than the least clearance violation the
+        // forced DP prices (one violation unit at the default weight)
+        assert_eq!(OctiCfg::default().stub_nm(), STUB_NM, "4 x bend_nm at the defaults");
+        // every violation weight the config accepts (>= 0) and a range of bend prices
+        for wt in [0.0, 0.01, 0.5, 1.0, 1.9, 2.0, 5.0, 1000.0] {
+            for bend in [0.0, 0.1, 0.25, 1.0, 5.0] {
+                let cfg = OctiCfg { viol_nm: wt * MM, short_nm: wt * MM * SHORT_FIRST, bend_nm: bend * MM, ..OctiCfg::default() };
+                let dearest = 2.0 * cfg.stub_nm();
+                assert!(dearest <= 0.8 * cfg.viol_nm + 1e-9 && (dearest < cfg.viol_nm || wt == 0.0), "w {wt} bend {bend}: {dearest} vs {}", cfg.viol_nm);
+                assert!(cfg.viol_nm <= cfg.short_nm);
+            }
+        }
+    }
+
+    #[test]
+    fn stub_price_only_for_a_stub_wholly_inside_the_pad() {
+        // 0.6 x 1.95 mm pad centred at the origin (math frame), a 0.2 mm track
+        let poly = vec![v(-0.3e6, -0.975e6), v(0.3e6, -0.975e6), v(0.3e6, 0.975e6), v(-0.3e6, 0.975e6)];
+        let c = v(0.0, 0.0);
+        let ext = (0.3e6f64).hypot(0.975e6);
+        let w = 0.2e6;
+        assert_eq!(stub_price_d(&poly, c, ext, w, c), 0.0);
+        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.0, 1.2e6)), 0.0, "outside");
+        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + LEAVE_NM)), 0.0, "the leave point");
+        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.3e6 - 0.05e6, 0.0)), 0.0, "near the long side");
+        let deep = stub_price_d(&poly, c, ext, w, v(0.0, 0.5e6));
+        assert!((deep - STUB_NM * (1.0 + 0.5e6 / ext)).abs() < 1e-6, "{deep}");
+        let deeper = stub_price_d(&poly, c, ext, w, v(0.0, 0.8e6));
+        assert!(deeper > deep, "graded by the distance from the centre: {deeper} vs {deep}");
+        // within tidy's tolerance of half the width: inside (tidy drops it), so priced
+        assert!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + 0.5 * STUB_TOL_NM)) > 0.0);
+    }
+
+    /// pad-snap r2b: the leave point lies on the ray where the round end of a stub from the centre
+    /// first sticks out of the pad by LEAVE_NM (axis, side and diagonal directions), so its stub
+    /// price is 0 there and > 0 just before it; none for a pad narrower than the track's half
+    /// width plus LEAVE_NM about the end.
+    #[test]
+    fn leave_point_is_where_the_stub_first_sticks_out() {
+        let poly = vec![v(-0.3e6, -0.975e6), v(0.3e6, -0.975e6), v(0.3e6, 0.975e6), v(-0.3e6, 0.975e6)];
+        let (c, w) = (v(0.0, 0.0), 0.2e6);
+        let ext = (0.3e6f64).hypot(0.975e6);
+        let s2 = std::f64::consts::FRAC_1_SQRT_2;
+        for (d, want) in [(v(0.0, 1.0), v(0.0, 0.895e6)), (v(-1.0, 0.0), v(-0.22e6, 0.0)), (v(s2, s2), v(0.22e6, 0.22e6)), (v(s2, -s2), v(0.22e6, -0.22e6))] {
+            let m = leave_point(&poly, c, d, w).expect("a leave point");
+            assert!((m - want).len() < 10.0, "{m:?} vs {want:?}");
+            assert_eq!(stub_price_d(&poly, c, ext, w, m), 0.0);
+            assert!(stub_price_d(&poly, c, ext, w, m - d * 30_000.0) > 0.0, "30 um before the leave point the stub is wholly inside");
+        }
+        let thin = vec![v(-0.075e6, -0.975e6), v(0.075e6, -0.975e6), v(0.075e6, 0.975e6), v(-0.075e6, 0.975e6)];
+        assert!(leave_point(&thin, c, v(0.0, 1.0), w).is_none());
     }
 
     #[test]

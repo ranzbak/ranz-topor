@@ -2327,6 +2327,9 @@ impl<'a> Drawer<'a> {
         let wi = &st.wires[w];
         let turn_at = |k: usize| wi.turns.iter().find(|x| x.0 == k).map(|x| pr.pos[x.1]);
         let mut best: Option<(f64, f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
+        // pad-snap r2b debug (`TOPO_VIADBG`): every forced candidate site with its price
+        let fdbg = std::env::var_os("TOPO_VIADBG").is_some();
+        let mut cands: Vec<(f64, usize, Vec2, i64, String)> = Vec::new();
         for &sz in sizes {
             let need_r = crate::vias::via_need_copper(&self.model.rules, net, sz, 0.0, self.opts.margin_nm.max(0) as f64);
             let at = plan.at.get(i).copied().filter(|&k| (ka..=kb).contains(&k));
@@ -2366,9 +2369,19 @@ impl<'a> Drawer<'a> {
                 };
                 let price = vs.iter().map(Viol::amount).sum::<f64>() + side + reach;
                 let room = self.via_room(w, k, p, sz.d as f64);
+                if fdbg {
+                    cands.push((price, k, p, sz.d, vs.iter().map(|v| format!("{} {} d{:.0} l{:.0}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3)).collect::<Vec<_>>().join("; ")));
+                }
                 if best.as_ref().is_none_or(|b| price < b.0 - 1e-9 || (price - b.0).abs() <= 1e-9 && room > b.1 + 1.0) {
                     best = Some((price, room, k, p, sz, vs));
                 }
+            }
+        }
+        if fdbg {
+            cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+            eprintln!("FORCEVIA wire {w} net {net} via {i} class {} chosen {:?} of {} sites", class.is_some(), best.as_ref().map(|b| (b.0, b.3.x / 1e6, -b.3.y / 1e6)), cands.len());
+            for c in cands.iter().take(8) {
+                eprintln!("  FORCEVIA cand price {:.3} k {} ({:.4},{:.4}) d {} [{}]", c.0, c.1, c.2.x / 1e6, -c.2.y / 1e6, c.3, c.4);
             }
         }
         best.map(|b| (b.2, b.3, b.4, b.5))
@@ -3520,6 +3533,9 @@ impl<'a> Drawer<'a> {
                     let (mut pts, mut items, mut pneck_out) = (pts, items, pneck_out);
                     // Debug (`TOPO_ERBS_DEBUG`): the run before its octilinear form and pull.
                     let pre_octi = (band.is_some() && std::env::var_os("TOPO_ERBS_DEBUG").is_some()).then(|| pts.clone());
+                    if self.octi.on && (neck.is_some() || restored) && std::env::var_os("TOPO_OCTIDBG").is_some() {
+                        eprintln!("OCTISKIP wire {w} net {} L{layer} neck {} restored {restored} from ({:.4},{:.4})", wi.net, neck.is_some(), pts[0].x / 1e6, -pts[0].y / 1e6);
+                    }
                     if self.octi.on && neck.is_none() && pts.len() >= 2 && !restored {
                         let t_o = std::time::Instant::now();
                         let wneck = if pneck_out.is_some() || attempt == 1 { pneck } else { None };
@@ -3583,6 +3599,9 @@ impl<'a> Drawer<'a> {
                     // by construction, and keeps the room of the wires not drawn yet.
                     if self.opts.draw_pull_taut && neck.is_none() && attempt >= 0 && !restored {
                         if let Some((p2, its2, pn2)) = self.pull_taut(w, k0, k1, layer, lid, &pts, &pneck) {
+                            if std::env::var_os("TOPO_OCTIDBG").is_some() {
+                                eprintln!("PULL wire {w} {:?} -> {:?}", pts.iter().map(|p| (p.x / 1e6, -p.y / 1e6)).collect::<Vec<_>>(), p2.iter().map(|p| (p.x / 1e6, -p.y / 1e6)).collect::<Vec<_>>());
+                            }
                             self.stats.pulled += pts.len() - p2.len();
                             pts = p2;
                             items = its2;

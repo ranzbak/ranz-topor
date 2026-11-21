@@ -738,6 +738,12 @@ fn finish_copper(model: &BoardModel, opts: &Options, r: &mut RouteResult) {
             r.warnings.push(st.line());
         }
     }
+    // pad-snap (A1b): track ends inside a pad of their net but off its centre, as written
+    let (n, worst) = crate::topo::tidy::off_centre_pad_ends(model, &r.items);
+    r.warnings.push(format!(
+        "pad ends off centre: {n} track ends end inside a pad of their net off its centre (KiCad connects them, but its interactive router links a pad only at its centre: loose for drag and footprint moves), largest {:.3} mm",
+        worst / 1e6
+    ));
 }
 
 /// Decompose `model` on its routable layers and report every connection as failed with

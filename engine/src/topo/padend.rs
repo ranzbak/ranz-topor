@@ -178,7 +178,7 @@ impl Drawer<'_> {
 }
 
 /// Distance from `p` to the boundary of `poly` (any simple polygon). O(n).
-fn boundary_dist(p: Vec2, poly: &[Vec2]) -> f64 {
+pub(super) fn boundary_dist(p: Vec2, poly: &[Vec2]) -> f64 {
     let n = poly.len();
     (0..n).map(|i| super::draw::seg_dist(p, poly[i], poly[(i + 1) % n])).fold(f64::INFINITY, f64::min)
 }

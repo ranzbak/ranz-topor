@@ -56,10 +56,10 @@ def test_drcloop_matches_run_bench_on_fixture(fixture_board, tmp_path, monkeypat
     assert r["drc_loop"] == {"rounds": 1, "pinned": {}, "spots": [], "budget_exhausted": False}
     assert r["zero_slack"] == {"status": "not run", "wires": []}
     # 8 items, not 7, since realise = "erbs" is the default (TW2): one wire ends in an octilinear tail, one more
-    # segment and +0.14 mm; not a defect (lead, verify V1 2026-11-18). The digest below is that run's (tw2r2-b92ac74).
+    # segment and +0.14 mm; not a defect (lead, verify V1 2026-11-18). The digest below is the pad-snap r3 run's: wire 2 ends at the pad centre (45 deg instead of the 60 deg free angle, +0.097 mm), A1b.
     assert (len(rep["items"]), r["routed_items"], r["unchanged_items"], r["replaced"]) == (8, 8, 0, 0)
     # golden digest carries the engine (IPC) net codes: GND 1, SIG 2, VCC 3 (pcbnew file order was VCC 1, SIG 2, GND 3)
-    assert _digest(rep["items"]) == "d979f1f05ce96e854c8cf25b20b0d683747f19df5b2fc7698c3e3e52a88f4672"
+    assert _digest(rep["items"]) == "7fa191f9e32da1e3f5259ba6b16acc045572c1a3d83b63ffbd6aa1ef3a1006dc"
 
 
 def test_drcloop_pin_round_matches_run_bench_on_fixture(fixture_board, tmp_path, monkeypatch):
