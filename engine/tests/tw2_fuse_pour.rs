@@ -1,6 +1,6 @@
 //! TW2 fuse pour check ([`topor_engine::topo::fusepour`]): the fuse and the octilinear polish after
-//! drawing are judged by the pour stitching too, so they never leave more pour pieces cut off
-//! than the copper without their moves (qmtech 2026-11-18: the reduced, fused and polished copper
+//! drawing are judged by the pour stitching too, so they never cut off a pour piece that the
+//! copper without their moves keeps connected (sets, not counts, fuse-octi r5; qmtech 2026-11-18: the reduced, fused and polished copper
 //! left 21 GND pieces against 20 as drawn, one error more, so the table dropped the via reduction).
 //!
 //! Fixture: the esp USB crop (`fixtures/esp-rust-board-usb-crop.json`) with a GND pour over the
@@ -89,6 +89,8 @@ fn the_fuse_never_leaves_more_pour_pieces_cut_off() {
     let num = |after: &str| -> usize { l.split(after).nth(1).and_then(|t| t.split(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("{after}: {l}")) };
     let (without, now) = (num(" and the octilinear polish, "), num(", now "));
     assert!(now <= without, "{l}");
+    // Sets, not counts (fuse-octi r5): no piece cut off that the copper without the moves keeps.
+    assert_eq!(num(&format!(", now {now} (")), 0, "{l}");
     let (_, k) = undone(l);
     assert!(k >= 1, "the crop fuses trace ends: {l}");
     // Every polished wire is a move of the check too.

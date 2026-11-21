@@ -8940,7 +8940,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 if after > before && !guard_off {
                     split_refused.1 += 1;
                     if fdbg {
-                        eprintln!("POLISH refused wire {w} net {net}: the net would be {after} pieces, {before} before (split guard)");
+                        let segs = super::fusepour::changed(&pre.runs, &now.runs);
+                        let at: Vec<String> = segs.iter().map(|s| format!("({:.3}, {:.3})->({:.3}, {:.3})", s[0].x / MM, -s[0].y / MM, s[1].x / MM, -s[1].y / MM)).collect();
+                        let was: Vec<String> = pre.runs.iter().map(|(l, p)| format!("L{l}: {}", p.iter().map(|q| format!("({:.3}, {:.3})", q.x / MM, -q.y / MM)).collect::<Vec<_>>().join(" "))).collect();
+                        eprintln!("POLISH refused wire {w} net {net}: the net would be {after} pieces, {before} before (split guard); new segments {}; wire before {}; keep {:?}", at.join(" "), was.join(" | "), anchors.get(&w).map(|a| a.iter().map(|q| format!("({:.3}, {:.3})", q.x / MM, -q.y / MM)).collect::<Vec<_>>()));
                     }
                     return false;
                 }
@@ -9015,6 +9018,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         let base = left_of(&unfused);
         let mut cur = left_of(&out);
         let first = cur.len();
+        let first_new = fusepour::new_pieces(&cur, &base).len();
         let mv: Vec<fusepour::Move> = moves.iter().map(|(m, _)| m.clone()).collect();
         let mut live = vec![true; mv.len()];
         let mut rounds = 0usize;
@@ -9053,7 +9057,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // new piece), so `fuse_pour_rounds` (0: every move at once) decides what is undone.
         let worse = ctl.test_point("fuse pour worse");
         let mut rechecked = 0usize;
-        while !pc_cut.get() && (undo_all || (partial && rounds == 0) || (worse && rounds == 0) || !fusepour::fused_ok(cur.len(), base.len())) && !ctl.is_cancelled() {
+        while !pc_cut.get() && (undo_all || (partial && rounds == 0) || (worse && rounds == 0) || !fusepour::fused_ok(&cur, &base)) && !ctl.is_cancelled() {
             let mut seed: BTreeSet<usize> = BTreeSet::new();
             if partial && rounds == 0 {
                 seed.extend(mv.iter().position(|m| m.onto != fusepour::NO_WIRE));
@@ -9118,13 +9122,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
         warnings.push(format!(
-            "fuse pour check: the stitching leaves {first} pour pieces cut off in the copper after the fuse and the octilinear polish, {} without their moves; {n_undone} of {} moves undone (fuse {fuse_undone} of {n_fuse}, polish {} of {}; {rechecked} by the re-check of the kept moves){}, now {}{} ({:.2} s; these steps never add a cut-off pour piece, errors first, TopoR 6.3 p. 72)",
+            "fuse pour check: the stitching leaves {first} pour pieces cut off in the copper after the fuse and the octilinear polish, {} without their moves ({first_new} of the first not cut off without the moves); {n_undone} of {} moves undone (fuse {fuse_undone} of {n_fuse}, polish {} of {}; {rechecked} by the re-check of the kept moves){}, now {} ({} of them new){} ({:.2} s; these steps never cut off a pour piece the copper without them keeps connected, piece sets not counts, errors first, TopoR 6.3 p. 72)",
             base.len(),
             mv.len(),
             n_undone - fuse_undone,
             mv.len() - n_fuse,
             if undone_nets.is_empty() { String::new() } else { format!(" ({})", undone_nets.iter().cloned().collect::<Vec<_>>().join(", ")) },
             cur.len(),
+            fusepour::new_pieces(&cur, &base).len(),
             if pc_cut.get() { "; the time limit or Cancel cut its stitching: the moves not undone by then stay" } else { "" },
             t_pc.elapsed().as_secs_f64()
         ));

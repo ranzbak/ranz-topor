@@ -229,3 +229,34 @@ fn the_split_self_check_names_a_net_the_steps_split() {
     let l = line(&r, "split guard after drawing: ").expect("split guard line");
     assert!(l.starts_with("split guard after drawing: 0 fuse and 0 polish steps not taken") && l.ends_with("; engine bug: 1 net in more pieces after the steps after the drawing than before them: N"), "{l}");
 }
+
+/// The fixtures' copper for the approval PNGs (fuse-octi r5, shopping-list rule: patterns are
+/// user-approved first): `TOPO_FIXTURE_DUMP=<dir> cargo test --release --test topo_fuse_order --
+/// --ignored dump` writes `<dir>/<fixture>.json` (pads, tracks fused and with fuse_branches off,
+/// KiCad frame mm); scratch tooling draws them with the expected answer.
+#[test]
+#[ignore]
+fn dump_the_fixtures_for_the_approval_pngs() {
+    let Ok(dir) = std::env::var("TOPO_FIXTURE_DUMP") else { return };
+    let segs = |r: &RouteResult| -> Vec<[f64; 4]> {
+        r.items
+            .iter()
+            .filter_map(|i| if let Item::Track(t) = i { Some(t) } else { None })
+            .map(|t| {
+                let (a, b) = (t.prim.start(), t.prim.end());
+                [a.x as f64 / 1e6, a.y as f64 / 1e6, b.x as f64 / 1e6, b.y as f64 / 1e6]
+            })
+            .collect()
+    };
+    let off = [("fuse_branches", serde_json::json!(false))];
+    for (name, pads) in [("fuse_shared_pad-long_a", [(25.0, 15.0), (5.0, 17.0), (22.0, 4.0)]), ("fuse_shared_pad-short_a", [(25.0, 15.0), (11.0, 17.0), (22.0, 1.0)])] {
+        let m = shared_pad(pads[1], pads[2]);
+        let (r, u) = (route(&m, &[]), route(&m, &off));
+        let j = serde_json::json!({"pads": pads, "names": ["P", "A", "B"], "fused": segs(&r), "unfused": segs(&u), "lines": r.warnings.iter().filter(|w| w.starts_with("fuse")).collect::<Vec<_>>()});
+        std::fs::write(format!("{dir}/{name}.json"), j.to_string()).unwrap();
+    }
+    let r = free_trunk(&[]);
+    let g = free_trunk(&["polish drops feet"]);
+    let j = serde_json::json!({"pads": FREE_TRUNK, "names": ["A", "B", "C"], "fused": segs(&r), "guarded": segs(&g), "lines": r.warnings.iter().filter(|w| w.starts_with("fuse") || w.starts_with("octi") || w.starts_with("split")).collect::<Vec<_>>()});
+    std::fs::write(format!("{dir}/fuse_free_trunk.json"), j.to_string()).unwrap();
+}
