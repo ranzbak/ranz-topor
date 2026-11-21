@@ -2368,9 +2368,15 @@ impl Drawer<'_> {
             if dbg {
                 eprintln!("STRAIGHTEN wire {w} run {r}: {} pts, side {}, refit preconditions {}", cur.len(), side.len(), self.refit_legal(wo, r, &wo.runs[r].1));
             }
+            // The whole run's price: a step is taken only where it lowers this (by more than 1 nm),
+            // so the pass ends. The span price alone is not enough: the style price is not a sum
+            // over the spans (a jog's price reads both legs beside it), two overlapping spans can
+            // each look cheaper than the other (seen on K5: an endless swap).
+            let full = |p: &[Vec2]| plen(p) + style_price(&cfg, pitch, p) - cfg.pull * follow(p);
             let mut i = 0;
             while i + 2 < cur.len() {
                 let mut done = false;
+                let full_old = full(&cur);
                 for j in (i + 2..cur.len()).rev() {
                     if (i + 1..j).any(|m| keep.iter().any(|&p| (cur[m] - p).len() < 1_000.0)) {
                         continue;
@@ -2434,15 +2440,18 @@ impl Drawer<'_> {
                                 }
                             }
                             let p = price(&mid);
-                            (p < old - 1.0).then_some((p, fi, mid))
+                            if p >= old - 1.0 {
+                                return None;
+                            }
+                            let mut trial = cur[..i].to_vec();
+                            trial.extend_from_slice(&mid);
+                            trial.extend_from_slice(&cur[j + 1..]);
+                            let trial = drop_collinear(&trial);
+                            (full(&trial) < full_old - 1.0).then_some((p, fi, trial))
                         })
                         .collect();
                     cands.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-                    for (p, _, mid) in cands {
-                        let mut trial = cur[..i].to_vec();
-                        trial.extend_from_slice(&mid);
-                        trial.extend_from_slice(&cur[j + 1..]);
-                        let trial = drop_collinear(&trial);
+                    for (p, _, trial) in cands {
                         let snap = wo.clone();
                         let ok = self.refit_run(wo, r, trial.clone());
                         if dbg {

@@ -17,11 +17,11 @@ fn route(p: &str, extra: &[(&str, serde_json::Value)]) -> RouteResult {
     let mut val = serde_json::to_value(Options::default()).unwrap();
     val["runs"] = serde_json::json!(1);
     val["topo_rounds"] = serde_json::json!(1);
-    for (k, v) in extra {
-        val[*k] = v.clone();
-    }
     if let Ok(o) = std::env::var("FD45_ORDER_TMP") {
         val["octi_order"] = serde_json::json!(o);
+    }
+    for (k, v) in extra {
+        val[*k] = v.clone();
     }
     let o: Options = serde_json::from_value(val).unwrap();
     topor_engine::route::route_with(&m, &o, &RunControl::new())
