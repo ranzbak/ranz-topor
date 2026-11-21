@@ -537,6 +537,8 @@ thread_local! {
     pub(super) static OCTI_NODE_SPLIT: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
     /// Tests (first-draw-45 P2): the own-crossing portals without their gates (no price).
     pub(super) static OCTI_NO_OWN_GATES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests (fd45 r11): extra P2 bands for the DP, as if `open_strip` had returned them.
+    pub(super) static OCTI_TEST_BANDS: std::cell::RefCell<Vec<Corridor>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Where the run ends at a pad: the pad's long axis (unit, pointing out of the pad towards the
@@ -671,6 +673,12 @@ impl Drawer<'_> {
         let (mut strip, own_gates, bands) = self.open_strip(w, k0, k1, layer, &taut);
         #[cfg(test)]
         let own_gates = if OCTI_NO_OWN_GATES.with(|f| f.get()) { Vec::new() } else { own_gates };
+        #[cfg(test)]
+        let bands = {
+            let mut b = bands;
+            OCTI_TEST_BANDS.with(|x| b.extend(x.borrow().iter().cloned()));
+            b
+        };
         strip.walls.extend(self.via_walls(w, k0, k1, layer));
         // The wire's own lane on every edge it crosses (Bast et al.: the grid restricted to the
         // line's corridor): the parts of the edge outside the span its packing leaves it are

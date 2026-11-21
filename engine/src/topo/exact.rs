@@ -2227,6 +2227,115 @@ mod tests {
         assert!(sides > 3 && slots > 0, "{sides} sides, {slots} slots");
     }
 
+    /// fd45 r11 (P2 bands priced): the octilinear DP pays for crossing an undrawn wire's ERBS band.
+    /// A net-1 run from (2, 12) to (12, 9) mm on an empty board, the room factor 0 (no depth price):
+    /// the DP's elbow form crosses a short band placed across its first leg, off the taut run
+    /// (the plan's own crossing is never priced). With the band's crossing price the DP takes a
+    /// form that crosses no band (the other elbow, as short); without it (mutant B2) it keeps the
+    /// crossing form.
+    #[test]
+    fn dp_form_avoids_crossing_an_undrawn_band_when_a_free_form_exists() {
+        use super::super::octi::{band_crossings, Corridor, OCTI_TEST_BANDS};
+        two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
+            dr.octi.room = 0.0;
+            let dr: &Drawer = dr;
+            let k1 = dr.st.wires[0].passes.len();
+            let poly = dr.st.polyline(0);
+            let (a, b) = (poly[0], poly[poly.len() - 1]);
+            // the taut run: the straight chord (the empty board's taut path)
+            let pts = vec![a, b];
+            let f0 = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).expect("an octilinear form").pts;
+            assert!(f0.len() >= 3, "{f0:?}");
+            // a short band across the first leg at 80 %, on its side of the chord, not reaching it
+            let (p0, p1) = (f0[0], f0[1]);
+            let m = p0 + (p1 - p0) * 0.8;
+            let u = (p1 - p0).unit().expect("a leg");
+            let n = Vec2 { x: -u.y, y: u.x };
+            let dist = pts.windows(2).map(|x| super::super::draw::seg_dist(m, x[0], x[1])).fold(f64::INFINITY, f64::min);
+            assert!(dist > 0.4 * MM, "the elbow lies {dist} nm off the taut run {pts:?}");
+            let h = 0.45 * dist;
+            let path = vec![m - n * h, m + n * h];
+            let reach = 0.3 * MM;
+            let band = Corridor { bb: bbox_of(&path).grow(reach), path: path.clone(), reach, pitch: reach, viol_nm: dr.octi.viol_nm, wire: 0 };
+            assert!(!pts.windows(2).any(|x| super::super::draw::seg_proper(x[0], x[1], path[0], path[1])), "the band crosses the taut run");
+            assert!(!band_crossings(std::slice::from_ref(&band), &f0).is_empty(), "the form without the band crosses it: {f0:?}");
+            OCTI_TEST_BANDS.with(|x| *x.borrow_mut() = vec![band.clone()]);
+            let f1 = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).map(|o| o.pts);
+            OCTI_TEST_BANDS.with(|x| x.borrow_mut().clear());
+            let f1 = f1.expect("an octilinear form with the band");
+            assert!(band_crossings(std::slice::from_ref(&band), &f1).is_empty(), "the DP crosses the band: {f1:?} (without it {f0:?})");
+            let len = |v: &[Vec2]| v.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>();
+            assert!(len(&f1) < len(&f0) + 0.01 * MM, "no detour round the band: {} vs {}", len(&f1), len(&f0));
+        });
+    }
+
+    /// fd45 r11: `open_strip` returns the band of every undrawn wire on an edge it opens (P2) as a
+    /// priced corridor: the ERBS path, reach = half widths + the larger clearance, the crossing
+    /// price at the `violation` weight. On the pad field of `own_taut_crossings_are_portals_in_free_room`
+    /// with `realise = "erbs"` and each undrawn wire's ERBS injected as its polyline.
+    #[test]
+    fn opened_edges_return_priced_bands_of_their_undrawn_wires() {
+        let erbs_opts: &'static Options = Box::leak(Box::new(Options { realise: "erbs".to_string(), ..Options::default() }));
+        let mut found = 0usize;
+        with_octi_fields(&mut |dr, _g| {
+            for l in dr.pass_layer.iter_mut() {
+                *l = 0;
+            }
+            dr.compute_intervals();
+            dr.opts = erbs_opts;
+            for w in 1..dr.st.wires.len() {
+                if !dr.st.wires[w].alive || dr.st.wires[w].passes.is_empty() {
+                    continue;
+                }
+                let path = dr.st.polyline(w);
+                let (s0, e0) = (path[0], path[path.len() - 1]);
+                dr.erbs.insert(w, vec![super::super::erbs::RunBand { layer: 0, s: s0, e: e0, band_len: path.windows(2).map(|x| (x[1] - x[0]).len()).sum(), path, gap: false }]);
+            }
+            let dr: &Drawer = dr;
+            let (st, pr) = (dr.st, &dr.b.proj);
+            let wi = &st.wires[0];
+            let k1 = wi.passes.len();
+            let poly = st.polyline(0);
+            let portal: Vec<usize> = wi.passes.iter().map(|&q| st.passes[q].edge).collect();
+            for e in 0..pr.edges.len() {
+                if portal.contains(&e) || pr.edge_tris[e].iter().flatten().filter(|&&t| !pr.tri_out[t]).count() < 2 {
+                    continue;
+                }
+                let qs: Vec<usize> = st.edge_order[e].iter().copied().filter(|&q| st.passes[q].wire != 0).collect();
+                let [q] = qs[..] else { continue };
+                let ow = st.passes[q].wire;
+                let [ea, eb] = pr.edges[e];
+                let (pp, pq) = (pr.pos[ea], pr.pos[eb]);
+                let Some((i, d)) = poly.windows(2).enumerate().filter(|(_, x)| !super::super::draw::seg_proper(x[0], x[1], pp, pq)).map(|(i, x)| (i, super::super::draw::seg_seg_dist(x[0], x[1], pp, pq))).min_by(|a, b| a.1.total_cmp(&b.1)) else { continue };
+                if !(0.3 * MM..=2.0 * MM).contains(&d) {
+                    continue;
+                }
+                // a detour vertex just across the edge's middle, on the far side from the run
+                let mid = (pp + pq) * 0.5;
+                let (a, b) = (poly[i], poly[i + 1]);
+                let x = mid + (mid - (a + b) * 0.5).unit().map_or(Vec2::default(), |u| u * 50_000.0);
+                let mut pts = poly.clone();
+                pts.insert(i + 1, x);
+                let band_path = &dr.erbs[&ow][0].path;
+                if band_path.windows(2).any(|bx| pts.windows(2).any(|y| super::super::draw::seg_proper(bx[0], bx[1], y[0], y[1]))) {
+                    continue;
+                }
+                let (_, gates, bands) = dr.open_strip(0, 0, k1, 0, &pts);
+                if !gates.iter().any(|g| (g.0 - pp).len() < 1.0) {
+                    continue;
+                }
+                let oi = &st.wires[ow];
+                let c = bands.iter().find(|c| c.wire == ow).unwrap_or_else(|| panic!("edge {e} opened for wire {ow}: no band"));
+                assert_eq!(c.viol_nm, dr.octi.viol_nm, "edge {e}: the band's crossing price");
+                assert!((c.reach - (0.5 * oi.w + oi.s.max(wi.s) + 0.5 * wi.w)).abs() < 1.0, "edge {e}: reach {}", c.reach);
+                assert_eq!(&c.path, band_path);
+                found += 1;
+            }
+        });
+        eprintln!("P2 bands: {found} opened edges with a priced band");
+        assert!(found > 0, "no opened edge with a band");
+    }
+
     /// first-draw-45 P5: the taut pull trades an octilinear leg for free angle only where the
     /// shortcut is cheaper on the DP's scale (length plus the `any_angle` price). A 2 mm leg along
     /// y = 12 then any-angle to B: the shortcut saves 0.1 mm and makes the whole run free-angle,
