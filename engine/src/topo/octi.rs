@@ -632,19 +632,7 @@ impl Drawer<'_> {
     /// first draw).
     pub(super) fn octilinear(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>) -> Option<OctiOut> {
         let t = std::time::Instant::now();
-        let walled = std::cell::Cell::new(false);
-        let mut r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, Some(&walled));
-        // fd45 r10 (esp attribution, arm p2w): the ERBS walls of undrawn wires (P2, `open_strip`)
-        // are planned room, not copper: when they leave the run no form at all, the run is drawn
-        // without them ("reserve planned room, adapt only on conflict") instead of falling to a
-        // forced form through drawn copper (esp +3V3 R2.1 -> pour ran through IO21_TX's via).
-        if r.is_none() && walled.get() {
-            r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, None);
-            // debug (`TOPO_FD45_RETRYDBG`, copper-neutral): one line per wall-less retry.
-            if std::env::var_os("TOPO_FD45_RETRYDBG").is_some() {
-                eprintln!("FD45RETRY w{w} L{layer} passes {k0}..{k1} forced {} -> {}", forced.is_some(), if r.is_some() { "form" } else { "none" });
-            }
-        }
+        let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced);
         // first-draw-45 r9 debug (`TOPO_REDUCEDBG`, copper-neutral): an octilinear call over 0.5 s.
         if std::env::var_os("TOPO_REDUCEDBG").is_some() && t.elapsed().as_secs_f64() > 0.5 {
             eprintln!("OCTISLOW w{w} L{layer} passes {k0}..{k1} taut pts {} forced {} -> {}: {:.2} s", pts.len(), forced.is_some(), r.as_ref().map_or(0, |o| o.pts.len()), t.elapsed().as_secs_f64());
@@ -665,7 +653,7 @@ impl Drawer<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, erbs_walls: Option<&std::cell::Cell<bool>>) -> Option<OctiOut> {
+    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>) -> Option<OctiOut> {
         let cfg = self.octi;
         let (short_nm, forced) = (forced.unwrap_or(0.0), forced.is_some());
         let mut taut: Vec<Vec2> = pts.to_vec();
@@ -680,7 +668,7 @@ impl Drawer<'_> {
         }
         let wi = &self.st.wires[w];
         let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax: 0.0 };
-        let (mut strip, own_gates) = self.open_strip(w, k0, k1, layer, &taut, erbs_walls);
+        let (mut strip, own_gates) = self.open_strip(w, k0, k1, layer, &taut);
         #[cfg(test)]
         let own_gates = if OCTI_NO_OWN_GATES.with(|f| f.get()) { Vec::new() } else { own_gates };
         strip.walls.extend(self.via_walls(w, k0, k1, layer));
@@ -1711,7 +1699,7 @@ impl Drawer<'_> {
     /// length, span lo, span hi)`. An edge the taut path crosses on both sides of an undrawn
     /// wire's planned crossing stays a wall.
     #[allow(clippy::type_complexity)]
-    pub(super) fn open_strip(&self, w: WireId, k0: usize, k1: usize, layer: usize, taut: &[Vec2], erbs_walls: Option<&std::cell::Cell<bool>>) -> (Strip, Vec<(Vec2, Vec2, f64, f64, f64)>) {
+    pub(super) fn open_strip(&self, w: WireId, k0: usize, k1: usize, layer: usize, taut: &[Vec2]) -> (Strip, Vec<(Vec2, Vec2, f64, f64, f64)>) {
         const OPEN_RINGS: usize = 6;
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
@@ -1875,28 +1863,17 @@ impl Drawer<'_> {
         // reserved copper the joint check commits), unless the run's own taut path crosses it
         // (the plan's own crossing, left to the clearance check). Without an ERBS the per-edge
         // walls above stay its only guard. O(opened wires x band points x taut points).
-        // `erbs_walls`: add them (set when any is added); `None`: the retry without them.
-        if let Some(added) = erbs_walls.filter(|_| self.erbs_walls_apply()) {
+        if self.opts.realise == "erbs" && !fd45_off("p2w") {
             for &ow in &opened_for {
                 for b in self.erbs.get(&ow).map_or(&[][..], |v| v.as_slice()).iter().filter(|b| b.layer == layer) {
                     let crosses = b.path.windows(2).any(|x| taut.windows(2).any(|y| super::draw::seg_proper(x[0], x[1], y[0], y[1])));
                     if !crosses {
-                        let n = walls.len();
                         walls.extend(b.path.windows(2).filter(|x| (x[1] - x[0]).len2() >= 1.0).map(|x| (x[0], x[1])));
-                        if walls.len() > n {
-                            added.set(true);
-                        }
                     }
                 }
             }
         }
         (Strip::new(tris, walls), gates)
-    }
-
-    /// fd45 r10 (3a): whether P2 adds the ERBS walls of undrawn wires on opened edges
-    /// (`open_strip`); debug arm `TOPO_FD45_OFF=p2w`.
-    fn erbs_walls_apply(&self) -> bool {
-        self.opts.realise == "erbs" && !fd45_off("p2w")
     }
 
     /// first-draw-45 r10 (mechanism C, lead-approved; "reserve planned room" for joint losers):
