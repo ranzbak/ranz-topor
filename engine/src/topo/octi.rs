@@ -685,7 +685,6 @@ impl Drawer<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, grid: bool) -> Option<OctiOut> {
         let cfg = self.octi;
         // grid-snap: the track grid of this pass (None: the plain pass, no grid node, no price).
@@ -1254,6 +1253,7 @@ impl Drawer<'_> {
             s: Vec<Leg>,
             // (leg index, length, unit direction, room price, follow length, direction, grid-snap:
             // the `off_grid` price of a bend at the leg's start)
+            #[allow(clippy::type_complexity)]
             legs: Vec<(usize, f64, Vec2, f64, f64, Option<usize>, f64)>,
             legal: Option<bool>,
         }

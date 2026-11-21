@@ -166,19 +166,18 @@ mod tests {
         let a = l.amount(v(75_927_000.0 + 50_000.0, -45_000_000.0));
         assert!(a > 0.2 && a < 0.3, "{a}");
         assert_eq!(l.step_along(v(1.0, 0.0)), Some(254_000.0));
-        assert!((l.step_along(v(0.7071, 0.7071)).unwrap() - 254_000.0 * 2f64.sqrt()).abs() < 1e-3);
+        assert!((l.step_along(v(std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2)).unwrap() - 254_000.0 * 2f64.sqrt()).abs() < 1e-3);
         let r = Lattice::new([200_000, 100_000], [0, 0]).unwrap();
         assert!(!r.square());
         assert_eq!(r.step_along(v(0.0, 1.0)), Some(100_000.0));
-        assert_eq!(r.step_along(v(0.7071, -0.7071)), None);
+        assert_eq!(r.step_along(v(std::f64::consts::FRAC_1_SQRT_2, -std::f64::consts::FRAC_1_SQRT_2)), None);
         assert!(Lattice::new([0, 254_000], [0, 0]).is_none());
     }
 
     /// Off without the option, the via grid falls back to the track grid.
     #[test]
     fn lattices_from_the_options() {
-        let mut o = crate::model::Options::default();
-        o.grid_track_nm = [254_000, 254_000];
+        let mut o = crate::model::Options { grid_track_nm: [254_000, 254_000], ..Default::default() };
         assert_eq!(Lattice::from_opts(&o), (None, None));
         o.grid_snap = "prefer".into();
         let (t, w) = Lattice::from_opts(&o);

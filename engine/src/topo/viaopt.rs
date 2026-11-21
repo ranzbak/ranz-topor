@@ -748,6 +748,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
 /// may take; never a violation). None: `cur` stays (on the grid already, or no such point).
 /// The via leaves its track by at most half the cell diagonal; the drawing goes through it.
 /// O(4 gap queries).
+#[allow(clippy::too_many_arguments)]
 pub fn grid_site(lat: &super::gridsnap::Lattice, price: f64, tr: &Track, lo: f64, hi: f64, cur: Vec2, ok_k: &dyn Fn(usize) -> bool, gap: &dyn Fn(Vec2) -> (f64, f64, f64)) -> Option<(usize, Vec2)> {
     let a = lat.amount(cur);
     if a <= 0.0 || tr.pts.len() < 2 {
