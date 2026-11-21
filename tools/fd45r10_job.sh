@@ -46,6 +46,11 @@ if [ "$mode" = attr ]; then
   q espPW 'TOPO_FD45_OFF=p2w unit espPW $ESP'; q espSW 'TOPO_FD45_OFF=sweepw unit espSW $ESP'
   wait; note "all done"; exit 0
 fi
+if [ "$mode" = retry ]; then
+  # P2 ERBS walls with the wall-less retry: esp and qm det s0, retry lines counted
+  q espRT 'TOPO_FD45_RETRYDBG=1 unit espRT $ESP'; q qmRT 'TOPO_FD45_RETRYDBG=1 unit qmRT $QM'
+  wait; note "all done"; exit 0
+fi
 if [ "$mode" = suite ]; then
   q rel 'cd $TREE && s=$(date +%s); CARGO_TARGET_DIR=/root/fd45r10-rel-target CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 cargo test --release --workspace --no-fail-fast > $OUT/cargo-rel.log 2>&1 9>&-; note "rel rc $? $(( $(date +%s)-s )) s"; gzip -k $OUT/cargo-rel.log' 8
   q py 'cd $TREE && s=$(date +%s); CI=1 python -m pytest -q -p no:cacheprovider -rfEs > $OUT/pytest.log 2>&1; note "py rc $? $(( $(date +%s)-s )) s"' 4

@@ -640,6 +640,10 @@ impl Drawer<'_> {
         // forced form through drawn copper (esp +3V3 R2.1 -> pour ran through IO21_TX's via).
         if r.is_none() && walled.get() {
             r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, None);
+            // debug (`TOPO_FD45_RETRYDBG`, copper-neutral): one line per wall-less retry.
+            if std::env::var_os("TOPO_FD45_RETRYDBG").is_some() {
+                eprintln!("FD45RETRY w{w} L{layer} passes {k0}..{k1} forced {} -> {}", forced.is_some(), if r.is_some() { "form" } else { "none" });
+            }
         }
         // first-draw-45 r9 debug (`TOPO_REDUCEDBG`, copper-neutral): an octilinear call over 0.5 s.
         if std::env::var_os("TOPO_REDUCEDBG").is_some() && t.elapsed().as_secs_f64() > 0.5 {
