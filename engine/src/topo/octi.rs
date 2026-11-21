@@ -2368,6 +2368,22 @@ mod tests {
     /// pad-snap: the stub price is 0 for a joint outside the pad, on its outline or within half the
     /// width of it (the stub's round end sticks out: kept by tidy and Cleanup), and at the centre;
     /// deeper inside it is STUB_NM graded by the distance from the centre.
+    /// fd45 r10 (mechanism C): a leg inside a joint loser's corridor pays for its length there,
+    /// graded by the depth (`x + x^2`, `x` = depth / pitch), 0 outside the reach.
+    #[test]
+    fn loser_corridor_prices_the_room_by_depth() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+        let path = vec![v(0.0, 0.0), v(10.0, 0.0)];
+        let c = Corridor { bb: bbox_of(&path).grow(0.45 * MM), path, reach: 0.45 * MM, pitch: 0.45 * MM };
+        let at = |y: f64| corridor_room(std::slice::from_ref(&c), 0.45 * MM, v(2.0, y), v(6.0, y));
+        assert_eq!(at(0.5), 0.0);
+        assert_eq!(corridor_room(std::slice::from_ref(&c), 0.45 * MM, v(12.0, 0.0), v(14.0, 0.0)), 0.0);
+        let (shallow, deep, on) = (at(0.4), at(0.2), at(0.0));
+        assert!(0.0 < shallow && shallow < deep && deep < on, "{shallow} {deep} {on}");
+        // On the path: 4 mm at depth 1 pitch, x + x^2 = 2.
+        assert!((on - 8.0 * MM).abs() < 1e-3 * MM, "{on}");
+    }
+
     /// fd45 r10 (verifier F8): at `bend_mm = 0` ("only length counts") a staircase still costs
     /// more than its elbow (the bend tie floor), and a bend after a tiny leg more than one after
     /// a long leg (the jog floor): the side-exit staircase of long legs and 0.03-0.07 mm legs

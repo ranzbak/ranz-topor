@@ -144,6 +144,19 @@ fn a_band_that_misses_any_angle_keeps_its_octilinear_form() {
     assert_eq!((e.cut_back, e.forced, viol), (0, 0, 0), "{e:?}");
 }
 
+/// The same under the bends order (fd45 r10): the joint loser X2 draws first (TOPO_FD45_OFF=
+/// loserfirst), and the P2 walls (an undrawn same-layer wire's ERBS on an opened edge, 3a) keep
+/// Y4's octilinear rescue out of Y1's band: no run cut back, none forced, no violation.
+#[test]
+fn a_band_that_misses_any_angle_keeps_its_octilinear_form_under_bends() {
+    let r = route("erbs", "swap_vias", "octilinear", &[("octi_order", serde_json::json!("bends"))], &[]);
+    let e = erbs(&r);
+    partition_holds(&e);
+    let viol: usize = r.connections.iter().map(|c| c.violations).sum();
+    assert!(e.octi_rescued >= 1, "{e:?}");
+    assert_eq!((e.cut_back, e.forced, viol), (0, 0, 0), "{e:?}");
+}
+
 /// Hook "joint conflict": every two bands next in the order conflict in the joint check, so the
 /// selector rejects bands whose copper is legal. Each rejected band whose octilinear form is legal
 /// against the kept bands is kept in that form (`octi_rescued`, best key first) instead of being

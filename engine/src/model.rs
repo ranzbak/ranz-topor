@@ -1539,10 +1539,10 @@ pub struct Options {
     /// whole edge stays a wall (the behaviour before). Default true.
     pub octi_own_portals: bool,
     /// first-draw-45 P4 step 2 (`[drawing] octi_straighten`): with style = "octilinear", after the
-    /// drawing every wire in the reverse draw order gets its stretches of two or more bends
+    /// drawing every wire in the draw (sweep) order, to a fixpoint of at most 4 passes, gets its stretches of two or more bends
     /// redrawn as one straight, elbow or Z form where that is cheaper on the octilinear DP's scale
     /// (length, bends, jog penalty) and legal (StraightenLayer, Staepelaere 1992 ch. 5, p. 15);
-    /// false = the staircases of the first draw stay. Default true.
+    /// an end leg on its pad keeps its pad anchor (r10); false = the staircases of the first draw stay. Default true.
     pub octi_straighten: bool,
     /// TW2 (`[drawing] erbs_gap_keep_max_mm`): with realise = "erbs", two bands the joint check
     /// finds too close by a model gap of the ERBS (`RunBand::gap`, no over-full cut predicts it)

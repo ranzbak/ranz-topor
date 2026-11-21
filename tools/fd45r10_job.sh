@@ -37,6 +37,7 @@ fi
 if [ "$mode" = suite ]; then
   q rel 'cd $TREE && s=$(date +%s); CARGO_TARGET_DIR=/root/fd45r10-rel-target CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 cargo test --release --workspace --no-fail-fast > $OUT/cargo-rel.log 2>&1 9>&-; note "rel rc $? $(( $(date +%s)-s )) s"; gzip -k $OUT/cargo-rel.log' 8
   q py 'cd $TREE && s=$(date +%s); CI=1 python -m pytest -q -p no:cacheprovider -rfEs > $OUT/pytest.log 2>&1; note "py rc $? $(( $(date +%s)-s )) s"' 4
-  [ -f tools/fd45r10_mut.sh ] && q mut 'cd $TREE && bash tools/fd45r10_mut.sh $OUT > $OUT/mut.log 2>&1 9>&-; note "mut rc $?"' 8
+  q mutA 'cd $TREE && bash tools/fd45r10_mut.sh $OUT A > $OUT/mutA.log 2>&1 9>&-; note "mutA rc $?"' 6
+  q mutB 'cd $TREE && bash tools/fd45r10_mut.sh $OUT B > $OUT/mutB.log 2>&1 9>&-; note "mutB rc $?"' 6
   wait; note "all done"; exit 0
 fi
