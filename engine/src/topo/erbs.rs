@@ -2417,10 +2417,12 @@ pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>, weight
     let mut succ: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut indeg = vec![0usize; n];
     let mut unmet = vec![0.0f64; n];
+    // Debug arm `TOPO_FD45_OFF=sweepw`: every pair weighs 1 (the count rule before r10).
+    let sweep_w = !super::octi::fd45_off("sweepw");
     for &(a, b) in before {
         if let (Some(&i), Some(&j)) = (pos.get(&a), pos.get(&b)) {
             if i != j {
-                let w = weight.get(&(a, b)).copied().unwrap_or(1.0);
+                let w = if sweep_w { weight.get(&(a, b)).copied().unwrap_or(1.0) } else { 1.0 };
                 succ[i].push((j, w));
                 indeg[j] += 1;
                 unmet[j] += w;

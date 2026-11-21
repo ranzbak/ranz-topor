@@ -249,7 +249,7 @@ impl OctiCfg {
     /// pad (tidy deletes the stub, the end sits off the centre; topo_pad_snap side_exit, exposed by
     /// the P4 chord nodes). The default (`4 x 0.25 mm` = 1 mm) is above every usual pitch.
     pub fn stub_nm(&self, pitch: f64) -> f64 {
-        (4.0 * self.bend_nm).max(pitch).min(STUB_VIOL_SHARE * self.viol_nm)
+        (4.0 * self.bend_nm).max(if fd45_off("padc") { 0.0 } else { pitch }).min(STUB_VIOL_SHARE * self.viol_nm)
     }
 
     /// From the engine options: `[drawing]` and the `any_angle` / `acute_bend` weights of
@@ -354,6 +354,12 @@ pub fn any_price(pts: &[Vec2]) -> f64 {
 /// fd45 r10: the least price of a 45 degree bend, nm ([`bend_price`]): a tie-break, not a price.
 pub const BEND_TIE_NM: f64 = 1_000.0;
 
+/// [`BEND_TIE_NM`], or 0 with the debug arm `TOPO_FD45_OFF=tie` (read once: [`bend_price`] is hot).
+fn tie_floor() -> f64 {
+    static T: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *T.get_or_init(|| if fd45_off("tie") { 0.0 } else { BEND_TIE_NM })
+}
+
 /// The leg length under which a bend pays the jog penalty: `L_min = min(L_pref, 2 (w + s))`
 /// (`pitch` = w + s, nm; at least 1 nm). The octilinear DP's and [`style_price`]'s.
 pub fn jog_leg(cfg: &OctiCfg, pitch: f64) -> f64 {
@@ -382,7 +388,7 @@ pub fn bend_price(cfg: &OctiCfg, leff: f64, u: Vec2, l_in: f64, v: Vec2) -> f64 
     // length the copper can tell) breaks that tie towards fewer bends instead of the node order
     // (the P4 chord nodes drew length-equal staircases that cost later wires their room:
     // topo_pad_snap side_exit).
-    let mut p = cfg.bend_nm.max(BEND_TIE_NM) * t / 45.0;
+    let mut p = cfg.bend_nm.max(tie_floor()) * t / 45.0;
     if t > 90.5 {
         if cfg.acute_forbidden {
             return f64::INFINITY;
@@ -395,7 +401,7 @@ pub fn bend_price(cfg: &OctiCfg, leff: f64, u: Vec2, l_in: f64, v: Vec2) -> f64 
     // [`bend_price_seq`] adds only after two short legs, so a lone short leg (eprom A0: 45
     // degrees, 0.17 mm, 45 degrees, the shortest form) pays no more than this tie-break there).
     if l_in < leff {
-        p += 2.0 * cfg.bend_nm.max(BEND_TIE_NM) * (1.0 - l_in / leff).powi(2);
+        p += 2.0 * cfg.bend_nm.max(tie_floor()) * (1.0 - l_in / leff).powi(2);
     }
     p
 }
@@ -858,7 +864,7 @@ impl Drawer<'_> {
                     // joint that tidy and KiCad's Cleanup delete, an end off its centre (bend_mm
                     // 0 prices the stub at 0; topo_pad_snap side_exit).
                     let q = sg[0] + d * f;
-                    if own_pad.iter().flatten().any(|&(poly, c, ext)| stub_price(poly, c, ext, wi.w, q, 1.0) > 0.0) {
+                    if !fd45_off("padc") && own_pad.iter().flatten().any(|&(poly, c, ext)| stub_price(poly, c, ext, wi.w, q, 1.0) > 0.0) {
                         continue;
                     }
                     nodes.push((q, cum[i] + f * l, None, true));
@@ -1857,7 +1863,7 @@ impl Drawer<'_> {
         // reserved copper the joint check commits), unless the run's own taut path crosses it
         // (the plan's own crossing, left to the clearance check). Without an ERBS the per-edge
         // walls above stay its only guard. O(opened wires x band points x taut points).
-        if self.opts.realise == "erbs" {
+        if self.opts.realise == "erbs" && !fd45_off("p2w") {
             for &ow in &opened_for {
                 for b in self.erbs.get(&ow).map_or(&[][..], |v| v.as_slice()).iter().filter(|b| b.layer == layer) {
                     let crosses = b.path.windows(2).any(|x| taut.windows(2).any(|y| super::draw::seg_proper(x[0], x[1], y[0], y[1])));
@@ -2674,7 +2680,8 @@ impl Drawer<'_> {
             let n_runs = wo.runs.len();
             let ends = [cur[0], cur[cur.len() - 1]];
             let pads: [Option<(Vec<Vec2>, Vec2, f64)>; 2] = [0usize, 1].map(|end| self.own_pad_end(w, end, if end == 0 { r == 0 } else { r + 1 == n_runs }, false, ends[end]).map(|(poly, c, ext)| (poly.to_vec(), c, ext)));
-            let pad_leave_lost = |end: usize, old: Vec2, new: Vec2| -> bool { pads[end].as_ref().is_some_and(|(poly, c, ext)| stub_price(poly, *c, *ext, ww, new, 1.0) > 0.0 && stub_price(poly, *c, *ext, ww, old, 1.0) <= 0.0) };
+            let padc = !fd45_off("padc");
+            let pad_leave_lost = |end: usize, old: Vec2, new: Vec2| -> bool { padc && pads[end].as_ref().is_some_and(|(poly, c, ext)| stub_price(poly, *c, *ext, ww, new, 1.0) > 0.0 && stub_price(poly, *c, *ext, ww, old, 1.0) <= 0.0) };
             let mut i = 0;
             while i + 2 < cur.len() {
                 let mut done = false;

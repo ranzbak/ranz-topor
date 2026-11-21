@@ -40,6 +40,12 @@ if [ "$mode" = arms ]; then
   q espLC 'TOPO_FD45_OFF=loser unit espLC $ESP'; q qmLC 'TOPO_FD45_OFF=loser unit qmLC $QM'
   wait; note "all done"; exit 0
 fi
+if [ "$mode" = attr ]; then
+  # attribution of the esp +3V3/IO21_TX/GND cluster: esp det s0 with one r10 arm off each
+  q espPC 'TOPO_FD45_OFF=padc unit espPC $ESP'; q espTI 'TOPO_FD45_OFF=tie unit espTI $ESP'
+  q espPW 'TOPO_FD45_OFF=p2w unit espPW $ESP'; q espSW 'TOPO_FD45_OFF=sweepw unit espSW $ESP'
+  wait; note "all done"; exit 0
+fi
 if [ "$mode" = suite ]; then
   q rel 'cd $TREE && s=$(date +%s); CARGO_TARGET_DIR=/root/fd45r10-rel-target CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 cargo test --release --workspace --no-fail-fast > $OUT/cargo-rel.log 2>&1 9>&-; note "rel rc $? $(( $(date +%s)-s )) s"; gzip -k $OUT/cargo-rel.log' 8
   q py 'cd $TREE && s=$(date +%s); CI=1 python -m pytest -q -p no:cacheprovider -rfEs > $OUT/pytest.log 2>&1; note "py rc $? $(( $(date +%s)-s )) s"' 4

@@ -8099,14 +8099,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 live.reverse();
             }
             dr.reserve_bands(&live, &plans, &placed, &skip, &key, mode);
-            // fd45 r10 (mechanism C, lead-approved): the wires the joint check rejected (no
-            // reserved copper) draw first, against the kept bands only, the plan's realisation.
-            // Drawn after their kept neighbours, those neighbours' octilinear redraws (which leave
-            // their bands: a staircase hugging an any-angle band, a 45 degree end into the pad row)
-            // took the room the plan kept for them (tw2 swap_vias under the sweep order: X2 cut
-            // back and forced). The kept wires then draw round the loser's copper. Stable: the
-            // precedes order stays within both groups. Debug arm: TOPO_FD45_OFF=loserfirst.
-            if !super::octi::fd45_off("loserfirst") {
+            // fd45 r10 (mechanism C), debug arm `TOPO_FD45_ON=loserfirst`, off by default: the
+            // wires the joint check rejected (no reserved copper) draw first, against the kept
+            // bands only. It fixes tw2 swap_vias under the sweep order (X2: drawn after its kept
+            // neighbours, whose octilinear redraws left their bands and took its room), but on
+            // esp it added 15 DRC items (IO10_SDA/USB_D-/ENABLE, IO8_SCL/+3V3): the lead's rule
+            // (keep it only if no board gets worse) reverted it. Shopping list TW2-SWEEP.
+            if super::octi::fd45_on("loserfirst") {
                 let losers: BTreeSet<WireId> = dr.joint.class.keys().map(|&(o, _)| o).collect();
                 let (mut a, b): (Vec<WireId>, Vec<WireId>) = live.iter().partition(|w| losers.contains(w));
                 a.extend(b);
