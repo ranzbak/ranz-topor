@@ -609,6 +609,10 @@ impl Drawer<'_> {
     pub(super) fn octilinear(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>) -> Option<OctiOut> {
         let t = std::time::Instant::now();
         let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced);
+        // first-draw-45 r9 debug (`TOPO_REDUCEDBG`, copper-neutral): an octilinear call over 0.5 s.
+        if std::env::var_os("TOPO_REDUCEDBG").is_some() && t.elapsed().as_secs_f64() > 0.5 {
+            eprintln!("OCTISLOW w{w} L{layer} passes {k0}..{k1} taut pts {} forced {} -> {}: {:.2} s", pts.len(), forced.is_some(), r.as_ref().map_or(0, |o| o.pts.len()), t.elapsed().as_secs_f64());
+        }
         super::par::meter::time(super::par::meter::OCTI, t);
         super::par::meter::count(super::par::meter::OCTI_CALLS, 1);
         r
