@@ -1888,4 +1888,40 @@ mod tests {
         }
         assert!(traded > 0, "short priced as clearance: no run traded clearance for a short ({runs} runs: {seen:?})");
     }
+
+    /// pad-snap r2b (D3b, mutant M13): an all-octilinear run whose first leg is a stub wholly
+    /// inside its own pad (tidy and KiCad's Cleanup delete it) is not kept as it is: the DP
+    /// reprices it and returns a form whose first leg leaves the pad.
+    #[test]
+    fn pad_stub_run_is_repriced_not_kept() {
+        let p = |v: f64| (v * MM) as i64;
+        let pad = |i: usize, x: f64, y: f64| format!(r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":1,"attr":"smd","center":[{x},{y}],"rotation_deg":0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{s},"h":{s}}}}},"drill":null}}"#, x = p(x), y = p(y), s = p(1.0));
+        let c = [(0.0, 0.0), (24.0, 0.0), (24.0, 24.0), (0.0, 24.0)];
+        let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+        let js = format!(
+            r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}}],"pads":[{},{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+            pad(0, 2.0, 12.0),
+            pad(1, 8.0, 11.8),
+            segs.join(",")
+        );
+        let m = BoardModel::from_json(&js).unwrap();
+        let bd = board::build(&m, &BuildOpts::default()).unwrap();
+        let conns = bd.connections(&m);
+        let mut st = State::new(&bd.proj);
+        let cn = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
+        st.route_conn(cn, &InitWeights::default(), (cn.w + cn.s) / 400_000.0).expect("routes");
+        let opts = Options::default();
+        let checker = Checker::new(&m, &opts);
+        let mut dr = Drawer::new(&m, &opts, &bd, &st, &checker);
+        dr.octi = crate::topo::octi::OctiCfg { on: true, ..dr.octi };
+        let k1 = dr.st.wires[0].passes.len();
+        // math frame (y up): A's centre, 0.2 mm up inside A (1 mm square), then straight to B
+        let (a, j, b) = (Vec2 { x: 2.0 * MM, y: -12.0 * MM }, Vec2 { x: 2.0 * MM, y: -11.8 * MM }, Vec2 { x: 8.0 * MM, y: -11.8 * MM });
+        let pts = vec![a, j, b];
+        assert_eq!(dr.run_pad_stubs(0, 0, k1, &pts), [true, false], "the fixture's first leg is an in-pad stub");
+        let o = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).expect("an all-octilinear run with an in-pad stub is repriced, not kept as it is");
+        assert!(o.pts.windows(2).all(|q| crate::topo::octi::octi_dir(q[1] - q[0]).is_some()), "octilinear: {:?}", o.pts);
+        assert_eq!(dr.run_pad_stubs(0, 0, k1, &o.pts), [false, false], "the form's first leg leaves the pad: {:?}", o.pts);
+        assert!((o.pts[0] - a).len() < 1.0 && (o.pts[o.pts.len() - 1] - b).len() < 1.0, "same ends: {:?}", o.pts);
+    }
 }

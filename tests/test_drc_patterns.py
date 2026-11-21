@@ -10,7 +10,7 @@ import pytest
 from harness import drc_patterns as dp
 from harness.paths import kicad_cli
 
-GENERIC_NETS = ({"DP", "DN", "A", "B", "C", "P3V3", "GND", "SDA", "SCL", "VX", "P", "N", "X", "SIG", "CC1", "CC2", "VB",
+GENERIC_NETS = ({"DP", "DN", "A", "B", "C", "D", "P3V3", "GND", "SDA", "SCL", "VX", "P", "N", "X", "SIG", "CC1", "CC2", "VB",
                  "L1", "L2", "P5V", "Q"}
                 | {f"S{i}" for i in range(1, 9)} | {f"H{i}" for i in range(1, 6)} | {f"V{i}" for i in range(1, 6)}
                 | {f"D{i}" for i in range(1, 5)} | {f"X{i}" for i in range(1, 5)} | {f"Y{i}" for i in range(1, 4)})

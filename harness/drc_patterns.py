@@ -1070,9 +1070,62 @@ def via_slot_60() -> Pat:
     return _via_slot(60)
 
 
+# ------------------------------------------------------------------------------------------------ A1b pad_end_centre
+def pad_end_centre() -> Pat:
+    Wd, Hd = 12.0, 8.0
+    # one SOIC row (Package_SO:SOIC-8_3.9x4.9mm_P1.27mm: 0.6 x 1.95 roundrect pads, 1.27 mm pitch), pads along y,
+    # tips at y 5.525; four wires to test pads on the right, each over the tip corner of the pin to its right
+    yr, x0, pitch, pw, ph = 6.5, 2.0, 1.27, 0.6, 1.95
+    tip = _r(yr - ph / 2)
+    nets = ["A", "B", "C", "D"]
+    xs = [_r(x0 + pitch * i) for i in range(4)]
+    u = Fp("U1", [Pad(str(8 - i), n, (x, yr), (pw, ph), "roundrect") for i, (n, x) in enumerate(zip(nets, xs))],
+           "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm (top row: pad size and pitch)")
+    lv = {"A": 1.3, "B": 2.2, "C": 3.1, "D": 4.0}  # the horizontal levels, 0.9 mm apart
+    xt = 11.0
+    tps = [Fp(f"T{n}", [Pad("1", n, (xt, lv[n]), (0.6, 0.6), "circle")]) for n in nets]
+    # the optimum: the 45 deg line up-right that passes the next pin's tip corner (corner radius 0.25 x 0.6 mm) at the
+    # clearance, x + y = x_pin + k. Its shortest feed from the centre turns 0.27 mm before it, inside the pad, and
+    # a centre stub wholly inside the pad is what Cleanup and tidy delete. The first segment therefore leaves at 45 deg
+    # to the pad side (its round end 0.02 mm out of the pad: `LEAVE_NM`), then up beside it onto the line (same
+    # length: every monotone octilinear path is as long). D has no pin to its right: 45 deg from the centre.
+    rc = 0.25 * pw
+    k = (pitch - pw / 2 + rc) + (tip + rc) - (rc + CL + W / 2 + 0.001) * SQ2  # x + y - x_pin on the line
+    jx = _r(pw / 2 - W / 2 + 0.02)  # the leave point on the pad side
+    ref = []
+    for n, x in zip(nets, xs):
+        if n == "D":
+            pts = [(x, yr), (_r(x + yr - lv[n]), lv[n]), (xt, lv[n])]
+        else:
+            y2 = _r(x + k - (x + jx))
+            pts = [(x, yr), (_r(x + jx), _r(yr - jx)), (_r(x + jx), y2), (_r(x + jx + y2 - lv[n]), lv[n]), (xt, lv[n])]
+        ref.append(Trk(n, "F.Cu", W, pts))
+    total = sum(plen(t.pts) for t in ref)
+    return Pat(
+        name="pad_end_centre", cluster="A1b", title="Four wires leave a SOIC row over the next pins: every track end at the pad centre",
+        purpose="One SOIC row (0.6 x 1.95 mm roundrect pads, 1.27 mm pitch, tips at y 5.525), nets A..D left to right, "
+                "each to a test pad on the right at its own level (1.3 / 2.2 / 3.1 / 4.0). The straight line from A, B "
+                "and C to their targets crosses the next pin, so their shortest paths pass that pin's tip corner at "
+                "the clearance. F.Cu only.",
+        answer=f"0 vias. A, B, C: from the pad centre 45 deg to the pad side (round end just out of the pad), up "
+               f"beside the pad onto the 45 deg line past the next pin's tip corner, then horizontal at the level to "
+               f"the test pad. D: 45 deg from its centre. {total:.3f} mm in all (the octilinear optimum). Every track "
+               "end on a pad is the pad centre (KiCad's interactive router joins a pad only at its anchor).",
+        why="The shortest feed of the 45 deg line past the next pin turns inside the pad, leaving a centre stub "
+            "wholly inside the pad, which KiCad's Cleanup (Delete tracks fully inside pads, tracks_cleaner.cpp "
+            "deleteTracksInPads) and topor's own tidy remove: the track then ends 0.3 - 0.9 mm off the centre, "
+            "inside the pad. KiCad's connectivity connects it, but the push-and-shove router links a pad only at "
+            "its anchor (pns_node.cpp addSolid), so the end is loose for drag / footprint moves (qmtech U6). The "
+            "failure class: the first bend of a pad exit inside the pad.",
+        size=(Wd, Hd), nets=nets, fps=[u] + tps, connections=[(n, f"U1.{8 - i}", f"T{n}.1") for i, n in enumerate(nets)],
+        ref_tracks=ref, expect={"vias": 0, "layers": {n: ["F.Cu"] for n in nets}, "octilinear": True,
+                                "pad_ends_at_centre": True},
+        marks=[{"xy": [xs[2], tip], "text": "pad tip"}])
+
+
 PATTERNS = {f.__name__: f for f in (usbc_pair_esd, fpc_exit_fanout, via_pair_cross, via_grid_10, kept_wide_gnd_arc,
                                     jst_fanout_45, jst_fanout_45_close, pth_wrap_pin, via_in_fanin, via_before_crossing,
-                                    cc_lines_esd, through_other_copper, narrow_passage_pair, own_net_neck)}
+                                    cc_lines_esd, through_other_copper, narrow_passage_pair, own_net_neck, pad_end_centre)}
 # parked / regression set: no repro left on the board, no further work (user, round 3)
 PARKED = {f.__name__: f for f in (roundrect_corner_pass, via_slot_30, via_slot_60, pair_crossing_layered)}
 # what changed in the latest review round per pattern (round 3 = user review of the round 2 PNGs)
@@ -1080,7 +1133,7 @@ ROUND = {"kept_wide_gnd_arc": "round 3: changed", "jst_fanout_45": "round 3: cha
          "jst_fanout_45_close": "round 3: changed (8 pins)", "pth_wrap_pin": "round 3: changed (wrap via the bottom)",
          "via_before_crossing": "round 3b: new (K8 rebuilt, edge closed)", "cc_lines_esd": "round 3: new", "through_other_copper": "round 3b: new (edge closed)",
          "narrow_passage_pair": "round 3b: new (B.Cu closed)", "own_net_neck": "round 3: new", "via_in_fanin": "round 3: approved (e2e test)",
-         "usbc_pair_esd": "round 2: changed", "fpc_exit_fanout": "round 2: changed", "via_grid_10": "round 2: new",
+         "pad_end_centre": "A1b: new (pad-snap)", "usbc_pair_esd": "round 2: changed", "fpc_exit_fanout": "round 2: changed", "via_grid_10": "round 2: new",
          "roundrect_corner_pass": "parked", "via_slot_30": "parked", "via_slot_60": "parked",
          "pair_crossing_layered": "parked (K8 rebuilt as via_before_crossing)"}
 
