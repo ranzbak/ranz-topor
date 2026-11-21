@@ -1865,7 +1865,7 @@ mod tests {
             dr.commit(&track_item(2, 0, tw, a + left * 20.0 * MM, b + left * 20.0 * MM, None));
             let need = dr.need_of(dr.ents.len() - 1, &wp, wi.w);
             for sg in [-1.0, 1.0] {
-                dr.commit(&track_item(2, 0, tw, a + u * 0.8 * MM + left * sg * (need + dw), b - u * 0.8 * MM + left * sg * (need + dw), None));
+                dr.commit(&track_item(2, 0, tw, a - u * 1.5 * MM + left * sg * (need + dw), b + u * 1.5 * MM + left * sg * (need + dw), None));
             }
             let k1 = dr.st.wires[0].passes.len();
             let leff = super::super::octi::jog_leg(&dr.octi, wi.w + wi.s);
@@ -1881,7 +1881,14 @@ mod tests {
             let f0 = form(dr);
             dr.octi = keep;
             let f1 = form(dr);
-            eprintln!("dw {dw}: weight 0 {} legs {} short; default {} legs {} short", f0.len() - 1, short(&f0), f1.len() - 1, short(&f1));
+            let mm = |q: &[Vec2]| q.iter().map(|p| format!("({:.3},{:.3})", p.x / MM, -p.y / MM)).collect::<Vec<_>>().join(" ");
+            eprintln!("dw {dw}: weight 0 {} legs {} short [{}]; default {} legs {} short [{}]; leff {leff}", f0.len() - 1, short(&f0), mm(&f0), f1.len() - 1, short(&f1), mm(&f1));
+            // r7 chord nodes at least the jog leg apart: the unpriced staircase's steps (from the
+            // start of one flat leg to the next, along the chord) are no shorter than the jog leg.
+            let starts: Vec<f64> = (1..f0.len().saturating_sub(1)).filter(|&k| super::super::octi::octi_dir(f0[k + 1] - f0[k]).is_some_and(|d| d % 4 == 0) && super::super::octi::octi_dir(f0[k] - f0[k - 1]).is_some_and(|d| d % 2 == 1)).map(|k| (f0[k] - a).dot(u)).collect();
+            if let Some(m) = starts.windows(2).map(|x| x[1] - x[0]).reduce(f64::min) {
+                assert!(m >= leff - 2_000.0, "dw {dw}: staircase step {m} nm below the jog leg {leff}");
+            }
             got = (short(&f0), short(&f1));
         });
         got
@@ -1890,12 +1897,14 @@ mod tests {
     #[test]
     fn short_leg_price_keeps_the_steps_long() {
         let mut seen = Vec::new();
-        for dw in [0.03 * MM, 0.06 * MM] {
+        for dw in [0.03 * MM, 0.06 * MM, 0.1 * MM] {
             let (s0, s1) = short_legs_in_corridor(dw);
             seen.push((dw / MM, s0, s1));
             assert_eq!(s1, 0, "dw {} mm: a leg below half the jog leg with the short-leg price: {seen:?}", dw / MM);
         }
-        assert!(seen.iter().any(|x| x.1 > 0), "the fixture must make the unpriced DP staircase: {seen:?}");
+        // dw 0.06 mm: the unpriced DP draws a 24-leg staircase of 0.16 / 0.22 mm legs (13 below
+        // half the jog leg); with the price the chord stays as drawn (one item).
+        assert!(seen.iter().any(|x| x.1 > 5), "the fixture must make the unpriced DP staircase: {seen:?}");
         // The price itself: 0 at and above the jog leg, graded below it, bounded.
         let cfg = super::super::octi::OctiCfg { short_leg_nm: 1.0 * MM, ..Default::default() };
         let p = |l: f64| super::super::octi::short_leg_price(&cfg, 0.5 * MM, l * MM) / MM;
