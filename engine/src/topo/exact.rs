@@ -2249,6 +2249,32 @@ mod tests {
         }
     }
 
+    /// first-draw-45 r10 (verifier: mutants MF1 / MF2 survived): in a forced run (P6 c) the
+    /// corner next to an octilinear leg is judged on the forced scale, violations first, then the
+    /// style price. (a) No violation either way: the 2 mm leg along y = 12 stays (the shortcut
+    /// does not pay its any-angle price; MF2 `pays = true` took it). (b) A foreign track 0.3 mm
+    /// above that leg, closer than the clearance, which the shortcut clears: the violation
+    /// outweighs the any-angle price, the corner goes (MF1, the style price alone, kept it).
+    #[test]
+    fn forced_pull_judges_an_octilinear_corner_on_the_forced_scale() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        for blocked in [false, true] {
+            two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
+                if blocked {
+                    dr.commit(&track_item(2, 0, 150_000.0, v(3.0, 12.3), v(4.5, 12.3), None));
+                }
+                let k1 = dr.st.wires[0].passes.len();
+                let pts = vec![v(2.0, 12.0), v(4.0, 12.0), v(12.0, 9.0)];
+                let got = dr.pull_forced(0, 0, k1, 0, &pts);
+                if blocked {
+                    assert_eq!(got, Some(vec![pts[0], pts[2]]), "the shortcut clearing the violation must be taken");
+                } else {
+                    assert_eq!(got, None, "the octilinear leg must stay: {got:?}");
+                }
+            });
+        }
+    }
+
     /// forced-draw (T6, the qmtech `Net-(U9-~{RST})` mechanism: the forced form cut through a
     /// foreign via, a short, where its taut run only missed the clearance): the forced DP puts
     /// shorts first in its shorts-first variant (`short_nm`). A net-1 run straight from A to B

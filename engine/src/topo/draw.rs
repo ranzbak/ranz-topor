@@ -1073,7 +1073,7 @@ pub struct Drawer<'a> {
     /// counts while its copper is committed (see [`Drawer::via_walls`]).
     via_marks: Vec<(WireId, usize, Vec2, usize, usize, usize)>,
     /// Wires drawn at least once (their copper, not a via wall, stands for their chords).
-    drawn_once: Vec<bool>,
+    pub(super) drawn_once: Vec<bool>,
     /// Per pass of a fitting edge-layer: `(edge, layer, index in the lane, lmin, rmax)` (nm).
     slot: Vec<Option<Slot>>,
     /// Per edge-layer that fits: its passes in edge order (see [`Lane`]).
@@ -4272,6 +4272,17 @@ impl<'a> Drawer<'a> {
     /// The vertex removal of [`Drawer::pull_taut`]; with `forced = Some(price)` (a run drawn by
     /// force, never drop) a leg is taken when the whole run's violation price stays at most
     /// `price` (then lowered to the new one) instead of when the leg is legal.
+    /// Test access to the forced pull (P6 c): `pts` pulled at its own violation key, as the
+    /// forced run's call does.
+    #[cfg(test)]
+    pub(super) fn pull_forced(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2]) -> Option<Vec<Vec2>> {
+        let its = self.run_items(w, layer, pts);
+        let rep = self.checker.check_against(&self.idx, &its, &[]);
+        let mut vs = self.viols_of(&its, &rep);
+        vs.extend(self.graze_viols(w, &its));
+        self.pull_pts(w, k0, k1, layer, pts, Some(viol_key(&vs)))
+    }
+
     fn pull_pts(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], mut forced: Option<(f64, f64)>) -> Option<Vec<Vec2>> {
         if pts.len() < 3 {
             return None;

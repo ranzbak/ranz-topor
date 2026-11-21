@@ -77,10 +77,6 @@ fn forced_free_line(octi_on: bool, s: &draw::DrawStats) -> Option<String> {
     })
 }
 
-/// Record the drawn wire `wo` as the outcome of connection `ci`.
-/// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
-/// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
-#[allow(clippy::too_many_arguments)]
 /// first-draw-45 r9 forensics (`TOPO_FREEDBG`, copper-neutral): the free-angle segments (not at
 /// 0/45/90 degrees) of every drawn wire after the step `stage` of the drawing, one stderr line
 /// each (mm, KiCad frame), so a segment of the final copper can be traced to the step that wrote
@@ -101,6 +97,10 @@ fn free_snap(stage: &str, drawn: &BTreeMap<WireId, WireOut>, st: &State) {
     }
 }
 
+/// Record the drawn wire `wo` as the outcome of connection `ci`.
+/// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
+/// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
+#[allow(clippy::too_many_arguments)]
 fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State) {
     let o = &mut out[ci];
     o.routed = true;
@@ -8055,6 +8055,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     r.unbanded
                 ));
                 live = r.order.clone();
+                // Test probe (fd45 r10): the ERBS draw order by net name, for a test whose
+                // precondition is an order (topo_m3_class_keep); nothing is formatted without a hook.
+                if ctl.has_test_hook() {
+                    let names: Vec<String> = live.iter().map(|&w| model.nets.iter().find(|n| n.code == st.wires[w].net).map_or_else(|| st.wires[w].net.to_string(), |n| n.name.clone())).collect();
+                    ctl.test_point(&format!("erbs draw order {}", names.join(",")));
+                }
                 dr.erbs = r.runs;
                 dr.test_no_sequential = ctl.test_point("no sequential run");
                 dr.test_no_class_keep = ctl.test_point("erbs class keep off");
@@ -8093,6 +8099,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 live.reverse();
             }
             dr.reserve_bands(&live, &plans, &placed, &skip, &key, mode);
+            // fd45 r10 (mechanism C, lead-approved): the wires the joint check rejected (no
+            // reserved copper) draw first, against the kept bands only, the plan's realisation.
+            // Drawn after their kept neighbours, those neighbours' octilinear redraws (which leave
+            // their bands: a staircase hugging an any-angle band, a 45 degree end into the pad row)
+            // took the room the plan kept for them (tw2 swap_vias under the sweep order: X2 cut
+            // back and forced). The kept wires then draw round the loser's copper. Stable: the
+            // precedes order stays within both groups. Debug arm: TOPO_FD45_OFF=loserfirst.
+            if !super::octi::fd45_off("loserfirst") {
+                let losers: BTreeSet<WireId> = dr.joint.class.keys().map(|&(o, _)| o).collect();
+                let (mut a, b): (Vec<WireId>, Vec<WireId>) = live.iter().partition(|w| losers.contains(w));
+                a.extend(b);
+                live = a;
+            }
         }
     }
     let over_n = dr.over.iter().filter(|&&o| o).count();
