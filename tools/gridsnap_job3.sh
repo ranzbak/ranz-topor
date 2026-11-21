@@ -10,17 +10,18 @@ A=(--no-png --set optimize.rounds=1 --set optimize.runs=1)
 G=(--set 'drawing.grid_snap="prefer"' --set drawing.grid_mm=0.254)
 QM=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
 ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
-run() {  # arm pcb name [env...] -- [sets...]
-  local arm=$1 pcb=$2 name=$3; shift 3; local t0=$(date +%s)
-  env "$@" python -m harness.score_runs $R/$arm/$name $pcb --only 0 --threads 4 "${A[@]}" ${SETS:+"${SETS[@]}"} > $R/$arm-$name.log 2>&1 9>&-
+run() {  # arm pcb name grid(0|1) [env...]
+  local arm=$1 pcb=$2 name=$3 g=$4; shift 4; local t0=$(date +%s) S=()
+  [ "$g" = 1 ] && S=("${G[@]}")
+  env "$@" python -m harness.score_runs $R/$arm/$name $pcb --only 0 --threads 4 "${A[@]}" "${S[@]}" > $R/$arm-$name.log 2>&1 9>&-
   note "$arm-$name rc $? wall $(( $(date +%s) - t0 )) s"
 }
 if [ "${1:-}" = unit ]; then
-  SETS=() run off $QM qmtech X=1
-  SETS=() run nodrill $QM qmtech TOPOR_DIAG_NO_DRILL_PRICE=1
-  SETS=() run noshort $QM qmtech TOPOR_DIAG_NO_SHORT_FIRST=1
-  SETS=("${G[@]}") run prefer $ESP esp X=1
-  SETS=() run off $ESP esp X=1
+  run off $QM qmtech 0 X=1
+  run nodrill $QM qmtech 0 TOPOR_DIAG_NO_DRILL_PRICE=1
+  run noshort $QM qmtech 0 TOPOR_DIAG_NO_SHORT_FIRST=1
+  run prefer $ESP esp 1 X=1
+  run off $ESP esp 0 X=1
   exit 0
 fi
 hzq run --threads 4 --name gs3-iso -- bash tools/gridsnap_job3.sh unit
