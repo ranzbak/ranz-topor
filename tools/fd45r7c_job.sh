@@ -35,7 +35,6 @@ q qmb 'unit qmb $QM --set drawing.octi_order=bends'; q espb 'unit espb $ESP --se
 q qms 'unit qms $QM --set drawing.octi_order=sweep'; q esps 'unit esps $ESP --set drawing.octi_order=sweep'
 q esp1 'unit esp1 $ESP --set drawing.octi_order=bends --set drawing.short_leg_mm=1.0'
 q qm1 'unit qm1 $QM --set drawing.octi_order=bends --set drawing.short_leg_mm=1.0'
-q t 'tests'
 q wicb 'unit wicb $WIC --set drawing.octi_order=bends'; q wics 'unit wics $WIC --set drawing.octi_order=sweep'
 q epb 'unit epb $EP $EPX --set drawing.octi_order=bends'; q eps 'unit eps $EP $EPX --set drawing.octi_order=sweep'
 wait
