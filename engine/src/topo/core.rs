@@ -8737,6 +8737,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // Test hook "fuse drops anchors": only the bookkeeping anchors go; the copper found on the
     // geometry still keeps the fuse off its cut part.
     let drop_anchor_skip = ctl.test_point("fuse drops anchors");
+    // Debug env TOPOR_FUSE_NO_FEET (ladder base arm, = the fuse before fuse-guard r1: bookkeeping
+    // anchors only): the geometric cut-part skip is off. Changes copper: never in a default arm.
+    let no_feet = std::env::var_os("TOPOR_FUSE_NO_FEET").is_some();
     if tree_free && opts.fuse_branches {
         let jw = reg.price(&Event::JunctionAngle { at: Vec2::default(), deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, &WireCtx::default());
         let js = tree::junctions(&st);
@@ -8800,8 +8803,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let Some(uo) = drawn.get(&u) else { continue };
                 let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
                 let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
-                // fuse-guard r1: the other copper of the net as it is drawn, the pads of the net but the
-                // wire's own end pad: what KiCad joins to the cut part (`netconn::cut_holds`).
+                // fuse-guard r1: the other copper of the net as it is drawn, the pads of the net (the
+                // wire's own end pad is on the trunk, `trunks_of`, so `keep` exempts it): what KiCad joins to the cut part (`netconn::cut_holds`).
                 let nbrs: Vec<super::netconn::Piece> = net_wires
                     .get(&wi.net)
                     .map_or(&[][..], |v| v.as_slice())
@@ -8809,12 +8812,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     .filter(|&&x| x != w)
                     .filter_map(|&x| drawn.get(&x).map(|o| super::netconn::Piece { runs: &o.runs, vias: o.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w: st.wires[x].w / 2.0 }))
                     .collect();
-                let own_pad = if end == 0 { wi.pa } else { wi.pb };
                 let tterms: Vec<super::netconn::Term> = net_terms
                     .get(&wi.net)
                     .map_or(&[][..], |v| v.as_slice())
                     .iter()
-                    .filter(|&&o| o != own_pad)
                     .map(|&o| {
                         let ob = &proj.obstacles[o];
                         super::netconn::Term { poly: &ob.poly, layers: ob.layers, center: ob.center }
@@ -8823,7 +8824,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let trunk_piece = super::netconn::Piece { runs: &uo.runs, vias: uo.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w: st.wires[u].w / 2.0 };
                 let mut skip = |gain: f64, i: usize, pts: &[Vec2]| -> bool {
                     let q = pts[0];
-                    if !no_anchor_skip {
+                    if !no_anchor_skip && !no_feet {
                         let cut_runs = [(layer, run[..=i].to_vec())];
                         let new_runs = [(layer, pts.to_vec())];
                         let cut = super::netconn::Piece { runs: &cut_runs, vias: Vec::new(), half_w: wi.w / 2.0 };
