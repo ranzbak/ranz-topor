@@ -118,8 +118,8 @@ pub struct OctiCfg {
     pub bend_nm: f64,
     /// `L_pref` of the jog penalty (nm).
     pub spacing_nm: f64,
-    /// first-draw-45 r7 (`[drawing] short_leg_mm`): weight (nm) of the short-leg price
-    /// ([`short_leg_price`]).
+    /// first-draw-45 r7 (`[drawing] short_leg_mm`): weight (nm) of the staircase price
+    /// ([`bend_price_seq`], [`shortness`]).
     pub short_leg_nm: f64,
     /// `any_angle` factor weight (nm per stretch; plus 2/15 of it per mm).
     pub any_nm: f64,
@@ -371,25 +371,38 @@ pub fn bend_price(cfg: &OctiCfg, leff: f64, u: Vec2, l_in: f64, v: Vec2) -> f64 
         p += cfg.acute_nm * acute_amount(t);
     }
     if l_in < leff {
-        p += 2.0 * cfg.bend_nm * (1.0 - l_in / leff).powi(2) + short_leg_price(cfg, leff, l_in);
+        p += 2.0 * cfg.bend_nm * (1.0 - l_in / leff).powi(2);
     }
     p
 }
 
-/// first-draw-45 r7 (`[drawing] short_leg_mm`, lead 2026-11-21: graded, no cutoff): the price of a
-/// leg of `l` nm that ends in a bend, below the jog leg `leff` ([`jog_leg`]): `short_leg_nm ((leff
-/// - l) / (l + leff / 8))^2`. 0 at and above `leff` (and its slope there), rising smoothly as the
-/// leg shrinks: `0.64 x` the weight at `leff / 2`, `64 x` for a vanishing leg (bounded below the
-/// violation scale). The jog penalty above saturates at `2 bend_nm`, so a fine staircase of
-/// 0.1 mm steps (each step one more KiCad item; esp +3V3 r6: 11 items where KiCad then counted one
-/// clearance item per step against the IO8_SCL crossing) stayed far cheaper than one free-angle
-/// stretch. O(1).
-pub fn short_leg_price(cfg: &OctiCfg, leff: f64, l: f64) -> f64 {
-    if l >= leff || cfg.short_leg_nm <= 0.0 {
+/// first-draw-45 r7: [`bend_price`] of the turn after the leg `l_in`, whose previous leg was
+/// `l_prev` (infinite: none), plus the staircase price of the two legs ([`shortness`]). The
+/// octilinear DP carries `l_prev` with its label, [`style_price`] reads it off the polyline. O(1).
+pub fn bend_price_seq(cfg: &OctiCfg, leff: f64, u: Vec2, l_in: f64, l_prev: f64, v: Vec2) -> f64 {
+    let p = bend_price(cfg, leff, u, l_in, v);
+    if p.is_finite() && p > 0.0 && cfg.short_leg_nm > 0.0 {
+        p + cfg.short_leg_nm * (shortness(leff, l_in) * shortness(leff, l_prev)).sqrt()
+    } else {
+        p
+    }
+}
+
+/// first-draw-45 r7 (`[drawing] short_leg_mm`, lead 2026-11-21: graded, no cutoff): the graded
+/// shortness of a leg of `l` nm below the jog leg `leff` ([`jog_leg`]): `((leff - l) / (l + leff /
+/// 8))^2`. 0 at and above `leff` (and its slope there), rising smoothly as the leg shrinks: 0.64 at
+/// `leff / 2`, 64 for a vanishing leg. [`bend_price_seq`] prices a bend after two legs by the
+/// weight times the geometric mean of their shortness: a staircase (a run of sub-jog legs: esp
+/// +3V3 r6, 11 KiCad items where the DRC then counted one clearance item per step against the
+/// IO8_SCL crossing) pays per step, while a single short leg between two long ones (eprom A0:
+/// 45 degrees, 0.17 mm, 45 degrees, the shortest form) pays nothing extra: the jog penalty of
+/// [`bend_price`] (bounded by `2 bend_nm`) stays its only price. O(1).
+pub fn shortness(leff: f64, l: f64) -> f64 {
+    if l >= leff || l.is_nan() {
         return 0.0;
     }
     let x = (leff - l.max(0.0)) / (l.max(0.0) + leff / 8.0);
-    cfg.short_leg_nm * x * x
+    x * x
 }
 
 /// octi-bundle r2 (fuse octilinear, the user's A1c rule: every redraw path prices on the first
@@ -402,8 +415,9 @@ pub fn style_price(cfg: &OctiCfg, pitch: f64, pts: &[Vec2]) -> f64 {
     let leff = jog_leg(cfg, pitch);
     let segs: Vec<Vec2> = pts.windows(2).map(|p| p[1] - p[0]).filter(|d| d.len2() > 1.0).collect();
     let mut tot = 0.0;
-    for s in segs.windows(2) {
-        tot += bend_price(cfg, leff, s[0], s[0].len(), s[1]);
+    for (k, s) in segs.windows(2).enumerate() {
+        let l_prev = if k > 0 { segs[k - 1].len() } else { f64::INFINITY };
+        tot += bend_price_seq(cfg, leff, s[0], s[0].len(), l_prev, s[1]);
     }
     let any = any_price(pts);
     if any > 0.0 {
@@ -1007,12 +1021,12 @@ impl Drawer<'_> {
         #[allow(clippy::type_complexity)]
         let mut back: Vec<[Option<(usize, usize, Vec<Leg>)>; ND]> = vec![std::array::from_fn(|_| None); n];
         // Last leg of the state: unit direction and length.
-        let mut last: Vec<[(Vec2, f64); ND]> = vec![[(Vec2::default(), f64::INFINITY); ND]; n];
+        let mut last: Vec<[(Vec2, f64, f64); ND]> = vec![[(Vec2::default(), f64::INFINITY, f64::INFINITY); ND]; n];
         dist[0][8] = 0.0;
         if let Some(u) = lead_in {
-            last[0][8] = (u, f64::INFINITY);
+            last[0][8] = (u, f64::INFINITY, f64::INFINITY);
         }
-        let bend = |u: Vec2, l_in: f64, v: Vec2| -> f64 { bend_price(&cfg, leff, u, l_in, v) };
+        let bend = |u: Vec2, l_in: f64, l_prev: f64, v: Vec2| -> f64 { bend_price_seq(&cfg, leff, u, l_in, l_prev, v) };
         // Price of leaving / entering a pad off its axis (up to two bends' worth at 90 degrees),
         // or along it but turning before the pad's tip is cleared (graded like the jog penalty):
         // pad exit along the pad axis until clear of the neighbour pads.
@@ -1113,7 +1127,7 @@ impl Drawer<'_> {
                     if !d0.is_finite() {
                         continue;
                     }
-                    let (u_in, l_in) = last[i][din];
+                    let (u_in, l_in, lp_in) = last[i][din];
                     let mut js: Vec<usize> = (i + 1..n.min(i + 1 + WINDOW_MAX)).take_while(|&j| j < i + 1 + WINDOW || nodes[j].1 - nodes[i].1 <= REACH_MM * MM).collect();
                     if let Some(j) = next_on[i] {
                         if !js.contains(&j) {
@@ -1143,7 +1157,7 @@ impl Drawer<'_> {
                             let asis = (taut_from..taut_to).contains(&si) || si >= oct_from;
                             // Price.
                             let mut c = 0.0;
-                            let (mut u, mut l, mut from) = (u_in, l_in, p);
+                            let (mut u, mut l, mut lp, mut from) = (u_in, l_in, lp_in, p);
                             // One any-angle stretch pays its per-stretch price once, however many
                             // pieces of the taut path it is made of.
                             let mut prev_any = din == 8 && i != 0;
@@ -1155,7 +1169,7 @@ impl Drawer<'_> {
                                     continue;
                                 }
                                 let v = d * (1.0 / len);
-                                let b = bend(u, l, v);
+                                let b = bend(u, l, lp, v);
                                 if !b.is_finite() {
                                     ok = false;
                                     break;
@@ -1178,9 +1192,10 @@ impl Drawer<'_> {
                                     c += axis_price(&exits[1], v, len) + stub(1, if k == 0 { p } else { s[k - 1].0 });
                                     if let Some(ul) = lead_out {
                                         // on into the lead (from its end back to the hand track)
-                                        c += bend(v, len, -ul);
+                                        c += bend(v, len, l, -ul);
                                     }
                                 }
+                                lp = l;
                                 u = v;
                                 l = len;
                                 from = e;
@@ -1206,7 +1221,7 @@ impl Drawer<'_> {
                                 continue;
                             }
                             dist[j][dout] = d0 + c;
-                            last[j][dout] = (u, l);
+                            last[j][dout] = (u, l, lp);
                             back[j][dout] = Some((i, din, s));
                         }
                     }
@@ -1221,7 +1236,7 @@ impl Drawer<'_> {
             // independent units (par-draw, docs/dev/design/par-draw.md section 13); it returns
             // the states of `j` it improved, (state, price, last leg, back pointer).
             #[allow(clippy::type_complexity)]
-            let relax = |i: usize, j: usize, fin: &[(usize, f64, Vec2, f64)], dj: [f64; ND], shared: Option<&Memo>, own: &mut Memo| -> Vec<(usize, f64, (Vec2, f64), (usize, usize, Vec<Leg>))> {
+            let relax = |i: usize, j: usize, fin: &[(usize, f64, Vec2, f64, f64)], dj: [f64; ND], shared: Option<&Memo>, own: &mut Memo| -> Vec<(usize, f64, (Vec2, f64, f64), (usize, usize, Vec<Leg>))> {
                 let (p, q) = (nodes[i].0, nodes[j].0);
                 let (sh_room, sh_follow, sh_legal, sh_viol) = (shared.map(|m| &m.room), shared.map(|m| &m.follow), shared.map(|m| &m.legal), shared.map(|m| &m.viol));
                 let (own_room, own_follow, own_legal, own_viol) = (&mut own.room, &mut own.follow, &mut own.legal, &mut own.viol);
@@ -1268,19 +1283,19 @@ impl Drawer<'_> {
                     })
                     .collect();
                 let mut dj = dj;
-                let mut best: [Option<((Vec2, f64), usize, usize)>; ND] = [None; ND];
-                for &(din, d0, u_in, l_in) in fin {
+                let mut best: [Option<((Vec2, f64, f64), usize, usize)>; ND] = [None; ND];
+                for &(din, d0, u_in, l_in, lp_in) in fin {
                     for (si, sh) in shapes.iter_mut().enumerate() {
                         // Price.
                         let mut c = 0.0;
-                        let (mut u, mut l) = (u_in, l_in);
+                        let (mut u, mut l, mut lp) = (u_in, l_in, lp_in);
                         // One any-angle stretch pays its per-stretch price once, however many
                         // pieces of the taut path it is made of.
                         let mut prev_any = din == 8 && i != 0;
                         let mut ok = true;
                         let sn = sh.s.len();
                         for &(k, len, v, rv, fv, dk) in &sh.legs {
-                            let b = bend(u, l, v);
+                            let b = bend(u, l, lp, v);
                             if !b.is_finite() {
                                 ok = false;
                                 break;
@@ -1300,9 +1315,10 @@ impl Drawer<'_> {
                                 c += axis_price(&exits[1], v, len) + stub(1, if k == 0 { p } else { sh.s[k - 1].0 });
                                 if let Some(ul) = lead_out {
                                     // on into the lead (from its end back to the hand track)
-                                    c += bend(v, len, -ul);
+                                    c += bend(v, len, l, -ul);
                                 }
                             }
+                            lp = l;
                             u = v;
                             l = len;
                         }
@@ -1328,7 +1344,7 @@ impl Drawer<'_> {
                             continue;
                         }
                         dj[dout] = d0 + c;
-                        best[dout] = Some(((u, l), din, si));
+                        best[dout] = Some(((u, l, lp), din, si));
                     }
                 }
                 (0..ND).filter_map(|dout| best[dout].map(|(ul, din, si)| (dout, dj[dout], ul, (i, din, shapes[si].s.clone())))).collect()
@@ -1342,7 +1358,7 @@ impl Drawer<'_> {
             // overlay each), their rows as the node found them, the call's memo (read only).
             struct OJob {
                 i: usize,
-                fin: Vec<(usize, f64, Vec2, f64)>,
+                fin: Vec<(usize, f64, Vec2, f64, f64)>,
                 js: Vec<usize>,
                 dj: Vec<[f64; ND]>,
                 runs: Vec<(usize, usize)>,
@@ -1355,9 +1371,9 @@ impl Drawer<'_> {
                 (ups, own)
             };
             #[allow(clippy::type_complexity)]
-            let mut nodes_loop = |mut crew: Option<&mut super::par::Crew<'_, OJob, (Vec<Vec<(usize, f64, (Vec2, f64), (usize, usize, Vec<Leg>))>>, Memo)>>| {
+            let mut nodes_loop = |mut crew: Option<&mut super::par::Crew<'_, OJob, (Vec<Vec<(usize, f64, (Vec2, f64, f64), (usize, usize, Vec<Leg>))>>, Memo)>>| {
                 for i in 0..n {
-                    let fin: Vec<(usize, f64, Vec2, f64)> = (0..ND).filter(|&d| dist[i][d].is_finite()).map(|d| (d, dist[i][d], last[i][d].0, last[i][d].1)).collect();
+                    let fin: Vec<(usize, f64, Vec2, f64, f64)> = (0..ND).filter(|&d| dist[i][d].is_finite()).map(|d| (d, dist[i][d], last[i][d].0, last[i][d].1, last[i][d].2)).collect();
                     if fin.is_empty() {
                         continue;
                     }

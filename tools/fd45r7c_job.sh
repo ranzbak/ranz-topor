@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # first-draw-45 r7c (TEMP job script): [drawing] short_leg_mm (default 2.0) + chord nodes a jog leg apart.
-# octi_order ladder det s0, bends and sweep x qmtech/esp/wiccon/eprom (8 units), the weight arm
-# short_leg_mm = 1.0 (bends) on esp and qmtech (2 units), one unit of targeted tests. At most 4 units at once.
+# octi_order ladder det s0, bends and sweep x qmtech/esp/wiccon/eprom (8 units); r7e = the
+# consecutive-leg (staircase) price. At most 5 units at once (20 hzq tokens).
 set -u
 OUT=$HZ_RUN_DIR
 TREE="${TOPOR_TREE:-/root/topor}"
@@ -30,11 +30,9 @@ if [ "${1:-}" = tests ]; then
   hzq run --threads 4 --name "$HZ_TAG-t" -- bash -c 'tests; cd "$TREE/engine" && cargo test --release --lib short_leg_price -- --nocapture > "$OUT/t-short.log" 2>&1' 9>&-
   echo "all done" >> "$OUT/rc.txt"; exit 0
 fi
-q() { while [ "$(jobs -rp | wc -l)" -ge 4 ]; do wait -n; done; hzq run --threads 4 --name "$HZ_TAG-$1" -- bash -c "$2" 9>&- & }
+q() { while [ "$(jobs -rp | wc -l)" -ge 5 ]; do wait -n; done; hzq run --threads 4 --name "$HZ_TAG-$1" -- bash -c "$2" 9>&- & }
 q qmb 'unit qmb $QM --set drawing.octi_order=bends'; q espb 'unit espb $ESP --set drawing.octi_order=bends'
 q qms 'unit qms $QM --set drawing.octi_order=sweep'; q esps 'unit esps $ESP --set drawing.octi_order=sweep'
-q esp1 'unit esp1 $ESP --set drawing.octi_order=bends --set drawing.short_leg_mm=1.0'
-q qm1 'unit qm1 $QM --set drawing.octi_order=bends --set drawing.short_leg_mm=1.0'
 q wicb 'unit wicb $WIC --set drawing.octi_order=bends'; q wics 'unit wics $WIC --set drawing.octi_order=sweep'
 q epb 'unit epb $EP $EPX --set drawing.octi_order=bends'; q eps 'unit eps $EP $EPX --set drawing.octi_order=sweep'
 wait

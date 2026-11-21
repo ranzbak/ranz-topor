@@ -1849,9 +1849,9 @@ mod tests {
     /// tracks parallel to it, each `dw` beyond the chord's clearance. Every octilinear form in the
     /// corridor is a staircase whose steps stay within `dw` of the chord: legs far below the jog
     /// leg. Without the short-leg price (weight 0) the first-draw DP takes such a staircase (its
-    /// bends and jogs cost less than one free-angle stretch); with it (the default weight) no leg
-    /// ending in a bend is below half the jog leg: the chord stays as drawn (free-angle, one item)
-    /// or the steps are long. Returns (sub-half-jog legs at weight 0, at the default).
+    /// bends and jogs cost less than one free-angle stretch); with it (the default weight) no bend
+    /// follows two consecutive legs below the jog leg: the chord stays as drawn (free-angle,
+    /// one item) or the steps are long. Returns (such staircase bends at weight 0, at the default).
     fn short_legs_in_corridor(dw: f64) -> (usize, usize) {
         let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
         let (a, b) = (v(2.0, 12.0), v(8.0, 10.0));
@@ -1871,7 +1871,8 @@ mod tests {
             let leff = super::super::octi::jog_leg(&dr.octi, wi.w + wi.s);
             let short = |pts: &[Vec2]| -> usize {
                 let segs: Vec<Vec2> = pts.windows(2).map(|x| x[1] - x[0]).filter(|d| d.len2() > 1.0).collect();
-                segs.windows(2).filter(|x| super::super::octi::turn_deg(x[0], x[1]) > 0.5 && x[0].len() < 0.5 * leff).count()
+                // a bend after two consecutive legs below the jog leg (a staircase step)
+                (1..segs.len().saturating_sub(1)).filter(|&k| super::super::octi::turn_deg(segs[k], segs[k + 1]) > 0.5 && segs[k].len() < leff - 1_000.0 && segs[k - 1].len() < leff - 1_000.0).count()
             };
             let pts = vec![a, b];
             let form = |dr: &Drawer| dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).map_or(pts.clone(), |o| o.pts);
@@ -1900,17 +1901,28 @@ mod tests {
         for dw in [0.03 * MM, 0.06 * MM, 0.1 * MM] {
             let (s0, s1) = short_legs_in_corridor(dw);
             seen.push((dw / MM, s0, s1));
-            assert_eq!(s1, 0, "dw {} mm: a leg below half the jog leg with the short-leg price: {seen:?}", dw / MM);
+            assert_eq!(s1, 0, "dw {} mm: a staircase step (two legs below the jog leg) with the price: {seen:?}", dw / MM);
         }
-        // dw 0.06 mm: the unpriced DP draws a 24-leg staircase of 0.16 / 0.22 mm legs (13 below
-        // half the jog leg); with the price the chord stays as drawn (one item).
+        // dw 0.06 mm: the unpriced DP draws a 24-leg staircase of 0.32 / 0.22 mm legs (all below
+        // the 0.5 mm jog leg); with the price the chord stays as drawn (one item).
         assert!(seen.iter().any(|x| x.1 > 5), "the fixture must make the unpriced DP staircase: {seen:?}");
-        // The price itself: 0 at and above the jog leg, graded below it, bounded.
-        let cfg = super::super::octi::OctiCfg { short_leg_nm: 1.0 * MM, ..Default::default() };
-        let p = |l: f64| super::super::octi::short_leg_price(&cfg, 0.5 * MM, l * MM) / MM;
+        // The shortness: 0 at and above the jog leg, graded below it, bounded.
+        let p = |l: f64| super::super::octi::shortness(0.5 * MM, l * MM);
         assert!(p(0.5) == 0.0 && p(0.7) == 0.0 && p(0.499) > 0.0 && p(0.499) < 1e-4);
         assert!((p(0.25) - 0.64).abs() < 1e-9 && (p(0.0) - 64.0).abs() < 1e-9);
         assert!(p(0.1) > p(0.2) && p(0.2) > p(0.3) && p(0.3) > p(0.4));
+        // The staircase price reads two consecutive legs: a single short leg between two long
+        // ones (eprom A0: 45 degrees, 0.17 mm, 45 degrees) pays no more than without the weight;
+        // two short legs in a row do.
+        let on = super::super::octi::OctiCfg { on: true, short_leg_nm: 2.0 * MM, ..Default::default() };
+        let off = super::super::octi::OctiCfg { short_leg_nm: 0.0, ..on };
+        let pitch = 0.375 * MM;
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+        let jog = [v(0.0, 0.0), v(0.665, 0.665), v(0.835, 0.665), v(1.5, 1.33)];
+        let st = |c: &super::super::octi::OctiCfg, q: &[Vec2]| super::super::octi::style_price(c, pitch, q);
+        assert_eq!(st(&on, &jog), st(&off, &jog), "a single short leg pays only the jog penalty");
+        let stair = [v(0.0, 0.0), v(0.158, 0.0), v(0.316, 0.158), v(0.474, 0.158), v(0.632, 0.316), v(2.0, 0.316)];
+        assert!(st(&on, &stair) > st(&off, &stair) + 2.0 * MM, "a staircase pays: {} vs {}", st(&on, &stair), st(&off, &stair));
     }
 
     /// first-draw-45 P1: an octilinear piece of the taut run is a chain of the DP as drawn, without
