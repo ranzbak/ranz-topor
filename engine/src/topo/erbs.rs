@@ -122,11 +122,13 @@ pub struct ErbsOpts {
     /// grown features keep `half width + clearance + margin`, so the ERBS copper keeps the rule
     /// after rounding to whole nm. 0 = exact (the model tests).
     pub margin: f64,
+    /// first-draw-45 P3 (`[drawing] octi_order`): the order of the wires for the drawing.
+    pub octi_order: OctiOrder,
 }
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, limit: None, draw_start: None, floor: None, fail_first: false, margin: 0.0 }
+        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, limit: None, draw_start: None, floor: None, fail_first: false, margin: 0.0, octi_order: OctiOrder::Bends }
     }
 }
 
@@ -2264,8 +2266,137 @@ fn greedy_keep(comp: &[usize], keys: &[(u8, usize)], adj: &[BTreeSet<usize>], mo
     sel
 }
 
+/// first-draw-45 P3 (`[drawing] octi_order`): how the drawing orders the wires of the ERBS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OctiOrder {
+    /// The bend relation ([`precedes`]) plus the sweep relation ([`sweep_scores`]); a cycle is
+    /// broken at the wire with the fewest unmet predecessors. Fixes K5-type bundles; long-chord
+    /// bundles need the staircase nodes of P4 first.
+    Sweep,
+    /// The bend relation only, a cycle broken at the earliest wire of the given order (the
+    /// default until P4, lead 2026-11-21).
+    #[default]
+    Bends,
+}
+
+impl OctiOrder {
+    /// The option's value (`"sweep"`, `"bends"`); `None` for anything else.
+    pub fn parse(s: &str) -> Option<OctiOrder> {
+        match s {
+            "sweep" => Some(OctiOrder::Sweep),
+            "bends" => Some(OctiOrder::Bends),
+            _ => None,
+        }
+    }
+}
+
+/// first-draw-45 P3: the sweep relation of Staepelaere 1992 (UCSC-CRL-92-39), OrderSegments: a
+/// segment `a` precedes `b` when a vertical line meets `a` below `b` (PDF p. 22); the segments
+/// are transformed in a topological order of that relation (PDF p. 29), each one pushed onto
+/// the boundary the segments below it already form, inside its lower triangle (PDF p. 16,
+/// section 4.1 p. 33), so the room on its other side belongs to the wires not drawn yet. Here
+/// the cuts of the plan stand for the vertical lines: two consecutive items of one cut (of
+/// different wires) are related, the lower one (smaller y, math frame: towards the bottom of the
+/// board) first. A wire pair can meet on many cuts of a bending bundle; each meeting adds its
+/// offset to the pair's score, `[y, x]` (y: lower first, x: left first); [`add_sweep`] reads
+/// one axis per group of wires. So one pair gets one direction and no 2-cycle. Scores are keyed `(a, b)` with `a < b`, positive = `a` lower / left. O(items).
+pub fn sweep_scores(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, score: &mut BTreeMap<(usize, usize), [f64; 2]>) {
+    let mut items: Vec<(usize, f64)> = Vec::new();
+    for c in &o.cuts {
+        let Some(cut) = sh.cuts.get(c.cut) else { continue };
+        items.clear();
+        items.extend(c.items.iter().map(|it| (sts[it.stretch].wire, it.key)));
+        sweep_cut(cut.p, cut.q, &items, score);
+    }
+}
+
+/// One cut `p q` of [`sweep_scores`]: its items `(wire, key)` in order from `p` (key = fraction
+/// along the cut).
+pub fn sweep_cut(p: Vec2, q: Vec2, items: &[(usize, f64)], score: &mut BTreeMap<(usize, usize), [f64; 2]>) {
+    let e = q - p;
+    for k in items.windows(2) {
+        let ((wa, ka), (wb, kb)) = (k[0], k[1]);
+        if wa == wb {
+            continue;
+        }
+        // The second item lies `d` further along the cut than the first.
+        let d = kb - ka;
+        let (key, f) = if wa < wb { ((wa, wb), d) } else { ((wb, wa), -d) };
+        let v = score.entry(key).or_insert([0.0, 0.0]);
+        v[0] += f * e.y;
+        v[1] += f * e.x;
+    }
+}
+
+/// The share of a pair's evidence on the axis of its component below which the pair stays
+/// unrelated by the sweep (it met the others almost only along the other axis: its sign there is
+/// geometry noise, not a side).
+pub const SWEEP_AXIS_SHARE: f64 = 0.1;
+
+/// first-draw-45 P3: the sweep scores as pairs of `before` where the bend relation does not
+/// already order the pair the other way (a bend is a must: the wire bends round the ones before
+/// it). Staepelaere sweeps a layer in one direction (PDF p. 22); here one axis per group of wires
+/// that meet on cuts (a connected component of the scored pairs): the axis with the larger summed
+/// evidence of the group, y (lower first) or x (left first). One axis for the whole group keeps a
+/// bundle's chain consistent: per pair axes mix "lower" and "left", which disagree on a bundle
+/// that bends, and draw it from the middle (K5, r2: chain 5-4-0-1-2-3 ordered 4 -> 5 and
+/// 4 -> 0 -> 1 -> 2 <- 3). A pair with evidence on the group's axis under
+/// [`SWEEP_AXIS_SHARE`] of its other axis, or within 1 nm of 0, relates nothing.
+pub fn add_sweep(score: &BTreeMap<(usize, usize), [f64; 2]>, before: &mut BTreeSet<(usize, usize)>) {
+    let bends = before.clone();
+    // union-find over the wires of the scored pairs
+    let mut up: BTreeMap<usize, usize> = BTreeMap::new();
+    fn find(up: &mut BTreeMap<usize, usize>, x: usize) -> usize {
+        let mut r = x;
+        while let Some(&p) = up.get(&r) {
+            if p == r {
+                break;
+            }
+            r = p;
+        }
+        up.insert(x, r);
+        r
+    }
+    for &(a, b) in score.keys() {
+        up.entry(a).or_insert(a);
+        up.entry(b).or_insert(b);
+        let (ra, rb) = (find(&mut up, a), find(&mut up, b));
+        if ra != rb {
+            up.insert(ra.max(rb), ra.min(rb));
+        }
+    }
+    let mut sum: BTreeMap<usize, [f64; 2]> = BTreeMap::new();
+    for (&(a, _), v) in score {
+        let r = find(&mut up, a);
+        let t = sum.entry(r).or_insert([0.0, 0.0]);
+        t[0] += v[0].abs();
+        t[1] += v[1].abs();
+    }
+    for (&(a, b), v) in score {
+        let r = find(&mut up, a);
+        let ax = usize::from(sum[&r][1] > sum[&r][0]);
+        let x = v[ax];
+        if x.abs() < SWEEP_AXIS_SHARE * v[1 - ax].abs() {
+            continue;
+        }
+        let pair = if x > 1.0 {
+            (a, b)
+        } else if x < -1.0 {
+            (b, a)
+        } else {
+            continue;
+        };
+        if !bends.contains(&(pair.1, pair.0)) {
+            before.insert(pair);
+        }
+    }
+}
+
 /// Topological order of `given` under `before` (pairs of wires), the given order as tie-break.
-pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec<usize> {
+/// When every wire left has an unmet predecessor (a cycle): `Bends` takes the earliest of the given
+/// order; `Sweep` (first-draw-45 P3) the one with the fewest unmet predecessors, ties in the given
+/// order, so a cycle of two bundle neighbours does not put the wire most others precede first.
+pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>, mode: OctiOrder) -> Vec<usize> {
     let pos: BTreeMap<usize, usize> = given.iter().enumerate().map(|(i, &w)| (w, i)).collect();
     let n = given.len();
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -2282,7 +2413,10 @@ pub fn precedes_order(given: &[usize], before: &BTreeSet<(usize, usize)>) -> Vec
     let mut done = vec![false; n];
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
-        let i = free.pop_first().unwrap_or_else(|| (0..n).find(|&i| !done[i]).expect("left"));
+        let i = free.pop_first().unwrap_or_else(|| match mode {
+            OctiOrder::Bends => (0..n).find(|&i| !done[i]).expect("left"),
+            OctiOrder::Sweep => (0..n).filter(|&i| !done[i]).min_by_key(|&i| (indeg[i], i)).expect("left"),
+        });
         if done[i] {
             continue;
         }
@@ -2313,6 +2447,7 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
     let ords = super::radii::from_measure(&m, &|p| st.proj.regime_at(p));
     let mut out = Realised::default();
     let mut before: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut sweep: BTreeMap<(usize, usize), [f64; 2]> = BTreeMap::new();
     // The test hook fails one stretch of the run (the first of the first layer with one), not
     // one per layer: the count it leaves does not depend on how the plan spreads the wires over
     // the layers.
@@ -2344,6 +2479,9 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
             _ => vec![v.stretch],
         }).collect();
         precedes(&le.es, &m.stretches, o, &mut before);
+        if stops.octi_order == OctiOrder::Sweep {
+            sweep_scores(&lf.sheet, &m.stretches, o, &mut sweep);
+        }
         for e in &le.es {
             let s = &m.stretches[e.stretch];
             out.runs.entry(s.wire).or_default().push(RunBand { layer: s.layer, s: e.pts[0], e: e.pts[e.pts.len() - 1], path: e.path.clone(), band_len: e.band_len, gap: gap.contains(&e.stretch) });
@@ -2361,9 +2499,12 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
         t.erbs_gap += r.erbs_gap;
         t.worst_gap = t.worst_gap.max(r.worst_gap);
     }
-    out.order = precedes_order(given, &before);
+    if stops.octi_order == OctiOrder::Sweep {
+        add_sweep(&sweep, &mut before);
+    }
+    out.order = precedes_order(given, &before, stops.octi_order);
     if std::env::var_os("TOPO_ERBS_DEBUG").is_some() {
-        eprintln!("ERBS precedes {:?} given {:?} order {:?}", before, given, out.order);
+        eprintln!("ERBS precedes {:?} given {:?} order {:?} sweep [vy, vx] {:?}", before, given, out.order, sweep);
     }
     out.seconds = t0.elapsed().as_secs_f64();
     Ok(out)
@@ -2372,6 +2513,80 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// first-draw-45 P3: consecutive items of a cut are related, the lower one first (side by
+    /// side: the left one); a pair meeting on several cuts gets the direction of its summed offsets (no
+    /// 2-cycle); a bend pair the other way wins; wires that never meet stay unrelated.
+    #[test]
+    fn sweep_relates_cut_neighbours_lower_first() {
+        let v = |x: f64, y: f64| Vec2 { x: x * 1e6, y: y * 1e6 };
+        let mut sc = BTreeMap::new();
+        // A cut from (0, 0) up to (0, 3): wires 7, 3, 5 from the bottom; a repeated wire 3 item.
+        sweep_cut(v(0.0, 0.0), v(0.0, 3.0), &[(7, 0.2), (3, 0.5), (3, 0.55), (5, 0.8)], &mut sc);
+        // A cut from the top down: wire 5 above wire 3 again (cut order 5, 3 from its p).
+        sweep_cut(v(1.0, 3.0), v(1.0, 0.0), &[(5, 0.1), (3, 0.6)], &mut sc);
+        // A short cut on which 3 lies above 5 (a bend of the bundle): outweighed.
+        sweep_cut(v(2.0, 0.0), v(2.0, 0.2), &[(5, 0.1), (3, 0.9)], &mut sc);
+        let mut before = BTreeSet::new();
+        add_sweep(&sc, &mut before);
+        assert_eq!(before, BTreeSet::from([(7, 3), (3, 5)]), "{sc:?}");
+        // A horizontal cut along the board's x axis: side by side, left first.
+        let mut sc = BTreeMap::new();
+        sweep_cut(v(4.0, 1.0), v(0.0, 1.0), &[(1, 0.2), (2, 0.6)], &mut sc);
+        let mut before = BTreeSet::new();
+        add_sweep(&sc, &mut before);
+        assert_eq!(before, BTreeSet::from([(2, 1)]), "{sc:?}");
+        // A bend relation the other way is kept, the sweep pair dropped.
+        let mut before = BTreeSet::from([(1, 2)]);
+        add_sweep(&sc, &mut before);
+        assert_eq!(before, BTreeSet::from([(1, 2)]));
+        // K5 (the r2 scores of the jst_fanout_45_close bundle, chain 5-4-0-1-2-3): x carries the
+        // group; one axis orders the whole chain from one side (per pair axes gave 4 -> 5 and 3 -> 2).
+        let sc = BTreeMap::from([
+            ((0, 1), [8.9e6, 170.6e6]),
+            ((0, 4), [-8.7e6, -138.3e6]),
+            ((1, 2), [-17.8e6, 215.1e6]),
+            ((2, 3), [-80.6e6, 130.9e6]),
+            ((4, 5), [33.6e6, -82.0e6]),
+        ]);
+        let mut before = BTreeSet::new();
+        add_sweep(&sc, &mut before);
+        assert_eq!(before, BTreeSet::from([(0, 1), (1, 2), (2, 3), (4, 0), (5, 4)]), "{sc:?}");
+        assert_eq!(precedes_order(&[0, 1, 2, 5, 3, 4], &before, OctiOrder::Sweep), vec![5, 4, 0, 1, 2, 3]);
+        // Two groups that never meet get their own axes: a vertical pair (y) beside the chain.
+        let mut sc2 = sc.clone();
+        sc2.insert((8, 9), [-3.0e6, 0.1e6]);
+        let mut before = BTreeSet::new();
+        add_sweep(&sc2, &mut before);
+        assert!(before.contains(&(9, 8)) && before.contains(&(5, 4)), "{before:?}");
+        // The share rule (r4, kills mutant P3-share): a pair of a y group whose y evidence is
+        // under SWEEP_AXIS_SHARE of its x evidence (it met the group side by side, its y sign is
+        // noise) stays unrelated; at the share it is related.
+        for (y, related) in [(9.0e6, false), (11.0e6, true)] {
+            let sc = BTreeMap::from([((0, 1), [500.0e6, 0.0]), ((1, 2), [y, -100.0e6])]);
+            let mut before = BTreeSet::new();
+            add_sweep(&sc, &mut before);
+            assert_eq!(before.contains(&(1, 2)), related, "y {y}: {before:?}");
+            assert!(!before.contains(&(2, 1)) && before.contains(&(0, 1)), "y {y}: {before:?}");
+        }
+    }
+
+    /// first-draw-45 P3: a cycle is broken at the wire with the fewest unmet predecessors, ties in
+    /// the given order (`Sweep`); at the earliest wire of the given order (`Bends`, before). The
+    /// U6 shape: wire 0 first in the given order but after every other wire, a 2-cycle 1 <-> 2.
+    #[test]
+    fn cycle_break_takes_the_fewest_unmet_predecessors() {
+        let given = [0, 1, 2, 3];
+        let before = BTreeSet::from([(1, 0), (2, 0), (3, 0), (1, 2), (2, 1), (3, 1), (3, 2)]);
+        assert_eq!(precedes_order(&given, &before, OctiOrder::Sweep), vec![3, 1, 2, 0]);
+        // 3 is free from the start: both modes take it; then 0 (Bends: earliest), with three
+        // unmet predecessors, against 1 (Sweep: one unmet predecessor, 2).
+        assert_eq!(precedes_order(&given, &before, OctiOrder::Bends), vec![3, 0, 1, 2]);
+        // Without a cycle the modes agree (Kahn's sort, ties in the given order).
+        let dag = BTreeSet::from([(2, 0), (3, 1)]);
+        assert_eq!(precedes_order(&given, &dag, OctiOrder::Sweep), precedes_order(&given, &dag, OctiOrder::Bends));
+        assert_eq!(precedes_order(&given, &dag, OctiOrder::Sweep), vec![2, 0, 3, 1]);
+    }
 
     /// The ERBS fold's prefix rule (par-draw phase A): from the first cut stretch in stretch
     /// order on, every later one counts as cut, also those a lane finished after the limit; the

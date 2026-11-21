@@ -669,6 +669,10 @@ pub struct DrawStats {
     pub octi_ok: usize,
     pub octi_rejected: usize,
     pub octi_s: f64,
+    /// first-draw-45 P1: in the runs drawn octilinear, octilinear pieces of the taut path kept as
+    /// drawn where the DP's leg test refused them, and of those the ones below the clearance.
+    pub octi_asis: usize,
+    pub octi_asis_below: usize,
     /// 5.4: vias placed at the plan's own site / planned sites that broke a rule there (searched).
     pub planned_sites: usize,
     pub planned_sites_missed: usize,
@@ -1632,6 +1636,17 @@ impl<'a> Drawer<'a> {
         let (e, l, i, _, _) = self.slot[pid]?;
         let ln = self.lanes.get(&(e, l))?;
         let j = if after { i + 1 } else { i.checked_sub(1)? };
+        let x = self.neighbour_x(pid, after)?;
+        let gap = (ln.cum[i.max(j)] - ln.cum[i.min(j)]).abs();
+        Some(if after { x - gap } else { x + gap })
+    }
+
+    /// The planned crossing (nm along the edge) of the lane neighbour of [`Drawer::neighbour_bound`]
+    /// itself, without the spacing: where that wire's ERBS (else its taut path) crosses the edge.
+    pub(super) fn neighbour_x(&self, pid: PassId, after: bool) -> Option<f64> {
+        let (e, l, i, _, _) = self.slot[pid]?;
+        let ln = self.lanes.get(&(e, l))?;
+        let j = if after { i + 1 } else { i.checked_sub(1)? };
         let q = *ln.pids.get(j)?;
         let wq = self.st.passes[q].wire;
         let at = *self.packer.taut(self.st, wq).at.get(self.pass_k[q])?;
@@ -1645,9 +1660,7 @@ impl<'a> Drawer<'a> {
         let erbs_x = (self.opts.realise == "erbs").then(|| self.erbs.get(&wq)).flatten().and_then(|v| {
             v.iter().filter(|b| b.layer == l).filter_map(|b| crossing(&b.path, pp, pr, taut_x)).min_by(|a, b| (a - taut_x).abs().total_cmp(&(b - taut_x).abs()))
         });
-        let x = erbs_x.unwrap_or(taut_x);
-        let gap = (ln.cum[i.max(j)] - ln.cum[i.min(j)]).abs();
-        Some(if after { x - gap } else { x + gap })
+        Some(erbs_x.unwrap_or(taut_x))
     }
 
     /// Remember where the accepted run `pts` (passes `k0..k1` of `w`, first track handle `h`)
@@ -2330,6 +2343,9 @@ impl<'a> Drawer<'a> {
         // pad-snap r2b debug (`TOPO_VIADBG`): every forced candidate site with its price
         let fdbg = std::env::var_os("TOPO_VIADBG").is_some();
         let mut cands: Vec<(f64, usize, Vec2, i64, String)> = Vec::new();
+        // TOPO_VIADBG (copper-neutral): every priced site as (price, short amount, k, site, size).
+        let dbg = std::env::var_os("TOPO_VIADBG").is_some();
+        let mut seen: Vec<(f64, f64, usize, Vec2, i64)> = Vec::new();
         for &sz in sizes {
             let need_r = crate::vias::via_need_copper(&self.model.rules, net, sz, 0.0, self.opts.margin_nm.max(0) as f64);
             let at = plan.at.get(i).copied().filter(|&k| (ka..=kb).contains(&k));
@@ -2368,6 +2384,9 @@ impl<'a> Drawer<'a> {
                     None => 0.0,
                 };
                 let price = vs.iter().map(Viol::amount).sum::<f64>() + side + reach;
+                if dbg {
+                    seen.push((price, viol_key(&vs).0, k, p, sz.d));
+                }
                 let room = self.via_room(w, k, p, sz.d as f64);
                 if fdbg {
                     cands.push((price, k, p, sz.d, vs.iter().map(|v| format!("{} {} d{:.0} l{:.0}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3)).collect::<Vec<_>>().join("; ")));
@@ -2383,6 +2402,21 @@ impl<'a> Drawer<'a> {
             for c in cands.iter().take(8) {
                 eprintln!("  FORCEVIA cand price {:.3} k {} ({:.4},{:.4}) d {} [{}]", c.0, c.1, c.2.x / 1e6, -c.2.y / 1e6, c.3, c.4);
             }
+        }
+        if dbg {
+            let line = |x: &(f64, f64, usize, Vec2, i64)| format!("{:.2}/short {:.2} k{} ({:.3},{:.3}) d{}", x.0, x.1, x.2, x.3.x / 1e6, -x.3.y / 1e6, x.4);
+            let mut by_price = seen.clone();
+            by_price.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut by_short = seen.clone();
+            by_short.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)));
+            eprintln!(
+                "FORCEVIASITES wire {w} via {i} class {} sites {} short-free {} | cheapest [{}] | least short [{}]",
+                class.is_some(),
+                seen.len(),
+                seen.iter().filter(|x| x.1 <= 0.0).count(),
+                by_price.iter().take(6).map(line).collect::<Vec<_>>().join("; "),
+                by_short.iter().take(4).map(line).collect::<Vec<_>>().join("; ")
+            );
         }
         best.map(|b| (b.2, b.3, b.4, b.5))
     }
@@ -3509,6 +3543,8 @@ impl<'a> Drawer<'a> {
                     let exits = [if r == 0 { self.pad_exit(w, 0, pts[1]) } else { None }, if r == plan.layers.len() - 1 { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
                     if let Some(o) = self.octilinear(w, k0, k1, layer, &pts, None, exits, None) {
                         if let Some((its, pn)) = self.realise(w, layer, lid, &o.pts, &pneck) {
+                            self.stats.octi_asis += o.asis;
+                            self.stats.octi_asis_below += o.asis_below;
                             pts = o.pts;
                             items = its;
                             pneck_out = pn;
@@ -3545,6 +3581,8 @@ impl<'a> Drawer<'a> {
                         let tag = match got {
                             Some(o) => match self.realise(w, layer, lid, &o.pts, &pneck) {
                                 Some((its, pn)) => {
+                                    self.stats.octi_asis += o.asis;
+                                    self.stats.octi_asis_below += o.asis_below;
                                     pts = o.pts;
                                     items = its;
                                     pneck_out = pn;
@@ -4294,6 +4332,14 @@ impl<'a> Drawer<'a> {
             tot
         };
         let octi = self.octi.on;
+        // first-draw-45 P5: with the octilinear style a corner goes only where the shortcut is
+        // cheaper on the octilinear DP's scale, length plus the `any_angle` price of the legs
+        // ([`super::octi::any_price`]): an octilinear leg is not traded for free angle for a little
+        // length (esp / qmtech: the DP's 45 degree legs next to a kept taut piece were pulled into
+        // one free-angle leg). Graded, not a cutoff: a shortcut saving more than its any-angle
+        // price is taken. Before (two octilinear legs kept, any other corner removed).
+        let any_nm = self.octi.any_nm;
+        let style = |q: &[Vec2]| -> f64 { poly_len(q) + any_nm * super::octi::any_price(q) };
         let mut cur = pts.to_vec();
         let mut changed = false;
         for _pass in 0..8 {
@@ -4301,7 +4347,21 @@ impl<'a> Drawer<'a> {
             let mut i = 1;
             while i + 1 < cur.len() {
                 let (a, b, c) = (cur[i - 1], cur[i], cur[i + 1]);
-                let keep_octi = octi && super::octi::octi_dir(c - a).is_none() && super::octi::octi_dir(b - a).is_some() && super::octi::octi_dir(c - b).is_some();
+                let p5 = !super::octi::fd45_off("p5");
+                // A corner next to an octilinear leg whose shortcut is free angle (P5); before P5
+                // only one between two octilinear legs.
+                let octi_corner = octi
+                    && super::octi::octi_dir(c - a).is_none()
+                    && if p5 {
+                        super::octi::octi_dir(b - a).is_some() || super::octi::octi_dir(c - b).is_some()
+                    } else {
+                        super::octi::octi_dir(b - a).is_some() && super::octi::octi_dir(c - b).is_some()
+                    };
+                // r4 (qmtech PS2_DAT1 RCA): in a forced run the corner is judged below on the forced
+                // run's own scale, its violations included (`forced_form_key`): the style price
+                // alone kept four short legs across a VIN5V track the base pull had merged into one
+                // crossing (KiCad: one crossing became a crossing and three shorting items).
+                let keep_octi = octi_corner && (!p5 || (forced.is_none() && style(&[a, c]) >= style(&[a, b, c])));
                 if keep_octi || (c - a).len2() < 1.0 || guards.iter().any(|g| cross(&[a, b, c], g) != cross(&[a, c], g)) || (forced.is_none() && room_price(&[a, c]) > room_price(&[a, b, c]) + 1.0) {
                     i += 1;
                     continue;
@@ -4316,7 +4376,11 @@ impl<'a> Drawer<'a> {
                         let mut vs = self.viols_of(&its, &rep);
                         vs.extend(self.graze_viols(w, &its));
                         let k2 = viol_key(&vs);
-                        if key_le(k2, price) {
+                        // P5 in a forced run: a corner next to an octilinear leg goes when the
+                        // shortcut is cheaper on the forced scale (shorts first, then `violation`
+                        // x amount + length + `any_angle` price, `forced_form_key`'s weights).
+                        let pays = !(octi_corner && p5) || k2.0 < price.0 - 1e-9 || self.octi.viol_nm * k2.1 + style(&cand) < self.octi.viol_nm * price.1 + style(&cur) - 1e-9;
+                        if pays && key_le(k2, price) {
                             forced = Some(k2);
                             true
                         } else {

@@ -1518,6 +1518,25 @@ pub struct Options {
     /// kept bands of the highest priority tier first, then of the next) or `"count"` (the most
     /// kept bands). Ties by route order.
     pub erbs_conflict_keep: String,
+    /// first-draw-45 P3 (`[drawing] octi_order`): with realise = "erbs", the order in which the
+    /// wires whose band is not kept as is get their octilinear form ([`crate::topo::erbs::OctiOrder`]):
+    /// `"bends"` (default: the bend relation only, a cycle broken at the earliest wire) or `"sweep"`
+    /// (Staepelaere 1992 OrderSegments, PDF pp. 22, 29: the bend relation plus one sweep axis per
+    /// group of cut neighbours, a cycle broken at the fewest unmet predecessors). Sweep fixes
+    /// K5-type bundles; long-chord bundles (U6, qmtech JS_*) need the staircase nodes of P4 first,
+    /// so "bends" stays the default until P4 (lead 2026-11-21, first-draw-45 r3).
+    pub octi_order: String,
+    /// first-draw-45 P2 (`[drawing] octi_own_portals`): in the first draw's octilinear form, an
+    /// edge the run's own taut path crosses (no portal of its sleeve) opens in the room the plan
+    /// left free there (up to an undrawn wire's planned crossing less the spacing); false = the
+    /// whole edge stays a wall (the behaviour before). Default true.
+    pub octi_own_portals: bool,
+    /// first-draw-45 P4 step 2 (`[drawing] octi_straighten`): with style = "octilinear", after the
+    /// drawing every wire in the reverse draw order gets its stretches of two or more bends
+    /// redrawn as one straight, elbow or Z form where that is cheaper on the octilinear DP's scale
+    /// (length, bends, jog penalty) and legal (StraightenLayer, Staepelaere 1992 ch. 5, p. 15);
+    /// false = the staircases of the first draw stay. Default true.
+    pub octi_straighten: bool,
     /// TW2 (`[drawing] erbs_gap_keep_max_mm`): with realise = "erbs", two bands the joint check
     /// finds too close by a model gap of the ERBS (`RunBand::gap`, no over-full cut predicts it)
     /// are both kept when the overlap is at most this: the gap stays as a clearance violation of
@@ -1886,6 +1905,9 @@ impl Default for Options {
             draw_pull_taut: true,
             realise: "erbs".into(),
             erbs_conflict_keep: "tier".into(),
+            octi_order: "bends".into(),
+            octi_own_portals: true,
+            octi_straighten: true,
             erbs_gap_keep_max_mm: 0.15,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
