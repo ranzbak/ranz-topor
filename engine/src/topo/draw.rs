@@ -5769,4 +5769,56 @@ mod tests {
             assert!(!dr.refit_legal(&wo, 0, &p13) && !dr.refit_run(&mut w2, 0, p13), "the blocked link is illegal for both");
         }
     }
+
+    /// first-draw-45 r7 (kills the r6 survivor "no end-leg rule"): the straightening keeps the
+    /// direction and length of a run's end legs (the pad exit or via leg the DP chose,
+    /// [`Drawer::octi_straighten`]). A run from pad A (3, 20) to pad B (13, 16), both legs east
+    /// (a 1 mm exit leg out of A, a 3 mm leg into B), a staircase of four bends between. The whole
+    /// stretch A..B has a one-bend elbow (45 degrees out of A, then east into B: same length, one
+    /// bend fewer than the Z), cheaper on the price, but it turns A's exit leg; the rule takes
+    /// the Z east-45-east instead, both end legs east and at least their length or the jog leg.
+    #[test]
+    fn straightening_keeps_the_end_legs() {
+        let m = fx_model(&[(1, 3.0, 20.0), (1, 13.0, 16.0)]);
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let o = Options::default();
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..b.proj.obstacles.len()).find(|&i| (b.proj.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(3.0, 20.0), obs(13.0, 16.0));
+        let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+        dr.octi = super::super::octi::OctiCfg { on: true, ..dr.octi };
+        let run = vec![fp(3.0, 20.0), fp(4.0, 20.0), fp(6.0, 18.0), fp(8.0, 18.0), fp(10.0, 16.0), fp(13.0, 16.0)];
+        let mut wo = fx_drawn(&mut dr, w, run.clone());
+        let k = dr.octi_straighten(&mut wo, &[], &mut |_, _| true);
+        let got = super::super::octi::drop_collinear(&wo.runs[0].1);
+        assert!(k >= 1 && got.len() < run.len(), "straightened: {k} {got:?}");
+        let east = |a: Vec2, b: Vec2| super::super::octi::octi_dir(b - a) == Some(0);
+        let n = got.len();
+        assert!(east(got[0], got[1]) && (got[1] - got[0]).len() + 1e3 >= 1.0 * FMM, "A's exit leg turned or cut: {got:?}");
+        assert!(east(got[n - 2], got[n - 1]) && (got[n - 1] - got[n - 2]).len() + 1e3 >= super::super::octi::jog_leg(&dr.octi, 0.45 * FMM).min(3.0 * FMM), "B's leg turned or cut: {got:?}");
+        assert!(octilinear(&got), "{got:?}");
+        // Part 2, the length half of the rule: pad B at (7.4, 16), a 0.3 mm exit leg east out of A,
+        // then 45 degrees, 0.05 mm east, 45 degrees, 0.05 mm east into B (four bends). The whole
+        // stretch's centred Z keeps both end legs east but only 0.2 mm long: refused (below the
+        // exit leg's 0.3 mm, under the jog leg); a form that keeps A's leg at 0.3 mm or more is
+        // taken instead.
+        let m = fx_model(&[(1, 3.0, 20.0), (1, 7.4, 16.0)]);
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..b.proj.obstacles.len()).find(|&i| (b.proj.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(3.0, 20.0), obs(7.4, 16.0));
+        let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+        dr.octi = super::super::octi::OctiCfg { on: true, ..dr.octi };
+        let leff = super::super::octi::jog_leg(&dr.octi, 0.45 * FMM);
+        assert!(leff > 0.3 * FMM, "the fixture needs the jog leg above the exit leg: {leff}");
+        let run = vec![fp(3.0, 20.0), fp(3.3, 20.0), fp(5.3, 18.0), fp(5.35, 18.0), fp(7.35, 16.0), fp(7.4, 16.0)];
+        let mut wo = fx_drawn(&mut dr, w, run.clone());
+        let k = dr.octi_straighten(&mut wo, &[], &mut |_, _| true);
+        let got = super::super::octi::drop_collinear(&wo.runs[0].1);
+        assert!(k >= 1 && got.len() < run.len(), "part 2 straightened: {k} {got:?}");
+        assert!(east(got[0], got[1]) && (got[1] - got[0]).len() + 1e3 >= 0.3 * FMM, "part 2: A's exit leg turned or cut: {got:?}");
+        assert!(octilinear(&got), "{got:?}");
+    }
 }

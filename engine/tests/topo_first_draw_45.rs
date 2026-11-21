@@ -197,3 +197,26 @@ fn unknown_octi_order_warns() {
     let r = route("jst_fanout_45_close", &[("octi_order", serde_json::json!("zigzag"))]);
     assert!(r.warnings.iter().any(|w| w.contains("octi_order = \"zigzag\"")), "{:?}", r.warnings);
 }
+
+/// first-draw-45 r7 (kills the r6 survivor STRAIGHTEN_PASSES = 1): the straightening's passes
+/// over the draw order run until one changes nothing. On the qmtech USB corner the 2nd pass still
+/// straightens (a wire straightened before its neighbours moved gets another turn) and the 3rd
+/// changes nothing: the line reports the passes and the fixpoint. A bound of 1 or 2 passes stops
+/// with changes in the last pass. Also the line's two forms (AGENT_RULES 13).
+#[test]
+fn straightening_reaches_its_fixpoint() {
+    use topor_engine::topo::core::straighten_line;
+    let path = format!("{}/tests/fixtures/qmtech-usb-crop.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut val = serde_json::to_value(Options::default()).unwrap();
+    val["runs"] = serde_json::json!(1);
+    val["topo_rounds"] = serde_json::json!(1);
+    let o: Options = serde_json::from_value(val).unwrap();
+    let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
+    let line = r.warnings.iter().find(|w| w.starts_with("octilinear straightening after drawing")).unwrap_or_else(|| panic!("no straightening line: {:?}", r.warnings));
+    let passes: usize = line.split("draw order, ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).expect("passes");
+    assert!(passes >= 3 && line.contains(", the last without a change)"), "{line}");
+    assert!(straighten_line(3, 0.54, 0, 3, true, 0.1).starts_with("octilinear straightening after drawing (draw order, 3 passes, the last without a change): 3 stretches"));
+    let cut = straighten_line(9, -1.0, 2, 4, false, 0.1);
+    assert!(cut.contains("(draw order, 4 passes, stopped at the bound of 4 passes with changes in the last): 9 stretches") && cut.contains("1.0 mm saved in length; 2 refused by the split guard"), "{cut}");
+}

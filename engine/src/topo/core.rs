@@ -2294,15 +2294,19 @@ pub fn split_line(fuse: usize, polish: usize, split: &[String]) -> Option<String
 }
 
 /// first-draw-45 P4: most passes of the straightening over the draw order (a work bound; a pass
-/// that changes nothing ends it earlier).
+/// that changes nothing ends it earlier, at a fixpoint). r7: the qmtech USB corner reaches its
+/// fixpoint in the 3rd pass (`straightening_reaches_its_fixpoint`); the boards take 3 (esp,
+/// wiccon) to 4 (qmtech, at the bound) passes.
 const STRAIGHTEN_PASSES: usize = 4;
 
 /// first-draw-45 P4: the straightening pass's report line: `n` stretches of two or more bends
 /// redrawn as one straight, elbow or Z form, the length that changed (mm, + added), the steps the
-/// split guard refused, the time (s).
-pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, secs: f64) -> String {
+/// split guard refused, the passes and whether the last one changed nothing (`fixpoint`; else the
+/// loop stopped at [`STRAIGHTEN_PASSES`]), the time (s).
+pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, fixpoint: bool, secs: f64) -> String {
     format!(
-        "octilinear straightening after drawing (draw order, {passes} passes): {n} stretches of two or more bends redrawn as one straight, elbow or Z form, {:.1} mm {} in length; {refused} refused by the split guard ({secs:.1} s)",
+        "octilinear straightening after drawing (draw order, {passes} passes, {}): {n} stretches of two or more bends redrawn as one straight, elbow or Z form, {:.1} mm {} in length; {refused} refused by the split guard ({secs:.1} s)",
+        if fixpoint { "the last without a change".to_string() } else { format!("stopped at the bound of {STRAIGHTEN_PASSES} passes with changes in the last") },
         added_mm.abs(),
         if added_mm > 0.0 { "added" } else { "saved" }
     )
@@ -8717,7 +8721,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
         }
         if n_str > 0 || str_refused > 0 {
-            warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, t_str.elapsed().as_secs_f64()));
+            warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, !pass_changed, t_str.elapsed().as_secs_f64()));
         }
     }
     ctl.stage(rnd, rnds, "via reduction and fuse");
