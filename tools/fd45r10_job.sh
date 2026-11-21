@@ -34,6 +34,12 @@ if [ "$mode" = ladder ]; then
   q qm 'unit qm $QM'; q esp 'unit esp $ESP'; q wic 'unit wic $WIC'; q ep 'unit ep $EP $EPX'
   wait; note "all done"; exit 0
 fi
+if [ "$mode" = arms ]; then
+  # attribution: esp and qm with one r10 arm off each (TOPO_FD45_OFF, copper-neutral switches)
+  q espLF 'TOPO_FD45_OFF=loserfirst unit espLF $ESP'; q qmLF 'TOPO_FD45_OFF=loserfirst unit qmLF $QM'
+  q espLC 'TOPO_FD45_OFF=loser unit espLC $ESP'; q qmLC 'TOPO_FD45_OFF=loser unit qmLC $QM'
+  wait; note "all done"; exit 0
+fi
 if [ "$mode" = suite ]; then
   q rel 'cd $TREE && s=$(date +%s); CARGO_TARGET_DIR=/root/fd45r10-rel-target CARGO_BUILD_JOBS=8 RUST_TEST_THREADS=8 cargo test --release --workspace --no-fail-fast > $OUT/cargo-rel.log 2>&1 9>&-; note "rel rc $? $(( $(date +%s)-s )) s"; gzip -k $OUT/cargo-rel.log' 8
   q py 'cd $TREE && s=$(date +%s); CI=1 python -m pytest -q -p no:cacheprovider -rfEs > $OUT/pytest.log 2>&1; note "py rc $? $(( $(date +%s)-s )) s"' 4
