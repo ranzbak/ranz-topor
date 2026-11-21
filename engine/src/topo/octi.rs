@@ -1724,6 +1724,7 @@ impl Drawer<'_> {
     pub fn octi_polish(&mut self, wo: &mut super::draw::WireOut, keep: &[Vec2], joined: &mut dyn FnMut(&super::draw::WireOut, &super::draw::WireOut) -> bool) -> usize {
         let mut n = 0;
         for r in 0..wo.runs.len() {
+            let n_run = n;
             let mut cur = wo.runs[r].1.clone();
             // Every point other copper ends on (`keep`: a planned branch point or a fused foot) lying inside a
             // segment becomes a vertex of it, so the segment is redrawn in two pieces that both end on it
@@ -1789,9 +1790,44 @@ impl Drawer<'_> {
                     i += 1;
                 }
             }
+            // r6: in a run the polish redrew, a kept foot between two legs that leave it in one
+            // direction is a collinear vertex; KiCad Cleanup would merge the two segments ("merge co-linear tracks"), so the
+            // run goes out with them merged (the same copper, the foot still on it).
+            let simple = drop_collinear(&wo.runs[r].1);
+            if n > n_run && simple.len() < wo.runs[r].1.len() {
+                let snap = wo.clone();
+                if self.refit_run(wo, r, simple) && !joined(&snap, wo) {
+                    let back = self.restore_wire(wo, &snap);
+                    *wo = back;
+                }
+            }
         }
         n
     }
+}
+
+/// The polyline `pts` without its interior vertices that lie on the straight line between their
+/// kept neighbours (within 1 um, between them) or on the previous kept vertex: the same copper.
+/// O(points).
+pub fn drop_collinear(pts: &[Vec2]) -> Vec<Vec2> {
+    let mut out: Vec<Vec2> = Vec::with_capacity(pts.len());
+    for (k, &p) in pts.iter().enumerate() {
+        if let Some(&last) = out.last() {
+            if (p - last).len() < 1_000.0 && k + 1 < pts.len() {
+                continue;
+            }
+        }
+        if out.len() >= 2 {
+            let (a, b) = (out[out.len() - 2], out[out.len() - 1]);
+            let ab = p - a;
+            let t = (b - a).dot(ab) / ab.len2().max(1.0);
+            if t > 0.0 && t < 1.0 && (a + ab * t - b).len() < 1_000.0 {
+                out.pop();
+            }
+        }
+        out.push(p);
+    }
+    out
 }
 
 /// One bend that a bundle takes together (M-45 item 4): at `at` the inner wire turns by `deg`,
@@ -1878,4 +1914,18 @@ pub fn bundle_bends(runs: &[(usize, i32, usize, &[Vec2])], pitch: &dyn Fn(usize)
         }
     }
     out
+}
+
+#[cfg(test)]
+mod collinear_tests {
+    use super::*;
+
+    #[test]
+    fn collinear_and_repeated_vertices_are_dropped_the_ends_stay() {
+        let v = |x: f64, y: f64| Vec2 { x: x * 1e6, y: y * 1e6 };
+        assert_eq!(drop_collinear(&[v(0.0, 0.0), v(1.0, 0.0), v(2.0, 0.0), v(2.0, 1.0)]), vec![v(0.0, 0.0), v(2.0, 0.0), v(2.0, 1.0)]);
+        assert_eq!(drop_collinear(&[v(0.0, 0.0), v(1.0, 1.0), v(1.0, 1.0), v(2.0, 2.0)]), vec![v(0.0, 0.0), v(2.0, 2.0)]);
+        assert_eq!(drop_collinear(&[v(0.0, 0.0), v(1.0, 1.0), v(2.0, 0.0)]), vec![v(0.0, 0.0), v(1.0, 1.0), v(2.0, 0.0)], "a bend stays");
+        assert_eq!(drop_collinear(&[v(0.0, 0.0), v(2.0, 0.0), v(1.0, 0.0)]), vec![v(0.0, 0.0), v(2.0, 0.0), v(1.0, 0.0)], "a reversal stays");
+    }
 }

@@ -221,6 +221,18 @@ fn the_split_guard_refuses_a_polish_that_drops_a_branch_foot() {
     assert!(!free_angle(&r).is_empty(), "the trunk segment under the foot stays as drawn: {:?}", tracks(&r));
 }
 
+/// r6 (r5 verifier L2): the polish keeps the feet of other copper found on the geometry, not only
+/// its own bookkeeping feet. With those taken away (hook "polish drops anchors") the branch's end
+/// on the free-angle trunk is still a fixed vertex: no step refused, all octilinear, one piece.
+#[test]
+fn the_polish_keeps_feet_it_finds_on_the_copper() {
+    let r = free_trunk(&["polish drops anchors"]);
+    assert!(copper_near(&r, 16.486, 21.081) < 1e-3, "{:?}", tracks(&r));
+    assert_eq!(pieces(&r, &FREE_TRUNK), (1, 0), "{:?}", tracks(&r));
+    assert!(free_angle(&r).is_empty(), "{:?}", tracks(&r));
+    assert!(line(&r, "split guard").is_none(), "{:?}", line(&r, "split guard"));
+}
+
 /// H1 part 2, the self-check (rule 12: every path): with the guard off as well, the dropped foot
 /// dangles, and the self-check after the steps names the net as an engine bug.
 #[test]

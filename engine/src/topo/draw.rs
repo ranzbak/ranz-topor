@@ -5599,7 +5599,10 @@ mod tests {
         let mut t = trunk0.clone();
         let k = dr.octi_polish(&mut t, &[f], &mut |_, _| true);
         assert!(k >= 2 && octilinear(&t.runs[0].1), "{k} {:?}", t.runs[0].1);
-        assert!(t.runs[0].1.iter().any(|&p| (p - f).len() < 1.0), "the foot is a vertex: {:?}", t.runs[0].1);
+        // The foot stays on the centre line (a vertex while the two halves are redrawn; r6: merged
+        // into one straight segment where both halves leave it in one direction, as KiCad Cleanup would).
+        assert!(t.runs[0].1.windows(2).any(|s| crate::geom::point_seg(f, &crate::geom::Seg { a: s[0], b: s[1] }) < 1.0), "the foot is on the trunk: {:?}", t.runs[0].1);
+        assert_eq!(t.runs[0].1, crate::topo::octi::drop_collinear(&t.runs[0].1), "no collinear vertex left");
         assert!(!super::super::netconn::worse(&c0, &pieces_of(&m, &b, &[&t, &branch])));
         // Part 2: the guard (netconn: partition and dangling ends) refuses every shape that drops the
         // foot (each elbow / Z either leaves the branch apart or crossing it with its foot dangling).

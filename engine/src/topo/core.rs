@@ -8927,6 +8927,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // Test hook "polish drops feet": the polish gets no fixed vertices (the r3 bug), so only the
         // split guard keeps the feet on their trunks.
         let drop_feet = ctl.test_point("polish drops feet");
+        // Test hook "polish drops anchors": only the own bookkeeping feet go (planned T points, fused
+        // feet); the other copper's feet found on the geometry (r6, `netconn::feet_on`) stay.
+        let drop_anchors = ctl.test_point("polish drops anchors");
         for w in ids {
             let mut wo = drawn.remove(&w).expect("drawn wire");
             let len0 = wo.length_nm;
@@ -8964,7 +8967,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     super::netconn::Piece { runs: &o.runs, vias: o.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w }
                 }
                 let others: Vec<super::netconn::Piece> = net_wires.get(&net).map_or(&[][..], |v| v.as_slice()).iter().filter(|&&x| x != w).filter_map(|&x| drawn.get(&x).map(|o| piece(o, st.wires[x].w / 2.0))).collect();
-                let mut k: Vec<Vec2> = anchors.get(&w).cloned().unwrap_or_default();
+                let mut k: Vec<Vec2> = if drop_anchors { Vec::new() } else { anchors.get(&w).cloned().unwrap_or_default() };
                 k.extend(super::netconn::feet_on(&piece(&wo, st.wires[w].w / 2.0), &others));
                 k
             };

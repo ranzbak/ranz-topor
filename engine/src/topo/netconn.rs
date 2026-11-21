@@ -253,6 +253,11 @@ pub fn feet_on(own: &Piece, others: &[Piece]) -> Vec<Vec2> {
                 if layer.is_some_and(|x| x != *l) {
                     continue;
                 }
+                // An end within reach of one of the run's vertices stays joined: the polish redraws
+                // between the vertices and keeps them (no micro-segment for it).
+                if pts.iter().any(|&q| (q - p).len() <= reach + own.half_w + TOL) {
+                    continue;
+                }
                 for s in pts.windows(2) {
                     let ab = s[1] - s[0];
                     let t = (p - s[0]).dot(ab) / ab.len2().max(1.0);
@@ -348,15 +353,15 @@ mod tests {
     }
 
     /// The feet of other copper on a wire: a run end 0.12 mm off a segment (reach 0.2), a via 0.35
-    /// off (radius 0.3 + 0.1), each projected onto the segment; an end at the segment's own end, one
-    /// beyond reach and one on another layer are not.
+    /// off (radius 0.3 + 0.1), each projected onto the segment; an end at the segment's own end or
+    /// within reach of a vertex, one beyond reach and one on another layer are not.
     #[test]
     fn feet_of_other_copper_are_projected_onto_the_segment() {
         let own_runs = vec![(0usize, vec![v(0.0, 0.0), v(10.0, 0.0)])];
         let own = pc(&own_runs, 0.1);
         let r1 = vec![(0usize, vec![v(3.0, 0.12), v(3.0, 4.0)])];
         let r2 = vec![(1usize, vec![v(6.0, 0.35), v(6.0, 4.0)])];
-        let r3 = vec![(0usize, vec![v(8.0, 0.25), v(8.0, 4.0)]), (1usize, vec![v(9.0, 0.0), v(9.0, 4.0)]), (0usize, vec![v(10.0, 0.0), v(10.0, 3.0)])];
+        let r3 = vec![(0usize, vec![v(8.0, 0.25), v(8.0, 4.0)]), (1usize, vec![v(9.0, 0.0), v(9.0, 4.0)]), (0usize, vec![v(10.0, 0.0), v(10.0, 3.0)]), (0usize, vec![v(0.15, 0.1), v(0.15, 3.0)])];
         let others = [pc(&r1, 0.1), Piece { runs: &r2, vias: vec![(v(6.0, 0.35), 0.3 * MM)], half_w: 0.1 * MM }, pc(&r3, 0.1)];
         let f = feet_on(&own, &others);
         assert_eq!(f.len(), 2, "{f:?}");
@@ -406,5 +411,19 @@ mod tests {
         assert_eq!(n(&before), n(&after), "the count does not see it");
         assert!(splits(&before, &after), "C was joined to the trunk, now it is not");
         assert!(!splits(&after, &after) && !splits(&before, &partition(&[pc(&trunk, 0.1), pc(&to_c, 0.1), pc(&to_d, 0.1)], &terms)), "a join alone splits nothing");
+        // The same trade with no end left dangling: the pair C-D crosses the trunk (joined) and goes
+        // around it after the step, the pair E-F the other way round. As many pieces, no dangling
+        // end, yet worse: C and D are cut off from the trunk.
+        let (c, d, e, f) = (v(3.0, 3.0), v(3.0, -3.0), v(7.0, 3.0), v(7.0, -3.0));
+        let ps: Vec<Vec<Vec2>> = [a, b, c, d, e, f].iter().map(|&p| sq(p, 0.5)).collect();
+        let terms: Vec<Term> = ps.iter().zip([a, b, c, d, e, f]).map(|(p, ce)| Term { poly: p, layers: one, center: ce }).collect();
+        let cd_cross = vec![(0usize, vec![c, d])];
+        let cd_round = vec![(0usize, vec![c, v(-2.0, 3.0), v(-2.0, -3.0), d])];
+        let ef_cross = vec![(0usize, vec![e, f])];
+        let ef_round = vec![(0usize, vec![e, v(12.0, 3.0), v(12.0, -3.0), f])];
+        let before = conn(&[pc(&trunk, 0.1), pc(&cd_cross, 0.1), pc(&ef_round, 0.1)], &terms);
+        let after = conn(&[pc(&trunk, 0.1), pc(&cd_round, 0.1), pc(&ef_cross, 0.1)], &terms);
+        assert_eq!((before.n(), after.n(), before.dangling.len(), after.dangling.len()), (2, 2, 0, 0));
+        assert!(worse(&before, &after), "C and D cut off from the trunk");
     }
 }
