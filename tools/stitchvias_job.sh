@@ -7,8 +7,9 @@ OUT=$HZ_RUN_DIR
 case "${HZ_TAG:-}" in *base*) ARM=base ;; *) ARM=tip ;; esac
 cd "${TOPOR_TREE:-/root/topor}"
 S="--set optimize.runs=1 --set optimize.rounds=1 --set optimize.stable_patience=1"
-unit() { # name board-pcb
-  python -m harness.score_runs "$OUT/$ARM" "$2" --only 0 --no-png --threads 4 $S > "$OUT/$1.log" 2>&1
+unit() { # name board-pcb [png]
+  local png=--no-png; [ "${3:-}" = png ] && png=
+  python -m harness.score_runs "$OUT/$ARM" "$2" --only 0 $png --threads 4 $S > "$OUT/$1.log" 2>&1
   local rc=$?
   local stem; stem=$(basename "$2" .kicad_pcb)
   local pcb; pcb=$(ls "$OUT/$ARM/$stem/s0/$stem-topor/$stem.kicad_pcb" 2>/dev/null | head -1)
@@ -42,7 +43,7 @@ QM=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
 ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
 hzq run --threads 4 --name sv-$ARM-qm -- bash -c "unit qm $QM" 9>&- &
 hzq run --threads 4 --name sv-$ARM-esp -- bash -c "unit esp $ESP" 9>&- &
-hzq run --threads 4 --name sv-$ARM-wic -- bash -c "unit wic $WIC" 9>&- &
+hzq run --threads 4 --name sv-$ARM-wic -- bash -c "unit wic $WIC png" 9>&- &
 hzq run --threads 4 --name sv-$ARM-ep -- bash -c "unit ep $EP; pattern" 9>&- &
 wait
 echo "all done" >> $OUT/rc.txt
