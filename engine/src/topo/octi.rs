@@ -727,8 +727,7 @@ impl Drawer<'_> {
         // chord nodes, one-sided where the neighbours leave room on one side only, as long as the
         // bend and jog prices allow (a longer step is cheaper wherever it is legal). Nodes on the
         // taut path: a piece between two of them may stay as drawn (P1).
-        // Debug arm `TOPO_FD45_OFF=p4f` (r7, measurement only): no chord nodes in a forced run.
-        if !(fd45_off("p4") || forced && fd45_off("p4f")) {
+        if !fd45_off("p4") {
             for (i, sg) in taut.windows(2).enumerate() {
                 let d = sg[1] - sg[0];
                 let l = d.len();
