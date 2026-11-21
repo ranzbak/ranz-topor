@@ -6,8 +6,9 @@ set -u
 OUT=$HZ_RUN_DIR; TREE="${TOPOR_TREE:-/root/topor}"; cd "$TREE"
 S="--set optimize.runs=1 --set optimize.rounds=1 --set optimize.stable_patience=1"
 ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
-unit() { # name [TOPO_FD45_OFF]
-  (cd "$TREE" && TOPO_FD45_OFF="${2:-}" TOPO_RUNPROV=1 python -m harness.score_runs "$OUT/$1" "$ESP" --only 0 --no-png --threads 4 $S) > "$OUT/$1.log" 2>&1
+QM=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb
+unit() { # name [TOPO_FD45_OFF] [board]
+  (cd "$TREE" && TOPO_FD45_OFF="${2:-}" TOPO_RUNPROV=1 python -m harness.score_runs "$OUT/$1" "${3:-$ESP}" --only 0 --no-png --threads 4 $S) > "$OUT/$1.log" 2>&1
   echo "$1 rc $?" >> "$OUT/rc.txt"
   L=$(ls "$OUT/$1"/*-s0.log | head -1)
   grep '^RUNPROV' "$L" | python3 -c '
@@ -19,8 +20,9 @@ for ln in sys.stdin:
   grep -c '^RUNPROV' "$L" > "$OUT/$1-runprov-count.txt"
   mkdir -p /root/fd45-work-aside/$HZ_TAG-$1 && mv "$OUT/$1"/*/s0/work "$L" /root/fd45-work-aside/$HZ_TAG-$1/ 2>/dev/null
 }
-export -f unit; export OUT S ESP TREE
+export -f unit; export OUT S ESP QM TREE
 if [ "${1:-}" = p4f ]; then
+  hzq run --threads 4 --name "$HZ_TAG-qmp4f" -- bash -c 'unit qmp4f p4f $QM' 9>&- &
   hzq run --threads 4 --name "$HZ_TAG-p4f" -- bash -c 'unit p4f p4f' 9>&- &
 else
   hzq run --threads 4 --name "$HZ_TAG-esp" -- bash -c 'unit esp' 9>&- &
