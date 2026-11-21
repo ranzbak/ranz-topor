@@ -2615,6 +2615,11 @@ mod tests {
         assert!((g[0] - a).len() < 1.0 && (g[g.len() - 1] - b).len() < 1.0, "the pad centres stay the ends: {g:?}");
         assert_eq!(off_bends(&g), 0, "every interior bend on the grid: {g:?} (plain {plain:?})");
         assert!(len(&g) <= len(&plain) + 4.0 * 0.15 * MM, "at most the saved grid price longer: {} vs {}", len(&g), len(&plain));
+        // the reference loop (every shape priced per arrival state) prices the grid the same (mutant G7)
+        crate::topo::octi::OCTI_REF.with(|f| f.set(true));
+        let gref = dr.octilinear(0, 0, k1, 0, &taut, None, [None, None], None).expect("a grid form (reference loop)").pts;
+        crate::topo::octi::OCTI_REF.with(|f| f.set(false));
+        assert_eq!(gref, g, "reference loop = cached loop with the grid");
         // an all-octilinear run with a bend off the grid (the plain form itself) is repriced with
         // the grid on (mutant G3: the early return keeps it), kept as it is without
         let again = dr.octilinear(0, 0, k1, 0, &plain, None, [None, None], None).expect("repriced with the grid on").pts;

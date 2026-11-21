@@ -656,7 +656,7 @@ impl Drawer<'_> {
                 if n0 > 0 {
                     let g = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true);
                     match g {
-                        Some(o) if stretches(&o.pts) < n0 => Some(o),
+                        Some(o) if fallback_takes(n0, stretches(&o.pts)) => Some(o),
                         _ => r,
                     }
                 } else {
@@ -2387,6 +2387,13 @@ fn connectors(p: Vec2, q: Vec2) -> Vec<Vec<Leg>> {
     ]
 }
 
+/// grid-snap `"fallback"`: the grid pass replaces the plain pass's form only when it leaves fewer any-angle
+/// stretches (`plain` > 0 stretches; ties keep the plain form: the grid is the last spacing fallback, not a
+/// preference there). The grid pass is not run when the plain form has none (it could not have fewer).
+pub fn fallback_takes(plain: usize, grid: usize) -> bool {
+    grid < plain
+}
+
 /// grid-snap: per interior node off the grid, at most this many points of its grid cell become
 /// extra nodes of the octilinear DP.
 const GRID_PER_NODE: usize = 2;
@@ -2841,6 +2848,13 @@ mod tests {
     /// grid-snap: between two grid points, the extra Z shapes have their middle leg on a grid
     /// step (from p and from q), so every bend lies on the grid; none on a rectangular grid or
     /// without one.
+    /// grid-snap fallback (mutant G6): fewer stretches win, a tie keeps the plain form.
+    #[test]
+    fn fallback_takes_only_fewer_stretches() {
+        assert!(fallback_takes(2, 1) && fallback_takes(1, 0));
+        assert!(!fallback_takes(1, 1) && !fallback_takes(1, 2) && !fallback_takes(0, 0));
+    }
+
     #[test]
     fn grid_connectors_add_z_shapes_on_the_grid() {
         let l = crate::topo::gridsnap::Lattice::new([254_000, 254_000], [0, 0]).unwrap();
