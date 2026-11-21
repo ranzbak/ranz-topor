@@ -134,21 +134,15 @@ fn forced_runs_are_counted() {
 /// A band whose any-angle form misses the clearance to a kept band keeps its octilinear form
 /// where that is legal against everything kept (`octi_rescued`, best key first): swap_vias
 /// octilinear draws every run from its ERBS, none cut back, no violation.
+///
+/// Pinned to `octi_order = "bends"` (fd45 r10, lead decision; shopping list TW2-SWEEP): under the
+/// sweep order the joint loser X2 draws after its kept neighbours X3 (a 25-bend staircase hugging
+/// its any-angle band, STAIRCASE-HUG) and X1 (a 45 degree end into the pad row), which leave it
+/// no legal form: cut back and forced, (1, 1, 1). Drawing joint losers first fixes it
+/// (`TOPO_FD45_ON=loserfirst`) but adds 15 DRC items on esp. Under bends the P2 walls (3a) keep
+/// Y4's octilinear rescue out of Y1's band.
 #[test]
 fn a_band_that_misses_any_angle_keeps_its_octilinear_form() {
-    let r = route("erbs", "swap_vias", "octilinear", &[], &[]);
-    let e = erbs(&r);
-    partition_holds(&e);
-    let viol: usize = r.connections.iter().map(|c| c.violations).sum();
-    assert!(e.octi_rescued >= 1, "{e:?}");
-    assert_eq!((e.cut_back, e.forced, viol), (0, 0, 0), "{e:?}");
-}
-
-/// The same under the bends order (fd45 r10): the joint loser X2 draws first (TOPO_FD45_OFF=
-/// loserfirst), and the P2 walls (an undrawn same-layer wire's ERBS on an opened edge, 3a) keep
-/// Y4's octilinear rescue out of Y1's band: no run cut back, none forced, no violation.
-#[test]
-fn a_band_that_misses_any_angle_keeps_its_octilinear_form_under_bends() {
     let r = route("erbs", "swap_vias", "octilinear", &[("octi_order", serde_json::json!("bends"))], &[]);
     let e = erbs(&r);
     partition_holds(&e);
