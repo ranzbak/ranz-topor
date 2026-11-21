@@ -1161,6 +1161,19 @@ impl<'a> CutPrice<'a> {
         a
     }
 
+    /// plan-dots: the middle of every cut [`CutPrice::overfull`] counts (math frame, nm), in
+    /// layer and cut order. `len() == overfull()`. O(cuts).
+    pub fn over_places(&self) -> Vec<crate::geom::Vec2> {
+        let mut out = Vec::new();
+        for (l, cs) in self.cuts.iter().enumerate() {
+            for (ci, _) in cs.iter().enumerate().filter(|(_, c)| c.live && !c.items.is_empty() && c.slack < -OVER_TOL) {
+                let cut = &self.sheets[l].cuts[ci];
+                out.push((cut.p + cut.q) * 0.5);
+            }
+        }
+        out
+    }
+
     /// Shopping list 2.4, the shrinkage level of the price: the cuts that fit only necked (or not
     /// even at the floors: their whole necking), `(count, sum of red / pitch, price)` with `red`
     /// the width reduction below the nominal widths ([`shrink_need`]) and the price `shrink_mm x

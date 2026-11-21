@@ -205,6 +205,11 @@ WORDING: dict[str, dict[str, str]] = {
         "preview_copper": "drawn copper",
         "preview_received": "Image of {time}; OK / Cancel keeps the best so far.",
         "preview_waiting": "Waiting for the first image…",
+        # plan-dots: the legend of the image's yellow dots (plan: smaller dots, the plan's predicted errors)
+        "preview_dots_plan": "Small yellow dots: predicted errors of the plan ({n})",
+        "preview_dots_plan_part": ("Small yellow dots: predicted errors of the plan ({n} of {total}; the rest have "
+                                   "no place: connections placed without a legal path)"),
+        "preview_dots_copper": "Yellow dots: rule violations of the drawn copper ({n})",
         "score_length": "{length} m",
         "score_pending": "–",
         "score_hint": "Scores compare in the pick order: fewest errors (open connections and connections with rule "
@@ -588,6 +593,22 @@ def sketch_caption(kind: str, sk: dict | None) -> str:
     rnd = sk.get("cycle", 0) if plan else W["drawn_round"].format(n=sk.get("cycle", 0))
     return W["preview_caption"].format(which=W[f"preview_{kind}"], run=sk.get("run", 0), round=rnd,
                                        what=W["preview_plan" if plan else "preview_copper"])
+
+
+def sketch_dots_legend(sk: dict | None) -> str:
+    """plan-dots: the legend line of the image's yellow dots: a plan's (smaller) dots are its predicted errors, how
+    many of its counted ones have a place; drawn copper's dots its rule violations; "" without dots (and, for a plan,
+    without predicted errors). O(1)."""
+    if not sk:
+        return ""
+    W = WORDING["progress"]
+    n = len(sk.get("errors_at") or [])
+    if sk.get("kind") == "plan":
+        total = int(sk.get("violations") or 0)
+        if n >= total:
+            return W["preview_dots_plan"].format(n=n) if n else ""
+        return W["preview_dots_plan_part"].format(n=n, total=total)
+    return W["preview_dots_copper"].format(n=n) if n else ""
 
 
 def verdict_tone(p: Progress) -> str:
@@ -1374,6 +1395,11 @@ class ProgressDialog(_Base):
         else:
             self.preview_image.SetMinSize(self.preview_size)
             self._right.Add(self.preview_image, 0, wx.BOTTOM, self.row)
+        # plan-dots: what the yellow dots of the image shown are (and how many)
+        self.preview_dots = wx.StaticText(self, label=" ", name="preview_dots",
+                                          style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
+        self.preview_dots.SetMinSize(wx.Size(self.FromDIP(120 if self.wide else self.TEXT_WIDTH), -1))
+        self._right.Add(self.preview_dots, 0, wx.EXPAND | wx.BOTTOM, self.row)
         self.preview_time = wx.StaticText(self, label=" ", name="preview_time",
                                           style=wx.ST_NO_AUTORESIZE | wx.ST_ELLIPSIZE_END)
         self.preview_time.SetMinSize(wx.Size(self.FromDIP(120 if self.wide else self.TEXT_WIDTH), -1))
@@ -1429,13 +1455,17 @@ class ProgressDialog(_Base):
         sk = self._sketches.get(kind)
         self.preview_caption.SetLabel(sketch_caption(kind, sk))
         self.preview_caption.SetToolTip(self.preview_caption.GetLabel())
+        legend = sketch_dots_legend(sk) if self._base is not None else ""
+        self.preview_dots.SetLabel(legend or " ")
+        self.preview_dots.SetToolTip(legend)
         if sk is None or self._base is None:
             return
         import wx.svg  # noqa: PLC0415
 
         from .preview import live_svg  # noqa: PLC0415
 
-        img = wx.svg.SVGimage.CreateFromBytes(live_svg(self._base, sk.get("items") or [], sk.get("errors_at")).encode())
+        img = wx.svg.SVGimage.CreateFromBytes(live_svg(self._base, sk.get("items") or [], sk.get("errors_at"),
+                                                       plan=sk.get("kind") == "plan").encode())
         bw, bh = max(1e-6, float(img.width)), max(1e-6, float(img.height))
         box = self.preview_size
         scale = min(box.width / bw, box.height / bh)

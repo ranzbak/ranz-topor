@@ -4527,6 +4527,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let added: usize = (0..st.wires.len()).filter(|&w| st.wires[w].alive).map(|w| st.neck_stretches_with(w, &necks).saturating_sub(st.neck_stretches_with(w, &BTreeMap::new()))).sum();
             p.with_shrink(added, cm.shrinkage().2)
         };
+        // plan-dots: the places of a plan's predicted violations, for its sketch (built only while
+        // the caller shows sketches, [`Sp::plan_sketch`]): the measure's capacity model built
+        // afresh (the refinement's final model, which the measure may reuse, is the same model),
+        // the meters off; nothing of it feeds back into the run.
+        let places = |st: &State, lr: &layers::LayerReport| -> super::compass::PlanPlaces {
+            super::refine::meter::suspended(|| {
+                let dirs = dirs_of(st);
+                let cm = if cuts_on { CapModel::new_cut(st, &packer, &dirs, &lr.events, bottom, overflow_mm) } else { CapModel::new(st, &packer, &dirs, &lr.events, bottom, overflow_mm) };
+                super::compass::plan_places(st, lr, &cm, bottom, forced.borrow().len(), &pour_comps_fn(st, &lr.events))
+            })
+        };
         // loop-local Step B (`[optimize] loop_judge = "local"`, docs/dev/design/loop-local.md): a
         // move that took the wires `gone` out of the state `saved` (layered as `prev`, measured as
         // `pred`) and laid `new` is layered locally and priced by what changes. F (the free wires) =
@@ -5079,15 +5090,21 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// last-preview: the board (layers of the plan sketch) and the sketch bookkeeping.
             board: &'a board::Board,
             sk: SketchBook,
+            /// plan-dots: the places of the plan's predicted violations (its sketch's dots).
+            places: &'a dyn Fn(&State<'p>, &layers::LayerReport) -> super::compass::PlanPlaces,
         }
         impl<'p> Sp<'_, 'p> {
             /// last-preview: the plan sketch of the current state (its layer stretches and planned
-            /// vias, [`super::pourplan::plan_items`], KiCad frame), labelled with `crit`. Reads the
-            /// state only (the via site cache it may fill is a pure memo). O(passes).
+            /// vias, [`super::pourplan::plan_items`], KiCad frame), labelled with `crit`, with the
+            /// places of its predicted violations (plan-dots, [`super::compass::plan_places`]: one
+            /// per counted violation but the forced connections). Reads the state only (the via
+            /// site cache and the edge memo it may fill are pure memos). O(passes + a capacity
+            /// model build).
             fn plan_sketch(&self, cycle: usize, crit: &Criteria) -> crate::control::Sketch {
                 let t0 = std::time::Instant::now();
                 let items = super::pourplan::plan_items(self.st, self.packer, self.board, &self.lr.events, self.bottom);
-                let sk = sketch_of(self.ctl.run.max(1), cycle, "plan", crit, items, Vec::new());
+                let at = (self.places)(self.st, self.lr).at;
+                let sk = sketch_of(self.ctl.run.max(1), cycle, "plan", crit, items, at);
                 let dt = t0.elapsed().as_secs_f64();
                 self.ctl.with_progress(|p| p.sketch_build_s += dt);
                 sk
@@ -6909,6 +6926,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pour_comps: pour_comps_ref,
             board: b,
             sk: SketchBook::default(),
+            places: &places,
         };
         let bounded_osc = opts.oscillation == "bounded";
         // TW3 (D6): the dialog run has no cycle cap (OK, Cancel or the time limit end it); headless
@@ -10533,7 +10551,7 @@ fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, pour_on: bool,
 #[cfg(test)]
 mod tests {
     #[test]
-    fn sketch_of_carries_the_violation_places_of_a_drawn_result_and_none_for_a_plan() {
+    fn sketch_of_carries_the_violation_places_it_is_given() {
         let viols = vec![
             crate::route::ViolationReport { at: [1_000, 2_000], ..Default::default() },
             crate::route::ViolationReport { at: [-3_000, 4_000], ..Default::default() },
@@ -10543,7 +10561,8 @@ mod tests {
         let c = Criteria { errors: 2, violations: 2, ..Default::default() };
         let sk = super::sketch_of(1, 3, "copper", &c, Vec::new(), at.clone());
         assert_eq!((sk.errors, sk.errors_at.clone()), (2, at));
-        assert!(super::sketch_of(1, 0, "plan", &c, Vec::new(), Vec::new()).errors_at.is_empty());
+        // plan-dots: a plan sketch carries the places it is given (its plan's, `compass::plan_places`)
+        assert_eq!(super::sketch_of(1, 0, "plan", &c, Vec::new(), vec![[5, 6]]).errors_at, vec![[5, 6]]);
         // an older sketch JSON without the field still parses
         let js = serde_json::to_string(&sk).unwrap().replace(",\"errors_at\":[[1000,2000],[-3000,4000]]", "");
         assert!(serde_json::from_str::<crate::control::Sketch>(&js).unwrap().errors_at.is_empty());

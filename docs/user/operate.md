@@ -318,6 +318,15 @@ later rounds were worse on that criterion — log.txt in the report folder has o
 its score and the verdict, e.g. `round ended: run 3, round 2: errors 5, open 0, vias 168, length 7.412 m, shrinkages
 4; rule violations 5, routed 426 of 426: worse than the best (run 1, round 1): errors +2`.
 
+The board image beside the scores (*Show: Last round / Last run / Best so far*) carries yellow dots where the errors
+are. On drawn copper a dot marks each rule violation the engine reports. While the TopoR loop runs the image is often
+a plan (*predicted plan, not drawn copper*): its dots are smaller (0.6 of the size) and mark the plan's own predicted
+errors, the ones its Errors count holds: an over-full passage between two pieces of copper (at its middle), a planned
+via without room, a via whose gap other nets' traces also need (at the via), a crossing no layer separates (at the
+crossing), a trace through another net's copper (where it runs through it). The line under the image names the dots
+and how many there are; a connection placed without any legal path is counted but has no dot (the line then says
+*n of m*).
+
 ### Routes stable and OK
 
 The topological core iterates like TopoR: there is no fixed number of rounds. Every round routes the whole board

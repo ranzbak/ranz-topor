@@ -257,10 +257,13 @@ pub struct Sketch {
     pub vias: usize,
     pub length_mm: f64,
     pub items: Vec<crate::model::Item>,
-    /// Where the errors are (KiCad frame, nm): the `at` of each rule violation of a drawn round's
-    /// copper ([`crate::route::ViolationReport::at`]), for the dialog's yellow dots. Empty for a
-    /// plan sketch (a plan's predicted errors have no position until the compass is built at the
-    /// end of the run) and for legal copper.
+    /// Where the errors are (KiCad frame, nm), for the dialog's yellow dots: for copper the `at`
+    /// of each rule violation of the drawn round ([`crate::route::ViolationReport::at`]); for a
+    /// plan (plan-dots) one place per predicted violation its plan counts
+    /// ([`crate::topo::compass::plan_places`]: over-full edges / cuts, vias without a site,
+    /// over-full via cuts, crossings no layer separates, traversals through foreign copper, cut-off
+    /// pour pieces), so `errors_at.len() == violations` but for the connections placed without a
+    /// legal path (counted, no place). Empty for legal copper and an error-free plan.
     #[serde(default)]
     pub errors_at: Vec<[i64; 2]>,
 }

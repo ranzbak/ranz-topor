@@ -406,12 +406,71 @@ def test_dialog_hands_the_sketch_error_places_to_the_image(app, monkeypatch):
     """M7: ProgressDialog._render_preview passes sk["errors_at"] to live_svg (a sketch without it passes None)."""
     seen = []
     real = preview_mod.live_svg
-    monkeypatch.setattr(preview_mod, "live_svg", lambda base, items, errors=None: (seen.append(errors), real(base, items, errors))[1])
+    monkeypatch.setattr(preview_mod, "live_svg", lambda base, items, errors=None, **kw: (seen.append(errors), real(base, items, errors, **kw))[1])
     dlg = ui_wx.ProgressDialog("eprom", 600.0, 30, preview="last")
     try:
         dlg.set_board(MODEL)
         dlg.set_sketch("last", {**_sketch(1, kind="copper"), "errors_at": [[4_000_000, 5_000_000]]})
         dlg.set_sketch("last", _sketch(2))
         assert seen == [[[4_000_000, 5_000_000]], None]
+    finally:
+        dlg.Destroy()
+
+
+# ---------------------------------------------------------------------------------------------- plan-dots (plan sketch dots)
+
+
+def _dot_r(svg):
+    import re
+    return float(re.search(r'topor-errors.*?r="([\d.]+)"', svg, re.S).group(1))
+
+
+def test_plan_sketch_dots_are_smaller_than_copper_dots_same_yellow():
+    """plan-dots (user 2026-11-21 "the yellow markers a bit smaller on the route finder preview"): a plan sketch's dots
+    are PLAN_DOT_SCALE (0.6) of the copper dots' radius, at every board size, in the same yellow."""
+    assert preview_mod.PLAN_DOT_SCALE == 0.6 and preview_mod.PLAN_DOT_R_MM == pytest.approx(0.6 * preview_mod.ERROR_DOT_R_MM)
+    for base in (preview_mod.live_base(MODEL), {"origin": (0, 0), "size": (120.0, 80.0), "svg": ""}):
+        pts = [[1_000_000, 1_000_000]]
+        copper = preview_mod.live_svg(base, [], pts)
+        plan = preview_mod.live_svg(base, [], pts, plan=True)
+        assert _dot_r(plan) == pytest.approx(0.6 * _dot_r(copper), abs=1e-4) and _dot_r(plan) < _dot_r(copper)
+        fill = 'fill="#%02X%02X%02X"' % preview_mod.ERROR_DOT_RGB
+        assert fill in plan[plan.index("topor-errors") - 12:] and fill in copper[copper.index("topor-errors") - 12:]
+    assert _dot_r(preview_mod.live_svg(preview_mod.live_base(MODEL), [], [[1, 1]], plan=True)) == pytest.approx(preview_mod.PLAN_DOT_R_MM, abs=1e-4)
+    assert preview_mod.live_dot_radius(10.0, True) == pytest.approx(preview_mod.PLAN_DOT_R_MM)
+    assert preview_mod.live_dot_radius(10.0, False) == preview_mod.ERROR_DOT_R_MM
+
+
+def test_dots_legend_names_plan_and_copper_dots():
+    """plan-dots: the legend line names what the dots are: the plan's predicted errors (all placed, or n of the
+    counted ones, the rest without a place), the drawn copper's rule violations; none without dots."""
+    W = ui_wx.WORDING["progress"]
+    leg = ui_wx.sketch_dots_legend
+    assert leg(None) == "" and leg(_sketch(1)) == "" and leg(_sketch(1, kind="copper")) == ""
+    plan = {**_sketch(1), "violations": 2, "errors_at": [[1, 2], [3, 4]]}
+    assert leg(plan) == W["preview_dots_plan"].format(n=2) == "Small yellow dots: predicted errors of the plan (2)"
+    part = {**_sketch(1), "violations": 3, "errors_at": [[1, 2]]}
+    assert leg(part) == W["preview_dots_plan_part"].format(n=1, total=3) and "(1 of 3;" in leg(part)
+    assert "no place" in leg({**_sketch(1), "violations": 2, "errors_at": []})
+    cu = {**_sketch(1, kind="copper"), "violations": 1, "errors_at": [[1, 2]]}
+    assert leg(cu) == "Yellow dots: rule violations of the drawn copper (1)"
+
+
+def test_dialog_draws_plan_dots_small_and_shows_the_legend(app, monkeypatch):
+    """plan-dots: ProgressDialog._render_preview tells live_svg whether the sketch is a plan, and the legend line
+    under the image follows the sketch shown."""
+    seen = []
+    real = preview_mod.live_svg
+    monkeypatch.setattr(preview_mod, "live_svg", lambda base, items, errors=None, **kw: (seen.append(kw.get("plan")), real(base, items, errors, **kw))[1])
+    dlg = ui_wx.ProgressDialog("eprom", 600.0, 30, preview="last")
+    try:
+        dlg.set_board(MODEL)
+        dlg.set_sketch("last", {**_sketch(1), "violations": 1, "errors_at": [[4_000_000, 5_000_000]]})
+        assert dlg.preview_dots.GetLabel() == "Small yellow dots: predicted errors of the plan (1)"
+        dlg.set_sketch("last", {**_sketch(2, kind="copper"), "violations": 1, "errors_at": [[4_000_000, 5_000_000]]})
+        assert dlg.preview_dots.GetLabel() == "Yellow dots: rule violations of the drawn copper (1)"
+        dlg.set_sketch("last", _sketch(3, kind="copper"))
+        assert dlg.preview_dots.GetLabel().strip() == ""
+        assert seen == [True, False, False]
     finally:
         dlg.Destroy()
