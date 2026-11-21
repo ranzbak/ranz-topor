@@ -186,6 +186,12 @@ def error_points(errors) -> list:
     return pts
 
 
+def error_dot_radius(board_mm: float, per_board: float = 120.0) -> float:
+    """Dot radius (mm) readable at preview scale: at least ERROR_DOT_R_MM, else the board's longer side / `per_board`
+    (120: about 6 px in the 700 px result panel; 60: the same in the progress dialog's smaller box). O(1)."""
+    return max(ERROR_DOT_R_MM, board_mm / per_board)
+
+
 def error_dots(points: list, origin_nm: tuple, *, r_mm: float = ERROR_DOT_R_MM) -> str:
     """SVG elements: one filled yellow dot with a dark outline per point (nm, KiCad frame), at
     ``(nm - origin) / 1e6`` mm. O(points)."""
@@ -344,7 +350,7 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
             # readable at preview scale: at least ERROR_DOT_R_MM, about 6 px at the 700 px panel on a large board
             big = max((org[2] - org[0]), (org[3] - org[1])) / MM
             dst.write_text(errors_svg(Path(svg_a_draw).read_text(), errors, (org[0], org[1]),
-                                      r_mm=max(ERROR_DOT_R_MM, big / 120.0)))
+                                      r_mm=error_dot_radius(big)))
             svg_a_draw = dst
 
     probe = wx.svg.SVGimage.CreateFromFile(str(svg_b))
@@ -403,7 +409,7 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
                        f"{len(unconnected_after or [])} after"
                        f"{ratsnest_caption(ratsnest_marks(unconnected_after))})", RATSNEST_RGB))
     if n_err and org is not None:
-        legend.append((f"yellow dot = engine-reported error, {n_err}", ERROR_DOT_RGB))
+        legend.append((f"yellow dot = engine-reported rule violation, {n_err}", ERROR_DOT_RGB))
     legend_path(out_png).write_text(json.dumps(
         [{"label": label, "rgb": list(rgb) if rgb is not None else None} for label, rgb in legend]))
     for label, rgb in legend:
@@ -535,8 +541,9 @@ def live_svg(base: dict, items: list, errors=None) -> str:
         rgb = _LAYER_RGB.get(int(it.get("layer", -1)), _INNER_RGB)
         core.append(f'<polyline points="{d}" fill="none" stroke="{_hex(rgb)}" stroke-width="{it["width"] / MM:.4f}" '
                     f'stroke-linecap="round" stroke-linejoin="round" />')
+    big = max(w, h)
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w + 2 * m:.4f}mm" height="{h + 2 * m:.4f}mm" '
             f'viewBox="{-m:.4f} {-m:.4f} {w + 2 * m:.4f} {h + 2 * m:.4f}">\n'
             f'<rect x="{-m:.4f}" y="{-m:.4f}" width="{w + 2 * m:.4f}" height="{h + 2 * m:.4f}" '
             f'fill="{_hex(LIVE_BOARD_RGB)}" />\n' + base["svg"] + "<g>" + "".join(core) + "</g>\n"
-            + error_dots(error_points(errors), (ox, oy)) + "</svg>\n")
+            + error_dots(error_points(errors), (ox, oy), r_mm=error_dot_radius(big, 60.0)) + "</svg>\n")

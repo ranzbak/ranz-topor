@@ -1471,6 +1471,9 @@ struct SketchBook {
     mid: Vec<(Criteria, crate::control::Sketch)>,
 }
 
+/// last-preview: the judged variant's criteria, copper and violation places.
+type JudgedSketch = (Criteria, Vec<Item>, Vec<[i64; 2]>);
+
 /// last-preview: a sketch of `items` with `crit`'s numbers. O(1) + the move.
 fn sketch_of(run: u32, cycle: usize, kind: &str, crit: &Criteria, items: Vec<Item>, errors_at: Vec<[i64; 2]>) -> crate::control::Sketch {
     crate::control::Sketch { run, cycle: cycle as u32, kind: kind.into(), errors: crit.errors, open: crit.open, violations: crit.violations, vias: crit.vias, length_mm: crit.length_mm, items, errors_at, ..Default::default() }
@@ -1772,7 +1775,7 @@ impl Run {
         // last-preview: the copper of the variant the round is judged by (only while the caller
         // shows sketches: the last round's sketch).
         // The same choice as `note_judged`: the better of the variants by the objective.
-        let judged_items: std::cell::RefCell<Option<(Criteria, Vec<Item>, Vec<[i64; 2]>)>> = std::cell::RefCell::new(None);
+        let judged_items: std::cell::RefCell<Option<JudgedSketch>> = std::cell::RefCell::new(None);
         let keep_items = |c: &Criteria, r: &RouteResult| {
             let mut ji = judged_items.borrow_mut();
             if ctl.sketches.enabled() && ji.as_ref().is_none_or(|(b, _, _)| obj.better(c, b)) {

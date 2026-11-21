@@ -295,3 +295,26 @@ fn the_progress_restart_count_is_the_loops_restart_count() {
     assert_eq!(seen.iter().copied().max().unwrap_or(0), n, "progress {seen:?} vs the loop report: {line}");
     assert_eq!(ctl.snapshot().loop_restarts, n);
 }
+
+/// preview-errors (E12): a drawn round's sketch carries the places of that round's rule violations (the yellow dots of
+/// the progress dialog). `channel_overfull` (4 wires through a slot that fits 2.00 mm, short by 0.40) is drawn with
+/// violations (never drop); the run's best sketch is the result's copper, so its `errors_at` are the result's
+/// `violations[].at`, in order; the last sketch is a drawn round's, and a plan sketch has none.
+#[test]
+fn drawn_sketches_carry_the_places_of_their_violations() {
+    let path = format!("{}/tests/fixtures/fit/channel_overfull.json", env!("CARGO_MANIFEST_DIR"));
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).expect("fixture")).expect("json");
+    let m = BoardModel::from_json(&doc["model"].to_string()).expect("model");
+    let o = Options::from_json(r#"{"runs": 1, "wall_clock_s": 120.0, "topo_rounds": 1, "capacity_model": "cuts"}"#).expect("options");
+    let (r, ctl) = run(&m, &o, 1, true);
+    let at: Vec<[i64; 2]> = r.violations.iter().map(|v| v.at).collect();
+    assert!(!at.is_empty(), "the fixture must be drawn with violations, else this test proves nothing");
+    let p = ctl.snapshot();
+    let best = ctl.sketches.get(true, p.best_run).expect("a best sketch");
+    assert_eq!(best.kind, "copper");
+    assert_eq!(best.errors_at, at, "best sketch vs the result's violations");
+    let last = ctl.sketches.get(false, 0).expect("a last sketch");
+    assert_eq!(last.kind, "copper");
+    assert_eq!(last.errors_at.len(), last.violations, "last sketch: one place per violation of its round");
+    assert!(!last.errors_at.is_empty());
+}

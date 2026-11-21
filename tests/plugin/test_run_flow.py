@@ -1592,7 +1592,7 @@ def test_run_preview_draws_a_yellow_dot_per_engine_violation(app, eprom, tmp_pat
     board, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), engine=ProxyEngine(patch=with_viols), strict=False)
     assert [e["at"] for e in seen["errors"]] == [[190_000_000, 70_000_000], [200_000_000, 75_000_000]]
     legend = json.loads(preview.legend_path(seen["png"]).read_text())
-    assert [e for e in legend if e["label"] == "yellow dot = engine-reported error, 2"][0]["rgb"] == list(preview.ERROR_DOT_RGB)
+    assert [e for e in legend if e["label"] == "yellow dot = engine-reported rule violation, 2"][0]["rgb"] == list(preview.ERROR_DOT_RGB)
     svg = (Path(seen["png"]).parent / "preview-work" / "after-errors.svg").read_text()
     grp = svg[svg.index("topor-errors"):]
     assert len(re.findall(r'<circle cx="[\d.]+" cy="[\d.]+" r="[\d.]+"', grp)) == 2
