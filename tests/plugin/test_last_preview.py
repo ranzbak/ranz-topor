@@ -381,3 +381,37 @@ def test_wx_preflight_reads_the_preview_settings_only_when_available(app, monkey
 
 def test_post_run_preview_says_the_result_is_what_accept_writes():
     assert ui_wx.WORDING["preview"]["after_heading"] == "Result: the best so far, what Accept writes"
+
+
+# ---------------------------------------------------------------------------------------------- preview-errors (live dots)
+
+
+def test_live_svg_takes_the_engines_bare_xy_pairs_and_scales_the_dot_with_the_board():
+    """E12/M1/M4: the engine's Sketch.errors_at is a list of bare [x, y] nm pairs (not dicts); the dot is at least
+    ERROR_DOT_R_MM and grows with the board's longer side (about 6 px in the dialog's box)."""
+    import re
+    base = preview_mod.live_base(MODEL)  # 20 x 10 mm
+    svg = preview_mod.live_svg(base, [], [[4_000_000, 5_000_000], [12_500_000, 2_000_000]])
+    grp = svg[svg.index("topor-errors"):]
+    dots = re.findall(r'<circle cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"', grp)
+    assert [(float(x), float(y)) for x, y, _ in dots] == [(4.0, 5.0), (12.5, 2.0)]
+    assert float(dots[0][2]) == preview_mod.ERROR_DOT_R_MM  # small board: the floor
+    big = {"origin": (0, 0), "size": (120.0, 80.0), "svg": ""}
+    r = float(re.search(r'topor-errors.*?r="([\d.]+)"', preview_mod.live_svg(big, [], [[1_000_000, 1_000_000]]), re.S).group(1))
+    assert r == pytest.approx(120.0 / 60.0) and r > preview_mod.ERROR_DOT_R_MM
+    assert preview_mod.error_dot_radius(10.0) == preview_mod.ERROR_DOT_R_MM and preview_mod.error_dot_radius(240.0) == 2.0
+
+
+def test_dialog_hands_the_sketch_error_places_to_the_image(app, monkeypatch):
+    """M7: ProgressDialog._render_preview passes sk["errors_at"] to live_svg (a sketch without it passes None)."""
+    seen = []
+    real = preview_mod.live_svg
+    monkeypatch.setattr(preview_mod, "live_svg", lambda base, items, errors=None: (seen.append(errors), real(base, items, errors))[1])
+    dlg = ui_wx.ProgressDialog("eprom", 600.0, 30, preview="last")
+    try:
+        dlg.set_board(MODEL)
+        dlg.set_sketch("last", {**_sketch(1, kind="copper"), "errors_at": [[4_000_000, 5_000_000]]})
+        dlg.set_sketch("last", _sketch(2))
+        assert seen == [[[4_000_000, 5_000_000]], None]
+    finally:
+        dlg.Destroy()

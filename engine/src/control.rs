@@ -257,6 +257,12 @@ pub struct Sketch {
     pub vias: usize,
     pub length_mm: f64,
     pub items: Vec<crate::model::Item>,
+    /// Where the errors are (KiCad frame, nm): the `at` of each rule violation of a drawn round's
+    /// copper ([`crate::route::ViolationReport::at`]), for the dialog's yellow dots. Empty for a
+    /// plan sketch (a plan's predicted errors have no position until the compass is built at the
+    /// end of the run) and for legal copper.
+    #[serde(default)]
+    pub errors_at: Vec<[i64; 2]>,
 }
 
 /// last-preview: the sketches a run publishes for the caller ([`RunControl::sketches`]): `enabled`

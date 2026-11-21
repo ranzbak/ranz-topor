@@ -36,6 +36,11 @@ from toporlib.kicad_cli import kicad_cli, run_cli
 PREVIEW_HIGHLIGHT_RGB = (0, 139, 139)
 #: open connections (KiCad DRC unconnected items after the zone refill), as the harness PNGs draw them
 RATSNEST_RGB = (0, 80, 255)
+#: engine-reported errors (rule violations of the written copper, ``RouteResult::violations[].at``): a yellow dot with a
+#: dark outline, readable on both copper colours, the board ground and the highlight (contrast(): see the tests)
+ERROR_DOT_RGB = (255, 221, 0)
+ERROR_DOT_EDGE_RGB = (24, 24, 24)
+ERROR_DOT_R_MM = 0.55
 PREVIEW_HIGHLIGHT_FALLBACK_RGB = (208, 64, 208)
 MIN_CONTRAST = 3.0  # WCAG graphics
 
@@ -168,6 +173,44 @@ def ratsnest_svg(svg_text: str, unconnected: list, origin_nm: tuple, *, width_mm
     return svg_text[:i] + extra + svg_text[i:] if i >= 0 else svg_text
 
 
+def error_points(errors) -> list:
+    """The ``(x, y)`` nm positions of engine-reported errors: items with ``at`` ([x, y] nm, KiCad frame; the result's
+    ``violations``) or bare pairs; entries without a usable position are dropped. O(errors)."""
+    pts = []
+    for e in errors or []:
+        at = e.get("at") if isinstance(e, dict) else e
+        try:
+            pts.append((float(at[0]), float(at[1])))
+        except (TypeError, IndexError, KeyError, ValueError):
+            continue
+    return pts
+
+
+def error_dot_radius(board_mm: float, per_board: float = 120.0) -> float:
+    """Dot radius (mm) readable at preview scale: at least ERROR_DOT_R_MM, else the board's longer side / `per_board`
+    (120: about 6 px in the 700 px result panel; 60: the same in the progress dialog's smaller box). O(1)."""
+    return max(ERROR_DOT_R_MM, board_mm / per_board)
+
+
+def error_dots(points: list, origin_nm: tuple, *, r_mm: float = ERROR_DOT_R_MM) -> str:
+    """SVG elements: one filled yellow dot with a dark outline per point (nm, KiCad frame), at
+    ``(nm - origin) / 1e6`` mm. O(points)."""
+    if not points:
+        return ""
+    ox, oy = origin_nm
+    dots = "".join(f'<circle cx="{(x - ox) / MM:.4f}" cy="{(y - oy) / MM:.4f}" r="{r_mm:.4f}" />' for x, y in points)
+    return (f'<g class="topor-errors" fill="{_hex(ERROR_DOT_RGB)}" stroke="{_hex(ERROR_DOT_EDGE_RGB)}" '
+            f'stroke-width="{r_mm * 0.3:.4f}">' + dots + "</g>\n")
+
+
+def errors_svg(svg_text: str, errors, origin_nm: tuple, *, r_mm: float = ERROR_DOT_R_MM) -> str:
+    """Append :func:`error_dots` of `errors` (:func:`error_points`) on top of `svg_text` (the last layer drawn).
+    O(errors)."""
+    extra = error_dots(error_points(errors), origin_nm, r_mm=r_mm)
+    i = svg_text.rfind("</svg>")
+    return svg_text[:i] + extra + svg_text[i:] if extra and i >= 0 else svg_text
+
+
 # ---------------------------------------------------------------- kicad-cli
 def export_svg(pcb: Path, out_svg: Path, layers=SVG_LAYERS, *, timeout_s: float | None = None,
                on_poll=None) -> Path:
@@ -247,11 +290,14 @@ def render(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_ite
 def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_items: list | None = None,
               outline: list | None = None, layer_names: list | None = None,
               panel_px: tuple = (700, 760), timeout_s: float | None = None, on_poll=None,
-              unconnected_before: list | None = None, unconnected_after: list | None = None) -> tuple:
+              unconnected_before: list | None = None, unconnected_after: list | None = None,
+              errors: list | None = None) -> tuple:
     """Export both boards, draw them side by side with `caption` (str or list of lines) above, the panel titles
     ``Current board`` / ``Result`` and a legend below; write `out_png`. Returns ``(out_png, notes)``; `notes`
     are report lines about what the render could not do (e.g. highlight skipped). `unconnected_before` /
-    `unconnected_after`: KiCad DRC unconnected items of the two boards, drawn blue (:func:`ratsnest_svg`). Needs a
+    `unconnected_after`: KiCad DRC unconnected items of the two boards, drawn blue (:func:`ratsnest_svg`). `errors`:
+    the engine-reported errors of the result (``violations``, each with ``at`` nm), a yellow dot each in the Result
+    panel on top of everything (:func:`errors_svg`). Needs a
     ``wx.App``."""
     import wx
     import wx.svg
@@ -294,6 +340,18 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
                 svg_b = dst
             else:
                 svg_a_draw = dst
+
+    n_err = len(error_points(errors))
+    if n_err:
+        if org is None:
+            notes.append("error dots skipped: no board outline")
+        else:
+            dst = work / "after-errors.svg"
+            # readable at preview scale: at least ERROR_DOT_R_MM, about 6 px at the 700 px panel on a large board
+            big = max((org[2] - org[0]), (org[3] - org[1])) / MM
+            dst.write_text(errors_svg(Path(svg_a_draw).read_text(), errors, (org[0], org[1]),
+                                      r_mm=error_dot_radius(big)))
+            svg_a_draw = dst
 
     probe = wx.svg.SVGimage.CreateFromFile(str(svg_b))
     pw, ph = float(probe.width) or 1.0, float(probe.height) or 1.0
@@ -350,6 +408,8 @@ def render_ex(before_pcb: Path, after_pcb: Path, out_png: Path, caption, *, new_
         legend.append((f"open connection (KiCad DRC unconnected: {len(unconnected_before or [])} before, "
                        f"{len(unconnected_after or [])} after"
                        f"{ratsnest_caption(ratsnest_marks(unconnected_after))})", RATSNEST_RGB))
+    if n_err and org is not None:
+        legend.append((f"yellow dot = engine-reported rule violation, {n_err}", ERROR_DOT_RGB))
     legend_path(out_png).write_text(json.dumps(
         [{"label": label, "rgb": list(rgb) if rgb is not None else None} for label, rgb in legend]))
     for label, rgb in legend:
@@ -456,10 +516,11 @@ def live_base(model: dict) -> dict | None:
             "svg": f'<g opacity="{LIVE_BASE_OPACITY}">' + "".join(parts) + "</g>\n"}
 
 
-def live_svg(base: dict, items: list) -> str:
+def live_svg(base: dict, items: list, errors=None) -> str:
     """The progress dialog's board image as SVG text (mm units, origin at the outline's minimum corner): the board
     ground, `base` (:func:`live_base`) and `items` (a sketch's tracks and vias, KiCad frame) in their layers'
-    default colours on top. O(items)."""
+    default colours on top, then `errors` (yellow dots, :func:`error_dots`; positions only when the engine
+    exports them). O(items)."""
     ox, oy = base["origin"]
     w, h = base["size"]
     m = 0.5  # mm of margin around the outline
@@ -480,7 +541,9 @@ def live_svg(base: dict, items: list) -> str:
         rgb = _LAYER_RGB.get(int(it.get("layer", -1)), _INNER_RGB)
         core.append(f'<polyline points="{d}" fill="none" stroke="{_hex(rgb)}" stroke-width="{it["width"] / MM:.4f}" '
                     f'stroke-linecap="round" stroke-linejoin="round" />')
+    big = max(w, h)
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w + 2 * m:.4f}mm" height="{h + 2 * m:.4f}mm" '
             f'viewBox="{-m:.4f} {-m:.4f} {w + 2 * m:.4f} {h + 2 * m:.4f}">\n'
             f'<rect x="{-m:.4f}" y="{-m:.4f}" width="{w + 2 * m:.4f}" height="{h + 2 * m:.4f}" '
-            f'fill="{_hex(LIVE_BOARD_RGB)}" />\n' + base["svg"] + "<g>" + "".join(core) + "</g>\n</svg>\n")
+            f'fill="{_hex(LIVE_BOARD_RGB)}" />\n' + base["svg"] + "<g>" + "".join(core) + "</g>\n"
+            + error_dots(error_points(errors), (ox, oy), r_mm=error_dot_radius(big, 60.0)) + "</svg>\n")

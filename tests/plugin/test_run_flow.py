@@ -1563,3 +1563,37 @@ def test_an_engine_without_ok_still_gets_the_cancel(app, eprom, tmp_path, report
     ui = _CancelWhen(lambda p: p.stable, accept=True)
     _, _, out = do_run(eprom, tmp_path, ui=ui, engine=eng, cfg=CFG.with_values({("optimize", "rounds"): 20}))
     assert eng.jobs[0].cancelled and eng.jobs[0].ok is None and out.cancelled is False
+
+
+def test_run_preview_draws_a_yellow_dot_per_engine_violation(app, eprom, tmp_path, reports, monkeypatch):
+    """preview-errors (user 2026-11-21): the result's violations reach render_ex, the Result panel carries one dot each
+    at its place (outline-corner offset) and the legend says how many."""
+    import re
+    seen = {}
+    real = preview.render_ex
+
+    def spy(*a, **kw):
+        seen["errors"] = kw.get("errors")
+        seen["png"] = a[2]
+        return real(*a, **kw)
+
+    monkeypatch.setattr(preview, "render_ex", spy)
+
+    def with_viols(out_json):
+        d = json.loads(out_json)
+        d["violations"] = [{"conn": 0, "net": 1, "name": "N", "from": "a", "to": "b", "kind": "clearance", "layer": "F.Cu",
+                            "at": [190_000_000, 70_000_000], "depth_nm": 1, "length_nm": 1, "against": "edge", "cause": "",
+                            "price_mm": 1.0, "class": "static"},
+                           {"conn": 0, "net": 1, "name": "N", "from": "a", "to": "b", "kind": "short", "layer": "B.Cu",
+                            "at": [200_000_000, 75_000_000], "depth_nm": 1, "length_nm": 1, "against": "item:1", "cause": "",
+                            "price_mm": 1.0, "class": "crossing"}]
+        return json.dumps(d)
+
+    board, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), engine=ProxyEngine(patch=with_viols), strict=False)
+    assert [e["at"] for e in seen["errors"]] == [[190_000_000, 70_000_000], [200_000_000, 75_000_000]]
+    legend = json.loads(preview.legend_path(seen["png"]).read_text())
+    assert [e for e in legend if e["label"] == "yellow dot = engine-reported rule violation, 2"][0]["rgb"] == list(preview.ERROR_DOT_RGB)
+    svg = (Path(seen["png"]).parent / "preview-work" / "after-errors.svg").read_text()
+    grp = svg[svg.index("topor-errors"):]
+    assert len(re.findall(r'<circle cx="[\d.]+" cy="[\d.]+" r="[\d.]+"', grp)) == 2
+    assert "preview" in ui.names()

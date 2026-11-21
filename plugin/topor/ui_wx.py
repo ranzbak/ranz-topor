@@ -1351,7 +1351,7 @@ class ProgressDialog(_Base):
 
         from .preview import live_svg  # noqa: PLC0415
 
-        img = wx.svg.SVGimage.CreateFromBytes(live_svg(self._base, sk.get("items") or []).encode())
+        img = wx.svg.SVGimage.CreateFromBytes(live_svg(self._base, sk.get("items") or [], sk.get("errors_at")).encode())
         bw, bh = max(1e-6, float(img.width)), max(1e-6, float(img.height))
         box = self.preview_size
         scale = min(box.width / bw, box.height / bh)

@@ -362,3 +362,36 @@ def test_rules_mismatch_item_without_net_uses_the_default_netclass_clearance():
 
     g = postrun.rules_mismatch(_no_net_drc(), _hdmi_model(127_000))
     assert "<no net> – TX0_N: KiCad requires" in g.message or "TX0_N – <no net>: KiCad requires" in g.message, g.message
+
+
+# ---------------------------------------------------------------- preview-errors: yellow dots (user 2026-11-21)
+def test_preview_error_dots_one_per_error_at_the_offset_mm_position():
+    import re
+
+    from topor.preview import ERROR_DOT_EDGE_RGB, ERROR_DOT_RGB, error_points, errors_svg
+    viols = [{"at": [150_000_000, 80_000_000], "kind": "clearance"}, {"at": [101_250_000, 55_500_000], "kind": "short"},
+             {"kind": "clearance"}, {"at": None}]  # the last two have no place: dropped
+    assert error_points(viols) == [(150e6, 80e6), (101.25e6, 55.5e6)]
+    out = errors_svg("<svg></svg>", viols, (100_000_000, 50_000_000))
+    dots = re.findall(r'<circle cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"', out)
+    assert [(float(x), float(y)) for x, y, _ in dots] == [(50.0, 30.0), (1.25, 5.5)]
+    assert out.rstrip().endswith("</svg>") and out.index("topor-errors") < out.index("</svg>")
+    assert "#%02X%02X%02X" % ERROR_DOT_RGB in out and "#%02X%02X%02X" % ERROR_DOT_EDGE_RGB in out
+    assert errors_svg("<svg></svg>", [], (0, 0)) == "<svg></svg>" == errors_svg("<svg></svg>", None, (0, 0))
+
+
+def test_preview_error_dot_contrast_on_copper_ground_and_highlight():
+    from topor.preview import (ERROR_DOT_EDGE_RGB, ERROR_DOT_RGB, LIVE_BOARD_RGB, MIN_CONTRAST, PREVIEW_HIGHLIGHT_RGB,
+                               _LAYER_RGB, contrast)
+    assert contrast(ERROR_DOT_RGB, ERROR_DOT_EDGE_RGB) >= MIN_CONTRAST  # the dot against its own outline
+    for ground in (*_LAYER_RGB.values(), LIVE_BOARD_RGB, PREVIEW_HIGHLIGHT_RGB, (255, 255, 255)):
+        # fill or the dark outline reads on every ground: the outline carries it where the yellow does not
+        assert max(contrast(ERROR_DOT_RGB, ground), contrast(ERROR_DOT_EDGE_RGB, ground)) >= MIN_CONTRAST, ground
+
+
+def test_live_svg_draws_error_dots_on_top():
+    from topor import preview as pv
+    base = {"origin": (5_000_000, 0), "size": (20.0, 10.0), "svg": "<g/>"}
+    svg = pv.live_svg(base, [], [{"at": [10_000_000, 4_000_000]}])
+    assert '<circle cx="5.0000" cy="4.0000"' in svg and svg.index("topor-errors") > svg.index("<g/>")
+    assert "topor-errors" not in pv.live_svg(base, [])

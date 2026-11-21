@@ -1362,6 +1362,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             layer_names=[l["name"] for l in model.get("layers", []) if l.get("routable", True)] or None,
             unconnected_before=(orig_drc.unconnected if orig_drc is not None else None),
             unconnected_after=(loop.routed_drc.unconnected if loop.routed_drc is not None else None),
+            errors=rr.get("violations") or None,
             **cli_kw("preview", cancellable=False))
         report.facts["notes"] = report.facts["notes"] + notes
     except KicadCliTimeout as e:  # the numbers still allow a decision; the timeout is named in the findings
