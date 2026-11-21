@@ -1490,6 +1490,24 @@ fn connectors(p: Vec2, q: Vec2) -> Vec<Vec<Leg>> {
 mod tests {
     use super::*;
 
+    /// fuse-octi r2: the jog penalty and its leg (`jog_leg` = min(L_pref, 2 pitch)) in `style_price`.
+    #[test]
+    fn style_price_pays_the_jog_penalty_on_the_pitch_scale() {
+        let mm = 1e6;
+        let cfg = OctiCfg { on: true, bend_nm: 1.0 * mm, spacing_nm: 2.0 * mm, any_nm: 15.0 * mm, ..Default::default() };
+        let v = |x: f64, y: f64| Vec2 { x: x * mm, y: y * mm };
+        // 0.5 mm leg, then a 45 degree turn.
+        let pts = [v(0.0, 0.0), v(0.5, 0.0), v(1.5, 1.0)];
+        // pitch 0.5 mm: leff = min(2, 1) = 1 mm: bend 1 + jog 2 (1 - 0.5)^2 = 1.5 mm.
+        assert!((style_price(&cfg, 0.5 * mm, &pts) / mm - 1.5).abs() < 1e-9);
+        // pitch 2 mm: leff = min(2, 4) = 2 mm: 1 + 2 (1 - 0.25)^2 = 2.125 mm.
+        assert!((style_price(&cfg, 2.0 * mm, &pts) / mm - 2.125).abs() < 1e-9);
+        // pitch 0.2 mm: leff 0.4 mm < the leg: no jog penalty.
+        assert!((style_price(&cfg, 0.2 * mm, &pts) / mm - 1.0).abs() < 1e-9);
+        assert!((jog_leg(&cfg, 0.5 * mm) / mm - 1.0).abs() < 1e-9 && (jog_leg(&cfg, 2.0 * mm) / mm - 2.0).abs() < 1e-9);
+    }
+
+
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }
     }

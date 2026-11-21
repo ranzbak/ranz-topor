@@ -8717,7 +8717,17 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let Some(uo) = drawn.get(&u) else { continue };
                     let tp: Vec<Vec<Vec2>> = uo.runs.iter().filter(|(l, _)| *l == layer).map(|(_, p)| p.clone()).collect();
                     let tr: Vec<&[Vec2]> = tp.iter().map(|p| p.as_slice()).collect();
-                    for (gain, len_gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw, octi_on.then_some((&ocfg, wi.w + wi.s))).into_iter().take(8) {
+                    for (gain, len_gain, i, mut pts) in draw::fuse_candidates(&run, &tr, ws_mm, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s)).into_iter().filter({
+                        // The cap counts run vertices (as main's one-link-per-vertex take(8) did), not link shapes: every
+                        // shape of the 8 best vertices is tried, cheapest first.
+                        let mut seen: Vec<usize> = Vec::new();
+                        move |c| {
+                            if !seen.contains(&c.2) {
+                                seen.push(c.2);
+                            }
+                            seen.len() <= 8
+                        }
+                    }) {
                         let cut = &run[..=i];
                         let fdbg = std::env::var("TOPO_FUSEDBG").is_ok();
                         if anchors.get(&w).is_some_and(|a| a.iter().any(|&p| (p - run[i]).len() > 1_000.0 && near_poly(p, cut))) {

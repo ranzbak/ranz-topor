@@ -385,6 +385,13 @@ pub fn no_run_reason(model: &BoardModel, lid: u32) -> String {
     )
 }
 
+/// The style the fuse prices its links with: the octilinear style's config and the wire's pitch
+/// (w + s, nm: the jog leg), `None` in the smooth style (the fuse is then length and junction
+/// angle only). O(1).
+pub fn fuse_style(octilinear: bool, cfg: &super::octi::OctiCfg, pitch: f64) -> Option<(&super::octi::OctiCfg, f64)> {
+    octilinear.then_some((cfg, pitch))
+}
+
 /// Shortcuts of a branch run onto its trunk (D6b fuse; TopoR's FreeStyle auto move of T-points,
 /// black-box E8c-E8e): `run` starts on the trunk's copper (`trunk`, the trunk's polylines on the
 /// run's layer, math frame); leaving the trunk at the foot `q` of a later vertex `run[i]`
@@ -5201,6 +5208,63 @@ mod tests {
         assert!(c[elbow].0 > chord.0, "{c:?}");
         let any_mm = 15.0 * super::super::octi::any_angle_amount((p(3.0, -6.0) - p(0.0, 0.0)).len());
         assert!((chord.0 - (chord.1 + st(&run) - any_mm)).abs() < 1e-6, "{chord:?}");
+    }
+
+    /// fuse-octi r2: the junction price of a link candidate is the one of its FIRST LEG (not of the
+    /// chord), and a run that holds a piece the style forbids is priced with the bans lifted.
+    #[test]
+    fn fuse_prices_the_first_leg_and_lifts_the_bans_of_the_old_run() {
+        let mm = 1e6;
+        let p = |x: f64, y: f64| v(x * mm, y * mm);
+        let trunk = [p(0.0, 5.0), p(0.0, 0.0)];
+        let (ws, jw) = (0.45, 10.0);
+        let cfg = super::super::octi::OctiCfg { on: true, ..Default::default() };
+        let pitch = 0.45 * mm;
+        let st = |c: &super::super::octi::OctiCfg, x: &[Vec2]| super::super::octi::style_price(c, pitch, x) / 1e6;
+        let len = |x: &[Vec2]| x.windows(2).map(|w| (w[1] - w[0]).len()).sum::<f64>() / 1e6;
+        let psi = |first: Vec2| {
+            let deg = first.unit().unwrap().dot(p(0.0, 1.0)).clamp(-1.0, 1.0).acos().to_degrees();
+            jw * ws * super::super::factors::junction_psi(deg)
+        };
+        // A staircase run leaving the trunk end straight down.
+        let run = [p(0.0, 0.0), p(0.0, -1.0), p(1.0, -2.0), p(1.0, -3.0), p(2.0, -4.0), p(2.0, -5.0), p(3.0, -6.0)];
+        let c = fuse_candidates(&run, &[&trunk], ws, jw, Some((&cfg, pitch)));
+        let mut checked = 0;
+        for (gain, _, i, pts) in &c {
+            // pts = foot, link legs (ending at run[i]), run[i+1..]
+            let tail = run.len() - 1 - i;
+            let link = &pts[..pts.len() - tail];
+            let want = len(&run[..=*i]) + psi(run[1] - run[0]) - len(link) - psi(pts[1] - pts[0]) + st(&cfg, &run) - st(&cfg, pts);
+            assert!((gain - want).abs() < 1e-9, "i {i} {pts:?}: gain {gain} want {want}");
+            checked += 1;
+        }
+        assert!(checked >= 4, "{c:?}");
+        // The first legs differ (vertical or 45 degrees), so the junction prices differ: the test
+        // fails if the chord's direction were used for all.
+        let firsts: std::collections::HashSet<i64> = c.iter().map(|x| ((x.3[1] - x.3[0]).y / mm * 100.0).round() as i64).collect();
+        assert!(firsts.len() >= 2, "{firsts:?}");
+        // `any_angle = "forbidden"`: the old run holds a free-angle piece; it is priced with the ban
+        // lifted (finite), so the octilinear links still gain by the style price.
+        let free = [p(0.0, 0.0), p(1.0, -4.0), p(1.0, -5.0), p(3.0, -6.0)];
+        let fcfg = super::super::octi::OctiCfg { any_forbidden: true, ..cfg };
+        let soft = super::super::octi::OctiCfg { any_forbidden: false, ..cfg };
+        let c = fuse_candidates(&free, &[&trunk], ws, jw, Some((&fcfg, pitch)));
+        assert!(!c.is_empty());
+        for (gain, _, i, pts) in &c {
+            assert!(st(&fcfg, pts).is_finite(), "forbidden pieces are never offered");
+            let tail = free.len() - 1 - i;
+            let link = &pts[..pts.len() - tail];
+            let want = len(&free[..=*i]) + psi(free[1] - free[0]) - len(link) - psi(pts[1] - pts[0]) + st(&soft, &free) - st(&fcfg, pts);
+            assert!((gain - want).abs() < 1e-9, "i {i} {pts:?}: gain {gain} want {want}");
+        }
+    }
+
+    #[test]
+    fn fuse_style_is_off_in_the_smooth_style_and_carries_the_pitch() {
+        let cfg = super::super::octi::OctiCfg { on: true, ..Default::default() };
+        assert!(fuse_style(false, &cfg, 450_000.0).is_none());
+        let (c, pitch) = fuse_style(true, &cfg, 450_000.0).expect("octilinear");
+        assert!(c.on && (pitch - 450_000.0).abs() < 1e-9);
     }
 
     #[test]
