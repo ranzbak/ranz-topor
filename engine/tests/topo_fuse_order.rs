@@ -114,10 +114,10 @@ fn copper_near(r: &RouteResult, x: f64, y: f64) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// The copper pieces of net 1 in the result (tracks and the 1 mm pads; KiCad's anchor rule,
+/// The copper pieces of net 1 in the result and its dangling track ends (tracks and the 1 mm pads; KiCad's anchor rule,
 /// [`topor_engine::topo::netconn`]).
-fn pieces(r: &RouteResult, pads: &[(f64, f64)]) -> usize {
-    use topor_engine::topo::netconn::{components, Piece, Term};
+fn pieces(r: &RouteResult, pads: &[(f64, f64)]) -> (usize, usize) {
+    use topor_engine::topo::netconn::{conn, Piece, Term};
     use topor_engine::topo::state::LayerMask;
     type Runs = Vec<(usize, Vec<Vec2>)>;
     let runs: Vec<(Runs, f64)> = r
@@ -140,7 +140,8 @@ fn pieces(r: &RouteResult, pads: &[(f64, f64)]) -> usize {
         })
         .collect();
     let ts: Vec<Term> = polys.iter().map(|(c, p)| Term { poly: p, layers: LayerMask(1), center: *c }).collect();
-    components(&pcs, &ts)
+    let c = conn(&pcs, &ts);
+    (c.n(), c.dangling.len())
 }
 
 fn shared_pad(a: (f64, f64), b: (f64, f64)) -> BoardModel {
@@ -157,7 +158,7 @@ fn the_large_legal_fuse_at_a_shared_pad_goes_first_whatever_the_wire_ids() {
     let l = line(&r, "fuse after drawing").expect("fuse line");
     assert!(l.starts_with("fuse after drawing: 1 trace ends moved") && l.contains("1.8 mm saved"), "{l}");
     assert!(copper_near(&r, 15.0, 15.0) > 1.0 && copper_near(&r, 22.0, 12.0) < 1e-3, "A leaves B at (22, 12): {:?}", tracks(&r));
-    assert_eq!(pieces(&r, &pads), 1, "{:?}", tracks(&r));
+    assert_eq!(pieces(&r, &pads), (1, 0), "{:?}", tracks(&r));
     let off = route(&shared_pad(pads[1], pads[2]), &[("fuse_branches", serde_json::json!(false))]);
     assert!(copper_near(&off, 15.0, 15.0) < 1e-3, "unfused, A runs along y = 15: {:?}", tracks(&off));
     // short_a: the A wire has the lower id; the small fuse (B at P, 0.19 mm) has the higher. Unfused,
@@ -167,7 +168,7 @@ fn the_large_legal_fuse_at_a_shared_pad_goes_first_whatever_the_wire_ids() {
     let l = line(&r, "fuse after drawing").expect("fuse line");
     assert!(l.starts_with("fuse after drawing: 1 trace ends moved") && l.contains("1.8 mm saved"), "{l}");
     assert!(copper_near(&r, 18.0, 17.0) > 1.0 && copper_near(&r, 16.0, 12.0) < 1e-3, "A leaves B at (22, 12): {:?}", tracks(&r));
-    assert_eq!(pieces(&r, &pads), 1, "{:?}", tracks(&r));
+    assert_eq!(pieces(&r, &pads), (1, 0), "{:?}", tracks(&r));
     let off = route(&shared_pad(pads[1], pads[2]), &[("fuse_branches", serde_json::json!(false))]);
     assert!(copper_near(&off, 18.0, 17.0) < 1e-3, "unfused, A runs along y = 17: {:?}", tracks(&off));
 }
@@ -202,7 +203,7 @@ fn the_polish_keeps_the_foot_of_a_fused_branch_on_its_free_angle_trunk() {
     let l = line(&r, "fuse after drawing").expect("fuse line");
     assert!(l.starts_with("fuse after drawing: 1 trace ends moved"), "the fixture reaches the fuse: {l}");
     assert!(copper_near(&r, 16.486, 21.081) < 1e-3, "{:?}", tracks(&r));
-    assert_eq!(pieces(&r, &FREE_TRUNK), 1, "{:?}", tracks(&r));
+    assert_eq!(pieces(&r, &FREE_TRUNK), (1, 0), "{:?}", tracks(&r));
     assert!(free_angle(&r).is_empty(), "the trunk is polished in two pieces: {:?}", tracks(&r));
     assert!(line(&r, "split guard").is_none(), "{:?}", line(&r, "split guard"));
 }
@@ -213,7 +214,7 @@ fn the_polish_keeps_the_foot_of_a_fused_branch_on_its_free_angle_trunk() {
 #[test]
 fn the_split_guard_refuses_a_polish_that_drops_a_branch_foot() {
     let r = free_trunk(&["polish drops feet"]);
-    assert_eq!(pieces(&r, &FREE_TRUNK), 1, "{:?}", tracks(&r));
+    assert_eq!(pieces(&r, &FREE_TRUNK), (1, 0), "{:?}", tracks(&r));
     let l = line(&r, "split guard after drawing: ").expect("split guard line");
     assert!(l.starts_with("split guard after drawing: 0 fuse and 4 polish steps not taken"), "{l}");
     assert!(!l.contains("engine bug"), "{l}");
@@ -221,13 +222,15 @@ fn the_split_guard_refuses_a_polish_that_drops_a_branch_foot() {
 }
 
 /// H1 part 2, the self-check (rule 12: every path): with the guard off as well, the dropped foot
-/// splits the net, and the self-check after the steps names it as an engine bug.
+/// dangles, and the self-check after the steps names the net as an engine bug.
 #[test]
 fn the_split_self_check_names_a_net_the_steps_split() {
     let r = free_trunk(&["polish drops feet", "split guard off"]);
-    assert_eq!(pieces(&r, &FREE_TRUNK), 2, "{:?}", tracks(&r));
+    // The branch still crosses the elbow of the trunk (KiCad joins crossing copper: one piece), but
+    // its foot is left dangling (KiCad Cleanup "dangling track").
+    assert_eq!(pieces(&r, &FREE_TRUNK), (1, 1), "{:?}", tracks(&r));
     let l = line(&r, "split guard after drawing: ").expect("split guard line");
-    assert!(l.starts_with("split guard after drawing: 0 fuse and 0 polish steps not taken") && l.ends_with("; engine bug: 1 net in more pieces after the steps after the drawing than before them: N"), "{l}");
+    assert!(l.starts_with("split guard after drawing: 0 fuse and 0 polish steps not taken") && l.ends_with("; engine bug: 1 net with copper apart or a new dangling end after the steps after the drawing: N"), "{l}");
 }
 
 /// The fixtures' copper for the approval PNGs (fuse-octi r5, shopping-list rule: patterns are
@@ -259,4 +262,20 @@ fn dump_the_fixtures_for_the_approval_pngs() {
     let g = free_trunk(&["polish drops feet"]);
     let j = serde_json::json!({"pads": FREE_TRUNK, "names": ["A", "B", "C"], "fused": segs(&r), "guarded": segs(&g), "lines": r.warnings.iter().filter(|w| w.starts_with("fuse") || w.starts_with("octi") || w.starts_with("split")).collect::<Vec<_>>()});
     std::fs::write(format!("{dir}/fuse_free_trunk.json"), j.to_string()).unwrap();
+}
+
+/// r5 verifier L4 (survivor best_of_trunk_min): three wires end at pad P (fixture
+/// `fuse_shared_pad` with a third pad C at (25, 27), PROPOSED pattern). A's wire end at P has two
+/// trunks: B's copper (best legal gain 4.22, A leaves it at (22, 12)) and C's (1.08). The end's key
+/// is the best over its trunks, so A fuses onto B; a key from the worse trunk (1.08) would let B's
+/// end (3.95, onto A's copper at (22, 15)) go first instead.
+#[test]
+fn an_end_with_two_trunks_is_keyed_by_its_best_trunk() {
+    let pads = [(25.0, 15.0), (5.0, 17.0), (22.0, 4.0), (25.0, 27.0)];
+    let m = model(pads.iter().zip(["P", "A", "B", "C"]).map(|(&(x, y), n)| pad(n, 1, x, y, 1.0)).collect());
+    let r = route(&m, &[]);
+    let l = line(&r, "fuse after drawing").expect("fuse line");
+    assert!(l.starts_with("fuse after drawing: 1 trace ends moved") && l.contains("1.8 mm saved"), "{l}");
+    assert!(copper_near(&r, 15.0, 12.0) < 1e-3 && copper_near(&r, 15.0, 15.0) > 1.0, "A leaves B's copper at (22, 12): {:?}", tracks(&r));
+    assert_eq!(pieces(&r, &pads), (1, 0), "{:?}", tracks(&r));
 }

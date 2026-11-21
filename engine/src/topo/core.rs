@@ -2279,16 +2279,16 @@ pub fn fuse_line(fused: &[(f64, f64)]) -> String {
 }
 
 /// The split guard's report line (fuse-octi r4, H1 part 2), `None` when it had nothing to do:
-/// `fuse` fuse and `polish` polish steps not taken because they would have left a net's copper in
-/// more pieces, and `split` the nets that still ended in more pieces than before the fuse pass
+/// `fuse` fuse and `polish` polish steps not taken because they would have split copper of a net
+/// that was joined, and `split` the nets whose copper joined before the fuse pass ends apart
 /// (an engine bug: some path the guard does not see, e.g. the fuse pour check's undo). O(nets).
 pub fn split_line(fuse: usize, polish: usize, split: &[String]) -> Option<String> {
     if fuse == 0 && polish == 0 && split.is_empty() {
         return None;
     }
-    let mut l = format!("split guard after drawing: {fuse} fuse and {polish} polish steps not taken (each would have left a net's copper in more pieces: a dangling branch)");
+    let mut l = format!("split guard after drawing: {fuse} fuse and {polish} polish steps not taken (each would have split copper of a net that was joined or left a new dangling end: a dangling branch)");
     if !split.is_empty() {
-        l.push_str(&format!("; engine bug: {} in more pieces after the steps after the drawing than before them: {}", if split.len() == 1 { "1 net" } else { "nets" }, split.join(", ")));
+        l.push_str(&format!("; engine bug: {} with copper apart or a new dangling end after the steps after the drawing: {}", if split.len() == 1 { "1 net" } else { "nets" }, split.join(", ")));
     }
     Some(l)
 }
@@ -8685,9 +8685,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let mut polish: Option<(usize, f64)> = None;
     let mut polish_of: BTreeMap<usize, (usize, f64)> = BTreeMap::new();
     // fuse-octi r4 (H1 part 2): the split guard of the fuse and the polish ([`super::netconn`]): a
-    // step that leaves a net's drawn copper and pads in more pieces is not taken (qmtech JS2_9 r3 and
+    // step that splits a net's drawn copper and pads that were joined is not taken (partitions, r6) (qmtech JS2_9 r3 and
     // main's JS1_2: a branch fused onto a free-angle trunk segment that the polish then redrew as an
-    // elbow without its foot, a dangling branch for KiCad Cleanup). `pieces`: the count per net as
+    // elbow without its foot, a dangling branch for KiCad Cleanup). `pieces`: the partition per net as
     // the copper is now (made at the net's first step), `pieces0`: before the fuse pass.
     let mut net_wires: BTreeMap<i32, Vec<WireId>> = BTreeMap::new();
     for &w in drawn.keys() {
@@ -8700,7 +8700,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
     }
     // The pieces of net `net` with the drawn wires `drawn` (`extra`: one wire taken out of it).
-    let pieces_of = |net: i32, drawn: &BTreeMap<WireId, WireOut>, extra: Option<(WireId, &WireOut)>| -> usize {
+    let pieces_of = |net: i32, drawn: &BTreeMap<WireId, WireOut>, extra: Option<(WireId, &WireOut)>| -> super::netconn::Conn {
         let ws = net_wires.get(&net).map_or(&[][..], |v| v.as_slice());
         let pcs: Vec<super::netconn::Piece> = ws
             .iter()
@@ -8721,10 +8721,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 super::netconn::Term { poly: &ob.poly, layers: ob.layers, center: ob.center }
             })
             .collect();
-        super::netconn::components(&pcs, &ts)
+        super::netconn::conn(&pcs, &ts)
     };
-    let mut pieces: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut pieces0: BTreeMap<i32, usize> = BTreeMap::new();
+    let mut pieces: BTreeMap<i32, super::netconn::Conn> = BTreeMap::new();
+    let mut pieces0: BTreeMap<i32, super::netconn::Conn> = BTreeMap::new();
     // Steps not taken by the guard: (fuse, polish).
     let mut split_refused = (0usize, 0usize);
     let fdbg = std::env::var("TOPO_FUSEDBG").is_ok();
@@ -8812,6 +8812,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     refused.contains(&(w, end, q.x.round() as i64, q.y.round() as i64, i))
                 };
                 if let Some((gain, len_gain, i, pts)) = dr.fuse_best_legal(wo, r, &run, end == 1, &tr, ws_mm, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s), &mut skip) {
+                    if fdbg {
+                        eprintln!("FUSE trunk wire {w} end {end} onto {u}: best legal gain {gain:.2} i {i}");
+                    }
                     if best.as_ref().is_none_or(|b| gain > b.0) {
                         let q = if end == 1 { pts[pts.len() - 1] } else { pts[0] };
                         best = Some((gain, len_gain, u, r, i, pts, q, run[..=i].to_vec()));
@@ -8860,26 +8863,27 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let ci = conn_of[wire_conn[w]];
                 (drawn[&w].clone(), out[ci].clone(), necking.iter().filter(|(c, _)| *c == ci).cloned().collect())
             });
-            let before = *pieces.entry(net).or_insert_with(|| {
+            let before = pieces.entry(net).or_insert_with(|| {
                 let n = pieces_of(net, &drawn, None);
-                pieces0.insert(net, n);
+                pieces0.insert(net, n.clone());
                 n
-            });
+            }).clone();
             let pre = drawn[&w].clone();
             let mut wo = drawn.remove(&w).expect("drawn wire");
             let mut ok = dr.refit_run(&mut wo, r, pts);
             drawn.insert(w, wo);
             if ok {
-                // The split guard: the step is not taken when it leaves the net in more pieces.
+                // The split guard: the step is not taken when it splits a piece of the net that was
+                // joined (partitions, not counts: r5 verifier M2) or leaves a new dangling end.
                 let after = pieces_of(net, &drawn, None);
-                if after > before && !guard_off {
+                if super::netconn::worse(&before, &after) && !guard_off {
                     let now = drawn.remove(&w).expect("drawn wire");
                     let back = dr.restore_wire(&now, &pre);
                     drawn.insert(w, back);
                     split_refused.0 += 1;
                     ok = false;
                     if fdbg {
-                        eprintln!("FUSE refused wire {w} end {end} onto {u} i {i} gain {gain:.2}: the net would be {after} pieces, {before} before (split guard)");
+                        eprintln!("FUSE refused wire {w} end {end} onto {u} i {i} gain {gain:.2}: it splits the net or leaves a new dangling end ({} pieces, {} before; split guard)", after.n(), before.n());
                     }
                 } else {
                     pieces.insert(net, after);
@@ -8931,27 +8935,40 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let net = st.wires[w].net;
             // The split guard (H1 part 2): each redrawn segment keeps the net's pieces.
             let mut joined = |pre: &WireOut, now: &WireOut| -> bool {
-                let before = *pieces.entry(net).or_insert_with(|| {
+                let before = pieces.entry(net).or_insert_with(|| {
                     let n = pieces_of(net, &drawn, Some((w, pre)));
-                    pieces0.entry(net).or_insert(n);
+                    pieces0.entry(net).or_insert_with(|| n.clone());
                     n
-                });
+                }).clone();
                 let after = pieces_of(net, &drawn, Some((w, now)));
-                if after > before && !guard_off {
+                if super::netconn::worse(&before, &after) && !guard_off {
                     split_refused.1 += 1;
                     if fdbg {
                         let segs = super::fusepour::changed(&pre.runs, &now.runs);
                         let at: Vec<String> = segs.iter().map(|s| format!("({:.3}, {:.3})->({:.3}, {:.3})", s[0].x / MM, -s[0].y / MM, s[1].x / MM, -s[1].y / MM)).collect();
                         let was: Vec<String> = pre.runs.iter().map(|(l, p)| format!("L{l}: {}", p.iter().map(|q| format!("({:.3}, {:.3})", q.x / MM, -q.y / MM)).collect::<Vec<_>>().join(" "))).collect();
-                        eprintln!("POLISH refused wire {w} net {net}: the net would be {after} pieces, {before} before (split guard); new segments {}; wire before {}; keep {:?}", at.join(" "), was.join(" | "), anchors.get(&w).map(|a| a.iter().map(|q| format!("({:.3}, {:.3})", q.x / MM, -q.y / MM)).collect::<Vec<_>>()));
+                        eprintln!("POLISH refused wire {w} net {net}: it splits the net or leaves a new dangling end ({} pieces, {} before; split guard); new segments {}; wire before {}; keep {:?}", after.n(), before.n(), at.join(" "), was.join(" | "), anchors.get(&w).map(|a| a.iter().map(|q| format!("({:.3}, {:.3})", q.x / MM, -q.y / MM)).collect::<Vec<_>>()));
                     }
                     return false;
                 }
                 pieces.insert(net, after);
                 true
             };
-            let keep = if drop_feet { &[][..] } else { anchors.get(&w).map_or(&[][..], |a| a.as_slice()) };
-            let k = dr.octi_polish(&mut wo, keep, &mut joined);
+            // Keep points: the wire's own junction feet (planned T points, fused feet) and, r6 (r5
+            // verifier L2), every end or via of the net's other wires lying within KiCad's reach of
+            // one of its segments, projected onto it.
+            let keep: Vec<Vec2> = if drop_feet {
+                Vec::new()
+            } else {
+                fn piece(o: &WireOut, half_w: f64) -> super::netconn::Piece<'_> {
+                    super::netconn::Piece { runs: &o.runs, vias: o.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w }
+                }
+                let others: Vec<super::netconn::Piece> = net_wires.get(&net).map_or(&[][..], |v| v.as_slice()).iter().filter(|&&x| x != w).filter_map(|&x| drawn.get(&x).map(|o| piece(o, st.wires[x].w / 2.0))).collect();
+                let mut k: Vec<Vec2> = anchors.get(&w).cloned().unwrap_or_default();
+                k.extend(super::netconn::feet_on(&piece(&wo, st.wires[w].w / 2.0), &others));
+                k
+            };
+            let k = dr.octi_polish(&mut wo, &keep, &mut joined);
             if k > 0 {
                 if let Some(sv) = saved {
                     let path = super::fusepour::changed(&sv.0.runs, &wo.runs);
@@ -9141,10 +9158,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         warnings.push(fuse_line(&fused));
     }
     // The split guard's self-check (rule 12: every path, the fuse pour check's undo too): a net
-    // the steps after the drawing touched that ends in more pieces than before them.
+    // the steps after the drawing touched whose copper joined before them ends apart.
     let split_nets: Vec<String> = pieces0
         .iter()
-        .filter(|&(&net, &n0)| pieces_of(net, &drawn, None) > n0)
+        .filter(|&(&net, p0)| super::netconn::worse(p0, &pieces_of(net, &drawn, None)))
         .map(|(&net, _)| model.nets.iter().find(|n| n.code == net).map_or_else(|| net.to_string(), |n| n.name.clone()))
         .collect();
     warnings.extend(split_line(split_refused.0, split_refused.1, &split_nets));

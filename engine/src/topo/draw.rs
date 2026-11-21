@@ -451,7 +451,10 @@ pub fn lazy_next(pool: &[FuseKey], version: usize) -> LazyStep {
 /// After a fuse of net `net` at queue version `version`: the new version; the keys of the other
 /// nets that were fresh stay fresh (a fuse changes the candidates of its own net only: its trunks,
 /// anchors and pads; its copper can block another net's candidate, which [`Drawer::refit_run`]
-/// finds when that one is taken, and then it is evaluated again). O(pool).
+/// finds when that one is taken, and then it is evaluated again). Known limit (r5 verifier L3): a
+/// fuse also FREES the room its old copper took, so another net's candidate that was illegal there
+/// can become legal; its key stays the lower one it had (deterministic, at worst a smaller fuse than
+/// possible for that end; re-pricing every net after each fuse costs a pass per fuse). O(pool).
 pub fn lazy_taken(pool: &mut [FuseKey], version: usize, net: i32) -> usize {
     for k in pool.iter_mut() {
         if k.net != net && k.stamp == version {
@@ -5560,11 +5563,11 @@ mod tests {
         WireOut { wire: w, ok: true, items, runs: vec![(0, pts)], handles, ..WireOut::default() }
     }
 
-    fn pieces_of(model: &BoardModel, b: &Board, wires: &[&WireOut]) -> usize {
+    fn pieces_of(model: &BoardModel, b: &Board, wires: &[&WireOut]) -> super::super::netconn::Conn {
         let _ = model;
         let pcs: Vec<super::super::netconn::Piece> = wires.iter().map(|wo| super::super::netconn::Piece { runs: &wo.runs, vias: vec![], half_w: 0.125 * FMM }).collect();
         let ts: Vec<super::super::netconn::Term> = b.proj.obstacles.iter().filter(|o| o.net == Some(1)).map(|o| super::super::netconn::Term { poly: &o.poly, layers: o.layers, center: o.center }).collect();
-        super::super::netconn::components(&pcs, &ts)
+        super::super::netconn::conn(&pcs, &ts)
     }
 
     fn octilinear(pts: &[Vec2]) -> bool {
@@ -5590,19 +5593,21 @@ mod tests {
         let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
         let branch = fx_drawn(&mut dr, wb, vec![c, f]);
         let trunk0 = fx_drawn(&mut dr, wt, vec![a, z]);
-        assert_eq!(pieces_of(&m, &b, &[&trunk0, &branch]), 1);
+        let c0 = pieces_of(&m, &b, &[&trunk0, &branch]);
+        assert!(c0.n() == 1 && c0.dangling.is_empty(), "{c0:?}");
         // Part 1: the foot kept as a vertex.
         let mut t = trunk0.clone();
         let k = dr.octi_polish(&mut t, &[f], &mut |_, _| true);
         assert!(k >= 2 && octilinear(&t.runs[0].1), "{k} {:?}", t.runs[0].1);
         assert!(t.runs[0].1.iter().any(|&p| (p - f).len() < 1.0), "the foot is a vertex: {:?}", t.runs[0].1);
-        assert_eq!(pieces_of(&m, &b, &[&t, &branch]), 1);
-        // Part 2: the guard (the netconn count) refuses every shape that drops the foot.
+        assert!(!super::super::netconn::worse(&c0, &pieces_of(&m, &b, &[&t, &branch])));
+        // Part 2: the guard (netconn: partition and dangling ends) refuses every shape that drops the
+        // foot (each elbow / Z either leaves the branch apart or crossing it with its foot dangling).
         let back = dr.restore_wire(&t, &trunk0);
         let mut t = back.clone();
         let mut refused = 0;
         let mut guard = |_: &WireOut, now: &WireOut| {
-            let ok = pieces_of(&m, &b, &[now, &branch]) <= 1;
+            let ok = !super::super::netconn::worse(&c0, &pieces_of(&m, &b, &[now, &branch]));
             refused += usize::from(!ok);
             ok
         };
@@ -5611,10 +5616,11 @@ mod tests {
         assert!(refused >= 4, "both elbows and both Zs tried: {refused}");
         assert_eq!(t.runs[0].1, vec![a, z]);
         assert!(dr.handles_hold(&t), "the refused shapes leave the drawing's index as it was");
-        // Without the guard the same polish splits the net (the r3 bug).
+        // Without the guard the same polish leaves the foot dangling (the r3 bug).
         let mut t2 = t.clone();
         assert!(dr.octi_polish(&mut t2, &[], &mut |_, _| true) >= 1);
-        assert_eq!(pieces_of(&m, &b, &[&t2, &branch]), 2);
+        let c2 = pieces_of(&m, &b, &[&t2, &branch]);
+        assert!(super::super::netconn::worse(&c0, &c2) && !c2.dangling.is_empty(), "{c2:?}");
     }
 
     /// fuse-octi r4 (M1, F1/L1): the fuse's best LEGAL candidate onto one trunk: a branch from the

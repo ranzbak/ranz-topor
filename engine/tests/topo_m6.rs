@@ -74,12 +74,12 @@ fn fuse_line_keeps_length_and_angle_price_apart() {
 fn split_line_names_the_refused_steps_and_the_split_nets() {
     assert_eq!(split_line(0, 0, &[]), None);
     let l = split_line(2, 0, &[]).unwrap();
-    assert_eq!(l, "split guard after drawing: 2 fuse and 0 polish steps not taken (each would have left a net's copper in more pieces: a dangling branch)");
+    assert_eq!(l, "split guard after drawing: 2 fuse and 0 polish steps not taken (each would have split copper of a net that was joined or left a new dangling end: a dangling branch)");
     assert!(split_line(0, 4, &[]).unwrap().starts_with("split guard after drawing: 0 fuse and 4 polish steps not taken ("));
     let l = split_line(0, 0, &["JS2_9".into()]).unwrap();
-    assert!(l.starts_with("split guard after drawing: 0 fuse and 0 polish steps") && l.ends_with("; engine bug: 1 net in more pieces after the steps after the drawing than before them: JS2_9"), "{l}");
+    assert!(l.starts_with("split guard after drawing: 0 fuse and 0 polish steps") && l.ends_with("; engine bug: 1 net with copper apart or a new dangling end after the steps after the drawing: JS2_9"), "{l}");
     let l = split_line(1, 1, &["A".into(), "B".into()]).unwrap();
-    assert!(l.ends_with("; engine bug: nets in more pieces after the steps after the drawing than before them: A, B"), "{l}");
+    assert!(l.ends_with("; engine bug: nets with copper apart or a new dangling end after the steps after the drawing: A, B"), "{l}");
 }
 
 #[test]

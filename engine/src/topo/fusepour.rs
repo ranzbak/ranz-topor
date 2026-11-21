@@ -73,9 +73,14 @@ pub fn same_piece(a: &Cut, b: &Cut) -> bool {
     a.pads.is_empty() && b.pads.is_empty() && a.vias.is_empty() && b.vias.is_empty() && (a.at - b.at).len() < SAME_NM
 }
 
-/// The pieces of `fused` that `unfused` does not leave cut off. O(F x U x piece).
+/// The pieces of `fused` that `unfused` does not leave cut off: no piece of `unfused` matches it,
+/// or it holds a pad or via that no piece of `unfused` holds (a cut-off piece that GREW, taking
+/// in copper the copper without the moves keeps connected; r5 verifier L1: unfused {27} -> fused
+/// {27, 23} cuts pad 23 off although a piece with pad 27 was cut off before). O(F x U x piece).
 pub fn new_pieces<'a>(fused: &'a [Cut], unfused: &[Cut]) -> Vec<&'a Cut> {
-    fused.iter().filter(|c| !unfused.iter().any(|u| same_piece(c, u))).collect()
+    let pads: BTreeSet<usize> = unfused.iter().flat_map(|u| u.pads.iter().copied()).collect();
+    let grew = |c: &Cut| c.pads.iter().any(|p| !pads.contains(p)) || c.vias.iter().any(|&v| !unfused.iter().any(|u| u.net == c.net && u.vias.iter().any(|&w| (w - v).len() < SAME_NM)));
+    fused.iter().filter(|c| grew(c) || !unfused.iter().any(|u| same_piece(c, u))).collect()
 }
 
 /// Where a piece is (math frame): its pads' centres, its vias, and its islands' centroid.
@@ -219,6 +224,18 @@ mod tests {
         assert!(!fused_ok(&swapped, &unfused), "as many pieces, one of them new");
         let island = |at| cut(1, &[], at);
         assert!(fused_ok(&[island(v(1.0, 1.0))], &[island(v(1.4, 1.0)), island(v(8.0, 8.0))]), "the same island, its centroid moved a little");
+    }
+
+    /// r5 verifier L1: a cut-off piece that grows (pad 27 cut off before, pads 27 and 23 after) is
+    /// new copper cut off: pad 23 was connected without the moves. A piece that shrinks is not.
+    #[test]
+    fn a_cut_off_piece_that_grows_is_not_taken() {
+        let unfused = [cut(1, &[27], v(0.0, 0.0))];
+        assert!(!fused_ok(&[cut(1, &[23, 27], v(0.5, 0.0))], &unfused), "pad 23 newly cut off");
+        assert!(fused_ok(&[cut(1, &[27], v(0.0, 0.0))], &[cut(1, &[23, 27], v(0.5, 0.0))]), "a piece that shrinks");
+        let via = |vs: &[Vec2]| Cut { vias: vs.to_vec(), ..cut(1, &[27], v(0.0, 0.0)) };
+        assert!(!fused_ok(&[via(&[v(1.0, 1.0), v(4.0, 4.0)])], &[via(&[v(1.0, 1.0)])]), "a via newly cut off");
+        assert!(fused_ok(&[via(&[v(1.2, 1.0)])], &[via(&[v(1.0, 1.0)])]), "the same via, 0.2 mm apart");
     }
 
     #[test]
