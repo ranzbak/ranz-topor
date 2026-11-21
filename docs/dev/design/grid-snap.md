@@ -80,3 +80,38 @@ DRC/unconnected/vias/detour/runtime/on-grid fraction.
 
 **Run budget** (<= EUR 0.60, one ccx43 hour): 1 build, 3 units (tip off with hash vs cached main;
 tip prefer, 4 boards; tip fallback, 4 boards) plus 1 pattern/render unit.
+
+## r2 (after the r1 ladder)
+
+The r1 ladder found:
+
+- a new DRC class on esp in prefer and fallback: `hole_clearance`, two items;
+- a fallback form worse than the plain one (esp USB_D+);
+- CPU up to 2x.
+
+r2 changes the mechanisms. There are no board special cases.
+
+- **Forced copper respects via drills.** KiCad reports a short over a via twice: `shorting_items`, and
+  `hole_clearance` for its drill.
+  - **Forced run (DP):** the violation price of a forced run's short over a via (existing or drawn)
+    now adds the drill's hole-clearance amount (`exact.rs ent_deficit`, `Drawer::via_hole`). A forced
+    run therefore prefers to short a track rather than a via drill. This is the esp case of IO6 over
+    an ENABLE via.
+  - **Forced via site:** the choice is now short-first (`draw.rs force_via_key`, with `viol_key` /
+    `forced_form_better` as for forced runs). Before, it was one sum of amounts, which let a site on a
+    foreign track (a short plus its drill's `hole_clearance`) beat a site that has only clearance
+    deficits. This is the esp case of the IO8_SCL via on a +3V3 track.
+  - Both changes also apply with `grid_snap = off`. They touch forced copper only; legal checks are
+    unchanged.
+- **Fallback by total price.** The grid pass replaces the plain form only when its whole DP price
+  (length, bends, room, any_angle, violations, off_grid) is lower (`fallback_takes(plain, grid)`).
+  Before, the comparison counted free-angle stretches only.
+- **Grid via moves keep the plan's cuts and pours.**
+  - A via moves only to a grid point inside the triangle of its site, so the crossings round it are
+    the ones the plan priced.
+  - After the moves, the plan copper (tracks plus via sites) goes through the pour-cut measure
+    (`pourplan::undo_grid_cuts`). If it cuts off more than without the moves:
+    1. the moves of the vias on the wires that bound a cut-off piece go back;
+    2. if it still cuts off more, every move goes back.
+- **CPU.** Grid companion nodes are added at taut vertices only, at most 48 per run. The octagon
+  extras get the grid through the grid Z connectors.
