@@ -958,13 +958,50 @@ pub fn viol_key(vs: &[Viol]) -> (f64, f64) {
     (vs.iter().filter(|v| v.kind == "short").map(Viol::amount).sum(), vs.iter().map(Viol::amount).sum())
 }
 
-/// The choice key of a forced via site ([`Drawer::force_via`]) with violations `vs` and the
-/// further price `extra` (wrong chord side, reach): `(short amount, violation amounts + extra)`,
-/// compared by [`forced_form_better`]. Shorts first, as for a forced run ([`viol_key`]): a via on
-/// a foreign track (KiCad: `shorting_items` and the drill's `hole_clearance`) never wins over a
-/// site with clearance deficits only (grid-snap r2, esp IO8_SCL over +3V3).
-pub fn force_via_key(vs: &[Viol], extra: f64) -> (f64, f64) {
-    (viol_key(vs).0, vs.iter().map(Viol::amount).sum::<f64>() + extra)
+/// The choice key of a forced via site ([`Drawer::force_via`]) with violations `vs`, the further
+/// price `extra` (wrong chord side, reach) and the run's safety margin `margin` (nm):
+/// `[short amount, hole amount, violation amounts + extra]`, compared in that order
+/// ([`force_via_better`]).
+/// - Shorts first, as for a forced run ([`viol_key`]): a via on a foreign track (KiCad:
+///   `shorting_items` and the drill's `hole_clearance`) never wins over a site with clearance
+///   deficits only (grid-snap r2, esp IO8_SCL over +3V3).
+/// - Then the drill (grid-snap r3): the `hole_clearance` amount as KiCad measures it, the drill's
+///   edge against foreign copper below the board's hole clearance (the checker's depth less the
+///   margin, which KiCad does not know; a site below the margin only is no KiCad violation). A
+///   drill too close to copper is its own DRC class, above plain clearance: a site with copper
+///   clearance deficits only wins over one whose drill is too close (esp r2: IO8_SCL 0.007 mm).
+pub fn force_via_key(vs: &[Viol], extra: f64, margin: f64) -> [f64; 3] {
+    if diag_flag(&DIAG_NO_SHORT_FIRST, "TOPOR_DIAG_NO_SHORT_FIRST") {
+        return [0.0, 0.0, vs.iter().map(Viol::amount).sum::<f64>() + extra];
+    }
+    let hole: f64 = vs
+        .iter()
+        .filter(|v| v.kind == "hole_clearance" && v.depth_nm > margin)
+        .map(|v| super::factors::violation_amount(v.depth_nm - margin, v.len_nm))
+        .sum();
+    [viol_key(vs).0, hole, vs.iter().map(Viol::amount).sum::<f64>() + extra]
+}
+
+/// `a` is strictly better than `b` on [`force_via_key`] (lexicographic, 1e-9 ties).
+pub fn force_via_better(a: [f64; 3], b: [f64; 3]) -> bool {
+    for k in 0..3 {
+        if a[k] < b[k] - 1e-9 {
+            return true;
+        }
+        if a[k] > b[k] + 1e-9 {
+            return false;
+        }
+    }
+    false
+}
+
+/// grid-snap r3 isolation (diagnosis only, read once per process): `TOPOR_DIAG_NO_SHORT_FIRST`
+/// = the forced via key of r1 (one sum), `TOPOR_DIAG_NO_DRILL_PRICE` = no drill amount in the
+/// forced DP ([`Drawer::ent_deficit`]).
+pub(super) static DIAG_NO_SHORT_FIRST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+pub(super) static DIAG_NO_DRILL_PRICE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+pub(super) fn diag_flag(f: &std::sync::OnceLock<bool>, name: &str) -> bool {
+    *f.get_or_init(|| std::env::var_os(name).is_some())
 }
 
 /// forced-draw (docs/dev/design/forced-draw.md): the graded choice key of one form of a forced
@@ -2360,7 +2397,7 @@ impl<'a> Drawer<'a> {
         let wi = &st.wires[w];
         let turn_at = |k: usize| wi.turns.iter().find(|x| x.0 == k).map(|x| pr.pos[x.1]);
         #[allow(clippy::type_complexity)]
-        let mut best: Option<((f64, f64), f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
+        let mut best: Option<([f64; 3], f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
         // pad-snap r2b debug (`TOPO_VIADBG`): every forced candidate site with its price
         let fdbg = std::env::var_os("TOPO_VIADBG").is_some();
         let mut cands: Vec<(f64, usize, Vec2, i64, String)> = Vec::new();
@@ -2404,22 +2441,22 @@ impl<'a> Drawer<'a> {
                     },
                     None => 0.0,
                 };
-                let key = force_via_key(&vs, side + reach);
+                let key = force_via_key(&vs, side + reach, self.opts.margin_nm.max(0) as f64);
                 if dbg {
-                    seen.push((key.1, viol_key(&vs).0, k, p, sz.d));
+                    seen.push((key[2], viol_key(&vs).0, k, p, sz.d));
                 }
                 let room = self.via_room(w, k, p, sz.d as f64);
                 if fdbg {
-                    cands.push((key.1, k, p, sz.d, vs.iter().map(|v| format!("{} {} d{:.0} l{:.0}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3)).collect::<Vec<_>>().join("; ")));
+                    cands.push((key[2], k, p, sz.d, vs.iter().map(|v| format!("{} {} d{:.0} l{:.0}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3)).collect::<Vec<_>>().join("; ")));
                 }
-                if best.as_ref().is_none_or(|b| forced_form_better(key, b.0) || (key.0 - b.0 .0).abs() <= 1e-9 && (key.1 - b.0 .1).abs() <= 1e-9 && room > b.1 + 1.0) {
+                if best.as_ref().is_none_or(|b| force_via_better(key, b.0) || !force_via_better(b.0, key) && room > b.1 + 1.0) {
                     best = Some((key, room, k, p, sz, vs));
                 }
             }
         }
         if fdbg {
             cands.sort_by(|a, b| a.0.total_cmp(&b.0));
-            eprintln!("FORCEVIA wire {w} net {net} via {i} class {} chosen {:?} of {} sites", class.is_some(), best.as_ref().map(|b| (b.0 .0, b.0 .1, b.3.x / 1e6, -b.3.y / 1e6)), cands.len());
+            eprintln!("FORCEVIA wire {w} net {net} via {i} class {} chosen {:?} of {} sites", class.is_some(), best.as_ref().map(|b| (b.0, b.3.x / 1e6, -b.3.y / 1e6)), cands.len());
             for c in cands.iter().take(8) {
                 eprintln!("  FORCEVIA cand price {:.3} k {} ({:.4},{:.4}) d {} [{}]", c.0, c.1, c.2.x / 1e6, -c.2.y / 1e6, c.3, c.4);
             }
@@ -4980,13 +5017,24 @@ mod tests {
         let viol = |kind: &'static str, depth_mm: f64| Viol { kind, at: v(0.0, 0.0), layer: 0, depth_nm: depth_mm * MM, len_nm: 0.6 * MM, against: "x".into(), via: true };
         let on_track = [viol("short", 0.05), viol("hole_clearance", 0.02)];
         let tight = [viol("clearance", 0.12), viol("clearance", 0.12), viol("hole_clearance", 0.1)];
-        let (a, b) = (force_via_key(&on_track, 0.0), force_via_key(&tight, 0.0));
-        assert!(a.1 < b.1, "the short site is cheaper on amounts alone: {a:?} {b:?}");
-        assert!(forced_form_better(b, a) && !forced_form_better(a, b), "{a:?} {b:?}");
+        let (a, b) = (force_via_key(&on_track, 0.0, 0.0), force_via_key(&tight, 0.0, 0.0));
+        assert!(a[2] < b[2], "the short site is cheaper on amounts alone: {a:?} {b:?}");
+        assert!(force_via_better(b, a) && !force_via_better(a, b), "{a:?} {b:?}");
         let deeper = [viol("short", 0.3)];
-        assert!(forced_form_better(force_via_key(&on_track, 5.0), force_via_key(&deeper, 0.0)));
-        assert_eq!(force_via_key(&tight, 1.0).1, b.1 + 1.0);
-        assert_eq!(force_via_key(&tight, 1.0).0, 0.0);
+        assert!(force_via_better(force_via_key(&on_track, 5.0, 0.0), force_via_key(&deeper, 0.0, 0.0)));
+        assert_eq!(force_via_key(&tight, 1.0, 0.0)[2], b[2] + 1.0);
+        assert_eq!(force_via_key(&tight, 1.0, 0.0)[0], 0.0);
+        // r3: the drill tier: a shallow drill deficit (KiCad's 0.007 mm) loses to deep copper
+        // clearance deficits only; with the margin subtracted a drill deficit inside the margin is
+        // no KiCad violation (tier 0)
+        let drill = [viol("hole_clearance", 0.007)];
+        let copper = [viol("clearance", 0.1), viol("clearance", 0.1)];
+        let (d, c) = (force_via_key(&drill, 0.0, 0.0), force_via_key(&copper, 0.0, 0.0));
+        assert!(d[2] < c[2] && d[1] > 0.0 && c[1] == 0.0, "{d:?} {c:?}");
+        assert!(force_via_better(c, d) && !force_via_better(d, c));
+        assert_eq!(force_via_key(&[viol("hole_clearance", 0.05)], 0.0, 0.05e6)[1], 0.0);
+        assert!(force_via_key(&[viol("hole_clearance", 0.15)], 0.0, 0.05e6)[1] > 0.0);
+        assert!(!force_via_better(c, c));
     }
 
     /// forced-draw (T4): the graded choice of a forced run's form ([`forced_form_key`],

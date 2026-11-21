@@ -609,7 +609,7 @@ impl Drawer<'_> {
             // grid-snap r2: over a via, the drill's hole clearance as well (KiCad reports
             // `hole_clearance` on top of the short: two violations, so a forced run prefers a
             // short over a track to one through a foreign via's drill)
-            let hole = self.via_hole.get(&i).map_or(0.0, |&hr| {
+            let hole = self.via_hole.get(&i).filter(|_| !super::draw::diag_flag(&super::draw::DIAG_NO_DRILL_PRICE, "TOPOR_DIAG_NO_DRILL_PRICE")).map_or(0.0, |&hr| {
                 let hneed = hr + self.model.rules.via_hole_clear() as f64 + 0.5 * sw + self.eps;
                 if d < hneed - TOL {
                     super::factors::violation_amount(hneed - d, band_len(a, b, &e.core, hneed))
