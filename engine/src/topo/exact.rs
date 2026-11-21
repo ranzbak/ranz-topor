@@ -2111,7 +2111,7 @@ mod tests {
                 let mut pts = poly.clone();
                 pts.insert(i + 1, x);
                 tried += 1;
-                let (strip, gates) = dr.open_strip(0, 0, k1, 0, &pts);
+                let (strip, gates) = dr.open_strip(0, 0, k1, 0, &pts, Some(&std::cell::Cell::new(false)));
                 let Some(&(gp, gu, glen, _, _)) = gates.iter().find(|g| (g.0 - pp).len() < 1.0 && (g.2 - len).abs() < 1.0) else {
                     why[4] += 1;
                     continue;

@@ -1,6 +1,6 @@
 # first-draw-45: the first draw's octilinear form where 45° fits (A5 first-draw part)
 
-**Status:** P1-P5 implemented and approved by the lead (P1-P3 2026-11-21 r2, P4 user-approved r6, sweep default r9); r10 adds the pad-centre and joint-loser rules below. Reports: scratch/agent-wt/reports/first-draw-45-r*-*.md. Base bbd6e0f1.
+**Status:** P1-P5 implemented and approved by the lead (P1-P3 2026-11-21 r2, P4 user-approved r6, sweep default r9); r10 adds the pad-centre, tie-floor, P2-wall, sweep-weight and loser-corridor rules below (losers-first draw order opt-in). Reports: scratch/agent-wt/reports/first-draw-45-r*-*.md. Base bbd6e0f1.
 
 ## What the diagnosis found
 
@@ -81,10 +81,10 @@ and the DP has no nodes along a long chord to build one (octi.rs:556-564).
   - *Tie floors.* A bend costs at least `BEND_TIE_NM` (1 um) per 45 degrees and the jog penalty uses the same floor: at `bend_mm = 0` a staircase (also one alternating long and tiny legs, verifier F8) loses the tie against its elbow instead of the node order deciding. Far below any length the copper can tell.
   - *P2 walls from ERBS (3a).* On an edge P2 opened, an undrawn same-layer wire's ERBS path is a wall unless the run's own taut path crosses it (Y4's octilinear rescue crossed Y1's band inside a triangle).
   - *Sweep weights (3b, graded).* A sweep pair weighs its side consistency `|sum of offsets| / sum of |offsets|` on the group's axis; the cycle break takes the least unmet weight (bend pairs weigh 1). Pairs that swap sides between cuts or layers fade out of the cycle break. Bend 2-cycles stay the bends' (the sweep breaking them put U6 out of order).
-  - *Joint losers draw first (mechanism C).* The wires the joint check rejected (no reserved copper) draw before the kept ones, against the kept bands only. Drawn after their kept neighbours, those neighbours' octilinear redraws left their bands (a staircase hugging an any-angle band, a 45 degree end into the pad row) and took the loser's room: tw2 swap_vias X2 was cut back and forced under the sweep order. Debug arm `TOPO_FD45_OFF=loserfirst`.
+  - *Joint losers draw first (mechanism C), opt-in.* Drawing the wires the joint check rejected before the kept ones fixes tw2 swap_vias under the sweep order (drawn after their kept neighbours, those neighbours' octilinear redraws took the loser's room: X2 cut back and forced). On the board ladder it cost esp +15 DRC items (r10l vs the arms run), so it is off by default: `TOPO_FD45_ON=loserfirst`. The tw2 a_band test runs under `octi_order = bends` until TW2-SWEEP (shopping list) is solved.
   - *Loser corridors.* The octilinear DP also prices a leg inside a joint loser's ERBS corridor (its half width + the larger clearance + the run's half width either side) like a lane zone, `room x length x (x + x^2)`. Graded, no wall; it does not decide tw2 (the loser's ERBS is any-angle, its octilinear room lies elsewhere: the ROOM-FROM-OCTI caveat). Debug arm `TOPO_FD45_OFF=loser`.
-  - Open: ROOM-FROM-OCTI (shopping list); STAIRCASE-HUG proposed (the DP prefers a many-bend staircase hugging an any-angle band over a 2-bend form, every leg at least the jog leg; tw2 X3 under the sweep order).
-- **Debug env (copper-neutral):** `TOPO_FD45_OFF=p1,p2,p4,p4s,p5,lane,loser,loserfirst` (arms off), `TOPO_FD45_ON=slack`, `TOPO_STRDBG` (straightening steps), `TOPO_REDUCEDBG` (via reduction repairs), `TOPO_FREEDBG` (free-angle writers: FREEDP, FREESNAP per stage), `TOPO_RUNPROV` (run provenance, octi tag), `TOPO_ERBS_DEBUG` (ERBS order, weights and draws).
+  - Open: ROOM-FROM-OCTI, TW2-SWEEP (shopping list); STAIRCASE-HUG (shopping list, pattern first) (the DP prefers a many-bend staircase hugging an any-angle band over a 2-bend form, every leg at least the jog leg; tw2 X3 under the sweep order).
+- **Debug env (copper-neutral):** `TOPO_FD45_OFF=p1,p2,p4,p4s,p5,lane,loser,padc,tie,p2w,sweepw` (arms off: padc = r10 pad-centre chord filter, stub floor and pad_leave_lost; tie = BEND_TIE_NM floors; p2w = P2 ERBS walls; sweepw = sweep side-consistency weights), `TOPO_FD45_ON=slack,loserfirst` (opt-in), `TOPO_STRDBG` (straightening steps), `TOPO_REDUCEDBG` (via reduction repairs), `TOPO_FREEDBG` (free-angle writers: FREEDP, FREESNAP per stage), `TOPO_RUNPROV` (run provenance, octi tag), `TOPO_ERBS_DEBUG` (ERBS order, weights and draws).
 
 ## Invariants, tests, cost
 
