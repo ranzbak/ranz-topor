@@ -212,27 +212,31 @@ fn area_stitching_fills_the_lattice_at_the_pitch() {
 }
 
 /// Power-via rule (user 2026-11-13): no stitching via of classes 2-4 under a BGA. A 4 x 4 ball
-/// grid of a signal net (pitch 1 mm) inside the dropped island: no via in its area.
+/// grid of a signal net (pitch 1.5 mm, 0.3 mm balls) inside the dropped island leaves room for a
+/// legal via on the lattice site (15, 20) between four balls (priced only 4 x 0.15 mm for the
+/// near pads); at least 9 vias are wanted, so the run reaches that site and only the BGA price
+/// (100 via prices, above the value of a via) keeps it empty.
 #[test]
 fn no_region_via_under_a_bga() {
     let mut balls = Vec::new();
     for j in 0..4 {
         for i in 0..4 {
-            let (x, y) = (14 * MM + i * MM, 18 * MM + j * MM);
+            let (x, y) = (12_750_000 + i * 1_500_000, 17_750_000 + j * 1_500_000);
             balls.push(format!(
                 r#"{{ "uuid": "B{i}{j}", "ref": "U9", "number": "{}", "net": 2, "attr": "smd", "center": [{x}, {y}], "layers": [0],
-                    "shapes": {{ "0": {{ "kind": "circle", "d": 400000 }} }} }}"#,
+                    "shapes": {{ "0": {{ "kind": "circle", "d": 300000 }} }} }}"#,
                 j * 4 + i + 1
             ));
         }
     }
     let m = model(&balls);
-    let items = square(0, 8, 12, 22, 26);
-    let s = stitch_regions(&m, &opts(true, 0.0, false), &reg(), &items, &[], None, &|| false);
+    let items = square(0, 8, 12, 23, 27);
+    let o = Options { stitch_min_vias: 9, ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
     let v = vias(&s.items);
-    assert!(!v.is_empty(), "{:?}", s.notes);
+    assert!(v.len() >= 8, "{:?}", s.notes);
     // BGA area: ball box grown by half a pitch.
-    assert!(v.iter().all(|p| !(p.0 > 13_500_000 && p.0 < 17_500_000 && p.1 > 17_500_000 && p.1 < 21_500_000)), "{v:?}");
+    assert!(v.iter().all(|p| !(p.0 > 12_000_000 && p.0 < 18_000_000 && p.1 > 17_000_000 && p.1 < 23_000_000)), "{v:?}");
 }
 
 /// Class 1 (cut-off repair) spreads its vias: the second via is the lattice site farthest from
