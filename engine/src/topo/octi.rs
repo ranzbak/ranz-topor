@@ -645,25 +645,26 @@ impl Drawer<'_> {
         let t = std::time::Instant::now();
         let on = self.octi.grid.is_some();
         let r = match self.octi.grid_mode {
-            Mode::Prefer if on => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true),
+            Mode::Prefer if on => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true, &mut 0.0),
             Mode::Fallback if on => {
-                // grid-snap "fallback": the grid nodes only where the plain pass leaves an
-                // any-angle stretch (the last spacing fallback); the pass with fewer stretches wins
-                // (ties: the plain one).
-                let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false);
-                let stretches = |p: &[Vec2]| breaks(p).0.len();
-                let n0 = stretches(r.as_ref().map_or(pts, |o| &o.pts[..]));
-                if n0 > 0 {
-                    let g = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true);
+                // grid-snap "fallback": the grid pass only where the plain pass leaves an any-angle
+                // stretch (the last spacing fallback), and its form only when its whole DP price
+                // (length, bends, room, any_angle, violations, off_grid) is lower than the plain
+                // pass's ([`fallback_takes`]; ties: the plain one).
+                let mut p0 = f64::INFINITY;
+                let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut p0);
+                if !breaks(r.as_ref().map_or(pts, |o| &o.pts[..])).0.is_empty() {
+                    let mut pg = f64::INFINITY;
+                    let g = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true, &mut pg);
                     match g {
-                        Some(o) if fallback_takes(n0, stretches(&o.pts)) => Some(o),
+                        Some(o) if fallback_takes(p0, pg) => Some(o),
                         _ => r,
                     }
                 } else {
                     r
                 }
             }
-            _ => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false),
+            _ => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut 0.0),
         };
         // first-draw-45 r9 debug (`TOPO_REDUCEDBG`, copper-neutral): an octilinear call over 0.5 s.
         if std::env::var_os("TOPO_REDUCEDBG").is_some() && t.elapsed().as_secs_f64() > 0.5 {
@@ -685,7 +686,9 @@ impl Drawer<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, grid: bool) -> Option<OctiOut> {
+    /// `price`: set to the DP's price of its best form (INFINITY when the DP does not run or finds
+    /// no form; the taut path kept then).
+    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, grid: bool, price: &mut f64) -> Option<OctiOut> {
         let cfg = self.octi;
         // grid-snap: the track grid of this pass (None: the plain pass, no grid node, no price).
         let lat = if grid { cfg.grid } else { None };
@@ -952,7 +955,7 @@ impl Drawer<'_> {
                 }
             }
         }
-        // grid-snap: per interior node off the grid, up to [`GRID_PER_NODE`] points of its grid
+        // grid-snap: per interior taut vertex off the grid, up to [`GRID_PER_NODE`] points of its grid
         // cell (nearest first) that lie in the strip and keep every clearance, as extra nodes off
         // the taut path (octilinear connectors only); at most [`GRID_NODES`] in all, on top of the
         // nodes above (their set is unchanged). Connectors between two grid nodes bend on the
@@ -962,8 +965,10 @@ impl Drawer<'_> {
             let base = nodes.len();
             let mut added = 0usize;
             'grid: for i in 0..base {
+                // r2 (cpu): taut vertices only (the run's real bends); the octagon extras get
+                // the grid through the grid Z connectors
                 let (p, _, ti, _) = nodes[i];
-                if ti == Some(0) || ti == Some(taut.len() - 1) || l.amount(p) <= 0.0 {
+                if ti.is_none() || ti == Some(0) || ti == Some(taut.len() - 1) || l.amount(p) <= 0.0 {
                     continue;
                 }
                 let mut cell = l.cell(p);
@@ -1627,6 +1632,7 @@ impl Drawer<'_> {
         if !dist[j][d].is_finite() {
             return None;
         }
+        *price = dist[j][d];
         let mut chain: Vec<Vec<Leg>> = Vec::new();
         while let Some((i, din, s)) = back[j][d].clone() {
             chain.push(s);
@@ -2387,18 +2393,21 @@ fn connectors(p: Vec2, q: Vec2) -> Vec<Vec<Leg>> {
     ]
 }
 
-/// grid-snap `"fallback"`: the grid pass replaces the plain pass's form only when it leaves fewer any-angle
-/// stretches (`plain` > 0 stretches; ties keep the plain form: the grid is the last spacing fallback, not a
-/// preference there). The grid pass is not run when the plain form has none (it could not have fewer).
-pub fn fallback_takes(plain: usize, grid: usize) -> bool {
-    grid < plain
+/// grid-snap `"fallback"`: the grid pass (run only where the plain pass leaves an any-angle
+/// stretch) replaces the plain pass's form only when its DP price `grid` (the same terms plus
+/// `off_grid`) is lower than the plain pass's `plain` (INFINITY: that pass found no form). A
+/// count of stretches alone took a 45 degree staircase through a packed passage for one free
+/// stretch (esp USB_D+, grid-snap r1); the price weighs the staircase's bends and room. Ties keep
+/// the plain form: the grid is the last spacing fallback, not a preference there.
+pub fn fallback_takes(plain: f64, grid: f64) -> bool {
+    grid.is_finite() && grid < plain - 1e-6
 }
 
-/// grid-snap: per interior node off the grid, at most this many points of its grid cell become
+/// grid-snap: per interior taut vertex off the grid, at most this many points of its grid cell become
 /// extra nodes of the octilinear DP.
 const GRID_PER_NODE: usize = 2;
 /// grid-snap: at most this many grid nodes per run, on top of the [`MAX_NODES`] cap.
-const GRID_NODES: usize = 160;
+const GRID_NODES: usize = 48;
 
 /// [`connectors`], plus with a grid (square: a 45 degree leg moves as far in x as in y) the two Z
 /// shapes with their middle leg moved to the nearest grid step from `p` and from `q` (the centred
@@ -2848,11 +2857,13 @@ mod tests {
     /// grid-snap: between two grid points, the extra Z shapes have their middle leg on a grid
     /// step (from p and from q), so every bend lies on the grid; none on a rectangular grid or
     /// without one.
-    /// grid-snap fallback (mutant G6): fewer stretches win, a tie keeps the plain form.
+    /// grid-snap fallback (mutant G6): a lower DP price wins, a tie or no grid form keeps the plain
+    /// form.
     #[test]
-    fn fallback_takes_only_fewer_stretches() {
-        assert!(fallback_takes(2, 1) && fallback_takes(1, 0));
-        assert!(!fallback_takes(1, 1) && !fallback_takes(1, 2) && !fallback_takes(0, 0));
+    fn fallback_takes_only_a_lower_price() {
+        let inf = f64::INFINITY;
+        assert!(fallback_takes(2.0e6, 1.0e6) && fallback_takes(inf, 5.0e6));
+        assert!(!fallback_takes(1.0e6, 1.0e6) && !fallback_takes(1.0e6, 2.0e6) && !fallback_takes(inf, inf) && !fallback_takes(1.0e6, inf));
     }
 
     #[test]

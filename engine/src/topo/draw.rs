@@ -958,6 +958,15 @@ pub fn viol_key(vs: &[Viol]) -> (f64, f64) {
     (vs.iter().filter(|v| v.kind == "short").map(Viol::amount).sum(), vs.iter().map(Viol::amount).sum())
 }
 
+/// The choice key of a forced via site ([`Drawer::force_via`]) with violations `vs` and the
+/// further price `extra` (wrong chord side, reach): `(short amount, violation amounts + extra)`,
+/// compared by [`forced_form_better`]. Shorts first, as for a forced run ([`viol_key`]): a via on
+/// a foreign track (KiCad: `shorting_items` and the drill's `hole_clearance`) never wins over a
+/// site with clearance deficits only (grid-snap r2, esp IO8_SCL over +3V3).
+pub fn force_via_key(vs: &[Viol], extra: f64) -> (f64, f64) {
+    (viol_key(vs).0, vs.iter().map(Viol::amount).sum::<f64>() + extra)
+}
+
 /// forced-draw (docs/dev/design/forced-draw.md): the graded choice key of one form of a forced
 /// run (never drop), its taut candidate or that candidate's octilinear form: `(short amount,
 /// price nm)`, the price = `violation` x the violation amounts + `any_angle` x the amounts of its
@@ -1051,6 +1060,10 @@ pub struct Drawer<'a> {
     pub(super) n_static: usize,
     /// The wire of each drawn (dynamic) object that has one, by ent id ([`Drawer::pair_disc_clear`]).
     ent_wire: BTreeMap<usize, usize>,
+    /// grid-snap r2: the drill radius of each via object (existing and drawn), by ent id. A
+    /// forced run's short over a via also pays the drill's `hole_clearance`, which KiCad's DRC
+    /// reports on top of the short ([`Drawer::ent_deficit`]).
+    pub(super) via_hole: BTreeMap<usize, f64>,
     /// Diagnosis: ignore the copper drawn so far.
     pub(super) only_static: std::sync::atomic::AtomicBool,
     /// Trial drawing (via reduction): a rejected run is not diagnosed or recorded.
@@ -1203,6 +1216,7 @@ impl<'a> Drawer<'a> {
             qgrow: 0.0,
             n_static: 0,
             ent_wire: BTreeMap::new(),
+            via_hole: BTreeMap::new(),
             only_static: std::sync::atomic::AtomicBool::new(false),
             quiet: false,
             widths: None,
@@ -1353,7 +1367,8 @@ impl<'a> Drawer<'a> {
         for v in &model.vias {
             let m = if v.layers.is_empty() { all } else { lmask(&v.layers) | if v.layers.contains(&0) && v.layers.contains(&2) { all } else { 0 } };
             let clear = via_clear(model, v.net, v.d, v.drill);
-            self.add_ent(Ent { core: Core::Pt(v.at.to_vec2()), grow: 0.5 * v.d as f64, mask: m, net: (v.net > 0).then_some(v.net), clear, fixed: false, live: true, shape: false });
+            let id = self.add_ent(Ent { core: Core::Pt(v.at.to_vec2()), grow: 0.5 * v.d as f64, mask: m, net: (v.net > 0).then_some(v.net), clear, fixed: false, live: true, shape: false });
+            self.via_hole.insert(id, 0.5 * v.drill as f64);
         }
         for k in &model.kept {
             let m = lmask(&[k.layer]);
@@ -1414,7 +1429,7 @@ impl<'a> Drawer<'a> {
             Item::Via(v) => {
                 let nl = b.signal_layers.len();
                 let clear = via_clear(self.model, v.net, v.d, v.drill);
-                self.add_ent(Ent {
+                let id = self.add_ent(Ent {
                     core: Core::Pt(Vec2 { x: v.at.x as f64, y: -(v.at.y as f64) }),
                     grow: 0.5 * v.d as f64,
                     mask: if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 },
@@ -1423,7 +1438,9 @@ impl<'a> Drawer<'a> {
                     fixed: false,
                     live: true,
                     shape: false,
-                })
+                });
+                self.via_hole.insert(id, 0.5 * v.drill as f64);
+                id
             }
         }
     }
@@ -2328,9 +2345,12 @@ impl<'a> Drawer<'a> {
 
     /// Via `i` of wire `w` by force (M-B1 never drop): of every candidate site in its interval
     /// `ka..=kb` (the legal search's sites, then every triangle's site points, obstacles or not)
-    /// and every via size, the one with the least `violation` price (a site on the wrong side of
-    /// another wire's chord counts one violation more: its run would cross that wire), ties by
-    /// the most room. Its violations go with it. O(sites x sizes x checker query).
+    /// and every via size, the one with the least short amount (via copper over foreign copper,
+    /// KiCad's `shorting_items`, plus its drill there, `hole_clearance`: no graded judgement call,
+    /// [`viol_key`]; grid-snap r2: a site on a foreign track won over a clearance-only site), then
+    /// the least `violation` price (a site on the wrong side of another wire's chord counts one
+    /// violation more: its run would cross that wire), ties by the most room. Its violations go
+    /// with it. O(sites x sizes x checker query).
     /// `class`: the plan's crossings of `w` ([`Drawer::class_crossings`]); `Some` = only sites in the
     /// plan's class ([`Drawer::via_reach`]), their reach violations added to the price with
     /// `[vias] reach_price`; `None` = every site.
@@ -2339,7 +2359,8 @@ impl<'a> Drawer<'a> {
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let turn_at = |k: usize| wi.turns.iter().find(|x| x.0 == k).map(|x| pr.pos[x.1]);
-        let mut best: Option<(f64, f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
+        #[allow(clippy::type_complexity)]
+        let mut best: Option<((f64, f64), f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
         // pad-snap r2b debug (`TOPO_VIADBG`): every forced candidate site with its price
         let fdbg = std::env::var_os("TOPO_VIADBG").is_some();
         let mut cands: Vec<(f64, usize, Vec2, i64, String)> = Vec::new();
@@ -2383,22 +2404,22 @@ impl<'a> Drawer<'a> {
                     },
                     None => 0.0,
                 };
-                let price = vs.iter().map(Viol::amount).sum::<f64>() + side + reach;
+                let key = force_via_key(&vs, side + reach);
                 if dbg {
-                    seen.push((price, viol_key(&vs).0, k, p, sz.d));
+                    seen.push((key.1, viol_key(&vs).0, k, p, sz.d));
                 }
                 let room = self.via_room(w, k, p, sz.d as f64);
                 if fdbg {
-                    cands.push((price, k, p, sz.d, vs.iter().map(|v| format!("{} {} d{:.0} l{:.0}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3)).collect::<Vec<_>>().join("; ")));
+                    cands.push((key.1, k, p, sz.d, vs.iter().map(|v| format!("{} {} d{:.0} l{:.0}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3)).collect::<Vec<_>>().join("; ")));
                 }
-                if best.as_ref().is_none_or(|b| price < b.0 - 1e-9 || (price - b.0).abs() <= 1e-9 && room > b.1 + 1.0) {
-                    best = Some((price, room, k, p, sz, vs));
+                if best.as_ref().is_none_or(|b| forced_form_better(key, b.0) || (key.0 - b.0 .0).abs() <= 1e-9 && (key.1 - b.0 .1).abs() <= 1e-9 && room > b.1 + 1.0) {
+                    best = Some((key, room, k, p, sz, vs));
                 }
             }
         }
         if fdbg {
             cands.sort_by(|a, b| a.0.total_cmp(&b.0));
-            eprintln!("FORCEVIA wire {w} net {net} via {i} class {} chosen {:?} of {} sites", class.is_some(), best.as_ref().map(|b| (b.0, b.3.x / 1e6, -b.3.y / 1e6)), cands.len());
+            eprintln!("FORCEVIA wire {w} net {net} via {i} class {} chosen {:?} of {} sites", class.is_some(), best.as_ref().map(|b| (b.0 .0, b.0 .1, b.3.x / 1e6, -b.3.y / 1e6)), cands.len());
             for c in cands.iter().take(8) {
                 eprintln!("  FORCEVIA cand price {:.3} k {} ({:.4},{:.4}) d {} [{}]", c.0, c.1, c.2.x / 1e6, -c.2.y / 1e6, c.3, c.4);
             }
@@ -4948,6 +4969,24 @@ mod tests {
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }
+    }
+
+    /// grid-snap r2: a forced via site on foreign copper (a short, here with its drill's hole
+    /// clearance) loses to a site with deep clearance deficits only; between shorts the smaller
+    /// short wins; the extra price adds to the second term only.
+    #[test]
+    fn force_via_key_puts_shorts_first() {
+        const MM: f64 = 1e6;
+        let viol = |kind: &'static str, depth_mm: f64| Viol { kind, at: v(0.0, 0.0), layer: 0, depth_nm: depth_mm * MM, len_nm: 0.6 * MM, against: "x".into(), via: true };
+        let on_track = [viol("short", 0.05), viol("hole_clearance", 0.02)];
+        let tight = [viol("clearance", 0.12), viol("clearance", 0.12), viol("hole_clearance", 0.1)];
+        let (a, b) = (force_via_key(&on_track, 0.0), force_via_key(&tight, 0.0));
+        assert!(a.1 < b.1, "the short site is cheaper on amounts alone: {a:?} {b:?}");
+        assert!(forced_form_better(b, a) && !forced_form_better(a, b), "{a:?} {b:?}");
+        let deeper = [viol("short", 0.3)];
+        assert!(forced_form_better(force_via_key(&on_track, 5.0), force_via_key(&deeper, 0.0)));
+        assert_eq!(force_via_key(&tight, 1.0).1, b.1 + 1.0);
+        assert_eq!(force_via_key(&tight, 1.0).0, 0.0);
     }
 
     /// forced-draw (T4): the graded choice of a forced run's form ([`forced_form_key`],

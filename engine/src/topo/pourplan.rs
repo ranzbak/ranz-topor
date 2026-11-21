@@ -208,6 +208,40 @@ pub fn cut_components(model: &BoardModel, items: &[Item], base: &PourBase) -> Ve
     out
 }
 
+/// grid-snap r2 (`[drawing] grid_snap = "prefer"`): a via moved onto the grid must not change
+/// the plan's pour cut-offs. `tracks`: the plan's tracks; `sites`: every via site after the grid
+/// moves `moves` `(wire, via index, site before)`; `via`: the via item of a wire at a point.
+/// When the copper with the moves cuts off more ([`pour_cuts`], graded) than without them, the
+/// moves of the vias on the wires that bound a cut-off piece ([`cut_components`]) go back, and
+/// if it still cuts off more, every move goes back. Returns how many went back. O(up to three
+/// pour checks; none without a pour or a move).
+pub fn undo_grid_cuts(model: &BoardModel, tracks: &[Item], sites: &mut super::viaopt::Sites, moves: &[(WireId, usize, super::viaopt::Site)], via: &dyn Fn(WireId, crate::geom::Vec2) -> Option<Item>, pb: &PourBase) -> usize {
+    if moves.is_empty() || !pb.any {
+        return 0;
+    }
+    let with = |sites: &super::viaopt::Sites| -> Vec<Item> { tracks.iter().cloned().chain(sites.iter().filter_map(|(&(w, _), &(_, p))| via(w, p))).collect() };
+    let mut before = sites.clone();
+    for &(w, i, s0) in moves {
+        before.insert((w, i), (s0.k, s0.p));
+    }
+    let base = pour_cuts(model, &with(&before), pb).1;
+    let now = with(sites);
+    if pour_cuts(model, &now, pb).1 <= base + 1e-9 {
+        return 0;
+    }
+    let bound: BTreeSet<WireId> = cut_components(model, &now, pb).into_iter().flat_map(|c| c.bounding).collect();
+    let mut back = 0;
+    for &(w, i, s0) in moves.iter().filter(|m| bound.contains(&m.0)) {
+        sites.insert((w, i), (s0.k, s0.p));
+        back += 1;
+    }
+    if pour_cuts(model, &with(sites), pb).1 > base + 1e-9 {
+        *sites = before;
+        back = moves.len();
+    }
+    back
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +284,37 @@ mod tests {
     fn seg(net: i32, a: (i64, i64), b: (i64, i64)) -> Item {
         let p = |q: (i64, i64)| IVec2 { x: q.0 as i32, y: q.1 as i32 };
         Item::Track(TrackItem { net, layer: 31, width: 250_000, prim: TrackPrim::Seg { a: p(a), b: p(b) }, group: None, wire: None })
+    }
+
+    /// grid-snap r2: a SIG track stops short of pad B (the pour between them stays open);
+    /// a via moved into that gap closes it (U1.1 and U2.1 cut off): the move goes back. A move
+    /// that cuts nothing stays; no move, nothing to do.
+    #[test]
+    fn grid_moves_that_cut_off_pour_go_back() {
+        use crate::geom::Vec2;
+        let m = model();
+        let pb = PourBase::new(&m, 1.0e5);
+        let mut t = seg(2, (7 * MM, 2_300_000), (7 * MM, 30_500_000));
+        if let Item::Track(x) = &mut t {
+            x.wire = Some(0);
+        }
+        let math = |x: i64, y: i64| Vec2 { x: x as f64, y: -(y as f64) };
+        let via = |w: WireId, p: Vec2| Some(super::super::draw::via_item(2, p, ViaSize { d: 1_200_000, drill: 600_000 }, Some(w)));
+        let site = |p: Vec2| super::super::viaopt::Site { wire: 1, i: 0, k: 0, p };
+        let (far, gap, far2) = (math(12 * MM, 31 * MM), math(7 * MM, 31 * MM), math(12 * MM, 30_800_000));
+        let tracks = [t];
+        assert_eq!(pour_cuts(&m, &[tracks[0].clone(), via(1, far).unwrap()], &pb).0, 0);
+        assert_eq!(pour_cuts(&m, &[tracks[0].clone(), via(1, gap).unwrap()], &pb).0, 1);
+        // wire 1's move closes the gap and goes back; wire 3's move (far from it) stays
+        let other = math(20 * MM, 10 * MM);
+        let mut sites: super::super::viaopt::Sites = [((1, 0), (0, gap)), ((3, 0), (0, other))].into_iter().collect();
+        let moves = [(1, 0, site(far)), (3, 0, super::super::viaopt::Site { wire: 3, i: 0, k: 0, p: math(20 * MM, 10_200_000) })];
+        assert_eq!(undo_grid_cuts(&m, &tracks, &mut sites, &moves, &via, &pb), 1);
+        assert_eq!((sites[&(1, 0)].1, sites[&(3, 0)].1), (far, other));
+        let mut sites: super::super::viaopt::Sites = [((1, 0), (0, far2))].into_iter().collect();
+        assert_eq!(undo_grid_cuts(&m, &tracks, &mut sites, &[(1, 0, site(far))], &via, &pb), 0);
+        assert_eq!(sites[&(1, 0)].1, far2);
+        assert_eq!(undo_grid_cuts(&m, &tracks, &mut sites, &[], &via, &pb), 0);
     }
 
     #[test]

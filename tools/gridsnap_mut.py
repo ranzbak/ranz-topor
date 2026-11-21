@@ -15,10 +15,16 @@ M = {
     "G3": ("engine/src/topo/octi.rs", "&& !off_grid {", "&& !(off_grid && false) {"),
     "G4": ("engine/src/topo/octi.rs", "    let Some(l) = lat.filter(|l| l.square()) else { return out };", "    let Some(l) = lat.filter(|_| false) else { return out };"),
     "G5": ("engine/src/topo/viaopt.rs", "        if r < 0.0 || g + price * a < g0 {", "        if r < 0.0 {"),
-    "G6": ("engine/src/topo/octi.rs", "    grid < plain\n", "    grid <= plain\n"),
+    "G6": ("engine/src/topo/octi.rs", "    grid.is_finite() && grid < plain - 1e-6\n", "    grid.is_finite() && grid <= plain + 1e-6\n"),
     "G7": ("engine/src/topo/octi.rs", "                                    c += if k == 0 { gnode[i] } else { gprice(from) };", "                                    c += 0.0;"),
+    # r2
+    "G8": ("engine/src/topo/exact.rs", "            [0.0, amt + hole]\n", "            [0.0, amt + 0.0 * hole]\n"),
+    "G9": ("engine/src/topo/draw.rs", "    (viol_key(vs).0, vs.iter()", "    (0.0, vs.iter()"),
+    "G10": ("engine/src/topo/viaopt.rs", "        if !ok_k(k) || !ok_q(q) {", "        if !ok_k(k) {"),
+    "G11": ("engine/src/topo/pourplan.rs", "    if pour_cuts(model, &now, pb).1 <= base + 1e-9 {", "    if true || pour_cuts(model, &now, pb).1 <= base + 1e-9 {"),
+    "G12": ("engine/src/topo/pourplan.rs", "    for &(w, i, s0) in moves.iter().filter(|m| bound.contains(&m.0)) {", "    for &(w, i, s0) in moves.iter().filter(|m| bound.contains(&m.0) && false) {"),
 }
-TESTS = ["grid", "octilinear", "fallback"]
+TESTS = ["grid", "octilinear", "fallback", "force_via", "deficit", "pour"]
 
 
 def main() -> int:

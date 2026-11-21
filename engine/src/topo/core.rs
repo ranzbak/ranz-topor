@@ -7753,14 +7753,30 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             _ => 0.0,
         };
         let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via, pair_room: opts.via_pair_room, grid: super::gridsnap::via_grid(opts) };
-        let (sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
+        let (mut sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
+        // grid-snap r2: a via moved onto the grid must not change the plan's pour cut-offs (the
+        // pour term the plan priced, [`super::pourplan`]): with the grid moves the plan copper
+        // cuts off no more than without them, else the moves of the vias on the wires that bound a
+        // new cut-off piece go back, and if it still cuts off more, every grid move goes back.
+        if !rr.grid_moves.is_empty() {
+            let pb = super::pourplan::PourBase::new(model, opts.pour_cut_cells);
+            if pb.any {
+                let tracks: Vec<Item> = super::pourplan::plan_items(&st, &packer, b, &lr.events, bottom).into_iter().filter(|it| matches!(it, Item::Track(_))).collect();
+                let via = |w: WireId, p: Vec2| first(st.wires[w].net).map(|sz| super::draw::via_item(st.wires[w].net, p, sz, Some(w)));
+                let back = super::pourplan::undo_grid_cuts(model, &tracks, &mut sites, &rr.grid_moves, &via, &pb);
+                if back > 0 {
+                    warnings.push(format!("grid snap: {back} of {} via grid moves undone: they cut off more pour than the sites without them", rr.grid_moves.len()));
+                }
+            }
+        }
         dr.via_site = sites;
         dr.via_site_tight = rr.tight.iter().copied().collect();
         warnings.push(format!(
-            "via relocation ([vias] relocate; Dayan & Dai 1991, force balance): {} vias, {} moved in their free interval to the most clearance, smallest gap {:+.3} mm in total",
+            "via relocation ([vias] relocate; Dayan & Dai 1991, force balance): {} vias, {} moved in their free interval to the most clearance, smallest gap {:+.3} mm in total{}",
             rr.vias,
             rr.moved,
-            rr.gap_gain / MM
+            rr.gap_gain / MM,
+            if rr.grid_moves.is_empty() { String::new() } else { format!(", {} onto the via grid ([drawing] grid_snap)", rr.grid_moves.len()) }
         ));
         if std::env::var("TOPO_VIAREL").is_ok() {
             for &(w, i, a, b, g0, g1) in &rr.moves {

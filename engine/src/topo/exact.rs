@@ -606,7 +606,18 @@ impl Drawer<'_> {
         }
         let amt = super::factors::violation_amount(need - d, band_len(a, b, &e.core, need));
         if ent_short(e, wp.net, d, sw) {
-            [0.0, amt]
+            // grid-snap r2: over a via, the drill's hole clearance as well (KiCad reports
+            // `hole_clearance` on top of the short: two violations, so a forced run prefers a
+            // short over a track to one through a foreign via's drill)
+            let hole = self.via_hole.get(&i).map_or(0.0, |&hr| {
+                let hneed = hr + self.model.rules.via_hole_clear() as f64 + 0.5 * sw + self.eps;
+                if d < hneed - TOL {
+                    super::factors::violation_amount(hneed - d, band_len(a, b, &e.core, hneed))
+                } else {
+                    0.0
+                }
+            });
+            [0.0, amt + hole]
         } else {
             [amt, 0.0]
         }
@@ -1769,9 +1780,14 @@ mod tests {
                             return t;
                         }
                         let x = crate::topo::factors::violation_amount(need - d, band_len(u, v, &e.core, need));
-                        // copper over foreign copper (not a hole, edge or keepout): a short
+                        // copper over foreign copper (not a hole, edge or keepout): a short; over a
+                        // via, its drill's hole clearance too (grid-snap r2)
                         if !e.fixed && e.net != Some(wp.net) && d < e.grow + 0.5 * sw {
-                            [t[0], t[1] + x]
+                            let h = dr.via_hole.get(&i).map_or(0.0, |&hr| {
+                                let hn = hr + dr.model.rules.via_hole_clear() as f64 + 0.5 * sw + dr.eps;
+                                if d < hn - TOL { crate::topo::factors::violation_amount(hn - d, band_len(u, v, &e.core, hn)) } else { 0.0 }
+                            });
+                            [t[0], t[1] + x + h]
                         } else {
                             [t[0] + x, t[1]]
                         }
