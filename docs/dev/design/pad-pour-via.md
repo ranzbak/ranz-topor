@@ -1,7 +1,7 @@
 # pad-pour-via: dog-bone via for a pour pad whose thermal spokes are all cut
 
 Status: A + B approved by the lead (2026-11-22, "KiCad's zone_filler spoke rule is the spec"); implemented.
-Branch pad-pour-via, rebased on stitch-vias r4 c513c70c.
+Branch pad-pour-via, rebased on main 65d7901b (stitch-vias merged).
 
 ## RCA (replay of the stitching on the r3 qmtech run, `examples/stitch_replay`)
 Of the 5 pads the stitch-vias r1 RCA found fitting, the estimate (`pourcheck`) misjudges 3:
@@ -52,8 +52,12 @@ Cause of the misjudgement: differences from KiCad 10.0 (`pcbnew/zone_filler.cpp`
   - length past the pad edge, plus 0.25 mm per 45° bend (0.5 mm per 90°);
   - `via_squeeze` on both layers, foreign-pad proximity, and the antipad-neck price (stitch-vias D2);
   - the BGA area price (100 via prices, power-via rule: shared vias outside BGA ok, under BGA a last resort);
-  - the off-grid price of the via (graded `off_grid` × amount, from the grid source stitch-vias r4 exposes; the pad
+  - the off-grid price of the via (graded `off_grid` × amount, from the grid source stitch-vias exposes; the pad
     end stays at the pad centre). No price for a shared via other than its stub length.
+- Grid first (lead 2026-11-23, stitch-vias r5c's rule for connection vias): with a via grid every candidate whose via
+  stands on a grid point, and every shared via, is tried before any off the grid; an off-grid via is the fallback
+  where no grid point fits, priced as above, with the warning "dog-bone X.N off the via grid at (x, y): the pad's only
+  connection, ..." (finding STITCH_OFF_GRID).
 - Legal only: the checker against all routed copper and the stitches placed so far, the mask-opening rule, the
   own-pad and own-copper sliver rules, and the via standing in solid main fill of another pour layer
   (`main_elsewhere`, depth r + ring).

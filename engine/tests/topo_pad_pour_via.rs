@@ -280,10 +280,24 @@ fn a_dog_bone_via_prefers_the_grid() {
     let off = first_via(&stitch(&m, &Options { stitch_on_grid: false, ..Options::default() }, &reg(), &items, &[], None));
     assert_eq!(off.0, 10.0);
     assert!((off.1 - 11.8).abs() < 1e-6, "{off:?}");
-    // off_grid weighted 2 mm per via fully off the grid (default 0.15 mm: a 0.05 mm detour would not pay).
-    let factors = FactorConfig { weight: [("off_grid".to_string(), 2.0)].into_iter().collect(), ..FactorConfig::default() };
-    let o = Options { stitch_on_grid: true, grid_via_nm: [500_000, 500_000], grid_origin_nm: [0, 250_000], factors, ..Options::default() };
+    // Grid first (stitch-vias r5c rule): a grid point that fits wins at the default off_grid price
+    // too, though the off-grid site 0.05 mm nearer the pad would be cheaper by length.
+    let o = Options { stitch_on_grid: true, grid_via_nm: [500_000, 500_000], grid_origin_nm: [0, 250_000], ..Options::default() };
     let s = stitch(&m, &o, &reg(), &items, &[], None);
     let v = first_via(&s);
     assert!((v.0 - 10.0).abs() < 1e-6 && (v.1 - 11.75).abs() < 1e-6, "{v:?} {}", dog_note(&s));
+    assert!(!s.notes.iter().any(|n| n.contains("off the via grid")), "{:?}", s.notes);
+}
+
+/// No grid point in reach (a 5 mm via grid from (2.5, 2.5)): the via leaves the grid as the
+/// priced fallback, at the cheapest off-grid site, and a warning names it.
+#[test]
+fn a_dog_bone_via_leaves_the_grid_only_where_no_grid_point_fits() {
+    let (m, items) = row();
+    let o = Options { stitch_on_grid: true, grid_via_nm: [5_000_000, 5_000_000], grid_origin_nm: [2_500_000, 2_500_000], ..Options::default() };
+    let s = stitch(&m, &o, &reg(), &items, &[], None);
+    let v = first_via(&s);
+    assert!((v.0 - 10.0).abs() < 1e-6 && (v.1 - 11.8).abs() < 1e-6, "{v:?} {}", dog_note(&s));
+    let w = s.notes.iter().find(|n| n.starts_with("dog-bone G.1 off the via grid at (10.000, 11.800)")).unwrap_or_else(|| panic!("{:?}", s.notes));
+    assert!(w.contains("only connection"), "{w}");
 }

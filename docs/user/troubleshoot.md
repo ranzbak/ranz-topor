@@ -710,7 +710,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** A stitching connection via (a pad stub, or the first via of a pour piece the new copper cut off: its only connection) stands off your KiCad via grid, because no legal point of the grid fits there. Connection copper may leave the grid, as in KiCad; extra stitching vias never do.
+**Cause.** A stitching connection via (a pad stub, a dog-bone of a pour pad whose thermal spokes are all cut, or the first via of a pour piece the new copper cut off: its only connection) stands off your KiCad via grid, because no legal point of the grid fits there. Connection copper may leave the grid, as in KiCad; extra stitching vias never do.
 
 **Fix.** Nothing to do if the place is fine; otherwise move the via by hand (KiCad → Edit → Properties) or use a finer via grid (KiCad → View → Grid Properties); planes.stitch_on_grid = false switches the grid off for the stitching vias.
 

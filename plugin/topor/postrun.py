@@ -171,7 +171,7 @@ def route_findings(result: dict | None) -> list:
                        [x.removeprefix("stitch ") for x in lines("stitch (")
                         if not re.search(r": 0 (of \d+ )?via\(s\)$", x)]))
     # r6: the warnings the user asked for are findings of their own (not items of the capped info finding above).
-    off = [x for x in lines("stitch via off the via grid at ") + lines("pad stub ") if " off the via grid at " in x]
+    off = [x for x in lines("stitch via off the via grid at ") + lines("pad stub ") + lines("dog-bone ") if " off the via grid at " in x]
     if off:
         out.append(_mk("STITCH_OFF_GRID",
                        f"{len(off)} connection via(s) of pour stitching stand off your KiCad via grid because no grid "

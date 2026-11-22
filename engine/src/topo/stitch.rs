@@ -1377,8 +1377,9 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 let mut why: Vec<String> = Vec::new();
                 for &pi in &c.pads {
                     match dogbone(&mut cx, &reach, c.net, pi, sz, need) {
-                        Ok((its, note)) => {
+                        Ok((its, note, warn)) => {
                             out.notes.push(format!("{note} for {}", cut_text(model, c)));
+                            out.notes.extend(warn);
                             for it in its {
                                 cx.add(&it);
                                 out.items.push(it);
@@ -1614,9 +1615,13 @@ fn blocker_nets(cx: &Ctx, rep: &crate::check::CheckReport, out: &mut std::collec
 /// rules), no via under a mask opening exposing another net. A leg that fails fails for every
 /// longer leg on its ray (it contains the shorter one) and a via site fails for every leg that
 /// ends there: both are remembered, so the [`DOG_TRIES`] checker queries go to new geometry.
-/// Ok: the items (KiCad frame) and a note; Err: the pad's name with the nets the refused
-/// candidates hit. O(candidates log candidates + DOG_TRIES checker queries).
-fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias::ViaSize, need: f64) -> Result<(Vec<Item>, String), String> {
+/// With a via grid (`[planes] stitch_on_grid`) every candidate whose via stands on a grid point
+/// (and every shared via) is tried before any off the grid; an off-grid via is the fallback where
+/// no grid point fits, priced by the graded `off_grid` amount and named in a warning (stitch-vias
+/// r5c: connection copper goes off the grid where it does not fit, as in KiCad).
+/// Ok: the items (KiCad frame), a note and the off-grid warning; Err: the pad's name with the
+/// reason no candidate fitted. O(candidates log candidates + DOG_TRIES checker queries).
+fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias::ViaSize, need: f64) -> Result<(Vec<Item>, String, Option<String>), String> {
     use std::collections::{BTreeSet, HashMap, HashSet};
     let model = cx.model;
     let pad = &model.pads[pi];
@@ -1656,7 +1661,11 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
         widths.dedup_by(|a, b| (*a - *b).abs() < 1_000.0);
         let axes: Vec<(Vec2, f64)> = (0..4).map(|k| if k < 2 { e[k] } else { e[k - 2] * -1.0 }).map(|u| (u, half(u))).collect();
         // Geometry first (a, b per axis and turn), widths after: the via filters are width-free.
-        let mut geo: Vec<(f64, usize, usize, f64, f64, bool)> = Vec::new(); // (price, axis, turn, a, b, share)
+        // (price, axis, turn, a, b, share, off): `off` = a new via off the via grid. With a grid the
+        // grid candidates (and shared vias) all come first; an off-grid via is the priced, warned
+        // fallback where no grid point fits (as stitch-vias r5c's connection vias: connection copper
+        // goes off the grid where it does not fit, as in KiCad).
+        let mut geo: Vec<(f64, usize, usize, f64, f64, bool, bool)> = Vec::new();
         for (k, &(u, h)) in axes.iter().enumerate() {
             for (ti, &turn) in turns.iter().enumerate() {
                 let t = (turn as f64).to_radians();
@@ -1668,6 +1677,7 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
                     }
                     let v = c0 + u * a + d * b;
                     let mut price = (a - h) + b + bend;
+                    let mut off = false;
                     if super::planes::in_bga(&cx.bga, v) {
                         price += cx.via_price_nm * 100.0;
                     }
@@ -1692,9 +1702,10 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
                         price += cx.squeeze(d2 - r, sz.d as f64) + cx.prox(v, r, net) + cx.plane_neck(reach, v, r, net);
                         if let Some(lat) = cx.grid.grid_at(v) {
                             price += cx.off_grid_nm * lat.amount(v);
+                            off = !lat.on(v);
                         }
                     }
-                    geo.push((price, k, ti, a, b, share));
+                    geo.push((price, k, ti, a, b, share, off));
                 };
                 let n1 = (DOG_LEG1_NM / DOG_STEP_NM).round() as usize;
                 let n2 = (DOG_LEG2_NM / DOG_STEP_NM).round() as usize;
@@ -1733,13 +1744,17 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
                 }
             }
         }
-        let mut cands: Vec<(f64, usize, usize, f64, f64, bool, usize)> = Vec::with_capacity(geo.len() * widths.len());
+        // (price, axis, turn, a, b, share, width index, off grid)
+        type Cand = (f64, usize, usize, f64, f64, bool, usize, bool);
+        let mut cands: Vec<Cand> = Vec::with_capacity(geo.len() * widths.len());
         for g in &geo {
             for (wi, &w) in widths.iter().enumerate() {
-                cands.push((g.0 + DOG_NECK_NM * (1.0 - w / w0), g.1, g.2, g.3, g.4, g.5, wi));
+                cands.push((g.0 + DOG_NECK_NM * (1.0 - w / w0), g.1, g.2, g.3, g.4, g.5, wi, g.6));
             }
         }
-        cands.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)).then(x.3.total_cmp(&y.3)).then(x.4.total_cmp(&y.4)).then(x.6.cmp(&y.6)));
+        cands.sort_by(|x, y| {
+            x.7.cmp(&y.7).then(x.0.total_cmp(&y.0)).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)).then(x.3.total_cmp(&y.3)).then(x.4.total_cmp(&y.4)).then(x.6.cmp(&y.6))
+        });
         // Monotone caches: leg 1 of axis k and width wi is legal up to `ok1`, illegal from `bad1`;
         // leg 2 likewise per (axis, a, turn, width); via sites by position.
         let mut ok1: HashMap<(usize, usize), f64> = HashMap::new();
@@ -1748,7 +1763,7 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
         let mut bad2: HashMap<(usize, i64, usize, usize), f64> = HashMap::new();
         let mut via_ok: HashSet<(i64, i64)> = HashSet::new();
         let mut via_bad: HashSet<(i64, i64)> = HashSet::new();
-        for &(_, k, ti, a, b, share, wi) in &cands {
+        for &(_, k, ti, a, b, share, wi, off) in &cands {
             if tried >= DOG_TRIES {
                 break;
             }
@@ -1816,7 +1831,13 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
                 if share { ", shared via" } else { ", via" },
                 w / 1e6
             );
-            return Ok((its, note));
+            let warn = off.then(|| {
+                format!(
+                    "dog-bone {label} off the via grid at {}: the pad's only connection, no legal via-grid point for its via (connection copper goes off the grid where it does not fit, as in KiCad; stitching extras never do)",
+                    kicad_mm(v)
+                )
+            });
+            return Ok((its, note, warn));
         }
     }
     let nets: Vec<String> = blockers.into_iter().take(6).collect();
