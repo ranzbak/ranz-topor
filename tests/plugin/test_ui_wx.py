@@ -95,14 +95,14 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         "preflight": ["findings", "cause", "accept", "use_default", "scope_whole", "scope_between",
                       "scope_touching", "existing", "respect_locked", "drawing_style", "grid_snap", "timeout", "timeout_clock",
                       "save_toml", "help", "cancel", "route"],
-        "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel"],
+        "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel", "accept"],
         "preview": ["zoom", "image_before", "image_after", "summary", "findings", "cause", "report_dir",
                     "open_report_folder", "reject", "accept"],
         "error": ["details", "copy_details", "open_report_folder", "close"],
     }
     mins = {"first_run": (440, 200), "preflight": (640, 420), "progress": (460, 240), "preview": (800, 560),
             "error": (520, 320)}
-    default = {"first_run": wx.ID_OK, "preflight": wx.ID_OK, "progress": wx.ID_CANCEL, "preview": wx.ID_OK,
+    default = {"first_run": wx.ID_OK, "preflight": wx.ID_OK, "progress": wx.ID_OK, "preview": wx.ID_OK,
                "error": wx.ID_OK}
     esc = {**{k: wx.ID_OK for k in ("first_run", "error")}, "preflight": wx.ID_CANCEL,
            "progress": wx.ID_CANCEL, "preview": wx.ID_CANCEL}
@@ -132,6 +132,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         for b in p.buttons.values():
             if b.GetName() != "cancel":
                 assert "&" in b.GetLabel()
+        assert all("&" in b.GetLabel() for b in dlgs["progress"].buttons.values())  # Accept and Cancel
         assert "&" in dlgs["preview"].buttons["accept"].GetLabel()
         # decision round trip: defaults change nothing; changes show up as overrides
         assert p.decision(False) == Decision(False)
@@ -220,30 +221,68 @@ def test_progress_returns_false_after_cancel(app):
     evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
     evt.SetEventObject(dlg.cancel_button)
     dlg.cancel_button.GetEventHandler().ProcessEvent(evt)
-    assert dlg.phase.GetLabel() == "Cancel pressed: finishing the current stage… 0 s"
-    assert not dlg.cancel_button.IsEnabled()
-    # the engine finishes its stage: the label names it and counts the seconds since Cancel
+    assert dlg.phase.GetLabel() == "Cancel pressed: stopping, nothing is taken… 0 s"
+    assert not dlg.cancel_button.IsEnabled() and not dlg.accept_button.IsEnabled()
+    assert ui.stop_discards() is True and ui.ok_at_press() is False
     dlg.cancelled_at -= 12.4
     assert ui.progress(Progress("route", 4, 13, 27, 4, 13.0, "drawing the traces")) is False
-    assert dlg.phase.GetLabel() == "Cancel pressed: finishing the current stage (drawing the traces)… 12 s"
+    assert dlg.phase.GetLabel() == "Cancel pressed: stopping, nothing is taken… 12 s"
     assert ui.progress(Progress("route", 4, 13, 27, 4, 13.0)) is False
     assert ui.progress(Progress("drc", 0, 13, 27, 4, 14.0)) is False
     assert dlg.phase.GetLabel() == ui_wx.WORDING["progress"]["phase_drc"]  # the DRC of the result keeps its label
     assert ui.shown == 1  # one dialog, shown once
-    ui._close_progress()
-    assert ui._progress is None
 
 
-def test_progress_phase_pending_and_nolimit(app):
+def test_progress_accept_keeps_the_best_and_names_the_stage_cancel_after_it_drops(app):
+    """User 2026-11-22: Accept = stop and take the best so far (the engine finishes its stage; the label names it);
+    ``stop_discards`` stays False. A Cancel after the Accept still drops the run."""
     ui = _QuietUi()
-    ui._timeout_s = 0.0
-    assert ui.progress(Progress("setup", 0, 0, 27, 0, 1.0)) is True
-    d = ui._progress
-    assert d.phase.GetLabel() == "Preparing geometry"
-    assert d.routed_value.GetLabel() == "– / 27"
-    assert d.elapsed_value.GetLabel() == "0:01 · CPU 0:00 / no limit"
-    ui.progress(Progress("weird", 1, 1, 27, 0, 2.0))
-    assert d.phase.GetLabel() == "weird"
+    assert ui.progress(Progress("route", 3, 12, 27, 4, 12.0)) is True
+    dlg = ui._progress
+    assert ui.stop_discards() is False and ui.ok_at_press() is None
+    _press(dlg.accept_button)
+    assert dlg.phase.GetLabel() == "Accept pressed: finishing the current stage… 0 s"
+    assert not dlg.accept_button.IsEnabled() and dlg.cancel_button.IsEnabled()  # Cancel stays possible
+    dlg.cancelled_at -= 12.4
+    assert ui.progress(Progress("route", 4, 13, 27, 4, 13.0, "drawing the traces")) is False
+    assert dlg.phase.GetLabel() == "Accept pressed: finishing the current stage (drawing the traces)… 12 s"
+    assert ui.stop_discards() is False and ui.ok_at_press() is False  # not stable at the press
+    _press(dlg.cancel_button)
+    assert ui.stop_discards() is True and not dlg.cancel_button.IsEnabled()
+    ui._close_progress()
+
+
+class _Key:
+    def __init__(self, code):
+        self.code, self.skipped = code, False
+
+    def GetKeyCode(self):
+        return self.code
+
+    def Skip(self):
+        self.skipped = True
+
+
+def test_progress_keys_esc_cancels_enter_never_stops_the_run(app):
+    """Esc = Cancel. Enter never presses Accept or Cancel, whatever has the focus (a stray Enter during an unattended run
+    must neither take a result nor drop the run); in the limit field it sets the limit, on a limit button it is passed on."""
+    ui = _QuietUi()
+    ui.progress(Progress("route", 1, 1, 27, 0, 1.0))
+    dlg = ui._progress
+    assert dlg.GetEscapeId() == wx.ID_CANCEL and not dlg.cancel_button.HasFocus()  # never starts on Cancel
+    for btn in (dlg.accept_button, dlg.cancel_button):
+        btn.SetFocus()
+        e = _Key(wx.WXK_RETURN)
+        dlg._on_key(e)
+        assert not dlg.cancelled and not e.skipped, "Enter on " + btn.GetName() + " does nothing"
+    dlg.limit_set.Enable()
+    dlg.limit_set.SetFocus()
+    e = _Key(wx.WXK_RETURN)
+    dlg._on_key(e)
+    assert e.skipped and not dlg.cancelled, "Enter on a limit button is the native press"
+    e = _Key(wx.WXK_ESCAPE)
+    dlg._on_key(e)
+    assert dlg.discarded and dlg.cancelled and ui.stop_discards()
     ui._close_progress()
 
 
@@ -502,7 +541,7 @@ def test_progress_says_the_soft_time_limit_is_waiting_for_the_step(app):
         p.notice = "time limit reached, waiting for the current step to finish (layer assignment, rip-up and reroute); press Cancel to stop now"
         dlg.update(p)
         assert dlg.phase.GetLabel() == ("Time limit reached, waiting for the current step to finish (layer assignment, "
-                                        "rip-up and reroute); press Cancel to stop now")
+                                        "rip-up and reroute); press Accept to stop now and keep the best")  # Cancel takes nothing now
         dlg.cancelled = True
         dlg.update(p)
         assert not dlg.phase.GetLabel().startswith("Time limit reached"), dlg.phase.GetLabel()
@@ -513,36 +552,42 @@ def test_progress_says_the_soft_time_limit_is_waiting_for_the_step(app):
 class _QueuedPressUi(_QuietUi):
     """The press sits in the event queue until the next pump (as a real click between two polls)."""
     queued = False
+    button = "cancel_button"
 
     def _pump(self):
         if self.queued and self._progress is not None:
             self.queued = False
-            _press(self._progress.cancel_button)
+            _press(getattr(self._progress, self.button))
 
 
-@pytest.mark.parametrize("label", ["Cancel", "OK"])
-def test_the_press_is_judged_by_the_label_it_was_pressed_on(app, label):
-    """verify-sl3 F2: a Cancel clicked while the button read Cancel stays a Cancel even when the progress that
-    the dialog gets next is the first one with "Routes stable" (before: the label turned into OK before the queued
-    click was handled, so the press counted as OK); a click on OK is an OK. ``ok_at_press`` is None until a press."""
+@pytest.mark.parametrize("button", ["cancel_button", "accept_button"])
+@pytest.mark.parametrize("stable_first", [False, True])
+def test_the_press_is_judged_by_the_state_it_was_pressed_in(app, button, stable_first):
+    """verify-sl3 F2: Accept clicked before "Routes stable" is not a stable accept even when the progress the dialog
+    gets next is the first one that says stable; one pressed after it is (``ok_at_press`` latched at the press, None
+    until a press). Cancel is never a stable accept."""
     ui = _QueuedPressUi()
+    ui.button = button
     kw = dict(runs=1, runs_stable=1, best_routed=27, best_total=27, best_run=1, best_round=1)
-    first = Progress("route", 1, 0, 27, 0, 1.0, "topological search", 3, 30, 2.0, stable=(label == "OK"), **kw)
+    first = Progress("route", 1, 0, 27, 0, 1.0, "topological search", 3, 30, 2.0, stable=stable_first, **kw)
     stable = Progress("route", 1, 0, 27, 0, 1.2, "topological search", 4, 30, 2.2, stable=True, **kw)
     assert ui.progress(first) is True and ui.ok_at_press() is None
     dlg = ui._progress
-    assert dlg.cancel_button.GetLabel().replace("&", "") == label  # the label the user clicks on
+    assert dlg.cancel_button.GetLabel().replace("&", "") == "Cancel"  # the buttons never change their label
+    assert dlg.accept_button.GetLabel().replace("&", "") == "Accept"
     ui.queued = True
     assert ui.progress(stable) is False
-    assert ui.ok_at_press() is (label == "OK")
-    assert dlg.cancel_button.GetLabel().replace("&", "") == "OK"  # the stable progress still shows
-    assert dlg.phase.GetLabel().startswith("Cancel pressed" if label == "Cancel" else "OK pressed"), dlg.phase.GetLabel()
+    assert ui.ok_at_press() is (stable_first and button == "accept_button")
+    assert ui.stop_discards() is (button == "cancel_button")
+    assert dlg.cancel_button.GetLabel().replace("&", "") == "Cancel"  # the stable progress changes no label
+    want = "Cancel pressed" if button == "cancel_button" else "Accept pressed"
+    assert dlg.phase.GetLabel().startswith(want), dlg.phase.GetLabel()
     ui._close_progress()
 
 
-def test_progress_routes_stable_turns_cancel_into_ok(app):
-    """M-B0 (user 2026-11-06): when the gain is below the threshold the dialog shows "Routes stable" and the
-    Cancel button reads OK; same action (stop, keep the best result so far, which the dialog shows)."""
+def test_progress_routes_stable_keeps_both_buttons(app):
+    """M-B0 (user 2026-11-06): when the gain is below the threshold the dialog shows "Routes stable". Since
+    2026-11-22 the buttons stay Accept / Cancel (no OK) and the run goes on; Accept then is a stable accept."""
     ui = _QuietUi()
     p = Progress("route", 1, 300, 426, 150, 40.0, "drawing the traces", 3, 30, 45.0, gain_pct=2.5, runs=5,
                  runs_stable=2, best_routed=341, best_total=426, best_length_mm=2310.0, best_vias=180, best_run=3,
@@ -561,15 +606,15 @@ def test_progress_routes_stable_turns_cancel_into_ok(app):
                  best_run=1, best_round=4, best_errors=80, best_open=80)
     assert ui.progress(q) is True
     assert dlg.phase.GetLabel() == W["phase_stable"] == "Routes stable"
-    assert dlg.cancel_button.GetLabel().replace("&", "") == "OK"
+    assert dlg.cancel_button.GetLabel().replace("&", "") == "Cancel"  # no OK: the buttons never change
+    assert dlg.accept_button.GetLabel().replace("&", "") == "Accept"
     assert dlg.GetTitle().endswith("— Routes stable")  # also in the window list (the live test waits for it)
-    assert dlg.cancel_button.GetId() == wx.ID_CANCEL  # same button, same action
+    assert dlg.cancel_button.GetId() == wx.ID_CANCEL and dlg.accept_button.GetId() == wx.ID_OK
+    assert dlg.accept_button.IsEnabled() and not ui.stop_discards()  # stable does not stop the run
     assert _row(dlg, "best") == ["1", "4", "80", "80", "181", "2.300 m", "drawn"]
-    evt = wx.CommandEvent(wx.wxEVT_BUTTON, wx.ID_CANCEL)
-    evt.SetEventObject(dlg.cancel_button)
-    dlg.cancel_button.GetEventHandler().ProcessEvent(evt)
-    assert dlg.phase.GetLabel() == "OK pressed: finishing the current stage… 0 s"
-    assert ui.progress(q) is False
+    _press(dlg.accept_button)
+    assert dlg.phase.GetLabel() == "Accept pressed: finishing the current stage… 0 s"
+    assert ui.progress(q) is False and ui.ok_at_press() is True and not ui.stop_discards()
     ui._close_progress()
 
 
@@ -828,7 +873,7 @@ def test_progress_waits_for_round_1_colours_the_verdict_and_never_changes_size(a
         assert dlg.GetSize() == size, "numbers, stage names and verdicts never resize the dialog"
         for st in (dlg.elapsed_value, dlg.total_value, dlg.vias_value):
             assert st.GetSize().width >= st.GetTextExtent(st.GetLabel()).width, st.GetName()
-        assert dlg.widget("cancel_hint").GetLabel() == "Cancel keeps the best result so far."
+        assert dlg.widget("cancel_hint").GetLabel() == "Accept keeps the best result so far. Cancel takes nothing."
         assert dlg.widget("cancel_hint").GetToolTipText() == ui_wx.WORDING["progress"]["cancel_hint_tip"]
     finally:
         dlg.Destroy()

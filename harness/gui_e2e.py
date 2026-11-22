@@ -18,8 +18,10 @@ What it does (every step leaves a screenshot in <out_dir>/shots/ and a line in <
   3. Xephyr on --display (started if not running), metacity, `pcbnew <input copy>`; waits until KiCad created the
      plugin environment (first start: pip from PyPI) and the board is loaded.
   4. Clicks the Topor button (found in the toolbar by its icon), then: first-run notice -> Continue (only without
-     a topor.toml), pre-flight -> Route, progress (screenshots; with --cancel-after S presses Cancel after S seconds; with
-     --ok-at-stable presses OK when the dialog says "Routes stable" and checks the board is the best result shown), preview -> Accept,
+     a topor.toml), pre-flight -> Route, progress (screenshots; with --cancel-after S presses Cancel (Esc: stop at once, nothing
+     taken, the board must be unchanged) after S seconds; with --accept-after S clicks Accept (stop and keep the best,
+     the preview follows) after S seconds; with --ok-at-stable clicks Accept when the dialog says "Routes stable" and checks the
+     board is the best result shown), preview -> Accept,
      (no finished window: Accept or Reject just closes the dialog).
   5. Over the KiCad API (an external kipy client in the plugin environment): counts the tracks / vias after
      Accept, presses Ctrl+Z (one undo step, two with run.refill_after_accept, must remove them all), Ctrl+Shift+Z (back), saves the board.
@@ -191,6 +193,12 @@ class E2E:
         """Click at a point given relative to the window's bottom-right corner when negative."""
         x0, y0, w, h = self.geom(win)
         self.click_abs(x0 + (rx if rx >= 0 else w + rx), y0 + (ry if ry >= 0 else h + ry))
+
+    def click_accept(self, win: str) -> None:
+        """Click the progress dialog's Accept button (bottom right: Cancel and Accept sit side by side; Enter presses
+        neither, and the Alt+A mnemonic is not delivered reliably through Xephyr)."""
+        _, _, w, h = self.geom(win)
+        self.click_rel(win, w - 68, h - 30)
 
     def key(self, win: str, *keys: str) -> None:
         self.x("xdotool", "windowactivate", "--sync", win)
@@ -891,6 +899,7 @@ def run(a) -> int:
         e.shot("preflight", pre[1])
         e.key(pre[1], "Return")
         fills_before = e.zone_fills()
+        counts_run_start = e.counts()
         e.log(f"zones before the run: {len(fills_before)}")
         t_route = time.monotonic()
         state = {"last": -10.0, "cancelled": False, "img_t": -10.0, "imgs": []}
@@ -919,20 +928,29 @@ def run(a) -> int:
                 e.shot("progress-after-resize", prog[1])
                 e.log(f"progress dialog resized to {a.resize_progress_to} at {dt:.1f} s")
             if prog and a.ok_at_stable and not state["cancelled"] and "Routes stable" in prog[0]:
-                # M-B0: the dialog says "Routes stable" and its Cancel button reads OK; press it (Enter)
+                # M-B0: the dialog says "Routes stable"; click Accept (Enter presses nothing)
                 time.sleep(1.0)  # let the label repaint for the screenshot
                 e.shot("routes-stable", prog[1])
-                e.key(prog[1], "Return")
+                e.click_accept(prog[1])
                 state["cancelled"] = True
                 state["cancel_t"] = dt
                 state["ok"] = True
                 time.sleep(0.3)
-                e.shot("ok-pressed", prog[1])
-                e.log(f"Routes stable at {dt:.1f} s: OK pressed")
+                e.shot("accept-pressed", prog[1])
+                e.log(f"Routes stable at {dt:.1f} s: Accept pressed")
+            if prog and a.accept_after is not None and not state["cancelled"] and dt >= a.accept_after:
+                e.shot("before-accept", prog[1])
+                e.click_accept(prog[1])
+                state["cancelled"] = True
+                state["cancel_t"] = dt
+                time.sleep(0.5)
+                e.shot("accepting", prog[1])
+                e.log(f"Accept pressed at {dt:.1f} s")
             if prog and a.cancel_after is not None and not state["cancelled"] and dt >= a.cancel_after:
                 e.shot("before-cancel", prog[1])
                 e.key(prog[1], "Escape")
                 state["cancelled"] = True
+                state["discard"] = True
                 state["cancel_t"] = dt
                 time.sleep(0.5)
                 e.shot("cancelling", prog[1])
@@ -948,6 +966,8 @@ def run(a) -> int:
                     break
             if nxt:
                 break
+            if state.get("discard") and not e.find("Topor — Routing"):
+                break  # Cancel: the dialog closed and no result window follows
             time.sleep(0.5)
         result["route_wall_s"] = round(time.monotonic() - t_route, 1)
         if a.preview_check:
@@ -957,10 +977,20 @@ def run(a) -> int:
             e.check("the board image changes between rounds", len(set(hashes)) >= 2,
                     f"{len(set(hashes))} different images in {len(hashes)} crops")
         if a.ok_at_stable:
-            e.check("progress dialog showed Routes stable (Cancel reads OK)", bool(state.get("ok")))
+            e.check("progress dialog showed Routes stable (Accept pressed there)", bool(state.get("ok")))
+        if state.get("discard"):
+            # Cancel: stop at once, take nothing: no result window, no error, the board exactly as before the run
+            result["cancel_reaction_s"] = round(time.monotonic() - t_route - state["cancel_t"], 1)
+            time.sleep(2)
+            stray = [t for t in e.windows() if t.startswith(("Topor — Preview", "Topor — Finished", "Topor — Error"))]
+            e.check("Cancel closes the progress dialog at once, no preview / error window", nxt is None and not stray,
+                    f"{result['cancel_reaction_s']} s after Cancel; {stray}")
+            e.shot("after-cancel")
+            e.check("Cancel leaves the copper unchanged", e.counts() == counts_run_start, f"{counts_run_start} -> {e.counts()}")
+            return 0 if all(c["ok"] for c in e.checks) else 1
         if state["cancelled"]:
             result["cancel_reaction_s"] = round(time.monotonic() - t_route - state["cancel_t"], 1)
-            e.check("Cancel ends the routing (best result or nothing, no error)", bool(nxt) and not nxt[0].startswith("Topor — Error"), f"{result['cancel_reaction_s']} s after Cancel")
+            e.check("Accept ends the routing (best result or nothing, no error)", bool(nxt) and not nxt[0].startswith("Topor — Error"), f"{result['cancel_reaction_s']} s after Accept")
         if not nxt:
             e.check("preview after routing", False, f"nothing after {a.max_wait} s")
             e.shot("stuck")
@@ -1073,14 +1103,14 @@ def run(a) -> int:
             e.check("the run flow handed over last-round images of different rounds (log.txt)", len(rounds) >= 2,
                     f"{len(shown)} images, {len(rounds)} distinct run/round")
         if a.ok_at_stable and report_dir is not None:
-            # the board is the best result the dialog showed at OK (run.py logs it), and OK is not a cancel
+            # the board is the best result the dialog showed at Accept (run.py logs it), and an Accept at stable is not a cancel
             import re as _re
             log_txt = (report_dir / "log.txt").read_text() if (report_dir / "log.txt").is_file() else ""
             mo = _re.search(r"OK at Routes stable: best so far (\d+)/(\d+) routed", log_txt)
             res = json.loads(rds[-1].read_text())
             # "Routes stable" waits for a pick (user 2026-11-17): Best so far is never empty at the OK; with the TopoR
             # loop it is the loops' predicted pick (every planned connection is drawn: never drop), so routed matches
-            e.check("OK keeps the best result shown (stop: stable, not cancelled)",
+            e.check("Accept keeps the best result shown (stop: stable, not cancelled)",
                     bool(mo) and int(mo.group(2)) > 0 and int(mo.group(1)) == res.get("routed")
                     and res.get("stop_reason") == "stable" and not res.get("cancelled"),
                     f"shown {mo.group(0) if mo else None}; result routed {res.get('routed')}, stop {res.get('stop_reason')}, "
@@ -1118,10 +1148,13 @@ def main(argv=None) -> int:
     ap.add_argument("out_dir")
     ap.add_argument("--display", default=":6")
     ap.add_argument("--wheel", default=None, help="prebuilt topor_engine wheel (default: tools/build.sh builds one)")
-    ap.add_argument("--cancel-after", type=float, default=None, help="press Cancel this many seconds after Route")
+    ap.add_argument("--cancel-after", type=float, default=None,
+                    help="press Cancel (Esc) this many seconds after Route: the run ends at once, nothing is taken, the board is unchanged")
+    ap.add_argument("--accept-after", type=float, default=None,
+                    help="click Accept this many seconds after Route: stop, keep the best, the preview follows")
     ap.add_argument("--reject", action="store_true", help="press Esc (Reject) in the preview and check the board is untouched")
     ap.add_argument("--ok-at-stable", action="store_true",
-                    help="press OK as soon as the progress dialog says Routes stable (M-B0) and check the result")
+                    help="press Accept as soon as the progress dialog says Routes stable (M-B0) and check the result")
     ap.add_argument("--max-wait", type=float, default=1800, help="longest wait for the preview after Route (s)")
     ap.add_argument("--preview-check", action="store_true",
                     help="last-preview: check the progress dialog's board image (shown, changes between rounds; log)")

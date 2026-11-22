@@ -610,6 +610,19 @@ def run(port: BoardPort, ui: UiPort, cfg: Config | None = None, engine=None, *, 
     try:
         ctx()
         return _run(port, ui, cfg, engine, out, report, log, ctx, Path(tmp_root), project_dir, board_name, ts, t0)
+    except RunDiscarded:  # Cancel in the progress dialog: nothing applied, no error window
+        log.line("cancelled by the user (Cancel): no result taken, the board is unchanged")
+        out.cancelled = True
+        out.items, out.replaced, out.commit = [], [], None
+        out.wall_s = time.monotonic() - t0
+        out.status = "cancelled"
+        report.set_outcome("cancelled")
+        try:
+            report.write(result=_facts_result("cancelled", out, None))
+        except Exception:  # noqa: BLE001
+            log.exc()
+        ctx()
+        return out
     except Exception as e:  # noqa: BLE001 - reported, never crashes the host
         log.exc()
         log.line(f"error: {type(e).__name__}: {e}")
@@ -726,6 +739,13 @@ def grid_run_options(cfg, known: dict, port, copy_text: str) -> tuple[dict, list
     settings = getattr(port, "kicad_settings_dir", None)
     return grid_mod.resolve(cfg.get("drawing", "grid_mm"), copy_text, settings() if callable(settings) else None)
 
+class RunDiscarded(Exception):
+    """The user pressed Cancel in the progress dialog (user 2026-11-22): stop at once, take no result. Raised by
+    ``_run`` at its next check after the press (every progress call, kicad-cli poll and the commit gate); ``run``
+    ends the run "cancelled" without touching the board. A running engine job is told to stop and abandoned: nobody
+    waits for it or reads its result, so a late result can never be written."""
+
+
 def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, board_name, ts, t0) -> RunOutcome:
     findings = out.findings
     report_dir = out.report_dir
@@ -733,11 +753,23 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
              "rounds": 0, "router_s": 0.0, "router_cpu_s": 0.0,  # router time / CPU time of the engine jobs (progress dialog)
              "limit_hit": None}  # "cpu": the CPU limit fired and the plugin cancelled the job
 
+    def discard_pressed() -> bool:
+        """The user pressed Cancel (``ui.stop_discards``, sticky; headless UIs have none): nothing is taken. Never
+        true once the commit happened (the board was changed then; Cancel has nothing left to undo)."""
+        f = getattr(ui, "stop_discards", None)
+        return out.commit is None and callable(f) and bool(f())
+
+    def check_discard() -> None:
+        if discard_pressed():
+            state["discard"] = True
+            raise RunDiscarded()
+
     def emit(phase: str) -> None:
         q = replace(state["last"], phase=phase, elapsed_s=state["router_s"], cpu_s=state["router_cpu_s"],
                     wall_s=time.monotonic() - t0, limit_s=state.get("limit"))
         if ui.progress(q) is False:
             state["cancel"] = True
+        check_discard()  # raised inside a kicad-cli poll too: run_cli kills the process on any exception
         if state["last_result"] is None:  # a change before the engine job starts applies to it
             take_limit()
 
@@ -1106,6 +1138,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 p.limit_s = state["limit"]
                 if ui.progress(p) is False:
                     state["cancel"] = True
+                if discard_pressed():
+                    # Cancel: no waiting for the stage in progress. The engine is told to stop (it frees its threads
+                    # by itself) and the job is abandoned: job.wait() is never called, so a result that is ready
+                    # later is never read, judged or written.
+                    log.line("Cancel: the run is dropped, nothing is taken; the engine job is stopped and not waited for")
+                    try:
+                        job.cancel(ok=False)
+                    except TypeError:  # an engine older than the plugin (no ok)
+                        job.cancel()
+                    check_discard()
                 if sketching:
                     try:
                         sketch_poll(job, ui, p, sk, now, interval, done, log)
@@ -1411,6 +1453,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         ctx()  # no "finished" window (user 2026-11-19): the preview and the progress log already said it all
         return finish("rejected")
 
+    check_discard()  # last gate: a Cancel pressed while the preview was shown (or any time before) commits nothing
     # 6. MINOR 11: the board must be exactly what it was when the run started (KiCad stays editable meanwhile)
     if start_fp is not None:
         now_fp = fingerprint("before the commit")

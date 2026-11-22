@@ -198,7 +198,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** topor.toml sets a key that is deprecated (e.g. optimize.finish_when_stable since 2026-11-17: with the progress dialog nothing ends the run at Routes stable any more, only OK does); the key is ignored.
+**Cause.** topor.toml sets a key that is deprecated (e.g. optimize.finish_when_stable since 2026-11-17: with the progress dialog nothing ends the run at Routes stable any more, only Accept or Cancel does); the key is ignored.
 
 **Fix.** In the pre-flight dialog select the finding and tick Use the current default: Route then comments the line out. Or delete the line the finding names by hand; runs without the dialog keep their stop at stable (optimize.stable_patience). docs/user/configuration.md, section Deprecated keys, says why.
 
@@ -560,7 +560,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** Cancel / OK came before the router had kept any plan (before the initial routing of any run had ended: its topology search, layer assignment and rip-up rounds), so there was nothing to draw: no copper was written and the board was not changed. A Cancel later in the run draws the best plan kept so far.
 
-**Fix.** Route again and let the initial routing finish (the progress dialog names the step; on a large board it can take a minute or more), then press OK / Cancel; or let the time limit end the run (run.timeout_s, [run] timeout_mode = soft: the step that runs then finishes and its plan is drawn).
+**Fix.** Route again and let the initial routing finish (the progress dialog names the step; on a large board it can take a minute or more), then press Accept (or Cancel); or let the time limit end the run (run.timeout_s, [run] timeout_mode = soft: the step that runs then finishes and its plan is drawn).
 
 ### PAD_OUTSIDE_BOARD
 
@@ -688,7 +688,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** Topor is already running for this project (another KiCad window or an earlier run that has not ended), so this start was cancelled before it touched the board. One run per project avoids two routers writing to the same board.
 
-**Fix.** Finish or cancel the other run first (its progress window shows OK / Cancel), then press the Topor button again. A crashed run frees the lock by itself. To allow parallel runs set run.single_instance = false in topor.toml.
+**Fix.** Finish or cancel the other run first (its progress window shows Accept / Cancel), then press the Topor button again. A crashed run frees the lock by itself. To allow parallel runs set run.single_instance = false in topor.toml.
 
 ### RUN_LOCK_UNAVAILABLE
 
@@ -712,7 +712,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** The time limit (or a Cancel) stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines. The stop reason says which clock fired: timeout_wall (seconds on the clock) or timeout_cpu (CPU seconds summed over all threads, run.timeout_clock = cpu).
 
-**Fix.** Raise run.timeout_s (0 = no limit; Cancel always works; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit), or lower [optimize] runs (best of N runs share the threads); wait for "Routes stable" and press OK for a reproducible result.
+**Fix.** Raise run.timeout_s (0 = no limit; Accept and Cancel always work; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit), or lower [optimize] runs (best of N runs share the threads); wait for "Routes stable" and press OK for a reproducible result.
 
 ### TIME_DRAWING_CUT
 
@@ -736,7 +736,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** The soft time limit (run.timeout_mode = soft) let the step that ran go on past run.timeout_s, until the overrun cap run.timeout_overrun_s (on the same clock); then the run acted as with the hard limit: the step that ran was cut and the kept plan (the best variant so far, or the initial plan) was drawn in full; when the drawing itself was the step that ran, the drawing was cut there (TIME_DRAWING_CUT). A cut initial routing or drawing leaves connections unrouted, a cut TopoR loop cycle is not kept; a cap that passed only after those steps had ended cut nothing. The warning says which. By default the cap is equal to run.timeout_s in headless runs (harness, MCP, scripts and direct engine calls: about twice the limit plus the drawing of one plan, plus the time a step takes to see the stop, measurements outside the limit and more drawings with [optimize] loop = "cycles" or runs > 1; operate.md) and off in the KiCad dialog, where Cancel stops a run.
 
-**Fix.** Raise run.timeout_overrun_s (seconds past the limit; 0 or "none" = no cap) or run.timeout_s and route again, or lower [optimize] runs; in the KiCad dialog leave the cap off (auto) and press Cancel when the overrun is too long.
+**Fix.** Raise run.timeout_overrun_s (seconds past the limit; 0 or "none" = no cap) or run.timeout_s and route again, or lower [optimize] runs; in the KiCad dialog leave the cap off (auto) and press Accept when the overrun is too long.
 
 ### TRACK_ANGLE_RULE
 
