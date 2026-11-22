@@ -1093,7 +1093,7 @@ pub struct Options {
     /// 2-4 against its site price.
     pub stitch_pitch_x_nm: i64,
     pub stitch_pitch_y_nm: i64,
-    /// stitch-vias (`[planes] stitch_lattice`, default `"straight"`; user 2026-11-22 "straight or
+    /// stitch-vias (`[planes] stitch_lattice`, default `"staggered"`; user 2026-11-22 "straight or
     /// staggered"): `"staggered"` shifts every other lattice row by half the x spacing.
     pub stitch_lattice: String,
     /// stitch-vias class 2 (`[planes] stitch_dropped`, default true, lead 2026-11-21): an island
@@ -1894,7 +1894,7 @@ impl Default for Options {
             stitch_per_area: true,
             stitch_pitch_x_nm: 5_000_000,
             stitch_pitch_y_nm: 5_000_000,
-            stitch_lattice: "straight".into(),
+            stitch_lattice: "staggered".into(),
             stitch_dropped: true,
             stitch_thin_nm: 1_000_000,
             stitch_area: false,

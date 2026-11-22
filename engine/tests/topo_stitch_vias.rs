@@ -69,7 +69,8 @@ fn reg() -> Registry {
 
 /// Only the region classes, nothing else changed.
 fn opts(dropped: bool, thin_mm: f64, area: bool) -> Options {
-    Options { stitch_dropped: dropped, stitch_thin_nm: (thin_mm * 1e6) as i64, stitch_area: area, ..Options::default() }
+    // The fixtures pin straight-lattice positions; the staggered default has its own test.
+    Options { stitch_dropped: dropped, stitch_thin_nm: (thin_mm * 1e6) as i64, stitch_area: area, stitch_lattice: "straight".into(), ..Options::default() }
 }
 
 fn vias(items: &[Item]) -> Vec<(i64, i64)> {
@@ -250,7 +251,8 @@ fn cut_off_repair_spreads_its_vias() {
     let mut m = m;
     m.pours[0].pads.push("U1.1".into());
     let items = [seg(2, 31, (7 * MM, 1_000_000), (7 * MM, 33_000_000))];
-    let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
+    let straight = Options { stitch_lattice: "straight".into(), ..Options::default() };
+    let s = stitch(&m, &straight, &reg(), &items, &[], None);
     let v = vias(&s.items);
     assert!(v.len() >= 2, "{:?}", s.notes);
     assert_eq!(v[0], (5 * MM, 15 * MM), "{v:?}");
@@ -352,9 +354,10 @@ fn no_stitching_via_that_leaves_a_thin_neck_in_another_plane() {
 /// {18, 24}.
 #[test]
 fn the_lattice_has_x_and_y_spacing_straight_or_staggered() {
+    assert_eq!(Options::default().stitch_lattice, "staggered", "default lattice (user 2026-11-22)");
     let m = model(&[]);
     let items = square(0, 8, 12, 22, 26);
-    let o = Options { stitch_min_vias: 7, stitch_lattice: "staggered".into(), ..opts(true, 0.0, false) };
+    let o = Options { stitch_min_vias: 7, stitch_lattice: Options::default().stitch_lattice, ..opts(true, 0.0, false) };
     let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
     let mut v = vias(&s.items);
     v.sort_unstable();

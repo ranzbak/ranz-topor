@@ -68,7 +68,7 @@ change which variant is picked.
 ## Options (`[planes]`, documented in schema.py + docs/user/configuration.md)
 - `stitch_islands` (exists) = class 1;
 - `stitch_min_vias` = 2;
-- `stitch_pitch_x_mm` = `stitch_pitch_y_mm` = 5.0, `stitch_lattice` = "straight" (r3, user 2026-11-22: x and y spacing, straight or staggered = odd rows shifted by x/2);
+- `stitch_pitch_x_mm` = `stitch_pitch_y_mm` = 5.0, `stitch_lattice` = "staggered" (r3, user 2026-11-22: x and y spacing, straight or staggered = odd rows shifted by x/2; default staggered, user 2026-11-22 "Default is staggered, I like it more");
 - `stitch_dropped` = true;
 - `stitch_thin_mm` = 1.0 (0 = off);
 - `stitch_area` = false.
