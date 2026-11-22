@@ -122,7 +122,7 @@ class Progress:
     limit_s: float | None = None  # plugin: the time limit in force (seconds on the run's clock, 0 = none); None = unknown
     # M-B0 (iterations like TopoR): "Routes stable" (the gain of the best result over the last
     # [optimize] stable_window rounds is below stable_gain_pct in every run), that gain (None before a
-    # full window), the best of N runs and the best result so far (what OK / Cancel keeps).
+    # full window), the best of N runs and the best result so far (what Accept keeps).
     stable: bool = False
     gain_pct: float | None = None
     runs: int = 0
@@ -165,7 +165,7 @@ class Progress:
     cycle_lines: list = field(default_factory=list)
     # M2.TL soft time limit (engine): the limit has passed and the step that runs finishes ([run] timeout_mode =
     # soft); the step that ran then; the dialog's line ("time limit reached, waiting for the current step to finish
-    # (<step>); press Cancel to stop now").
+    # (<step>); press Accept to stop now and keep the best").
     limit_reached: bool = False
     limit_step: str = ""
     notice: str = ""
@@ -279,7 +279,9 @@ class UiPort(Protocol):
     def preflight(self, findings: list, summary: RunSummary, cfg: Config) -> Decision: ...
 
     def progress(self, p: Progress) -> bool:
-        """Called every ~0.25 s; return False to cancel the run."""
+        """Called every ~0.25 s; return False to stop the run. The interactive progress dialog has two buttons for the
+        whole run: Accept stops the run and takes the best result so far (the post-run flow follows: DRC, preview,
+        commit); Cancel stops at once and takes nothing (``stop_discards``). Both make this return False."""
 
     # Optional (the wx UI only; run_gui calls it before the KiCad connection, the first real window closes it):
     #   def splash(self, status: str, version: str | None = None) -> None:
@@ -288,9 +290,15 @@ class UiPort(Protocol):
 
     # Optional (the interactive progress dialog only; UIs without it are judged by the progress they returned False on):
     #   def ok_at_press(self) -> bool | None:
-    #       """What the stop button read when it was pressed (True = OK at "Routes stable", False = Cancel), or None
-    #       when it was not pressed. A press is handled at the next ``progress`` call, whose progress may already
-    #       say stable: this is what the user saw, and what the run flow sends to the engine."""
+    #       """Whether the routes were stable when the stop button was pressed (True = Accept at "Routes stable",
+    #       False = Accept before it, or Cancel), or None when it was not pressed. A press is handled at the next
+    #       ``progress`` call, whose progress may already say stable: this is what the user saw, and what the run flow
+    #       sends to the engine."""
+    #   def stop_discards(self) -> bool:
+    #       """True once the user pressed Cancel (sticky, also after an Accept): the run flow stops the engine job
+    #       without waiting for it, discards whatever it returns and ends the run "cancelled" with the board untouched
+    #       (no tracks, vias or zone changes). False = Accept (the best so far is taken) or no press. Asked after every
+    #       ``progress`` call and before the commit; a UI without it never discards."""
 
     # Optional (the interactive progress dialog only; headless UIs leave it out, so their limit stays fixed):
     #   def time_limit_request(self) -> float | None:

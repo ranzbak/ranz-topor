@@ -45,7 +45,7 @@ pub struct Progress {
     #[serde(default)]
     pub rounds: u32,
     /// M-B0: the best result has gained less than `[optimize] stable_gain_pct` over the last
-    /// `stable_window` cycles in every run ("Routes stable"; the plugin's Cancel then reads OK),
+    /// `stable_window` cycles in every run ("Routes stable"; the plugin keeps running until Accept or Cancel),
     /// and there is a pick to keep (user 2026-11-17: *Best so far* is not empty; with the TopoR
     /// loop the loops' predicted pick). Never goes back within a run.
     #[serde(default)]
@@ -67,7 +67,7 @@ pub struct Progress {
     pub runs_stable: u32,
     #[serde(default)]
     pub runs_done: u32,
-    /// M-B0: the best result so far over all runs (what OK / Cancel returns): routed of total,
+    /// M-B0: the best result so far over all runs (what Accept returns): routed of total,
     /// length (mm), vias and its run (1-based; 0 = none yet).
     #[serde(default)]
     pub best_routed: usize,
@@ -153,7 +153,7 @@ pub struct Progress {
     #[serde(default)]
     pub limit_step: String,
     /// The progress dialog's line for the soft limit ("time limit reached, waiting for the
-    /// current step to finish (<step>); press Cancel to stop now"), "" when it does not apply.
+    /// current step to finish (<step>); press Accept to stop now and keep the best"), "" when it does not apply.
     #[serde(default)]
     pub notice: String,
     /// The step each run of a best-of-N call computes now (index = run - 1; "" = the run computes
@@ -332,7 +332,7 @@ pub fn limit_notice(step: &str, hard: bool, capped: bool) -> String {
     let at = if step.is_empty() { String::new() } else { format!(" ({step})") };
     match (capped, hard) {
         (true, _) => format!("time limit overrun cap reached ([run] timeout_overrun_s): the current step stops now{at}"),
-        (false, false) => format!("time limit reached, waiting for the current step to finish{at}; press Cancel to stop now"),
+        (false, false) => format!("time limit reached, waiting for the current step to finish{at}; press Accept to stop now and keep the best"),
         (false, true) => format!("time limit reached (hard): the current step stops now{at}"),
     }
 }
@@ -1524,7 +1524,7 @@ mod tests {
         assert!(!ctl.limit.changed(), "the plugin's CPU clock reached its limit: no change by the user");
         let p = ctl.snapshot();
         assert!(p.limit_reached);
-        assert_eq!(p.notice, "time limit reached, waiting for the current step to finish (layer assignment, rip-up and reroute); press Cancel to stop now");
+        assert_eq!(p.notice, "time limit reached, waiting for the current step to finish (layer assignment, rip-up and reroute); press Accept to stop now and keep the best");
         ctl.stage(1, 1, "drawing the traces");
         assert_eq!(ctl.snapshot().limit_step, "layer assignment, rip-up and reroute", "the step that ran when the limit passed");
         ctl.request_cancel();
@@ -1549,7 +1549,7 @@ mod tests {
         ctl.limit.reach();
         let p = ctl.snapshot();
         assert_eq!(p.limit_step, "run 2: layer assignment, rip-up and reroute; run 3: topological search");
-        assert_eq!(p.notice, "time limit reached, waiting for the current step to finish (run 2: layer assignment, rip-up and reroute; run 3: topological search); press Cancel to stop now");
+        assert_eq!(p.notice, "time limit reached, waiting for the current step to finish (run 2: layer assignment, rip-up and reroute; run 3: topological search); press Accept to stop now and keep the best");
         r3.idle();
         assert_eq!(ctl.snapshot().limit_step, "run 2: layer assignment, rip-up and reroute; run 3: topological search", "recorded once");
         assert!(ctl.snapshot().notice.contains("(run 2: layer assignment, rip-up and reroute)"), "the notice follows the runs still computing");

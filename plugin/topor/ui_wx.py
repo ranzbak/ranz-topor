@@ -2,14 +2,14 @@
 ``docs/progress/notes/m4-ui-wireframes.md`` (wording table = ``WORDING`` below).
 
 Rules applied (note §0, ecc:make-interfaces-feel-better + ecc:accessibility adapted to wx):
-native widgets only, ``wx.StdDialogButtonSizer`` (GTK button order), Enter = default / Esc = Cancel, mnemonics on
+native widgets only, ``wx.StdDialogButtonSizer`` (GTK button order), Esc = Cancel, mnemonics on
 buttons / checkboxes / radios, sizes via ``FromDIP``, fixed-width right-aligned number labels (no layout shift),
 system colours only (the sole fixed colour is the preview legend swatch), severity = icon + word, every
 control carries ``SetName(id)`` (test hook and accessible name) and a tooltip where no label precedes it,
 disabled Route states its reason, nothing is truncated silently.
 
 Threading: everything runs on the wx main thread. ``progress`` shows a MODELESS dialog, pumps events and returns
-False once Cancel was pressed; every other UiPort method is modal and closes the progress dialog first.
+False once Accept or Cancel was pressed (``stop_discards`` tells which); every other UiPort method is modal and closes the progress dialog first.
 
 Complexity: construction O(#findings + #summary lines); ``progress`` O(1) per call; image scaling O(pixels) per
 zoom change. No pcbnew (M4-R1).
@@ -123,10 +123,12 @@ WORDING: dict[str, dict[str, str]] = {
         "phase_preflight_drc": "Checking the board (KiCad DRC)",
         "phase_drc": "Verifying with KiCad DRC",
         "phase_preview": "Rendering the preview",
-        # after Cancel the engine finishes the stage it is in; {stage} = " (drawing the traces)" or "", {s} = seconds
-        "phase_cancelling": "Cancel pressed: finishing the current stage{stage}… {s} s",
+        # after Accept the engine finishes the stage it is in; {stage} = " (drawing the traces)" or "", {s} = seconds.
+        # Cancel does not wait for the engine: the run is dropped, its late result is never used
+        "phase_cancelling": "Cancel pressed: stopping, nothing is taken… {s} s",
         # M2.TL soft time limit: the engine's notice ("time limit reached, waiting for the current step to finish
-        # (<step>); press Cancel to stop now"), capitalised
+        # (<step>); press Accept to stop now and keep the best"), capitalised
+        # (Cancel takes nothing since 2026-11-22)
         "phase_limit": "{notice}",
         "gauge_value": "{routed} / {total}",
         "iteration_label": "Round",
@@ -150,18 +152,21 @@ WORDING: dict[str, dict[str, str]] = {
         "limit_add15": "+15 min",
         "limit_hint": "0 = no limit. A limit below the time spent stops the run now, keeping the best result.",
         # one short line; the full text is its tooltip (user 2026-11-11)
-        "cancel_hint": "Cancel keeps the best result so far.",
-        "cancel_hint_tip": "Cancel keeps the best result so far. Once the routes are stable the button reads OK: the "
-                           "same action, and the best result shown is exactly the board you get; waiting longer may "
-                           "still find small gains. The time limit counts router time only and is an emergency stop; "
-                           "KiCad's DRC and the preview come on top.",
+        "cancel_hint": "Accept keeps the best result so far. Cancel takes nothing.",
+        "cancel_hint_tip": "Accept stops the run and takes the best result so far (the best shown here is exactly the "
+                           "board you get; the DRC and the preview follow, and you can still reject it there). Cancel "
+                           "stops at once and takes no result: the board stays exactly as it was. \"Routes stable\" "
+                           "does not stop the run: waiting longer may still find small gains. The time limit counts "
+                           "router time only and is an emergency stop; KiCad's DRC and the preview come on top.",
         "score_waiting": "Waiting for round 1…",
         "cancel": "Cancel",
-        # M-B0: iterations like TopoR ("Routes stable", Cancel -> OK, best of N runs)
-        "ok": "OK",
+        # two buttons for the whole run (user 2026-11-22): Accept = stop and take the best so far, Cancel = stop at
+        # once and take nothing
+        "accept": "Accept",
+        # M-B0: iterations like TopoR ("Routes stable", best of N runs; the run goes on until Accept / Cancel)
         "phase_stable": "Routes stable",
         "title_stable": "Topor — Routing {board} — Routes stable",
-        "phase_finishing": "OK pressed: finishing the current stage{stage}… {s} s",
+        "phase_finishing": "Accept pressed: finishing the current stage{stage}… {s} s",
         "round_value": "{round}",
         "gain_label": "Gain",
         "gain_value": "{gain} % / {window} rounds",
@@ -203,7 +208,7 @@ WORDING: dict[str, dict[str, str]] = {
         "preview_caption": "{which}: run {run}, round {round} — {what}",
         "preview_plan": "predicted plan, not drawn copper",
         "preview_copper": "drawn copper",
-        "preview_received": "Image of {time}; OK / Cancel keeps the best so far.",
+        "preview_received": "Image of {time}; Accept keeps the best so far, Cancel takes nothing.",
         "preview_waiting": "Waiting for the first image…",
         # plan-dots: the legend of the image's yellow dots (plan: smaller dots, the plan's predicted errors)
         "preview_dots_plan": "Small yellow dots: predicted errors of the plan ({n})",
@@ -214,7 +219,7 @@ WORDING: dict[str, dict[str, str]] = {
         "score_pending": "–",
         "score_hint": "Scores compare in the pick order: fewest errors (open connections and connections with rule "
                       "violations), then fewest connections with a short, then fewest open, fewest vias, the shortest length ([optimize] pick). The best "
-                      "so far is the board OK or Cancel keeps. Last round = the round that finished last, whatever its "
+                      "so far is the board Accept keeps. Last round = the round that finished last, whatever its "
                       "score; Last run = the newest best of the run whose own best changed last. Predicted = a "
                       "plan of the TopoR loop (nothing drawn yet), drawn = copper.",
         "vs_first": "The first result is the best so far.",
@@ -521,7 +526,7 @@ def score_rows(p: Progress) -> tuple[dict, str]:
     the verdict line: how the last round compares with the best and on which criterion, in the pick order (the
     engine's ``Progress.last_vs_best`` / ``last_decider`` / ``last_delta``). Last round = the TopoR loop round that
     finished last (its own state's predicted score) or the round judged last (drawn), whichever is newer; Last run =
-    the newest pick of the run whose own pick changed last; Best so far = the best over the runs (what OK / Cancel
+    the newest pick of the run whose own pick changed last; Best so far = the best over the runs (what Accept
     keeps). The "source" cell says predicted or drawn; a drawn round in loop mode is "draw N" (the loop's whole-route
     round is 1 for every run, the user's "goes back to 1 / 1", 2026-11-19). O(1)."""
     W = WORDING["progress"]
@@ -1205,7 +1210,7 @@ class ProgressDialog(_Base):
     run's clock; 0 = no limit; below the time spent = stop now). A change is kept in ``limit_request`` until the run
     flow takes it (``WxUi.time_limit_request``); the run reports the limit it applies back in ``Progress.limit_s``."""
     _wk = "progress"
-    TAB_ORDER = ("limit", "limit_set", "limit_add5", "limit_add15", "cancel")
+    TAB_ORDER = ("limit", "limit_set", "limit_add5", "limit_add15", "cancel", "accept")
     LIMIT_MAX_S = 86400.0  # schema range of run.timeout_s
 
     def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None, stable_window: int = 4,
@@ -1231,7 +1236,9 @@ class ProgressDialog(_Base):
         self._phase = ""
         self.iteration_cap = iteration_cap
         self._round, self._round_from_engine = (0, iteration_cap), False
-        self.cancelled = False
+        self.cancelled = False  # a stop was requested (Accept or Cancel); the run flow ends the run on it
+        self.accepted = False  # Accept: stop and take the best so far
+        self.discarded = False  # Cancel: stop at once, take nothing (also after an Accept, which it overrides)
         self.cancelled_at: float | None = None
         W = WORDING["progress"]
 
@@ -1276,30 +1283,35 @@ class ProgressDialog(_Base):
             grid.Add(self.text(self, "progress", lab), 0)
             grid.Add(val, 0, wx.ALIGN_RIGHT)
         self._left.Add(grid, 0, wx.BOTTOM, self.group)
-        # the score of the last round and of the best so far (what OK / Cancel keeps), over all runs
+        # the score of the last round and of the best so far (what Accept keeps), over all runs
         self._build_score_rows()
         self.iteration_value.SetToolTip(W["round_total_tip"])
         if self.preview_mode != "off":
             self._build_preview()
             self.TAB_ORDER = ("preview_last", "preview_run", "preview_best") + type(self).TAB_ORDER
         self.stable = False
-        #: What the button read when it was pressed (True = OK at "Routes stable", False = Cancel; None = not pressed),
-        #: latched in ``cancel`` (verify-sl3 F2: the label after the next poll may read OK already).
+        #: Whether the routes were stable when Accept was pressed (False for Cancel; None = nothing pressed), latched
+        #: in ``accept`` / ``cancel`` (verify-sl3 F2: the next poll may already say stable); the engine keeps the
+        #: pour stitching of a stable end for it.
         self.ok_at_press: bool | None = None
         self.stable_window = stable_window
         self._build_limit_row()
         hint = self.text(self, "progress", "cancel_hint")  # one short line; the full text is its tooltip
         hint.SetToolTip(W["cancel_hint_tip"])
-        if self.wide:  # full-width bar: the hint on the left, Cancel / OK on the right
+        # [Cancel] [Accept], two buttons for the whole run; Esc = Cancel (button_row), Enter does nothing unless a
+        # of them (``_on_key``: an Enter typed by accident never takes a result or drops the run)
+        if self.wide:  # full-width bar: the hint on the left, the buttons on the right
             bar = wx.BoxSizer(wx.HORIZONTAL)
             bar.Add(hint, 0, wx.ALIGN_CENTER_VERTICAL)
-            self.root.Add(self.button_row(("cancel", "cancel", "c"), ok_id=wx.ID_CANCEL, middle=bar), 0, wx.EXPAND)
+            self.root.Add(self.button_row(("accept", "accept", "a"), ("cancel", "cancel", "c"), middle=bar), 0, wx.EXPAND)
         else:
             self.root.Add(hint, 0, wx.BOTTOM, self.group)
-            self.root.Add(self.button_row(("cancel", "cancel", "c"), ok_id=wx.ID_CANCEL), 0, wx.EXPAND)
+            self.root.Add(self.button_row(("accept", "accept", "a"), ("cancel", "cancel", "c")), 0, wx.EXPAND)
         self.cancel_button = self.buttons["cancel"]
+        self.accept_button = self.buttons["accept"]
         self.cancel_button.Bind(wx.EVT_BUTTON, self._on_cancel)
-        self.Bind(wx.EVT_CLOSE, self._on_cancel)
+        self.accept_button.Bind(wx.EVT_BUTTON, self._on_accept)
+        self.Bind(wx.EVT_CLOSE, self._on_cancel)  # the window's close box = Cancel
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.set_phase("")
         self.A11Y = {"limit": f"{W['limit_label']} ({W[self._unit_key]})"}
@@ -1308,7 +1320,10 @@ class ProgressDialog(_Base):
         else:
             self.finish((460, 300))
         self._sync_limit_controls()
-        self.cancel_button.SetFocus()
+        # The start focus is the limit field (Enter there only sets the limit), never Cancel: a stray Space right after
+        # the dialog opens must not drop the run (Enter presses neither button, see _on_key). Without an editable
+        # limit it is Accept (the result dialog still follows), never Cancel.
+        (self.limit if self.limit.IsEnabled() else self.accept_button).SetFocus()
 
     SCORE_COLS = (("run", 30, "888"), ("round", 40, "88888", "draw 88"), ("errors", 44, "88888"),
                   ("open", 40, "88888"), ("vias", 40, "888888"), ("length", 70, "888.888 m"),
@@ -1611,15 +1626,23 @@ class ProgressDialog(_Base):
             evt.Veto()
         self.cancel()
 
+    def _on_accept(self, evt) -> None:
+        self.accept()
+
     def _on_key(self, evt) -> None:
+        """Esc = Cancel. Enter never presses Accept or Cancel (user 2026-11-22: Enter = Accept only if it cannot fire by
+        accident, and during an unattended run it can): in the limit field it sets the limit, on a focused limit button
+        it presses that button, anywhere else it is ignored. Space or a click presses the focused Accept / Cancel."""
         key = evt.GetKeyCode()
         enter = key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
         focus = wx.Window.FindFocus()
         if enter and focus is not None and (focus is self.limit or focus.GetParent() is self.limit):
-            self.apply_field()  # Enter in the limit field sets the limit; it never cancels the run
+            self.apply_field()  # Enter in the limit field sets the limit; it never stops the run
         elif enter and focus in (self.limit_set, self.limit_add5, self.limit_add15):
             evt.Skip()  # the focused limit button acts
-        elif key == wx.WXK_ESCAPE or enter:
+        elif enter:
+            return  # Accept / Cancel / nothing focused: Enter does nothing
+        elif key == wx.WXK_ESCAPE:
             self.cancel()
         else:
             evt.Skip()
@@ -1627,29 +1650,45 @@ class ProgressDialog(_Base):
     def _set_stopping_label(self, stage: str = "") -> None:
         W = WORDING["progress"]
         s = int(time.monotonic() - (self.cancelled_at or time.monotonic()))
-        ok = self.stable if self.ok_at_press is None else self.ok_at_press  # the label at the press (F2)
-        self._phase_label(W["phase_finishing" if ok else "phase_cancelling"].format(stage=f" ({stage})" if stage else "", s=s))
+        self._phase_label(W["phase_cancelling" if self.discarded else "phase_finishing"].format(
+            stage=f" ({stage})" if stage and not self.discarded else "", s=s))
 
-    def cancel(self) -> None:
-        if self.cancelled:
-            return
-        self.ok_at_press = self.stable  # what the button read at the press (OK once stable, else Cancel)
+    def _stop(self) -> None:
+        """The first stop request (Accept or Cancel): the run flow ends the run at its next ``progress`` call."""
         self.cancelled = True
         self.cancelled_at = time.monotonic()
-        self._set_stopping_label()
-        self.cancel_button.Disable()
         self._sync_limit_controls()
         self.gauge.Pulse()
 
+    def accept(self) -> None:
+        """Accept: stop the run and take the best result so far; the engine finishes the stage it is in. Cancel stays
+        possible until the run ends (it then drops the run and takes nothing)."""
+        if self.cancelled:
+            return
+        self.ok_at_press = self.stable  # the routes were stable at the press (full pour stitching in the engine)
+        self.accepted = True
+        self._stop()
+        self._set_stopping_label()
+        self.accept_button.Disable()
+
+    def cancel(self) -> None:
+        """Cancel: stop at once and take nothing. The run flow drops the engine job without waiting for it."""
+        if self.discarded:
+            return
+        if not self.cancelled:
+            self.ok_at_press = False
+            self._stop()
+        self.discarded = True
+        self._set_stopping_label()
+        self.cancel_button.Disable()
+        self.accept_button.Disable()
+
     def set_stable(self, stable: bool) -> None:
-        """M-B0: once the routes are stable the Cancel button reads OK (same id, same action: stop and keep the
-        best result so far, which is exactly the board the user gets). Stable never goes back within a run."""
+        """M-B0: once the routes are stable the dialog says "Routes stable" (title and phase line). The run goes on
+        (no stop on stable; the buttons stay Accept / Cancel); stable never goes back within a run."""
         if stable and not self.stable:
             self.stable = True
             self.SetTitle(WORDING["progress"]["title_stable"].format(board=self.board))
-            self.cancel_button.SetLabel(_mn(WORDING["progress"]["ok"], "o"))
-            self.cancel_button.SetDefault()
-            self.Layout()
 
     def update(self, p: Progress) -> None:
         W = WORDING["progress"]
@@ -2100,8 +2139,8 @@ class WxUi:
         self._preview_interval = float(plugin_value(Config.defaults(), "run", "progress_preview_interval_s"))
         self._board_model: dict | None = None
 
-    #: M-B0: the progress dialog lets the user end the run (OK at "Routes stable"); the run flow then does not
-    #: stop the engine at stable by itself.
+    #: M-B0: the progress dialog lets the user end the run (Accept, or Cancel); the run flow then does not stop the
+    #: engine at "Routes stable" by itself.
     waits_for_ok = True
 
     def set_context(self, board: str | None = None, report_dir=None, log_path=None, versions=None) -> None:
@@ -2229,10 +2268,16 @@ class WxUi:
             self._progress.set_sketch(kind, sketch)
 
     def ok_at_press(self) -> bool | None:
-        """What the stop button read when it was pressed: True = OK ("Routes stable"), False = Cancel, None = not
+        """Whether the routes were stable when the stop button (Accept; Cancel = False) was pressed, None = not
         pressed (or no progress dialog). The run flow sends it to the engine, which latches it. O(1)."""
         dlg = self._progress
         return dlg.ok_at_press if dlg is not None and dlg.cancelled else None
+
+    def stop_discards(self) -> bool:
+        """True once Cancel was pressed (sticky, also after an Accept): the run flow drops the run at once and takes
+        no result; False for Accept (the best so far is taken) and before any press. O(1)."""
+        dlg = self._progress
+        return bool(dlg is not None and dlg.discarded)
 
     def time_limit_request(self) -> float | None:
         """The time limit the user set in the progress dialog since the last call (seconds on the run's clock,

@@ -19,7 +19,10 @@ Contents: [Quick start](#quick-start) · [Where the settings come from](#where-t
 3. Click **Topor: route** in the PCB Editor toolbar (or **Tools → External Plugins → Topor: route**).
 4. Read the findings, set the [Options](#options) (on a board that is already routed choose
    *Existing copper: Rip up and re-route*, otherwise there is nothing to route), press **Route**.
-5. Watch the progress; press **Cancel** at any time to keep the best result so far (during the initial routing there is none yet: [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)).
+5. Watch the progress. The dialog has two buttons for the whole run: **Accept** stops the run and takes the best result so far
+   (KiCad's DRC and the preview follow, see the next step; during the initial routing there is none yet:
+   [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)); **Cancel** (or Esc) stops at once and takes nothing: the board stays
+   exactly as it was.
 6. Compare *Current board* and *Result* in the preview, then **Accept** (applied to the board; Edit → Undo reverts it) or
    **Reject** (nothing changes).
 7. Run KiCad's own DRC (**Inspect → Design Rules Checker**) — KiCad is the judge, not topor.
@@ -255,7 +258,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Trace shape | *45° (octilinear)* (default: straight and 45° segments, 90° bends only where needed) or *Any angle (smooth)* | `[drawing] style` |
 | Snap to KiCad grid | Ticked = prefer, unticked = off (default); half-ticked = topor.toml has `"fallback"` (kept unless you click). A grey line below shows the grid the run will use: size in mm and where it comes from (KiCad settings or `grid_mm`), the origin from the board, or "no grid found" | `[drawing] grid_snap` |
-| Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your OK); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
+| Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your Accept / Cancel); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Time limit clock | *wall* (default, seconds on the clock: what you wait) or *cpu* (CPU seconds of router work summed over all threads; comparable across machine load and thread count) | `[run] timeout_clock` |
 
 *Existing copper* decides what happens to tracks and vias that are already on the board:
@@ -308,12 +311,12 @@ removes the track. `[optimize] short_weight` (k, default 1) grades this: the ran
 shorts, the shorts a tie-break after it. The round lines in log.txt name the connections with a short. The same order decides when the
 best result improved (the stable meter: reheats and the stable stop), so `pick_shorts` changes which rounds a run makes,
 not only the final pick among equal error counts.
-*Last round* is the round any run finished last; *Best so far* is the best result over all runs, exactly the board OK
-or Cancel keeps; until the first round ends their place reads *Waiting for round 1…*. The line below says how the
+*Last round* is the round any run finished last; *Best so far* is the best result over all runs, exactly the board Accept
+keeps; until the first round ends their place reads *Waiting for round 1…*. The line below says how the
 last round compares, on the first criterion that differs: *Last round is worse than the best: errors +2.* (amber; more
 errors decide before fewer vias), *Last round is the new best: length -0.030 m.* (green), or *… scores the same as the
 best; the earlier result stays.* The numbers change in place: nothing in the dialog moves or widens while it runs.
-Hover *Cancel keeps the best result so far.* for what Cancel and OK do exactly. When *Best so far* stays at an early round, the
+Hover *Accept keeps the best result so far. Cancel takes nothing.* for what the two buttons do exactly. When *Best so far* stays at an early round, the
 later rounds were worse on that criterion — log.txt in the report folder has one `round ended:` line per round with
 its score and the verdict, e.g. `round ended: run 3, round 2: errors 5, open 0, vias 168, length 7.412 m, shrinkages
 4; rule violations 5, routed 426 of 426: worse than the best (run 1, round 1): errors +2`.
@@ -327,7 +330,7 @@ crossing), a trace through another net's copper (where it runs through it). The 
 and how many there are; a connection placed without any legal path is counted but has no dot (the line then says
 *n of m*).
 
-### Routes stable and OK
+### Routes stable and Accept
 
 The topological core iterates like TopoR: there is no fixed number of rounds. Every round routes the whole board
 again — with the passages the drawing found too small lowered, and with its factor weights shaken by a seeded
@@ -341,32 +344,32 @@ compute: their layer refinement tries its candidate moves on several lanes at on
 count or the lane setting, only the time does.
 
 When the best result has gained less than `[optimize] stable_gain_pct` (0.5 %) over the last `stable_window` (4)
-rounds in every run, the dialog says **Routes stable** (also in its window title) and the **Cancel** button reads
-**OK**. It is the same button with the same action: stop and keep the best result so far — exactly the board shown
-under *Best so far*, which then goes to KiCad's DRC and the preview. By default the run does not stop there by itself
-(user 2026-11-16: "don't stop on stable"): it keeps going for marginal gains until OK, Cancel, the safety cap
-`[optimize] rounds` or the time limit (the TopoR way; user 2026-11-17: "the button should change from 'Cancel' to
-'Ok' and the optimizer should keep running like it does for TopoR"). Nothing else ends a dialog run at *Routes
+rounds in every run, the dialog says **Routes stable** (also in its window title). The two buttons never change (they are **Accept** and
+**Cancel** for the whole run; since 2026-11-22 there is no OK): **Accept** stops the run and keeps the best result so far
+— exactly the board shown under *Best so far*, which then goes to KiCad's DRC and the preview — and **Cancel** stops
+at once and takes nothing. By default the run does not stop at *Routes stable* by itself
+(user 2026-11-16: "don't stop on stable"): it keeps going for marginal gains until Accept, Cancel, the safety cap
+`[optimize] rounds` or the time limit (the TopoR way). Nothing else ends a dialog run at *Routes
 stable*: the old keys `[optimize] finish_when_stable` and `finish_patience` are deprecated and ignored (warning
 `CFG_DEPRECATED_KEY` with their line; the pre-flight dialog offers *Use the current default* to comment the line
 out). *Routes stable* appears the moment every run's TopoR loop
-has recorded it and there is a pick to keep, while the loops still run (user 2026-11-17), so OK there really ends the
-run before the cap; *Routes stable* itself never stops anything, it only turns Cancel into OK. The loops judge their
+has recorded it and there is a pick to keep, while the loops still run (user 2026-11-17), so Accept there really ends the
+run before the cap; *Routes stable* itself never stops anything, it only tells you that Accept is a good moment. The loops judge their
 variants on the topology and draw only the one picked, so until that drawing *Best so far* shows the loops' predicted
 pick (its connections, vias and length as planned); the drawn board then replaces it. With fewer engine threads
 than runs (a small CPU, or `RAYON_NUM_THREADS` set), a run whose loop is stable gives its thread to a run that has
 not begun yet and goes on when a thread is free again, so *Routes stable* still comes while the loops run (log.txt:
-*TopoR loop: stable after cycle …, it gave its compute slot to a run not yet begun*). Pressing OK
+*TopoR loop: stable after cycle …, it gave its compute slot to a run not yet begun*). Pressing Accept
 at *Routes stable* is not a cancel: the summary says *Stopped: stable*, and the rest of the run (drawing the picked
 variant, the pour stitching) runs to its end exactly as when a run ends at stable by itself; only the time limit can
 still cut it. When it does (the hard limit, or the soft one past its overrun cap, cuts the drawing of the stable
 plan), the board is drawn only in part and the summary says *Stopped: timeout_wall* or *Stopped: timeout_cpu* (by
 `[run] timeout_clock`), not *Stopped: stable*; the time budget line then says *OK came at Routes stable, but the time
-limit then cut the drawing of the stable plan*. Cancel (pressed while the button still reads Cancel, e.g. at *Runs* 1 of 5 stable) stays a cancel
-whatever the runs do after it: the summary says *Stopped: cancel* and the pour stitching ends after the pass in
-progress. What the button read at the press decides, and the button is disabled after the first press, so there is
-no second Cancel. An OK that comes only after the engine already ended
-at the cap leaves *Stopped: round cap*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
+limit then cut the drawing of the stable plan* (the line keeps its wording from before the Accept button). An Accept pressed
+before *Routes stable* (e.g. at *Runs* 1 of 5 stable) stays a plain stop whatever the runs do after it: the summary says
+*Stopped: cancel* (the engine's name for a stop that keeps the best) and the pour stitching ends after the pass in
+progress. Whether the routes were stable at the press decides, and the Accept button is disabled after the first press.
+An Accept that comes only after the engine already ended at the cap leaves *Stopped: round cap*. Headless runs (harness, MCP) stop at *Routes stable* by themselves (plus `stable_patience`
 rounds). The first round of the first run always uses the plain weights, and every run is reproducible: the same
 board and settings give the same result.
 
@@ -375,18 +378,18 @@ router time is most of the total): eprom-to-kernal 2 s, wiccon-2023 about 25 s, 
 about 450 s of router time (320–710 s over six seeds), qmtech (426 connections, 4 layers) about 1000 s (680–1300 s).
 That is 5–8 times the fixed four rounds of earlier versions; in exchange that badge connects 80.5 % instead of
 77.6 % and qmtech 81.5 % instead of 79.6 % (KiCad DRC). `[optimize] runs = 1` takes roughly a quarter to a half of the
-time for a smaller gain; *Routes stable* and OK let you stop as soon as the result is good enough.
+time for a smaller gain; *Routes stable* and Accept let you stop as soon as the result is good enough.
 `[run] timeout_s` (default 600 s of router time) is only an emergency stop: when it fires before the routes are
 stable the result is the best so far, may differ between runs, and the findings say so
 ([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). Runs on large boards (that badge, qmtech with the default
 best of 5 runs) may hit it and keep the best result so far. `0` = no limit.
 
 **The limit is soft** (`[run] timeout_mode = "soft"`, the default since 2026-11-13). When it is reached, the
-progress dialog says *Time limit reached, waiting for the current step to finish (<step>); press Cancel to stop
-now*. The step that runs finishes and its plan is kept as a variant: the initial routing up to its rip-up rounds,
+progress dialog says *Time limit reached, waiting for the current step to finish (<step>); press Accept to stop
+now and keep the best*. The step that runs finishes and its plan is kept as a variant: the initial routing up to its rip-up rounds,
 the TopoR loop cycle that runs, or (with `[optimize] loop = "cycles"`) the whole-route cycle that runs. No new step
-begins, and the best kept variant is drawn to its end, so a limit never leaves half-drawn copper. **Cancel** stops
-at once and draws the best variant kept so far; when none is kept yet (Cancel during the initial routing of every
+begins, and the best kept variant is drawn to its end, so a limit never leaves half-drawn copper. **Accept** stops
+at once and draws the best variant kept so far (**Cancel** stops at once and takes nothing); when none is kept yet (Accept during the initial routing of every
 run) the run ends with the error [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw) and writes no copper. How far
 the run went past the limit, and in which step it was reached, is in log.txt, report.md (*Time limit* line) and
 `result.json` (`time_limit.reached`, `step`, `overrun_s` on the run's clock; measurements outside the limit, such as
@@ -394,7 +397,7 @@ the run went past the limit, and in which step it was reached, is in log.txt, re
 the overrun on the wall clock). With several runs each run finishes its own step; the steps named are those of the
 runs still computing when the limit was reached (a run waiting for the others' picks computes nothing). On a large board a
 TopoR loop cycle plus the drawing can take minutes (qmtech, 2026-11-13: about 4 minutes on the clock past the limit);
-press Cancel to stop at once.
+press Accept to stop at once and keep the best, or Cancel to drop the run.
 
 **The wait for the TopoR loop is bounded** (`[run] limit_grace_s`, default 30 s): the loop checks its stop
 between rerouted connections, layer re-optimisations, label moves and crossing passes, not only between cycles. After the
@@ -427,7 +430,7 @@ line and lists the run in `limits.json` `overrun_cap_hit`). The default `auto` i
 runs (harness, MCP, scripts, and direct calls of the engine's `route` / `route_async`, whose own default
 `timeout_overrun_s` is `"auto"`), so such a run takes about twice its limit plus the drawing of one plan (plus what
 the bound of a hard run below names), and no
-cap in the KiCad dialog, where Cancel stops a run at once. A number sets the cap; `0` or `"none"` = no cap. The cap
+cap in the KiCad dialog, where Accept stops a run at once. A number sets the cap; `0` or `"none"` = no cap. The cap
 never changes `timeout_s` itself, and has no effect with `timeout_mode = "hard"` or without a limit.
 
 `hard` cuts the step that runs at the limit and draws the kept plan (the best variant so far, or the initial plan)
@@ -490,22 +493,33 @@ progress: the progress dialog has a **Time limit** row with the limit in force (
 time* or *s CPU time*). **+5 min** and **+15 min** add to it; or type a new value and press **Set limit** (or Enter
 in the field). You can raise it, lower it down to the router time already spent (a value below that becomes the time
 spent: the run stops at its next check and keeps the best result so far, exactly as when the limit fires — not a
-Cancel), or set `0` for no limit (then only OK / Cancel end the run, and the + buttons are off: there is nothing to add
-to). The row works while the router runs; it is off after Cancel / OK, once the limit is reached, and during the
+Cancel), or set `0` for no limit (then only Accept / Cancel end the run, and the + buttons are off: there is nothing to add
+to). The row works while the router runs; it is off after Accept / Cancel, once the limit is reached, and during the
 DRC and the preview (the limit counts router time only). The change applies to this run only: `topor.toml` keeps
 `[run] timeout_s`. The log says *time limit extended by the user …* (or lowered / set / removed), and the report and
 `result.json` (`time_limit`: clock, start, every change with the router time it was made at, final) record it; the
 summary's *Stopped* line names the final limit (e.g. *limit 900 s wall (raised during the run from 600 s, 1 change)*),
 and so does the time-budget warning. Headless runs (harness, MCP) have no such control, so their limit stays fixed.
 
-**Cancel** (or Esc / Enter outside the time-limit field; **OK** after *Routes stable*) works at any time: the label changes to *Cancel pressed:
-finishing the current stage…* (after *Routes stable*: *OK pressed: finishing the current stage…*); while routing, the best result found so far goes on to KiCad DRC and the preview; if nothing was routed yet
-the run ends with *Cancelled — nothing was changed on the board.* topor polls the running `kicad-cli` every 0.25 s,
-so Cancel also works during the pre-flight DRC (the run then ends with nothing changed) and the DRC rounds / preview
-export (the DRC and the preview of the best result still finish). The engine finishes the stage it is in and then
-returns its best result so far: normally within a second or two, on a large board sometimes longer. Meanwhile the
-label reads *Cancel pressed: finishing the current stage (…)* with the seconds since Cancel; topor waits for the
-engine and never drops the result it is finishing. A `kicad-cli` call that runs longer than `[run] kicad_cli_timeout_s` (default 120 s, `0` = no
+**Accept** and **Cancel** work at any time (user 2026-11-22; Esc = Cancel). Enter never presses either button: in the
+time-limit field it sets the limit, on a limit button it presses that button, anywhere else it does nothing, so a stray Enter
+cannot take a result or drop the run (Alt+A and Alt+C are the mnemonics; Space or a click presses the focused one; the dialog starts with the focus in the
+time-limit field, never on Cancel).
+
+- **Accept** stops the run and takes the best result so far. The label changes to *Accept pressed: finishing the current
+  stage…* (with the seconds since the press); the engine finishes the stage it is in and returns its best result so far:
+  normally within a second or two, on a large board sometimes longer. That result then goes on to KiCad DRC and the preview, where
+  you still choose *Accept* or *Reject*; topor waits for the engine and never drops the result it is finishing. If nothing was
+  routed yet the run ends with *Cancelled — nothing was changed on the board.* (or the error `NOTHING_TO_DRAW` during the initial
+  routing). topor polls the running `kicad-cli` every 0.25 s, so Accept also works during the pre-flight DRC (the run then ends
+  with nothing changed) and the DRC rounds / preview export (the DRC and the preview of the best result still finish).
+- **Cancel** stops at once and takes no result: the board stays exactly as it was (no tracks, vias or zone changes, no preview, no
+  error window). The engine is told to stop and is not waited for: the dialog closes within one poll (about 0.25 s) even in the middle of a stage, and whatever the
+  engine still returns is thrown away, never judged or written. It also works after an Accept (before the run has ended) and during the pre-flight and DRC
+  rounds (the running `kicad-cli` is killed). The report and log say *cancelled by the user (Cancel)*; the run's outcome is
+  *cancelled*. A Cancel pressed after the commit has nothing left to undo (use Edit → Undo).
+
+A `kicad-cli` call that runs longer than `[run] kicad_cli_timeout_s` (default 120 s, `0` = no
 limit) is stopped and the run ends with [KICAD_CLI_TIMEOUT](troubleshoot.md#kicad_cli_timeout) (board unchanged).
 Before the routing starts the progress dialog already shows *Preparing geometry* while topor reads the board.
 

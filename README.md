@@ -105,8 +105,9 @@ connections still open (annealing with reheating; `[optimize] fluctuation`, `flu
 `fluctuation_stuck`, `fluctuation_reheat`). Every cycle's variants are pour-stitched and judged (a pour piece left
 cut off counts as an error). When the best result gains less than `stable_gain_pct` over `stable_window` cycles the
 routes are *stable* (TopoR 6.3 manual p. 73: "Autorouting may be stopped"; not before level 5–10): the progress
-dialog says **Routes stable** and its Cancel button reads **OK** — the same action, the best result shown is exactly
-the board you get. With the dialog the run keeps iterating for marginal gains until OK / Cancel
+dialog says **Routes stable**; its two buttons stay **Accept** (stop and keep the best result so far, exactly the
+board shown) and **Cancel** (stop at once, take nothing: the board stays as it was). With the dialog the run keeps
+iterating for marginal gains until Accept / Cancel
 (user 2026-11-16: "don't stop on stable"; `finish_when_stable = true` makes it finish at stable by itself,
 `finish_patience`), and headless runs stop at stable. `[optimize] runs` (default 5) seeded runs go on in
 parallel on the engine's threads and the best by the pick (errors, vias, length) is offered; `[optimize] rounds` (30) is only a

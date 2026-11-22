@@ -401,6 +401,102 @@ def test_run_builds_sketches_only_when_the_dialog_shows_an_image(app, eprom, tmp
     assert eng.jobs[0].enabled is (kind is not None)
 
 
+class _LateJob(ProxyJob):
+    """The engine job as seen by a Cancel: `done()` stays False until the plugin cancelled it, then it is done with a
+    complete, valid result (a late result). ``waited`` counts the ``wait()`` calls: a cancelled run never reads it."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.waited = 0
+
+    def done(self):
+        return self.cancelled and self.real.done()
+
+    def wait(self):
+        self.waited += 1
+        return super().wait()
+
+
+class _LateEngine(ProxyEngine):
+    def route_async(self, m, o):
+        j = _LateJob(topor_engine.route_async(m, o), self.hold, self.patch)
+        self.jobs.append(j)
+        return j
+
+
+def _drain(engine):
+    """Let a cancelled test job end (the real engine thread keeps computing after a Cancel): no leaked workers."""
+    for j in engine.jobs:
+        j.real.cancel(False)
+        j.real.wait()
+
+
+def _untouched(board, before_text, ui):
+    """Cancel's promise: no tracks, vias or zone changes, no commit, no refill, no result window, no error."""
+    assert board.commits == [] and board.refills == 0 and board.actions == []
+    assert board.text == before_text
+    assert not any(c[0] in ("commit", "refill_zones", "run_action", "preview", "error") for c in board.calls)
+    assert not any(n in ui.names() for n in ("preview", "error"))
+
+
+def test_run_cancel_while_the_engine_runs_takes_nothing_and_does_not_wait(app, eprom, tmp_path, reports):
+    """User 2026-11-22: Cancel stops at once and takes no result. The engine job is told to stop (``cancel(ok=False)``)
+    and abandoned: ``wait()`` is never called, even when the job finishes with a valid result right after."""
+    eng = _LateEngine(hold=1)
+    board = make_board(eprom)
+    before = board.text
+    ui = ScriptedUi(accept=True, discard_at_iteration=1)
+    try:
+        board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng, board=board)
+        job = eng.jobs[0]
+        assert job.cancelled and job.ok is False  # the engine is signalled to stop
+        assert job.waited == 0  # ... and not waited for
+        assert out.status == "cancelled" and out.cancelled is True and out.items == [] and out.commit is None
+        _untouched(board, before, ui)
+        assert "cancelled" in (out.report_dir / "report.md").read_text()
+        assert "cancelled by the user" in (out.report_dir / "log.txt").read_text()
+    finally:
+        _drain(eng)
+
+
+def test_run_late_result_after_cancel_is_never_applied(app, eprom, tmp_path, reports):
+    """The engine already finished with a full result when Cancel is pressed (here at the DRC of that result): the
+    result is discarded, nothing is previewed or written, even though the user's Accept answer would say yes."""
+    eng = ProxyEngine(hold=1)
+    board = make_board(eprom)
+    before = board.text
+    ui = ScriptedUi(accept=True, discard_when=lambda p: p.phase == "drc")
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng, board=board)
+    assert eng.jobs[0].real.done()  # the result existed
+    assert out.status == "cancelled" and out.items == [] and out.commit is None
+    _untouched(board, before, ui)
+
+
+def test_run_accept_still_takes_the_best_so_far(app, eprom, tmp_path, reports):
+    """Accept (the stop that keeps the result) is unchanged: the run goes on to the result and the commit."""
+    ui = ScriptedUi(accept=True, cancel_at_iteration=1)
+    board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=ProxyEngine(hold=2))
+    assert ui.stop_discards() is False
+    assert out.status == "accepted" and out.routed > 0 and board.commits and "preview" in ui.names()
+
+
+def test_run_headless_ui_without_stop_discards_never_discards(app, eprom, tmp_path, reports):
+    """A UI without ``stop_discards`` (the headless / CLI path) is judged as before: a stop keeps the best."""
+
+    class Plain:  # no stop_discards, no waits_for_ok
+        def __init__(self):
+            self.inner = ScriptedUi(accept=False, cancel_at_iteration=1)
+
+        def __getattr__(self, name):
+            if name == "stop_discards":
+                raise AttributeError(name)
+            return getattr(self.inner, name)
+
+    ui = Plain()
+    board, _, out = do_run(eprom, tmp_path, ui=ui, engine=ProxyEngine(hold=2))
+    assert out.status == "rejected" and out.routed > 0
+
+
 def test_run_cancel_with_nothing_routed_is_cancelled(app, eprom, tmp_path, reports):
     eng = ProxyEngine(hold=2, patch=_nothing_routed)
     ui = ScriptedUi(accept=True, cancel_at_iteration=1)

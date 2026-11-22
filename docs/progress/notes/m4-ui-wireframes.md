@@ -540,7 +540,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | phase_preflight_drc | text | Checking the board (KiCad DRC) |
 | progress | phase_drc | text | Verifying with KiCad DRC |
 | progress | phase_preview | text | Rendering the preview |
-| progress | phase_cancelling | text | Cancel pressed: finishing the current stage{stage}… {s} s |
+| progress | phase_cancelling | text | Cancel pressed: stopping, nothing is taken… {s} s |
 | progress | phase_limit | text | {notice} |
 | progress | gauge_value | text | {routed} / {total} |
 | progress | iteration_label | label | Round |
@@ -561,13 +561,13 @@ title/label/button/checkbox/choice/heading/text).
 | progress | limit_add5 | button | +5 min |
 | progress | limit_add15 | button | +15 min |
 | progress | limit_hint | text | 0 = no limit. A limit below the time spent stops the run now, keeping the best result. |
-| progress | cancel_hint | label | Cancel keeps the best result so far. |
-| progress | cancel_hint_tip | text | Cancel keeps the best result so far. Once the routes are stable the button reads OK: the same action, and the best result shown is exactly the board you get; waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
+| progress | cancel_hint | label | Accept keeps the best result so far. Cancel takes nothing. |
+| progress | cancel_hint_tip | text | Accept stops the run and takes the best result so far (the best shown here is exactly the board you get; the DRC and the preview follow, and you can still reject it there). Cancel stops at once and takes no result: the board stays exactly as it was. "Routes stable" does not stop the run: waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
 | progress | cancel | button | Cancel |
-| progress | ok | text | OK |
+| progress | accept | button | Accept |
 | progress | phase_stable | text | Routes stable |
 | progress | title_stable | text | Topor — Routing {board} — Routes stable |
-| progress | phase_finishing | text | OK pressed: finishing the current stage{stage}… {s} s |
+| progress | phase_finishing | text | Accept pressed: finishing the current stage{stage}… {s} s |
 | progress | round_value | text | {round} |
 | progress | gain_label | label | Gain |
 | progress | gain_value | text | {gain} % / {window} rounds |
@@ -586,7 +586,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | score_length | text | {length} m |
 | progress | score_pending | text | – |
 | progress | score_waiting | text | Waiting for round 1… |
-| progress | score_hint | text | Scores compare in the pick order: fewest errors (open connections and connections with rule violations), then fewest connections with a short, then fewest open, fewest vias, the shortest length ([optimize] pick). The best so far is the board OK or Cancel keeps. Last round = the round that finished last, whatever its score; Last run = the newest best of the run whose own best changed last. Predicted = a plan of the TopoR loop (nothing drawn yet), drawn = copper. |
+| progress | score_hint | text | Scores compare in the pick order: fewest errors (open connections and connections with rule violations), then fewest connections with a short, then fewest open, fewest vias, the shortest length ([optimize] pick). The best so far is the board Accept keeps. Last round = the round that finished last, whatever its score; Last run = the newest best of the run whose own best changed last. Predicted = a plan of the TopoR loop (nothing drawn yet), drawn = copper. |
 | progress | vs_first | text | The first result is the best so far. |
 | progress | vs_new_best | text | Last round is the new best: {delta}. |
 | progress | vs_worse | text | Last round is worse than the best: {delta}. |
@@ -608,7 +608,7 @@ title/label/button/checkbox/choice/heading/text).
 | progress | preview_caption | text | {which}: run {run}, round {round} — {what} |
 | progress | preview_plan | text | predicted plan, not drawn copper |
 | progress | preview_copper | text | drawn copper |
-| progress | preview_received | text | Image of {time}; OK / Cancel keeps the best so far. |
+| progress | preview_received | text | Image of {time}; Accept keeps the best so far, Cancel takes nothing. |
 | progress | preview_waiting | text | Waiting for the first image… |
 | progress | delta_errors | text | errors {d} |
 | progress | delta_open | text | open {d} |
