@@ -1140,8 +1140,9 @@ def grid_snap_bends() -> Pat:
     jb = Fp("J2", [Pad("1", "A", a2, (0.6, 0.6), "circle")])
     # part 2: three pins of a 0.65 mm pitch row placed off the grid (x 4.0 / 4.65 / 5.3, y 8.0) to test pads on grid
     # lines: the first bend of each (on the leg through the off-grid pad centre) cannot be on the grid (KiCad's own
-    # router gives the same, pad snap wins); every later bend can, at no extra length (all monotone octilinear paths
-    # from the pin to its pad are equally long)
+    # router gives the same, pad snap wins); every later bend can, but not for free: to the same horizontal level,
+    # every mm of extra pad leg costs 2 - sqrt(2) = 0.586 mm of length (a vertical mm replaces part of a 45 deg run),
+    # so the on-grid answer is 1.12 mm longer in all than the shortest octilinear one (B +0.254, C +0.22, D +0.649)
     nets = ["B", "C", "D"]
     xs, yr = [4.0, 4.65, 5.3], 8.0
     u = Fp("U1", [Pad(str(i + 1), n, (x, yr), (0.45, 1.45), "roundrect") for i, (n, x) in enumerate(zip(nets, xs))],
@@ -1161,8 +1162,10 @@ def grid_snap_bends() -> Pat:
         answer=f"0 vias. A: 45 deg up onto the grid line y 1.27 (one grid line out from the tight line 1.35, +0.066 mm), "
                f"over the blocker, 45 deg down: both bends on the grid. B, C, D: up from the pin centre along the pad, then "
                f"45 deg onto the test pad's grid line, horizontal to it: the first bend is off the grid (it lies on the leg "
-               f"through the off-grid pin centre: pad snap wins, as in KiCad), the second on it, at no extra length. "
-               f"{total:.3f} mm in all. Every track end on a pad at the pad centre.",
+               f"through the off-grid pin centre: pad snap wins, as in KiCad), the second on it. That is not free: to the same level every mm of extra pad leg "
+               f"costs 2 - sqrt(2) = 0.586 mm of length, so this answer is about 1.12 mm longer in all than the shortest "
+               f"octilinear one (B +0.254, C +0.22, D +0.649 mm); the grid is worth it here because the bends of B and C "
+               f"then keep the room the plan gives the next trace. {total:.3f} mm in all. Every track end on a pad at the pad centre.",
         why="Users fix autorouted boards by hand in KiCad with grid snap on (user 2026-11-17); off-grid bends make "
             "those edits awkward. The grid is a graded price (off_grid, 0.15 mm per bend fully off), never a rule: "
             "a wire leaves the grid where clearance, packing or the 45 deg form need it (user 2026-11-21).",
