@@ -4,7 +4,7 @@ use topor_engine::geom::quant::{IVec2, TrackPrim};
 use topor_engine::model::{BoardModel, Item, Options, TrackItem};
 use topor_engine::pourcheck::check_pour_reach;
 use topor_engine::topo::factors::{standard_factors, FactorConfig, Registry};
-use topor_engine::topo::stitch::stitch;
+use topor_engine::topo::stitch::{lattice_pitch, stitch, want_vias};
 
 const MM: i64 = 1_000_000;
 
@@ -65,12 +65,22 @@ fn a_cut_off_island_with_a_pad_gets_a_stitch_via() {
     let before = check_pour_reach(&m, &items, &[]);
     assert_eq!(before.cuts.len(), 1, "{:?}", before.notes);
     assert_eq!(before.cuts[0].pads, vec![0]);
-    let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
-    assert_eq!((s.before, s.after, s.island_vias, s.pad_stubs), (1, 0, 1, 0), "{:?}", s.notes);
+    // The straight 5 mm lattice this test pins (the default is staggered since 2026-11-22).
+    let o = Options { stitch_lattice: "straight".into(), ..Options::default() };
+    let s = stitch(&m, &o, &reg(), &items, &[], None);
+    // stitch-vias: at least 2, one per pitch² of the piece (131.6 mm² / 25 mm² -> 6); round 5:
+    // capped at the legal lattice points of the piece (the x = 5 column).
+    let want = want_vias(before.cuts[0].area, lattice_pitch(&o), o.stitch_min_vias);
+    assert_eq!(want, 6);
+    assert_eq!((s.before, s.after, s.pad_stubs), (1, 0, 0), "{:?}", s.notes);
+    assert!(s.island_vias >= 2 && s.island_vias <= want, "{:?}", s.notes);
     let Item::Via(v) = &s.items[0] else { panic!("{:?}", s.items) };
     assert_eq!(v.net, 1);
-    // Left of the cut, near the pad.
-    assert!(v.at.x < 7 * MM - 300_000 && (v.at.x - 4 * MM).abs() + (v.at.y - 15 * MM).abs() < 4 * MM, "{:?}", v.at);
+    // All on the 5 mm lattice from the grid origin (0, 0), left of the cut.
+    for it in &s.items {
+        let Item::Via(v) = it else { panic!("{it:?}") };
+        assert!(v.at.x % (5 * MM) == 0 && v.at.y % (5 * MM) == 0 && v.at.x < 7 * MM, "{:?}", v.at);
+    }
     let mut all = items.to_vec();
     all.extend(s.items.iter().cloned());
     assert!(check_pour_reach(&m, &all, &[]).cuts.is_empty());
@@ -99,7 +109,9 @@ fn an_empty_island_counts_only_when_kicad_keeps_it() {
     let r = check_pour_reach(&m, &items, &[]);
     assert_eq!(r.cuts.len(), 1, "{:?}", r.notes);
     let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
-    assert_eq!((s.before, s.after, s.island_vias), (1, 0, 1), "{:?}", s.notes);
+    // Round 5: the 3 legal points of the staggered lattice (rows y = 10, 20, 30 at x = 5; the
+    // shifted rows fall at x = 2.5 / 7.5, outside the site area), never a raster point.
+    assert_eq!((s.before, s.after, s.island_vias), (1, 0, 3), "{:?}", s.notes);
 }
 
 /// The planner's static via-site test and the drawing look at the same nine points of a
@@ -285,4 +297,44 @@ fn a_coarse_stub_never_reaches_the_fine_lattice() {
     let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
     assert_eq!((s.fine_cuts, s.fine_points, s.fine_stubs), (0, 0, 0), "{:?}", s.notes);
     assert!(!s.notes.iter().any(|n| n.starts_with("fine stub lattice")));
+}
+
+/// Round 5b (user 2026-11-22: stitching vias off the via grid NEVER): the boxed pad's stub via
+/// stands on the via grid. On a 0.05 mm grid the column x = 10.05 lies in the 0.03..0.10 mm window:
+/// the stub is found there. On a 0.25 mm grid no column lies in it (10.00 / 10.25): r5c (user:
+/// connection copper goes off the grid where it does not fit, as in KiCad) the stub, the pad's only
+/// connection, stands off the grid, named in a warning.
+#[test]
+fn a_pad_stub_via_stands_on_the_via_grid() {
+    let m = boxed_model();
+    let items = boxed_items();
+    let fine = Options { grid_via_nm: [50_000, 50_000], ..Options::default() };
+    let s = stitch(&m, &fine, &reg(), &items, &[], None);
+    assert_eq!((s.after, s.pad_stubs), (0, 1), "{:?}", s.notes);
+    let v = s.items.iter().find_map(|it| if let Item::Via(v) = it { Some(v) } else { None }).expect("a stub via");
+    assert!(v.at.x % 50_000 == 0 && v.at.y % 50_000 == 0, "stub via off the 0.05 mm grid: {:?}", v.at);
+    // nearest legal grid point first: about 0.6 mm above the pad, not anywhere out to 3 mm
+    let d = ((v.at.x - 10 * MM) as f64).hypot((v.at.y - 15 * MM) as f64);
+    assert!(d < 1.0e6, "stub via {:.3} mm from its pad: {:?}", d / 1e6, v.at);
+    let coarse = Options { grid_via_nm: [250_000, 250_000], ..Options::default() };
+    let s = stitch(&m, &coarse, &reg(), &items, &[], None);
+    assert_eq!((s.after, s.pad_stubs), (0, 1), "{:?}", s.notes);
+    let v = s.items.iter().find_map(|it| if let Item::Via(v) = it { Some(v) } else { None }).expect("a stub via");
+    assert!(v.at.x % 250_000 != 0 || v.at.y % 250_000 != 0, "{:?}", v.at);
+    assert!(s.notes.iter().any(|n| n.starts_with("pad stub C1.1 off the via grid at ") && n.contains("the pad's only connection")), "{:?}", s.notes);
+}
+
+/// r5c: the coarse lattice's off-grid pass. The boxed pad with its pocket widened to the left
+/// (-0.65 mm): a via fits with its centre 9.975..10.10 mm, so the coarse ray straight up (x 10.00)
+/// reaches it; the 0.25 mm via grid from x 0.125 mm has columns 9.875 / 10.125, both outside. The
+/// coarse lattice finds the stub off the grid itself (after every grid point failed), not the fine one.
+#[test]
+fn the_coarse_lattice_falls_back_off_the_grid_for_a_pad_stub() {
+    let m = boxed_model();
+    let (l, r, t, b) = (10 * MM - 650_000, 10 * MM + 725_000, 13 * MM, 16_200_000);
+    let items = vec![seg(2, 0, (l, t), (r, t)), seg(2, 0, (r, t), (r, b)), seg(2, 0, (r, b), (l, b)), seg(2, 0, (l, b), (l, t))];
+    let o = Options { grid_via_nm: [250_000, 250_000], grid_origin_nm: [125_000, 0], ..Options::default() };
+    let s = stitch(&m, &o, &reg(), &items, &[], None);
+    assert_eq!((s.after, s.pad_stubs, s.fine_stubs), (0, 1, 0), "{:?}", s.notes);
+    assert!(s.notes.iter().any(|n| n.starts_with("pad stub C1.1 off the via grid at ")), "{:?}", s.notes);
 }

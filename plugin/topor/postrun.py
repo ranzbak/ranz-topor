@@ -11,6 +11,10 @@ Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md)
                         connection width check)
     POUR_ISLANDS        pour pieces that stay cut off from their pour after the stitching
     POUR_STITCHED       stitching vias / pad stubs / island joins topor added to join cut-off pour pieces (info)
+    STITCH_VIAS         stitching vias in dropped islands / behind thin necks / on the area grid (info, stitch-vias)
+    STITCH_OFF_GRID     connection vias (pad stub, first via of a cut-off piece) that left the via grid because no grid
+                        point fits (warning, stitch-vias r6)
+    STITCH_VIAS_SHORT   pieces that got fewer stitching vias than wanted, with the reason (warning, stitch-vias r6)
     PLANE_PAD_SIGNAL    plane pads that got no stub into their pour and were joined by a trace instead (info):
                         to the pour's filled copper (planes.terminals) or to another pad of the net
     PLANE_VIA_OUTSIDE_POUR  a plane stub via that ended outside the filled copper of its plane
@@ -46,7 +50,7 @@ from .findings import Finding
 from .messages import MESSAGES
 
 #: every code route_findings can emit (the preview summary names those present)
-POSTRUN_CODES = ("DIFF_PAIRS", "DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "PLANE_PAD_SIGNAL",
+POSTRUN_CODES = ("DIFF_PAIRS", "DIFF_PAIRS_SKIPPED", "POUR_UNJOINED", "UNROUTED", "CONNECTION_WIDTH", "POUR_ISLANDS", "POUR_STITCHED", "STITCH_VIAS", "STITCH_OFF_GRID", "STITCH_VIAS_SHORT", "PLANE_PAD_SIGNAL",
                  "PLANE_VIA_OUTSIDE_POUR", "VIA_SQUEEZE", "NECKED", "IGNORED_RULE", "VIOLATIONS", "TIME_BUDGET_HIT", "TIME_LIMIT_WAIT", "TIME_OVERRUN_CAP", "TIME_DRAWING_CUT", "DRC_NEW_VIOLATIONS", "RULES_MISMATCH", "DRC_WITHOUT_PROJECT",
                  "ERBS_FALLBACK", "ERBS_TIMEOUT", "ERBS_LONG")
 DIFF_PAIR_REASON = "diff pair: not in the rough version"  # engine/src/topo/core.rs DIFF_PAIR
@@ -153,6 +157,28 @@ def route_findings(result: dict | None) -> list:
                           "(planes.join_islands)" if joins else "")
                        + (f"; {len(long_joins)} of those join(s) run more than 3 mm from the pad, check them by hand"
                           if long_joins else "") + ".", stitched))
+    # stitch-vias: the region stitching after the pick (classes dropped / thin / area).
+    sv = next((x for x in w if x.startswith("stitching vias (")), None)
+    m3 = re.search(r"; (\d+) vias in all", sv or "")
+    if m3 and int(m3.group(1)):
+        out.append(_mk("STITCH_VIAS",
+                       f"{m3.group(1)} stitching via(s) join pour pieces to solid pour of their net on another layer: "
+                       + sv.split(": ", 1)[1].split("; ")[0] + ".",
+                       [x.removeprefix("stitch ") for x in lines("stitch (")
+                        if not re.search(r": 0 (of \d+ )?via\(s\)$", x)]))
+    # r6: the warnings the user asked for are findings of their own (not items of the capped info finding above).
+    off = [x for x in lines("stitch via off the via grid at ") + lines("pad stub ") if " off the via grid at " in x]
+    if off:
+        out.append(_mk("STITCH_OFF_GRID",
+                       f"{len(off)} connection via(s) of pour stitching stand off your KiCad via grid because no grid "
+                       "point fits there (the via is the only connection of a pad or a cut-off pour piece).",
+                       [x.split(": ", 1)[0] for x in off]))
+    short = [x for x in lines("stitch vias: ") if re.search(r": \d+ of \d+ wanted for ", x)]
+    if short:
+        out.append(_mk("STITCH_VIAS_SHORT",
+                       f"{len(short)} pour piece(s) got fewer stitching vias than wanted: "
+                       + "; ".join(re.sub(r"^stitch vias: ", "", x) for x in short[:3]) + (" ..." if len(short) > 3 else "") + ".",
+                       [x.removeprefix("stitch vias: ") for x in short]))
     sig = lines(contains="joined to its net's copper by a signal connection instead")
     # 4.4 (planes.terminals): such a pad is wired to its pour's filled copper instead.
     far = lines(contains="wired to its pour's filled copper at")

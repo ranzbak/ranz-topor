@@ -732,12 +732,30 @@ def grid_line_for(cfg, port, copy_text: str) -> str:
 
 def grid_run_options(cfg, known: dict, port, copy_text: str) -> tuple[dict, list[str] | None]:
     """grid-snap: the engine options for the user's KiCad grid and the log lines, or ``(dict(), None)`` when
-    ``[drawing] grid_snap`` is off or the engine lacks the option. The settings directory comes from the port
-    (``kicad_settings_dir()``, KiCad's own config dir, read only); a port without it gives None (no grid found)."""
-    if cfg.get("drawing", "grid_snap") == "off" or "grid_track_nm" not in known:
+    neither ``[drawing] grid_snap`` nor the stitching vias (``[planes] stitch_islands`` with ``stitch_on_grid``)
+    use it, or the engine lacks the option. The settings directory comes from the port
+    (``kicad_settings_dir()``, KiCad's own config dir, read only); a port without it gives None (no grid found).
+    One grid source for both (topor/grid.py resolve: size, via override, origin); with grid_snap off the drawn
+    copper ignores the grid (the engine gates it on grid_snap), only the stitching vias use it."""
+    snap = cfg.get("drawing", "grid_snap") != "off"
+    stitch = "stitch_on_grid" in known and bool(cfg.get("planes", "stitch_islands")) and bool(cfg.get("planes", "stitch_on_grid"))
+    if not (snap or stitch) or "grid_track_nm" not in known:
         return {}, None
     settings = getattr(port, "kicad_settings_dir", None)
-    return grid_mod.resolve(cfg.get("drawing", "grid_mm"), copy_text, settings() if callable(settings) else None)
+    opts, lines = grid_mod.resolve(cfg.get("drawing", "grid_mm"), copy_text, settings() if callable(settings) else None)
+    if not snap:  # stitching vias only: name them, the drawn copper is not on the grid
+        lines = [x.replace("grid snap: no grid found", "stitching vias: no grid found")
+                 .replace("the copper is drawn without the grid", "the stitching vias stand off the grid")
+                 .replace("grid snap:", "stitching vias grid:") for x in lines if "coarser than" not in x]
+    via = opts["grid_via_nm"] if min(opts["grid_via_nm"]) > 0 else opts["grid_track_nm"]
+    if stitch and min(via) > 0:
+        for i, axis in enumerate(("x", "y")):
+            p, g = float(cfg.get("planes", f"stitch_pitch_{axis}_mm")), via[i] / 1e6
+            r = max(1, round(p / g)) * g
+            if abs(r - p) > 1e-6:
+                lines.append(f"warning: stitching vias: stitch_pitch_{axis}_mm {p:g} is not a multiple of the via grid "
+                             f"{g:g} mm: the lattice uses {r:g} mm")
+    return opts, lines
 
 class RunDiscarded(Exception):
     """The user pressed Cancel in the progress dialog (user 2026-11-22): stop at once, take no result. Raised by

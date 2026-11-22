@@ -1,6 +1,7 @@
 """PNG renders of a board (zone fills stripped), captions and side-by-side comparisons."""
 from __future__ import annotations
 
+import functools
 import subprocess
 import tempfile
 from pathlib import Path
@@ -60,8 +61,54 @@ def _png_width(png: Path) -> int:
     return int(out.strip())
 
 
+# Text fonts for ImageMagick, first found wins. Without -font ImageMagick takes its default font, which on a
+# bare server (no ghostscript fonts) resolves to a symbol font: every caption came out as garbage glyphs on
+# the Hetzner VMs (stitch-vias r2).
+FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+)
+_NOT_TEXT = ("symbol", "dingbat", "emoji", "math", "wingding")
+
+
+@functools.lru_cache(maxsize=1)
+def text_font() -> str | None:
+    """A sans-serif TrueType font file for captions: a known path, then matplotlib's bundled DejaVu Sans, then
+    any fontconfig sans font that is not a symbol / math font. None = ImageMagick's default (may be symbols)."""
+    for f in FONT_CANDIDATES:
+        if Path(f).is_file():
+            return f
+    try:
+        import matplotlib
+        f = Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf"
+        if f.is_file():
+            return str(f)
+    except Exception:  # noqa: BLE001 - matplotlib is optional here
+        pass
+    try:
+        out = subprocess.run(["fc-list", ":style=Regular", "family", "file"], capture_output=True, text=True,
+                             timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in sorted(out.splitlines()):
+        file, _, family = line.partition(":")
+        fam = family.lower()
+        if "sans" in fam and not any(w in fam for w in _NOT_TEXT) and file.strip().endswith((".ttf", ".otf")):
+            return file.strip()
+    return None
+
+
+def _font_args() -> list[str]:
+    f = text_font()
+    return ["-font", f] if f else []
+
+
 def _text_width(text: str, pointsize: int) -> int:
-    out = subprocess.run(["convert", "-pointsize", str(pointsize), f"label:{text}",
+    out = subprocess.run(["convert", *_font_args(), "-pointsize", str(pointsize), f"label:{text}",
                           "-format", "%w", "info:"], check=True,
                          capture_output=True, text=True).stdout
     return int(out.strip())
@@ -86,7 +133,7 @@ def caption(png: Path, text: str, out: Path, *, strip_px: int = CAPTION_PX) -> P
     top = max(1, (strip - (pointsize + (len(lines) - 1) * CAPTION_LINE_PX)) // 2)
     # Each line is annotated at an explicit y so the line pitch is fixed.
     cmd = ["convert", str(png), "-background", "white", "-gravity", "North",
-           "-splice", f"0x{strip}", "-fill", "black", "-pointsize", str(pointsize)]
+           "-splice", f"0x{strip}", "-fill", "black", *_font_args(), "-pointsize", str(pointsize)]
     for i, line in enumerate(lines):
         # ImageMagick treats '%' as an escape in -annotate text.
         cmd += ["-annotate", f"+0+{top + i * CAPTION_LINE_PX}", line.replace("%", "%%")]

@@ -118,6 +118,52 @@ def test_island_join_is_a_stitch():
     assert "1 of those join(s) run more than 3 mm from the pad" in msg
 
 
+def test_stitch_vias_finding_lists_the_pieces():
+    """stitch-vias: the region stitching summary (engine/tests/topo_stitch_vias.rs pins its words) becomes
+    STITCH_VIAS with one item per piece that got a via; none when it placed no via."""
+    head = ("stitching vias (lattice 5.00 x 5.00 mm straight from the grid origin, at least 2 per piece): dropped islands 1 of 2 stitched "
+            "(3 vias), thin-neck cores 0 of 1 (0 vias), area 0 vias; {} vias in all (0.02 s)")
+    pieces = ["stitch (dropped island): GND on F.Cu 80.00 mm² near (15.000, 19.000): 3 of 4 via(s) (10.000, 15.000) "
+              "(20.000, 25.000) (15.000, 20.000)",
+              "stitch (dropped island): GND on F.Cu 9.00 mm² near (5.000, 5.000): 0 of 2 via(s)",
+              "stitch (thin neck < 1.00 mm): GND on B.Cu core 30.00 mm²: 0 of 2 via(s)"]
+    res = {"connections": [_c("GND", "routed")], "warnings": [head.format(3)] + pieces}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    f = fs["STITCH_VIAS"]
+    assert f.severity == "info" and f.message.startswith("3 stitching via(s)") and "dropped islands 1 of 2" in f.message
+    assert list(f.items) == [pieces[0].removeprefix("stitch ")]
+    assert f.fix == MESSAGES["STITCH_VIAS"].fix
+    res["warnings"][0] = head.format(0)
+    assert "STITCH_VIAS" not in {f.code for f in postrun.route_findings(res)}
+
+
+def test_stitch_off_grid_and_short_pieces_are_warning_findings():
+    """stitch-vias r6: the off-grid connection vias and the 'k of n wanted (reason)' lines (engine/src/topo/stitch.rs)
+    are warning findings of their own, not items of the capped info STITCH_VIAS / POUR_STITCHED."""
+    off1 = ("stitch via off the via grid at (10.100, 20.050) for GND island R1.1: the piece's only connection, no legal "
+            "via-grid point in it nor for a pad stub (connection copper goes off the grid where it does not fit, as in KiCad; "
+            "stitching extras never do)")
+    off2 = ("pad stub C6.2 off the via grid at (3.020, 4.000): the pad's only connection, no legal via-grid point within "
+            "5 mm of the pad (connection copper goes off the grid where it does not fit, as in KiCad; stitching extras never do)")
+    short = ("stitch vias: 1 of 3 wanted for GND island R1.1 (no more legal site on the via grid 0.05 x 0.05 mm; 2 legal "
+             "spot(s) between grid points not used: stitching vias never leave the via grid)")
+    fillers = [f"stitch via 0.6 mm at ({i}.000, 1.000) for GND island R{i}.1" for i in range(60)]
+    res = {"connections": [_c("GND", "routed")], "warnings": fillers + [off1, off2, short]}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    o = fs["STITCH_OFF_GRID"]
+    assert o.severity == "warning" and o.message.startswith("2 connection via(s)")
+    assert [x.split(" ")[0] for x in o.items] == ["stitch", "pad"] and "C6.2" in o.items[1]
+    assert o.fix == MESSAGES["STITCH_OFF_GRID"].fix
+    sh = fs["STITCH_VIAS_SHORT"]
+    assert sh.severity == "warning" and sh.message.startswith("1 pour piece(s) got fewer")
+    assert "1 of 3 wanted for GND island R1.1" in sh.message and sh.items[0].startswith("1 of 3 wanted")
+    assert sh.fix == MESSAGES["STITCH_VIAS_SHORT"].fix
+    assert {"STITCH_OFF_GRID", "STITCH_VIAS_SHORT"} <= set(postrun.POSTRUN_CODES)
+    # quiet when the engine had nothing to say
+    res["warnings"] = fillers
+    assert not {"STITCH_OFF_GRID", "STITCH_VIAS_SHORT"} & {f.code for f in postrun.route_findings(res)}
+
+
 def test_a_drawing_cut_by_the_hard_limit_is_a_loud_finding():
     """verify-m2c 3: the engine's line (engine/tests/topo_m2_draw_once.rs pins its words) becomes TIME_DRAWING_CUT,
     with the counts and what to change for a complete board."""

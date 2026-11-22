@@ -99,7 +99,9 @@ WORDING: dict[str, dict[str, str]] = {
                          "costs less than its price. Unticked: off (the default; prefer adds DRC violations on dense "
                          "boards). Half-ticked: topor.toml has grid_snap = \"fallback\"; it stays unless you click. "
                          "The grid (size from KiCad's saved settings or [drawing] grid_mm, origin from the board) is "
-                         "shown next to it. Saved to topor.toml with the box below.",
+                         "shown next to it. Saved to topor.toml with the box below. The stitching vias use this grid "
+                         "whatever the tick says ([planes] stitch_on_grid, on by default); the tick only moves the "
+                         "drawn tracks.",
         "grid_line": "Grid: {grid}",
         "grid_none": "Grid: not known (headless run)",
         "timeout_clock_label": "Count",

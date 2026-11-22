@@ -189,6 +189,20 @@ pub struct KeptItem {
     pub locked: bool,
 }
 
+/// A solder-mask opening drawn as a graphic on F.Mask / B.Mask (board or footprint; pads' own
+/// openings are not listed): copper under it is exposed, and exposed copper of two nets in one
+/// opening is KiCad's `solder_mask_bridge` (stitch-vias F1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaskOpening {
+    #[serde(default)]
+    pub uuid: String,
+    /// The copper layer the opening exposes (F.Mask -> F.Cu, B.Mask -> B.Cu).
+    pub layer: u32,
+    pub poly: Vec<Pt>,
+    #[serde(default)]
+    pub owner_ref: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CopperShape {
     #[serde(default)]
@@ -566,6 +580,8 @@ pub struct BoardModel {
     pub dangling_ends: Vec<DanglingEnd>,
     pub pours: Vec<Pour>,
     pub rules: Rules,
+    /// Solder-mask openings drawn as graphics ([`MaskOpening`]).
+    pub mask_openings: Vec<MaskOpening>,
 }
 
 impl BoardModel {
@@ -593,6 +609,9 @@ impl BoardModel {
         }
         for c in &mut self.copper_shapes {
             c.poly.iter_mut().for_each(Pt::flip);
+        }
+        for m in &mut self.mask_openings {
+            m.poly.iter_mut().for_each(Pt::flip);
         }
         for p in &mut self.pours {
             for f in &mut p.fills {
@@ -1056,6 +1075,47 @@ pub struct Options {
     /// = distance from the pad's edge ([`crate::topo::stitch::join_price`]), no cutoff, a warning
     /// beyond 3 mm. False: such an island is only reported.
     pub plane_join_islands: bool,
+    /// stitch-vias (`topor.toml [planes] stitch_min_vias`, default 2, lead 2026-11-21: redundancy):
+    /// the vias a cut-off pour piece (class 1), a dropped island (class 2) or a thinly connected
+    /// core (class 3) gets at least, where room allows; more by area, one per `stitch_pitch_x_nm` · `stitch_pitch_y_nm`.
+    pub stitch_min_vias: usize,
+    /// stitch-vias (`[planes] stitch_per_area`, default true): a piece gets one via per
+    /// x · y lattice cell of its area on top of `stitch_min_vias`; false = `stitch_min_vias` only.
+    pub stitch_per_area: bool,
+    /// stitch-vias (`[planes] stitch_pitch_x_mm` / `stitch_pitch_y_mm`, default 5 mm each, about
+    /// lambda_g/20 at 1.5 GHz in FR4; user 2026-11-22 "a setting for x space and y space in mm"):
+    /// the stitching lattice spacing along x and y (each rounded to 0.05 mm) from the board's grid
+    /// origin; one via per x · y of a piece's area; sqrt(x · y) is the value of a via of classes
+    /// 2-4 against its site price.
+    pub stitch_pitch_x_nm: i64,
+    pub stitch_pitch_y_nm: i64,
+    /// stitch-vias (`[planes] stitch_lattice`, default `"staggered"`; user 2026-11-22 "straight or
+    /// staggered"): `"staggered"` shifts every other lattice row by half the x spacing.
+    pub stitch_lattice: String,
+    /// stitch-vias (`[planes] stitch_on_grid`, default true; user 2026-11-22 "the vias should use
+    /// that as well"): the stitching vias stand on the user's KiCad via grid (`grid_via_nm`, else
+    /// `grid_track_nm`, from `grid_origin_nm`), the lattice pitch a multiple of it; independent of
+    /// `grid_snap`. No grid known = as off (the plugin warns).
+    pub stitch_on_grid: bool,
+    /// stitch-vias round 5 (`[planes] stitch_nudge_mm`, default 0; user 2026-11-22: "looks like
+    /// random placement"): how far a stitching via whose board-lattice point is blocked (no room,
+    /// or the checker refuses it) may move along the via grid, nm, priced 2 x the distance on top
+    /// of its site cost (graded, cheapest first). 0 = the blocked lattice point is dropped; a via
+    /// never moves to an arbitrary raster point. The minimum per piece (`stitch_min_vias`) is kept
+    /// at the piece's extremities either way.
+    pub stitch_nudge_nm: i64,
+    /// stitch-vias class 2 (`[planes] stitch_dropped`, default true, lead 2026-11-21): an island
+    /// of a pour that KiCad's island removal would drop (no pad, via or track of its net) and of
+    /// at least pitch²/4 gets stitching vias into solid pour of its net on another layer, so its
+    /// copper stays.
+    pub stitch_dropped: bool,
+    /// stitch-vias class 3 (`[planes] stitch_thin_mm`, default 1 mm, 0 = off): a part of a pour
+    /// island that a neck narrower than this separates from the rest and that holds no via or
+    /// through-hole pad of the net gets stitching vias.
+    pub stitch_thin_nm: i64,
+    /// stitch-vias class 4 (`[planes] stitch_area`, default false): classic area stitching, a via
+    /// on every lattice site of a pour farther than the pitch from every via of its net.
+    pub stitch_area: bool,
     /// Topological core (4.4, `topor.toml [planes] terminals`, user rule 2026-11-10): an own-net
     /// pour is a terminal of its net like a pad, which may carry vias. Only fill connected to the
     /// rest of its net before the run (the main component of [`crate::pourcheck`] on the board as
@@ -1838,6 +1898,16 @@ impl Default for Options {
             via_reduce: true,
             stitch_islands: true,
             plane_join_islands: true,
+            stitch_min_vias: 2,
+            stitch_per_area: true,
+            stitch_pitch_x_nm: 5_000_000,
+            stitch_pitch_y_nm: 5_000_000,
+            stitch_lattice: "staggered".into(),
+            stitch_on_grid: true,
+            stitch_nudge_nm: 0,
+            stitch_dropped: true,
+            stitch_thin_nm: 1_000_000,
+            stitch_area: false,
             plane_terminals: true,
             plane_share_vias: "outside_bga".into(),
             plane_bga_refs: Vec::new(),

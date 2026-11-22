@@ -515,6 +515,25 @@ def _courtyards(board) -> dict:
 
 
 # ---------------------------------------------------------------- top level
+def _export_mask_openings(board, max_err: int) -> list[dict]:
+    """Solder-mask openings drawn as graphics on F.Mask / B.Mask (board and footprints; pads' own openings are
+    not graphics): {uuid, layer (the copper layer exposed: F.Cu / B.Cu), poly, owner_ref}. Polygons contain
+    KiCad's shape (ERROR_OUTSIDE); holes are dropped (superset). stitch-vias F1: no stitching via or kept island
+    under an opening that exposes another net (KiCad's solder_mask_bridge)."""
+    err = min(max_err, SHAPE_ERR_NM)
+    side = {int(pcbnew.F_Mask): int(pcbnew.F_Cu), int(pcbnew.B_Mask): int(pcbnew.B_Cu)}
+    out = []
+    for item, owner in _graphics(board):
+        layer = int(item.GetLayer())
+        if layer not in side or item.GetClass() != "PCB_SHAPE":
+            continue
+        ps = pcbnew.SHAPE_POLY_SET()
+        item.TransformShapeToPolygon(ps, item.GetLayer(), 0, err, pcbnew.ERROR_OUTSIDE)
+        for i in range(ps.OutlineCount()):
+            out.append({"uuid": _uuid(item), "layer": side[layer], "poly": _outline_pts(ps, i), "owner_ref": owner})
+    return out
+
+
 def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) -> dict:
     """The BoardModel dict. `dru_text` (the .kicad_dru) adds its `disallow` rules as keepouts."""
     cu = _cu_layers(board)
@@ -549,6 +568,7 @@ def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) 
                              if z.IsTeardropArea()), key=lambda d: d["uuid"]),
         "dangling_ends": find_dangling_ends(board),
         "rules": rules,
+        "mask_openings": _export_mask_openings(board, max_err),
     }
     return apply_to_model(model, dru_text, courtyards=_courtyards(board) if dru_text else {})
 

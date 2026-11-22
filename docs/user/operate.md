@@ -49,6 +49,7 @@ takes a reported fallback.
 | Via protection (filled + capped), needed for vias in pads | KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection |
 | Locked tracks and vias | KiCad → item Properties → Locked |
 | What to route (scope) | KiCad → select footprints in the PCB editor before you click the button ([Scope by selection](#scope-by-selection)) |
+| Origin of the stitching-via lattice (`[planes] stitch_pitch_x_mm`, `stitch_pitch_y_mm`, `stitch_lattice`) and the grid the stitching vias stand on (`stitch_on_grid`) | KiCad → Place → Grid Origin; KiCad → View → Grid Properties (grid, via grid override) |
 | Priority marker `@1`..`@3` in a net name | the net label in the schematic (Eeschema), then Tools → Update PCB from Schematic |
 | Zones and their fill | Place → Add Filled Zone; Edit → Fill All Zones (B) |
 | Grid for the drawn copper (`[drawing] grid_snap`, `grid_mm`): grid sizes and the per-item track / via grid overrides; the grid origin | View → Grid Properties; Place → Grid Origin ([grid snap](#grid-snap-the-drawn-copper-on-your-kicad-grid)) |
@@ -257,7 +258,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Existing copper | Keep as obstacles · Keep and smooth · Rip up and re-route | `[run] existing_copper` = `fixed` / `smooth` / `rip` |
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Trace shape | *45° (octilinear)* (default: straight and 45° segments, 90° bends only where needed) or *Any angle (smooth)* | `[drawing] style` |
-| Snap to KiCad grid | Ticked = prefer, unticked = off (default); half-ticked = topor.toml has `"fallback"` (kept unless you click). A grey line below shows the grid the run will use: size in mm and where it comes from (KiCad settings or `grid_mm`), the origin from the board, or "no grid found" | `[drawing] grid_snap` |
+| Snap to KiCad grid | Ticked = prefer, unticked = off (default); half-ticked = topor.toml has `"fallback"` (kept unless you click). A grey line below shows the grid the run will use: size in mm and where it comes from (KiCad settings or `grid_mm`), the origin from the board, or "no grid found". The stitching vias use this grid whatever the tick says (`[planes] stitch_on_grid`, on by default); the tick only moves the drawn tracks | `[drawing] grid_snap` |
 | Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your Accept / Cancel); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Time limit clock | *wall* (default, seconds on the clock: what you wait) or *cpu* (CPU seconds of router work summed over all threads; comparable across machine load and thread count) | `[run] timeout_clock` |
 
@@ -650,8 +651,9 @@ the preview summary names the warnings (*After routing, check: …*), report.md 
 | [`DIFF_PAIRS_SKIPPED`](troubleshoot.md#diff_pairs_skipped) | differential pairs left unrouted because `[diffpair] enabled = false` (also announced in the pre-flight); see [Differential pairs](#differential-pairs) |
 | [`UNROUTED`](troubleshoot.md#unrouted) | connections that could not be finished, counted by reason (no room for a via, no room at the clearance when drawn, …) |
 | [`CONNECTION_WIDTH`](troubleshoot.md#connection_width) | traces not drawn because they would graze their own pad or via (KiCad's minimum connection width) |
-| [`POUR_ISLANDS`](troubleshoot.md#pour_islands) / [`POUR_STITCHED`](troubleshoot.md#pour_stitched) | pour pieces the new copper cut off: left over / joined again by stitching vias or pad stubs |
+| [`POUR_ISLANDS`](troubleshoot.md#pour_islands) / [`POUR_STITCHED`](troubleshoot.md#pour_stitched) / [`STITCH_VIAS`](troubleshoot.md#stitch_vias) | pour pieces the new copper cut off: left over / joined again by stitching vias or pad stubs; stitching vias in islands KiCad would drop, behind thin necks or on the area grid |
 | [`POUR_UNJOINED`](troubleshoot.md#pour_unjoined) | KiCad's own DRC after the zone refill: pour pieces cut off (counted in the preview legend) and pads not joined to their pour (blue ring in the preview) |
+| [`STITCH_OFF_GRID`](troubleshoot.md#stitch_off_grid) / [`STITCH_VIAS_SHORT`](troubleshoot.md#stitch_vias_short) | (warning) a stitching connection via off your KiCad via grid because no grid point fits / a pour piece with fewer stitching vias than wanted, with the reason |
 | [`PLANE_PAD_SIGNAL`](troubleshoot.md#plane_pad_signal) / [`PLANE_VIA_OUTSIDE_POUR`](troubleshoot.md#plane_via_outside_pour) | plane pads joined by a trace instead of a via into their pour / a plane via outside the fill |
 | [`VIA_SQUEEZE`](troubleshoot.md#via_squeeze) | vias in a narrow pass (the via_squeeze social factor) |
 | [`NECKED`](troubleshoot.md#necked) | traces narrower than their net width where they leave a pad |
@@ -979,9 +981,26 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
 - **Pour pieces cut off by the new copper** (topological core, `[planes] stitch_islands`): after routing,
   topor estimates the refill (the copy's fill minus the new copper of other nets grown by the clearance,
   minus features thinner than the zone's minimum width, islands dropped or kept as KiCad → zone properties →
-  Remove islands says). A piece of a pour net that is no longer joined to the rest of its pour gets a
-  stitching via inside it near its pad (or a short stub from the pad), into the pour on another layer; the
-  report lists each piece and each stitch, and the pieces it could not join. A kept island that holds no pad
+  Remove islands says). A piece of a pour net that is no longer joined to the rest of its pour gets
+  stitching vias inside it (or a short stub from the pad), into the pour on another layer. The placement
+  is deliberate: one straight or staggered (`stitch_lattice`) lattice of `stitch_pitch_x_mm` x
+  `stitch_pitch_y_mm` for the whole board, from KiCad → Place → Grid Origin, on your KiCad via grid
+  (`stitch_on_grid`: the pitch becomes the nearest multiple of the grid, named in the run log), so rows
+  and columns line up across pieces. A piece that holds at least `[planes] stitch_min_vias` legal lattice
+  points gets its vias on lattice points only (at most one per lattice cell of its area); a lattice point
+  without room is left out, or with `stitch_nudge_mm` > 0 moved along the via grid by at most that much.
+  A smaller piece gets `stitch_min_vias` at its extremities: its corners, the two ends of a strip, on the
+  via grid. An extra stitching via never stands off the via grid: a piece whose only room lies between grid
+  points gets fewer vias, and the report warns, naming the piece and the grid (a finer KiCad via grid, or
+  more room in the pour, fixes it). Only a connection via (a pad stub, or the first via of a cut-off piece:
+  its only connection) goes off the grid where no grid point fits, named in the report, as KiCad lets
+  connection copper leave the grid. With `stitch_min_vias` = 1 a one-via
+  piece gets its via near its pad, as before stitching vias. After the run's result is picked, islands KiCad
+  would drop (`stitch_dropped`), pour parts behind necks thinner than `stitch_thin_mm` and, as an option, the
+  whole pour area (`stitch_area`: vias on every legal lattice point of the board's pours, a pitch away from
+  the vias and through-hole pads already there) get vias by the same rule, only where the pour is solid on another layer of the
+  net and never under a BGA (`STITCH_VIAS`). The report lists each piece and each stitch, and the pieces it
+  could not join. A kept island that holds no pad
   (KiCad: isolated copper, e.g. Remove islands = never) and that no stitching via reaches is joined to the
   nearest connected pad of its net by a short track (`[planes] join_islands`, default on). KiCad's DRC is the
   judge.
