@@ -139,11 +139,25 @@ WORDING: dict[str, dict[str, str]] = {
         "routed_value": "{routed} / {total}",
         "routed_pending": "– / {total}",
         "vias_label": "Vias",
-        "elapsed_label": "Router time",
+        # time-limit-fix r2 (user 2026-11-22: "3600 s = 3600 s optimizing, the drawing afterwards is constant for a
+        # board so doesn't count"): the limit's clock is optimizing time; the final drawing has its own row
+        "elapsed_label": "Optimizing",
         "elapsed_value": "{elapsed} / {limit} · CPU {cpu}",
         "elapsed_cpu_value": "{elapsed} · CPU {cpu} / {limit}",
         "elapsed_nolimit": "{elapsed} · CPU {cpu} / no limit",
         "total_label": "Total time",
+        # when the optimizing ends: at the limit (on the wall clock; with the CPU clock at the CPU rate so far)
+        "ends_label": "Optimizing ends",
+        "ends_value": "about {clock}",
+        "ends_none": "– (no limit)",
+        "ends_reached": "limit reached",
+        "ends_done": "ended",
+        "draw_label": "Drawing",
+        "draw_pending": "–",
+        "draw_value": "{draw} (not counted)",
+        "ends_tip": "The time limit counts optimizing time only: the initial routing and the TopoR loop of every run. "
+                    "When it is reached the step that runs finishes and the best result is drawn. The drawing after "
+                    "it (row Drawing) is not counted: it takes about the same time on every run of a board.",
         # the time limit can be changed while the router runs (user 2026-11-07: "make the max run time editable
         # during the run"); in seconds on the run's clock (run.timeout_clock)
         "limit_label": "Time limit",
@@ -152,14 +166,16 @@ WORDING: dict[str, dict[str, str]] = {
         "limit_set": "Set limit",
         "limit_add5": "+5 min",
         "limit_add15": "+15 min",
-        "limit_hint": "0 = no limit. A limit below the time spent stops the run now, keeping the best result.",
+        "limit_hint": "The limit counts optimizing time; the drawing after it is not counted. 0 = no limit. A limit "
+                      "below the time spent ends the optimizing now, keeping the best result.",
         # one short line; the full text is its tooltip (user 2026-11-11)
         "cancel_hint": "Accept keeps the best result so far. Cancel takes nothing.",
         "cancel_hint_tip": "Accept stops the run and takes the best result so far (the best shown here is exactly the "
                            "board you get; the DRC and the preview follow, and you can still reject it there). Cancel "
                            "stops at once and takes no result: the board stays exactly as it was. \"Routes stable\" "
                            "does not stop the run: waiting longer may still find small gains. The time limit counts "
-                           "router time only and is an emergency stop; KiCad's DRC and the preview come on top.",
+                           "optimizing time only and is an emergency stop: the drawing after it, KiCad's DRC and the "
+                           "preview come on top.",
         "score_waiting": "Waiting for round 1…",
         "cancel": "Cancel",
         # two buttons for the whole run (user 2026-11-22): Accept = stop and take the best so far, Cancel = stop at
@@ -630,6 +646,39 @@ def verdict_tone(p: Progress) -> str:
     if vs == "better" or (vs == "new best" and getattr(p, "last_decider", "")):
         return "ok"
     return ""
+
+
+def _opt_times(p) -> tuple:
+    """time-limit-fix r2: (optimizing wall seconds, optimizing CPU seconds) of a progress: the run flow's
+    ``optimize_s`` / ``opt_cpu_s``; a progress without them (before the first engine poll, an older flow) falls back
+    to the router time and CPU seconds. O(1)."""
+    opt = float(getattr(p, "optimize_s", 0.0) or 0.0)
+    drawing = bool(getattr(p, "drawing", False))
+    if opt <= 0 and not drawing:
+        opt = float(getattr(p, "elapsed_s", 0.0) or 0.0)
+    cpu = float(getattr(p, "opt_cpu_s", 0.0) or 0.0)
+    if cpu <= 0 and not drawing:
+        cpu = float(getattr(p, "cpu_s", 0.0) or 0.0)
+    return opt, cpu
+
+
+def _ends_text(limit: float, spent: float, opt: float, opt_cpu: float, cpu_clock: bool, drawing: bool,
+               now: float) -> str:
+    """time-limit-fix r2: the dialog's "Optimizing ends" value: ended (the final drawing runs), limit reached (the
+    step that runs finishes), no limit, or the clock time it ends at: now plus what is left of the limit (wall clock;
+    CPU clock: at the CPU rate of the optimizing so far, CPU seconds per wall second). O(1)."""
+    W = WORDING["progress"]
+    if drawing:
+        return W["ends_done"]
+    if limit <= 0:
+        return W["ends_none"]
+    if spent >= limit:
+        return W["ends_reached"]
+    left = limit - spent
+    if cpu_clock:
+        rate = opt_cpu / opt if opt > 1.0 and opt_cpu > 0 else 1.0
+        left /= max(rate, 1e-3)
+    return W["ends_value"].format(clock=time.strftime("%H:%M:%S", time.localtime(now + left)))
 
 
 def _fmt_time(seconds: float) -> str:
@@ -1234,7 +1283,7 @@ class ProgressDialog(_Base):
         self.timeout_clock = timeout_clock
         self.limit_editable = limit_editable
         self.limit_request: float | None = None  # a change the run flow has not taken yet
-        self._spent = 0.0  # router time on the run's clock at the last update
+        self._spent = 0.0  # optimizing time on the run's clock at the last update (what the limit counts)
         self._phase = ""
         self.iteration_cap = iteration_cap
         self._round, self._round_from_engine = (0, iteration_cap), False
@@ -1276,11 +1325,16 @@ class ProgressDialog(_Base):
         self.elapsed_value = self._num("elapsed_value", 250, "88:88:88 / 88:88:88 · CPU 88:88:88",
                                        "88:88:88 · CPU 88:88:88 / no limit")
         self.total_value = self._num("total_value", 140, "88:88:88")
+        self.ends_value = self._num("ends_now", 140, "about 88:88:88", W["ends_none"], W["ends_reached"])
+        self.draw_value = self._num("draw_now", 140, W["draw_value"].format(draw="88:88:88"))
+        self.ends_value.SetToolTip(W["ends_tip"])
+        self.draw_value.SetToolTip(W["ends_tip"])
         self.gain_value = self._num("gain_now", 140, "-888.8 % / 88 rounds")
         self.runs_value = self._num("runs_now", 110, "888 of 888 stable")
         for lab, val in (("iteration_label", self.iteration_value), ("routed_label", self.routed_value),
                          ("vias_label", self.vias_value), ("elapsed_label", self.elapsed_value),
                          ("runs_label", self.runs_value), ("total_label", self.total_value),
+                         ("ends_label", self.ends_value), ("draw_label", self.draw_value),
                          ("gain_label", self.gain_value)):
             grid.Add(self.text(self, "progress", lab), 0)
             grid.Add(val, 0, wx.ALIGN_RIGHT)
@@ -1553,10 +1607,12 @@ class ProgressDialog(_Base):
 
     # -- the time limit during the run
     def limit_open(self) -> bool:
-        """The limit can still be changed: routing run, not cancelled, the limit not reached, not in the DRC /
-        preview after the routing (the limit counts router time only)."""
+        """The limit can still be changed: routing run, not cancelled, the limit not reached, the optimizing not
+        ended (the final drawing is off the clock), not in the DRC / preview after the routing (the limit counts
+        optimizing time only)."""
         reached = 0 < self.timeout_s <= self._spent
-        return (self.limit_editable and not self.cancelled and not reached
+        drawing = bool(getattr(getattr(self, "_last", None), "drawing", False))
+        return (self.limit_editable and not self.cancelled and not reached and not drawing
                 and self._phase not in ("drc", "preview"))
 
     def _sync_limit_controls(self) -> None:
@@ -1741,7 +1797,8 @@ class ProgressDialog(_Base):
             self.routed_value.SetLabel(W["routed_value"].format(routed=p.routed, total=p.total))
         self.vias_value.SetLabel(str(p.vias))
         self._phase = p.phase
-        self._spent = float(getattr(p, "cpu_s", 0.0) if self.timeout_clock == "cpu" else p.elapsed_s)
+        opt, opt_cpu = _opt_times(p)
+        self._spent = opt_cpu if self.timeout_clock == "cpu" else opt
         limit = getattr(p, "limit_s", None)
         if limit is not None and self.limit_request is None and float(limit) != self.timeout_s:
             # the limit the run applies (after a change the run took); the field follows unless being edited
@@ -1758,14 +1815,20 @@ class ProgressDialog(_Base):
         if p is None:
             return
         W = WORDING["progress"]
-        el = _fmt_time(p.elapsed_s)
-        cpu = _fmt_time(getattr(p, "cpu_s", 0.0))
+        opt, opt_cpu = _opt_times(p)
+        el, cpu = _fmt_time(opt), _fmt_time(opt_cpu)
         if self.timeout_s <= 0:
             txt = W["elapsed_nolimit"].format(elapsed=el, cpu=cpu)
         else:
             key = "elapsed_cpu_value" if self.timeout_clock == "cpu" else "elapsed_value"
             txt = W[key].format(elapsed=el, cpu=cpu, limit=_fmt_time(self.timeout_s))
         self.elapsed_value.SetLabel(txt)
+        drawing = bool(getattr(p, "drawing", False))
+        self.ends_value.SetLabel(_ends_text(self.timeout_s, self._spent, opt, opt_cpu, self.timeout_clock == "cpu",
+                                            drawing, time.time()))
+        draw = float(getattr(p, "draw_s", 0.0) or 0.0)
+        self.draw_value.SetLabel(W["draw_value"].format(draw=_fmt_time(draw)) if drawing or draw > 0
+                                 else W["draw_pending"])
 
 
 # --------------------------------------------------------------------------------------------- (4) preview

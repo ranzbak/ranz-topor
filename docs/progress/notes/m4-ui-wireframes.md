@@ -549,20 +549,29 @@ title/label/button/checkbox/choice/heading/text).
 | progress | routed_value | text | {routed} / {total} |
 | progress | routed_pending | text | – / {total} |
 | progress | vias_label | label | Vias |
-| progress | elapsed_label | label | Router time |
+| progress | elapsed_label | label | Optimizing |
 | progress | elapsed_value | text | {elapsed} / {limit} · CPU {cpu} |
 | progress | elapsed_cpu_value | text | {elapsed} · CPU {cpu} / {limit} |
 | progress | elapsed_nolimit | text | {elapsed} · CPU {cpu} / no limit |
 | progress | total_label | label | Total time |
+| progress | ends_label | label | Optimizing ends |
+| progress | ends_value | text | about {clock} |
+| progress | ends_none | text | – (no limit) |
+| progress | ends_reached | text | limit reached |
+| progress | ends_done | text | ended |
+| progress | draw_label | label | Drawing |
+| progress | draw_pending | text | – |
+| progress | draw_value | text | {draw} (not counted) |
+| progress | ends_tip | text | The time limit counts optimizing time only: the initial routing and the TopoR loop of every run. When it is reached the step that runs finishes and the best result is drawn. The drawing after it (row Drawing) is not counted: it takes about the same time on every run of a board. |
 | progress | limit_label | label | Time limit |
 | progress | limit_unit_wall | text | s wall time |
 | progress | limit_unit_cpu | text | s CPU time |
 | progress | limit_set | button | Set limit |
 | progress | limit_add5 | button | +5 min |
 | progress | limit_add15 | button | +15 min |
-| progress | limit_hint | text | 0 = no limit. A limit below the time spent stops the run now, keeping the best result. |
+| progress | limit_hint | text | The limit counts optimizing time; the drawing after it is not counted. 0 = no limit. A limit below the time spent ends the optimizing now, keeping the best result. |
 | progress | cancel_hint | label | Accept keeps the best result so far. Cancel takes nothing. |
-| progress | cancel_hint_tip | text | Accept stops the run and takes the best result so far (the best shown here is exactly the board you get; the DRC and the preview follow, and you can still reject it there). Cancel stops at once and takes no result: the board stays exactly as it was. "Routes stable" does not stop the run: waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
+| progress | cancel_hint_tip | text | Accept stops the run and takes the best result so far (the best shown here is exactly the board you get; the DRC and the preview follow, and you can still reject it there). Cancel stops at once and takes no result: the board stays exactly as it was. "Routes stable" does not stop the run: waiting longer may still find small gains. The time limit counts optimizing time only and is an emergency stop: the drawing after it, KiCad's DRC and the preview come on top. |
 | progress | cancel | button | Cancel |
 | progress | accept | button | Accept |
 | progress | phase_stable | text | Routes stable |

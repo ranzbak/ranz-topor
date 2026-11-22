@@ -3,6 +3,9 @@
 //! the later of the limit and its own start. Every wire is still drawn and the pour stitching is
 //! never cut by it (never drop). Synthetic board: three crossing two-pin nets on two layers (vias for
 //! the reduction) and a GND pour on F.Cu the top-layer copper cuts (pieces for the stitching).
+//! time-limit-fix r2: these tests check the time limit inside the final drawing, which only
+//! `[run] timeout_scope = "all"` counts (the default "optimizing" keeps it off the clock), so
+//! their options set it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -59,7 +62,7 @@ fn board() -> BoardModel {
 /// ERBS run with the limit reached at "loop ended" and a nap of `nap_ms` before ERBS works.
 fn erbs_run(grace: f64, cap: f64, nap_ms: u64) -> RouteResult {
     let o = Options::from_json(&format!(
-        r#"{{"wall_clock_s": 86400.0, "timeout_overrun_s": {cap}, "opt_loop": "topor", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": {grace}, "via_reduce": false, "realise": "erbs"}}"#
+        r#"{{"timeout_scope": "all", "wall_clock_s": 86400.0, "timeout_overrun_s": {cap}, "opt_loop": "topor", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": {grace}, "via_reduce": false, "realise": "erbs"}}"#
     ))
     .expect("options parse");
     let mut ctl = RunControl::new();

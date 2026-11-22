@@ -148,6 +148,8 @@ fn a_hard_limit_reached_at_the_start_of_the_check_cuts_its_stitching() {
     val["runs"] = serde_json::json!(1);
     val["topo_rounds"] = serde_json::json!(1);
     val["timeout_mode"] = serde_json::json!("hard");
+    // time-limit-fix r2: the limit acts in the final drawing only with timeout_scope = "all"
+    val["timeout_scope"] = serde_json::json!("all");
     val["wall_clock_s"] = serde_json::json!(if cfg!(debug_assertions) { 900.0 } else { 120.0 });
     let o: Options = serde_json::from_value(val).unwrap();
     let mut ctl = RunControl::new();

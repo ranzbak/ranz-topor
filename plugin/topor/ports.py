@@ -120,6 +120,14 @@ class Progress:
     cpu_s: float = 0.0  # plugin: CPU seconds of the engine jobs so far, all threads summed (what timeout_clock = cpu limits)
     measure_s: float = 0.0  # engine: seconds of measurements outside the time limit (M1 compass cut test), left out of cpu_s's limit
     limit_s: float | None = None  # plugin: the time limit in force (seconds on the run's clock, 0 = none); None = unknown
+    # time-limit-fix r2 (user 2026-11-22: the limit is optimizing time, the final drawing is not counted): the engine
+    # gives the job's optimizing seconds (its clock stands still in the final drawing), the drawing's seconds and
+    # whether it draws; the run flow turns optimize_s into the run's (earlier jobs count in full) and fills
+    # opt_cpu_s (the CPU seconds of optimizing, what timeout_clock = cpu limits)
+    optimize_s: float = 0.0
+    draw_s: float = 0.0
+    drawing: bool = False
+    opt_cpu_s: float = 0.0
     # M-B0 (iterations like TopoR): "Routes stable" (the gain of the best result over the last
     # [optimize] stable_window rounds is below stable_gain_pct in every run), that gain (None before a
     # full window), the best of N runs and the best result so far (what Accept keeps).
@@ -216,6 +224,9 @@ class Progress:
                         str(d.get("stage", "") or ""), int(d.get("round", 0) or 0), int(d.get("rounds", 0) or 0),
                         stable=bool(d.get("stable", False)), gain_pct=None if g is None else float(g),
                         measure_s=float(d.get("measure_s", 0.0) or 0.0),
+                        # -1 = the engine gave none (an older engine): the run flow takes the job's wall time
+                        optimize_s=float(d["optimize_s"]) if d.get("optimize_s") is not None else -1.0,
+                        draw_s=float(d.get("draw_s", 0.0) or 0.0), drawing=bool(d.get("drawing", False)),
                         runs=int(d.get("runs", 0) or 0), runs_stable=int(d.get("runs_stable", 0) or 0),
                         best_routed=int(d.get("best_routed", 0) or 0), best_total=int(d.get("best_total", 0) or 0),
                         best_length_mm=float(d.get("best_length_mm", 0.0) or 0.0),

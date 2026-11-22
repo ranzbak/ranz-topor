@@ -123,48 +123,72 @@ def time_limit_text(tl: dict | None) -> str:
 SHARE_STOP = "loop_time_share"
 
 
+#: time-limit-fix r2: the stop reason in words: the optimizing time limit reached versus the other stops (stable
+#: headless, Accept / Cancel, the work caps, the loop's own share)
+STOP_WORDS = {
+    "timeout_wall": "the optimizing time limit was reached",
+    "timeout_cpu": "the optimizing time limit was reached, CPU clock",
+    "timeout": "the optimizing time limit was reached",
+    SHARE_STOP: "the TopoR loop's own time share ended it, the limit was not reached",
+    "stable": "the routes were stable",
+    "cancel": "Accept / Cancel stopped it",
+    "round cap": "the rounds safety cap ([optimize] rounds)",
+    "re-lay budget": "the re-lay work cap",
+    "stop_after plan": "run.stop_after = plan",
+}
+
+
 def stopped_line(f: dict) -> str:
-    """The summary's "Stopped:" line from the report facts. One clock (time-limit-fix): ``elapsed_s`` = router time,
-    the wall seconds of the engine jobs, what run.timeout_s counts on the wall clock and what the progress dialog shows
-    as Router time; what does not count is shown apart: ``measure_s`` (the engine's measurements outside the limit) and
-    ``run_s`` (the whole run up to the result: pre-flight, KiCad's DRC and the rest on top). ``iterations`` = the
-    picked run's cycles (TopoR loop cycles), ``threads`` = the engine's thread pool. With the share's stop the limit
-    is named as not reached, with the seconds of it left. O(1)."""
+    """The summary's "Stopped:" line from the report facts (time-limit-fix r2, user 2026-11-22: the limit is
+    optimizing time, the final drawing after it is not counted). The stop reason with its words (STOP_WORDS),
+    ``optimize_s`` = optimizing time, what run.timeout_s counts (on the CPU clock ``optimize_cpu_s``), ``draw_s`` = the
+    final drawing, not counted; router time (``elapsed_s``) = both, the wall seconds of the engine jobs. Shown apart:
+    ``measure_s`` (the engine's measurements outside the limit) and ``run_s`` (the whole run up to the result:
+    pre-flight, KiCad's DRC and the rest on top). ``iterations`` = the picked run's cycles (TopoR loop cycles),
+    ``threads`` = the engine's thread pool. With the share's stop the limit is named as not reached, with the seconds
+    of it left. O(1)."""
     tl = f.get("time_limit")
     el = f.get("elapsed_s")
     meas = _num(f.get("measure_s"))
-    txt = (f"Stopped: {_na(f.get('stop_reason'))} after {_na(f.get('iterations'))} cycles, router time {_na(el)} s"
+    stop = f.get("stop_reason")
+    opt = f.get("optimize_s", el)
+    cpu_clock = (tl or {}).get("clock", f.get("timeout_clock")) == "cpu"
+    words = STOP_WORDS.get(str(stop or ""))
+    txt = (f"Stopped: {_na(stop)}" + (f" ({words})" if words else "") + f" after {_na(f.get('iterations'))} cycles, "
+           f"optimizing {_na(opt)} s"
+           + (f" (CPU {_na(f.get('optimize_cpu_s'))} s, the limit's clock)" if cpu_clock and f.get("optimize_cpu_s") is not None else "")
            + (f" (+{meas:.1f} s measurements, not counted)" if meas > 0 else "")
-           + f", {_na(f.get('threads'))} threads"
+           + (f", drawing {_na(f.get('draw_s'))} s (after the limit, not counted)" if f.get("draw_s") is not None else "")
+           + f", router time {_na(el)} s, {_na(f.get('threads'))} threads"
            + (f", CPU {_na(f.get('router_cpu_s'))} s" if f.get("router_cpu_s") is not None else ""))
     if tl:
         txt += f" · {time_limit_text(tl)}"
         final = _num(tl.get("final_s"))
-        if f.get("stop_reason") == SHARE_STOP and final > 0 and not tl.get("reached") and el is not None:
-            txt += f", not reached ({max(0.0, final - _num(el) + meas):.0f} s left)"
+        if stop == SHARE_STOP and final > 0 and not tl.get("reached") and opt is not None:
+            txt += f", not reached ({max(0.0, final - _num(opt) + meas):.0f} s left)"
     if f.get("run_s") is not None:
         txt += f" · whole run {_na(f.get('run_s'))} s to the result (pre-flight and KiCad's DRC not counted)"
     return txt
 
 
 def time_budget_line(f: dict) -> str:
-    """The summary's warning when a time bound ended the topological core before its routes were stable: the time
-    limit, or (stop reason loop_time_share) the TopoR loop's own share of it, which is then named, and the limit as not
-    reached. O(1)."""
+    """The summary's warning when a time bound ended the topological core before its routes were stable: the
+    optimizing time limit, or (stop reason loop_time_share) the TopoR loop's own share of it, which is then named, and
+    the limit as not reached. O(1)."""
     tl = f.get("time_limit")
     if f.get("stop_reason") == SHARE_STOP:
         share = f.get("loop_time_share")
         return ("Warning: time budget hit: result may differ between runs (the TopoR loop's own time share, "
-                f"[optimize] loop_time_share = {_num(share, 0.5):g} of the time left when the loop began, ended the loop "
-                "before its routes were stable and kept the rest for the drawing; the time limit"
+                f"[optimize] loop_time_share = {_num(share, 1.0):g} of the time left when the loop began, ended the loop "
+                "before its routes were stable; the optimizing time limit"
                 + (f" of {limit_text(tl.get('final_s'))} {tl.get('clock', 'wall')}" if tl else "")
-                + (" passed only later, while the drawing ran" if tl and tl.get("reached") else " was not reached")
-                + ": raise loop_time_share to give the loop more of it)")
+                + (" passed only later" if tl and tl.get("reached") else " was not reached")
+                + ": raise loop_time_share (default 1.0 = the loop runs to the limit))")
     return ("Warning: time budget hit: result may differ between runs ("
-            + (f"time limit {limit_text(tl.get('final_s'))}" + (" set during the run, " if tl.get("changes") else ", ")
+            + (f"optimizing time limit {limit_text(tl.get('final_s'))}" + (" set during the run, " if tl.get("changes") else ", ")
                if tl else "")
             + f"run.timeout_s, clock {f.get('timeout_clock') or 'wall'}, stopped the topological core before its "
-            "[optimize] work caps)")
+            "[optimize] work caps; the final drawing after it is not counted)")
 
 
 SUMMARY_MAX_LINES = 20
@@ -615,6 +639,10 @@ def build_report(result: dict, drc: dict | None, cfg, findings, scope, before_st
         "stop_reason": result.get("stop_reason"), "iterations": result.get("iterations"),
         "elapsed_s": None if el is None else round(el, 1), "threads": result.get("threads_used"),
         "router_cpu_s": None if timing.get("router_cpu_s") is None else round(timing["router_cpu_s"], 1),
+        # time-limit-fix r2: optimizing time (what run.timeout_s counts) and the final drawing (not counted)
+        "optimize_s": None if timing.get("optimize_s") is None else round(timing["optimize_s"], 1),
+        "optimize_cpu_s": None if timing.get("optimize_cpu_s") is None else round(timing["optimize_cpu_s"], 1),
+        "draw_s": None if timing.get("draw_s") is None else round(timing["draw_s"], 1),
         # time-limit-fix: what the router time does not count, shown apart (stopped_line)
         "measure_s": None if not timing.get("measure_s") else round(timing["measure_s"], 1),
         "run_s": None if timing.get("run_s") is None else round(timing["run_s"], 1),

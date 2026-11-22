@@ -259,7 +259,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Trace shape | *45° (octilinear)* (default: straight and 45° segments, 90° bends only where needed) or *Any angle (smooth)* | `[drawing] style` |
 | Snap to KiCad grid | Ticked = prefer, unticked = off (default); half-ticked = topor.toml has `"fallback"` (kept unless you click). A grey line below shows the grid the run will use: size in mm and where it comes from (KiCad settings or `grid_mm`), the origin from the board, or "no grid found". The stitching vias use this grid whatever the tick says (`[planes] stitch_on_grid`, on by default); the tick only moves the drawn tracks | `[drawing] grid_snap` |
-| Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your Accept / Cancel); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
+| Time limit | seconds of optimizing time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your Accept / Cancel); `0` = no limit; the final drawing after it, KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Time limit clock | *wall* (default, seconds on the clock: what you wait) or *cpu* (CPU seconds of router work summed over all threads; comparable across machine load and thread count) | `[run] timeout_clock` |
 
 *Existing copper* decides what happens to tracks and vias that are already on the board:
@@ -300,7 +300,7 @@ of the board*, *topological search*, *layer assignment, rip-up and reroute*, *dr
 fuse*, *pour stitching*), then *Verifying with KiCad DRC* and *Rendering the preview*. Below it: **Round** — the
 whole-route round (cycle) now running; **Gain** — how much the best result improved over the last
 `[optimize] stable_window` rounds; **Runs** — how many of the `[optimize] runs` seeded runs are stable; routed/total;
-vias; **Router time** and, next to it, the **CPU time** the run has used so far (all threads summed), against the time limit (on the clock you chose); **Total time** since you pressed Route (KiCad's DRC and the preview
+vias; **Optimizing** time and, next to it, its **CPU time** (all threads summed), against the time limit (on the clock you chose); **Optimizing ends** (the clock time the optimizing ends at the limit; *limit reached* while the step that runs finishes; *ended* once the final drawing runs); **Drawing** (the seconds of the final drawing, not counted); **Total time** since you pressed Route (the drawing, KiCad's DRC and the preview
 included); and the **score** of the **Last round** and of the **Best so far**.
 
 The score rows show run, round, **Errors** (connections open or drawn with rule violations), **Open** (connections
@@ -380,7 +380,7 @@ about 450 s of router time (320–710 s over six seeds), qmtech (426 connections
 That is 5–8 times the fixed four rounds of earlier versions; in exchange that badge connects 80.5 % instead of
 77.6 % and qmtech 81.5 % instead of 79.6 % (KiCad DRC). `[optimize] runs = 1` takes roughly a quarter to a half of the
 time for a smaller gain; *Routes stable* and Accept let you stop as soon as the result is good enough.
-`[run] timeout_s` (default 600 s of router time) is only an emergency stop: when it fires before the routes are
+`[run] timeout_s` (default 600 s of optimizing time) is only an emergency stop: when it fires before the routes are
 stable the result is the best so far, may differ between runs, and the findings say so
 ([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)). Runs on large boards (that badge, qmtech with the default
 best of 5 runs) may hit it and keep the best result so far. `0` = no limit.
@@ -406,8 +406,9 @@ limit the step that runs may go on for at most `limit_grace_s` seconds (`0` = st
 value = no bound); then it stops at the next check, the cycle it was in is dropped (a cycle cut short is never kept) and
 the best variant kept so far is drawn. This holds in the KiCad dialog too, where the overrun cap is off.
 
-**The drawing's optional passes are bounded too** (`[run] drawing_grace_s`, default 60 s, counted from the later of
-the limit and the drawing's start): every wire is always drawn and the pour stitching always finishes (never drop), but
+**A counted drawing's optional passes are bounded too** (`[run] drawing_grace_s`, default 60 s, counted from the later of
+the limit and the drawing's start; it acts only on a drawing the limit counts: a whole-route cycle's with `loop =
+"cycles"`, or the final drawing with `[run] timeout_scope = "all"`; by default the final drawing is off the clock): every wire is always drawn and the pour stitching always finishes (never drop), but
 past the bound the via reduction stops (it keeps the vias it removed so far) and, with `[drawing] realise = "erbs"`, the
 stretches not yet banded are drawn the sequential way (counted in the report). `0` = they stop at their first check
 past the limit, any negative value = no bound. Measured: qmtech draws its wires in about 50 s and reduces vias in
@@ -429,7 +430,7 @@ line) and `result.json` (`time_limit.cap_s`, `time_limit.cap_hit`, and `time_lim
 or `none` when the cap passed only after the steps it stops had ended; `harness/score_runs.py` prints a WARNING
 line and lists the run in `limits.json` `overrun_cap_hit`). The default `auto` is equal to `timeout_s` in headless
 runs (harness, MCP, scripts, and direct calls of the engine's `route` / `route_async`, whose own default
-`timeout_overrun_s` is `"auto"`), so such a run takes about twice its limit plus the drawing of one plan (plus what
+`timeout_overrun_s` is `"auto"`), so such a run takes about twice its limit plus the final drawing, which is not counted (plus what
 the bound of a hard run below names), and no
 cap in the KiCad dialog, where Accept stops a run at once. A number sets the cap; `0` or `"none"` = no cap. The cap
 never changes `timeout_s` itself, and has no effect with `timeout_mode = "hard"` or without a limit.
@@ -441,17 +442,17 @@ one, 6.3 manual pp. 72-73, p. 237); the progress dialog says *Time limit reached
 stop and their plan so far is kept, and a TopoR loop cycle the limit cut is thrown away. A limit that acted as hard
 before the drawing began never cuts the drawing of the kept plan.
 
-**A hard limit can cut the drawing.** A limit reached while the drawing runs (its via reduction and pour stitching
-included) cuts the drawing there: the drawing began before the limit and ran past it, so the board is drawn only
+**A hard limit cuts a drawing only where the limit counts it.** With `[run] timeout_scope = "optimizing"` (the
+default) the final drawing is off the clock and never cut (see *Optimizing time* below). With `timeout_scope = "all"`,
+or a whole-route cycle's drawing with `loop = "cycles"`, a limit reached while the drawing runs (its via reduction and
+pour stitching included) cuts the drawing there: the drawing began before the limit and ran past it, so the board is drawn only
 in part. The connections it had not drawn stay unrouted (reason *time limit reached before this connection was
 drawn*), a cut via reduction keeps the vias it had not removed yet, and the pour stitching after a cut drawing is
 cut too (pour pieces it had not joined stay apart: open in KiCad's DRC). The warning
 [`TIME_DRAWING_CUT`](troubleshoot.md#time_drawing_cut) says *the drawing was cut by the hard time limit: N of M
 connections drawn* and what to change; `result.json` has `time_limit.cut = "drawing"` and `time_limit.cut_steps`
-(`drawing`, `via_reduction`, `stitching`; `plan` and `plane_stubs` for the planning steps). With `[optimize] loop =
-"topor"` the loop uses at most `loop_time_share` (default 0.5) of the time left, so on a large board the drawing
-can begin before the limit and still run past it. For a complete board use `soft` (the default: the drawing always
-runs to its end) or a longer `timeout_s`. This is the behaviour as decided on 2026-11-13; whether a hard limit should
+(`drawing`, `via_reduction`, `stitching`; `plan` and `plane_stubs` for the planning steps). For a complete board keep `timeout_scope = "optimizing"` (the
+default), or use `soft` (the drawing always runs to its end) or a longer `timeout_s`. This is the behaviour as decided on 2026-11-13; whether a hard limit should
 spare a drawing that has begun is an open question.
 
 **How long a hard run takes.** About the limit plus the drawing of one plan, plus:
@@ -460,7 +461,7 @@ spare a drawing that has begun is an open question.
   the TopoR loop, one connection in the drawing); a round (the initial routing, or a whole-route cycle) gets at
   least 1 s from its start, also past the limit;
 - measurements outside the limit: `[capacity] compass_cut_check` moves the limit later by the time it took (it is
-  not router time, and the overrun leaves it out);
+  not optimizing time, and the overrun leaves it out);
 - more drawings: with `[optimize] loop = "cycles"` every whole-route cycle draws its own plan (a cycle the limit
   cut in its planning still draws its plan in full, and is then kept only when no other cycle is); with
   `[optimize] runs` > 1 every run that draws (`loop = "cycles"`: each run; `loop = "topor"`: `[drawing]
@@ -489,35 +490,48 @@ idle machine. When the limit fires, the best result so far is kept either way an
 *Stopped: timeout_wall* or *Stopped: timeout_cpu*. The progress dialog, the report summary (*CPU ... s*), `result.json`
 (`router_cpu_s`) and the preview summary show the CPU time in both modes.
 
-**Router time: the one clock the limit counts.** Router time is the wall-clock seconds of the engine jobs, from each
-job's start to its result. The wall-clock limit counts it, the progress dialog shows it as **Router time** (*x / limit*),
-and the summary prints it in its *Stopped:* line (*router time x s*). Some time is not counted, and each part is shown
-on its own line. The dialog's **Total time** and the summary's *whole run ... s to the result* cover the pre-flight
-(DRC of the untouched copy, the pre-flight dialog), KiCad's DRC rounds and the preview exports. Measurements outside the
-limit (`[capacity] compass_cut_check`) appear as *(+x s measurements, not counted)*. The time the preview dialog waits
-for your Accept is counted nowhere. The summary also names the cycles of the picked run (*after N cycles*: TopoR loop
-cycles) and the engine's thread pool (*N threads*).
+**Optimizing time: the one clock the limit counts** (user 2026-11-22: *3600 s = 3600 s optimizing, the drawing
+afterwards is constant for a board so doesn't count*). `timeout_s` counts optimizing time: the initial routing and the
+TopoR loop of every run (best of N runs), up to the moment all runs have ended their loop; drawing rounds inside the run
+count. The final drawing of the picked variants that follows (copper, via reduction, pour stitching) is not counted
+(`[run] timeout_scope = "optimizing"`, the default): its clock stops, the limit neither cuts nor bounds it, and a run so
+takes the limit plus that drawing. The progress dialog shows **Optimizing** *x / limit*, **Optimizing ends** (the clock
+time: simply the limit, now plus what is left of it; with the CPU clock at the CPU rate so far) and **Drawing** on its
+own row; the limit row and +5 / +15 min change the optimizing limit and are off once the drawing runs. The summary's
+*Stopped:* line says why the run stopped in words (*timeout_wall (the optimizing time limit was reached)* versus
+*stable*, *Accept / Cancel*, the rounds cap or *loop_time_share*) and prints *optimizing x s*, *drawing y s (after the
+limit, not counted)* and *router time* (both, the wall seconds of the engine jobs from each job's start to its result);
+`result.json` has `optimize_s`, `optimize_cpu_s`, `draw_s` and `router_s`, and `time_limit.scope`. The rest is not
+counted either, and each part is shown on its own line: the dialog's **Total time** and the summary's *whole run ... s
+to the result* cover the pre-flight (DRC of the untouched copy, the pre-flight dialog), KiCad's DRC rounds and the
+preview exports. Measurements outside the limit (`[capacity] compass_cut_check`) appear as *(+x s measurements, not
+counted)*. The time the preview dialog waits for your Accept is counted nowhere. The summary also names the cycles of
+the picked run (*after N cycles*: TopoR loop cycles) and the engine's thread pool (*N threads*).
+`timeout_scope = "all"` counts the final drawing too, as before 2026-11-22 (then the hard limit, the overrun cap and
+`drawing_grace_s` act on it). With `[optimize] loop = "cycles"` every cycle draws its own plan, so all of it counts.
+Scripts and wrappers with a hard kill of their own (a `timeout` around a headless run, `harness/score_runs.py`) must
+leave room for the drawing after the limit: qmtech draws in about 50-360 s.
 
-**The TopoR loop's own time share.** With `[optimize] loop = "topor"` (the default) the loop may use only
-`[optimize] loop_time_share` (default 0.5) of the time left when it begins. The rest of the limit is kept for the
-drawing. When that share ends the loop before the routes are stable, the limit itself is *not* reached. The summary
-then says *Stopped: loop_time_share ... · limit 3600 s wall, not reached (N s left)*, and the time budget warning
-([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)) names the share. On a board whose drawing is quick, the run so
-ends well before `timeout_s`. In a 3600 s qmtech run (2026-11-22), the loops ended at about 1940-2000 s, the drawing
-took about 360 s, and the run ended at 2357 s. Raise `loop_time_share` (up to 1.0) to give the loop more of the
-limit. The share follows a limit you change while the router runs. It acts on the wall clock only: with
-`timeout_clock = "cpu"` the engine has no wall deadline, so the loop runs to the CPU limit.
+**The TopoR loop's own time share.** `[optimize] loop_time_share` (default 1.0) is the share of the time left when the
+TopoR loop begins that it may use. At 1.0 there is no extra stop: the loop runs to the limit, as the drawing after it
+is not counted. Before 2026-11-22 the default was 0.5, keeping half of the limit for the drawing: in a 3600 s qmtech run
+the loops ended at about 1940-2000 s, the drawing took about 360 s and the run ended at 2357 s with the limit never
+reached. Below 1.0 the share ends the loop earlier; the limit itself is then *not* reached, the summary says *Stopped:
+loop_time_share ... · limit 3600 s wall, not reached (N s left)*, and the time budget warning
+([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)) names the share. The share follows a limit you change while the
+router runs. It acts on the wall clock only: with `timeout_clock = "cpu"` the engine has no wall deadline, so the loop
+runs to the CPU limit.
 
 **Changing the time limit while the router runs.** A run that takes longer than you planned need not lose its
 progress: the progress dialog has a **Time limit** row with the limit in force (seconds on the run's clock, *s wall
 time* or *s CPU time*). **+5 min** and **+15 min** add to it; or type a new value and press **Set limit** (or Enter
-in the field). You can raise it, lower it down to the router time already spent (a value below that becomes the time
+in the field). You can raise it, lower it down to the optimizing time already spent (a value below that becomes the time
 spent: the run stops at its next check and keeps the best result so far, exactly as when the limit fires — not a
 Cancel), or set `0` for no limit (then only Accept / Cancel end the run, and the + buttons are off: there is nothing to add
-to). The row works while the router runs; it is off after Accept / Cancel, once the limit is reached, and during the
-DRC and the preview (the limit counts router time only). The change applies to this run only: `topor.toml` keeps
+to). The row works while the router runs; it is off after Accept / Cancel, once the limit is reached, while the final drawing runs, and during the
+DRC and the preview (the limit counts optimizing time only). The change applies to this run only: `topor.toml` keeps
 `[run] timeout_s`. The log says *time limit extended by the user …* (or lowered / set / removed), and the report and
-`result.json` (`time_limit`: clock, start, every change with the router time it was made at, final) record it; the
+`result.json` (`time_limit`: clock, start, every change with the optimizing time it was made at, final) record it; the
 summary's *Stopped* line names the final limit (e.g. *limit 900 s wall (raised during the run from 600 s, 1 change)*),
 and so does the time-budget warning. Headless runs (harness, MCP) have no such control, so their limit stays fixed.
 

@@ -56,6 +56,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 X_TIMEOUT_S = 30.0  # one xdotool / wmctrl / xwd call; a hung X tool must not hang the run
 REPLAY_TIMEOUT_S = 600.0  # harness.cleanup_check replay in its own pcbnew
+#: time-limit-fix r2: room after the optimizing time limit for the final drawing (not counted: qmtech about 50-360 s),
+#: KiCad's DRC and the preview export, before the harness gives up waiting for the preview
+DRAW_MARGIN_S = 900.0
 ICON = ROOT / "plugin" / "icons" / "topor-light-24.png"
 PLUGIN_ID = "org.topor.router"
 # Net name -> the effective netclass KiCad's API returns for it (get_netclass_for_nets): name, type, constituents and
@@ -1170,7 +1173,10 @@ def main(argv=None) -> int:
     ap.add_argument("--reject", action="store_true", help="press Esc (Reject) in the preview and check the board is untouched")
     ap.add_argument("--ok-at-stable", action="store_true",
                     help="press Accept as soon as the progress dialog says Routes stable (M-B0) and check the result")
-    ap.add_argument("--max-wait", type=float, default=1800, help="longest wait for the preview after Route (s)")
+    ap.add_argument("--max-wait", type=float, default=None,
+                    help="longest wait for the preview after Route (s); default max(1800, run.timeout_s from --toml + "
+                         f"{DRAW_MARGIN_S:g}): the limit counts optimizing time only, the final drawing, KiCad's DRC and "
+                         "the preview come after it (time-limit-fix r2)")
     ap.add_argument("--preview-check", action="store_true",
                     help="last-preview: check the progress dialog's board image (shown, changes between rounds; log)")
     ap.add_argument("--resize-progress-at", type=float, default=None, metavar="S",
@@ -1193,7 +1199,25 @@ def main(argv=None) -> int:
                          + ",".join(CLEANUP_BOXES))
     ap.add_argument("--keep", action="store_true", help="leave KiCad and Xephyr running")
     ap.add_argument("--name", default=None)
-    return run(ap.parse_args(argv))
+    a = ap.parse_args(argv)
+    if a.max_wait is None:
+        a.max_wait = default_max_wait(a.toml)
+    return run(a)
+
+
+def default_max_wait(toml: list) -> float:
+    """time-limit-fix r2: the wait for the preview after Route: at least 1800 s, and run.timeout_s (from --toml;
+    default 600) plus DRAW_MARGIN_S, since the limit counts optimizing time only and the final drawing, KiCad's DRC
+    and the preview export follow it. O(len(toml))."""
+    limit = 600.0
+    for kv in toml or []:
+        k, _, v = kv.partition("=")
+        if k.strip() == "run.timeout_s":
+            try:
+                limit = float(v.strip().strip('"'))
+            except ValueError:
+                pass
+    return max(1800.0, limit + DRAW_MARGIN_S) if limit > 0 else max(1800.0, 4 * 3600.0)
 
 
 if __name__ == "__main__":

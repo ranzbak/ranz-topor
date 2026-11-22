@@ -103,6 +103,11 @@ class RunOutcome:
     rounds: int = 0
     router_s: float = 0.0
     router_cpu_s: float = 0.0  # CPU seconds of this process during the engine jobs, all threads summed
+    # time-limit-fix r2 (user 2026-11-22): what run.timeout_s limits, optimizing time (wall and CPU seconds: the
+    # engine jobs up to the final drawing, earlier jobs in full), and the final drawing's wall seconds (not counted)
+    optimize_s: float = 0.0
+    optimize_cpu_s: float = 0.0
+    draw_s: float = 0.0
     wall_s: float = 0.0
     work_dir: Path | None = None
     pcb_copy: Path | None = None
@@ -538,6 +543,7 @@ def _facts_result(status: str, out: RunOutcome, report: dict | None) -> dict:
     slim = {k: v for k, v in (report or {}).items() if k not in ("items", "profile")}
     return {"status": status, "routed": out.routed, "total": out.total, "stop_reason": out.stop_reason,
             "cancelled": out.cancelled, "rounds": out.rounds, "router_s": round(out.router_s, 3), "router_cpu_s": round(out.router_cpu_s, 3),
+            "optimize_s": round(out.optimize_s, 3), "optimize_cpu_s": round(out.optimize_cpu_s, 3), "draw_s": round(out.draw_s, 3),
             "wall_s": round(out.wall_s, 3), "items": len(out.items), "ripped": len(out.ripped), "drc": out.drc,
             "findings": [asdict(f) for f in out.findings], "route": slim, "via_fallback": out.via_fallback,
             "time_limit": out.time_limit, "compass": out.compass, "profile": _profile_facts(out),
@@ -769,6 +775,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     report_dir = out.report_dir
     state = {"no_project": None, "cancel": False, "last": Progress(), "judged_key": None, "judged": None, "last_result": None,
              "rounds": 0, "router_s": 0.0, "router_cpu_s": 0.0,  # router time / CPU time of the engine jobs (progress dialog)
+             # time-limit-fix r2: optimizing time (wall, CPU: what run.timeout_s limits) and the final drawing (wall)
+             "opt_s": 0.0, "opt_cpu_s": 0.0, "draw_s": 0.0,
              "limit_hit": None}  # "cpu": the CPU limit fired and the plugin cancelled the job
 
     def discard_pressed() -> bool:
@@ -784,6 +792,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
 
     def emit(phase: str) -> None:
         q = replace(state["last"], phase=phase, elapsed_s=state["router_s"], cpu_s=state["router_cpu_s"],
+                    optimize_s=state["opt_s"], opt_cpu_s=state["opt_cpu_s"], draw_s=state["draw_s"],
                     wall_s=time.monotonic() - t0, limit_s=state.get("limit"))
         if ui.progress(q) is False:
             state["cancel"] = True
@@ -794,8 +803,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     def take_limit() -> bool:
         """A time limit the user set in the progress dialog (``ui.time_limit_request``, interactive runs only:
         headless UIs have no such method, so their limit stays fixed): applied to ``state["limit"]``, logged and
-        recorded in ``out.time_limit``. <= 0 = no limit; a limit below the router time spent becomes the time spent
-        (the run stops at its next check and keeps the best result). True when the limit changed. O(1)."""
+        recorded in ``out.time_limit``. <= 0 = no limit; a limit below the optimizing time spent becomes the time
+        spent (the run stops at its next check and keeps the best result). True when the limit changed. O(1)."""
         req = getattr(ui, "time_limit_request", None)
         if "limit" not in state or not callable(req):  # before the routing's limit exists: left for later
             return False
@@ -803,7 +812,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if new is None:
             return False
         clock = out.time_limit["clock"]
-        spent = state["router_cpu_s"] if clock == "cpu" else state["router_s"]
+        spent = state["opt_cpu_s"] if clock == "cpu" else state["opt_s"]  # time-limit-fix r2: optimizing time
         new = float(new)
         new = 0.0 if not math.isfinite(new) or new <= 0 else max(new, spent)
         old = state["limit"]
@@ -814,7 +823,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         out.time_limit["final_s"] = new
         how = ("removed by the user (no limit)" if new <= 0 else "set by the user" if old <= 0
                else "extended by the user" if new > old else "lowered by the user")
-        log.line(f"time limit {how} at {spent:.1f} s router time ({clock} clock): {limit_text(old)} -> "
+        log.line(f"time limit {how} at {spent:.1f} s optimizing time ({clock} clock): {limit_text(old)} -> "
                  f"{limit_text(new)}" + (" = the time spent: the run stops at its next check" if 0 < new <= spent else ""))
         return True
 
@@ -1049,7 +1058,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     opts["timeout_overrun_s"] = 0.0 if cpu_clock else cap
     state["cap_hit"] = False
     out.time_limit = {"clock": "cpu" if cpu_clock else "wall", "start_s": state["limit"], "final_s": state["limit"],
-                      "changes": [], "cap_s": cap or None, "cap_hit": False, "cut": "none", "cut_steps": []}
+                      "changes": [], "cap_s": cap or None, "cap_hit": False, "cut": "none", "cut_steps": [],
+                      # time-limit-fix r2: what the limit counts (run.timeout_scope): optimizing (default) | all
+                      "scope": str(opts.get("timeout_scope", "optimizing"))}
     geometry = cfg.get("output", "geometry")
     max_err = int(rules.get("max_error") or 5000)
     layer_names = {int(l["id"]): l["name"] for l in model.get("layers", [])}
@@ -1070,7 +1081,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # the engine's measurements outside the limit (M1 compass cut test) are not time past it
         last = state.get("last")
         measured = float(getattr(last, "measure_s", 0.0) or 0.0) if last is not None else 0.0
-        spent = (state["router_cpu_s"] if cpu_clock else state["router_s"]) - measured
+        spent = (state["opt_cpu_s"] if cpu_clock else state["opt_s"]) - measured  # time-limit-fix r2: optimizing time
         reached = bool(lim > 0 and (state["limit_hit"] or spent >= lim or eng.get("reached")))
         state["cap_hit"] = bool(state["cap_hit"] or eng.get("cap_hit"))
         out.time_limit.update({"mode": "soft" if soft_limit else "hard", "reached": reached,
@@ -1083,14 +1094,20 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                                "grace_s": eng.get("grace_s"), "grace_hit": bool(eng.get("grace_hit")),
                                # run.drawing_grace_s: the drawing's optional passes stopped (every wire drawn)
                                "draw_grace_s": eng.get("draw_grace_s"), "draw_grace_hit": bool(eng.get("draw_grace_hit")),
-                               "draw_grace_erbs": int(eng.get("draw_grace_erbs") or 0)})
+                               "draw_grace_erbs": int(eng.get("draw_grace_erbs") or 0),
+                               # time-limit-fix r2: the engine's word on what the limit counted (the final drawing
+                               # off the clock, "optimizing"; "all" with timeout_scope = all)
+                               "scope": str(eng.get("scope") or out.time_limit.get("scope") or "optimizing")})
         tl = out.time_limit
         if reached and (tl["wait_s"] > 0 or tl["cycle_dropped"] or tl["draw_grace_hit"]):
             log.line(f"time limit wait: {wait_log_text(tl)}")
         if reached:
             log.line(f"time limit ({out.time_limit['mode']}): reached during {out.time_limit['step'] or 'the run'}; "
-                     f"the result was ready {out.time_limit['overrun_s']:.1f} s past the limit "
-                     f"({'CPU' if cpu_clock else 'wall'} clock)"
+                     + (f"the optimizing ended {out.time_limit['overrun_s']:.1f} s past the limit "
+                        f"({'CPU' if cpu_clock else 'wall'} clock; the final drawing after it is not counted)"
+                        if out.time_limit.get("scope", "optimizing") != "all" else
+                        f"the result was ready {out.time_limit['overrun_s']:.1f} s past the limit "
+                        f"({'CPU' if cpu_clock else 'wall'} clock)")
                      + (f"; WARNING: the overrun cap (run.timeout_overrun_s = {cap:g} s) was reached, the run then "
                         f"acted as with the hard limit ({messages.CUT_TEXT.get(out.time_limit['cut'], messages.CUT_TEXT['none'])})"
                         if state["cap_hit"] else ""))
@@ -1122,6 +1139,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         sk = {"asked": -1e9, "seq": -1, "kind": None, "sent": None}  # last request, progress seq / kind fetched, sent
         job_t0, router_before = time.monotonic(), state["router_s"]
         cpu_t0, cpu_before = time.process_time(), state["router_cpu_s"]
+        # time-limit-fix r2: an earlier engine job counts in full as optimizing (its drawing was a round inside the
+        # run); only this job's final drawing, after its draw gate, is off the clock
+        state["opt_s"], state["opt_cpu_s"], state["draw_s"] = router_before, cpu_before, 0.0
         # cancelled_at: Cancel / OK was sent (job.cancel(); also the CPU clock's limit for an engine without
         # reach_limit / harden); limit_at: the CPU clock's limit was sent (job.reach_limit(), and job.harden() when hard). Kept apart so a Cancel after the soft limit still reaches the job (verify-m2 F1).
         last_poll, cancelled_at, limit_at = -1e9, None, None
@@ -1142,6 +1162,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 p.wall_s = now - t0
                 state["router_s"] = p.elapsed_s
                 p.cpu_s = state["router_cpu_s"] = cpu_before + (time.process_time() - cpu_t0)
+                # time-limit-fix r2: optimizing time, the clock run.timeout_s counts: the engine's own (it stands
+                # still in the final drawing, `drawing`); the CPU seconds stop with the first poll that sees the
+                # drawing (0.25 s resolution); the drawing's wall seconds apart
+                eng_opt = p.optimize_s if p.optimize_s >= 0 else now - job_t0  # -1: an engine without the figure
+                p.optimize_s = state["opt_s"] = router_before + min(eng_opt, now - job_t0)
+                if not p.drawing:
+                    state["opt_cpu_s"] = p.cpu_s
+                p.opt_cpu_s, state["draw_s"] = state["opt_cpu_s"], p.draw_s
                 state["last"] = p
                 for line in round_log_lines(p, rounds_seen):
                     log.line(line)
@@ -1150,9 +1178,11 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                     log.line(line)
                 cycles_seen = max(cycles_seen, p.cycles_logged)
                 # the engine's measurements outside the limit (M1 compass cut test, one thread) do not count
-                if (cpu_clock and 0 < state["limit"] <= p.cpu_s - p.measure_s and not state["limit_hit"] and not done):
+                if (cpu_clock and 0 < state["limit"] <= p.opt_cpu_s - p.measure_s and not state["limit_hit"] and not done
+                        and not p.drawing):
                     state["limit_hit"] = "cpu"
-                    log.line(f"CPU-time limit reached: {p.cpu_s:.1f} s of {state['limit']:.0f} s (router wall {p.elapsed_s:.1f} s)")
+                    log.line(f"CPU-time limit reached: {p.opt_cpu_s:.1f} s of {state['limit']:.0f} s optimizing "
+                             f"(wall {p.optimize_s:.1f} s)")
                 p.limit_s = state["limit"]
                 if ui.progress(p) is False:
                     state["cancel"] = True
@@ -1203,9 +1233,9 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 # F3: the CPU clock's overrun cap: past the soft limit by run.timeout_overrun_s CPU seconds, the run
                 # acts as with the hard limit (the engine's own cap counts the wall clock, timeout_overrun_s)
                 if (cpu_clock and limit_at is not None and cancelled_at is None and cap > 0 and not state["cap_hit"]
-                        and not done and p.cpu_s - p.measure_s >= state["limit"] + cap):
+                        and not done and not p.drawing and p.opt_cpu_s - p.measure_s >= state["limit"] + cap):
                     state["cap_hit"] = True
-                    log.line(f"WARNING: time limit overrun cap reached: {p.cpu_s - p.measure_s:.0f} CPU s of router work, "
+                    log.line(f"WARNING: time limit overrun cap reached: {p.opt_cpu_s - p.measure_s:.0f} CPU s of optimizing, "
                              f"limit {state['limit']:.0f} s + run.timeout_overrun_s {cap:g} s; the step that runs is cut "
                              "and the kept plan is drawn in full (as with the hard limit; a drawing that runs is cut)")
                     harden = getattr(job, "harden", None)
@@ -1301,6 +1331,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     out.routed, out.total = int(rr.get("routed", 0)), int(rr.get("connections_total", 0))
     out.stop_reason = rr.get("stop_reason")
     out.router_cpu_s = state["router_cpu_s"]
+    out.optimize_s, out.optimize_cpu_s, out.draw_s = state["opt_s"], state["opt_cpu_s"], state["draw_s"]
     if state["limit_hit"] == "cpu" and out.stop_reason in ("timeout", "cancel"):
         # the CPU clock's limit cut the run: the engine says "timeout" (reach_limit / harden) or "cancel" (an engine
         # without them); "stable" / "round cap" = the run had ended (or was stable) before the limit cut anything
@@ -1325,8 +1356,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                     "timeout_s, or use Cancel instead")
             warns.append(f"{cap_line} (run.timeout_overrun_s = {cap:g} s past the {state['limit']:.0f} s limit, CPU clock): {what}")
         rr = {**rr, "stop_reason": "timeout_cpu", "timed_out": True, "warnings": warns + [
-            f"time budget hit: CPU-time limit of {state['limit']:.0f} s reached ({out.router_cpu_s:.0f} CPU s of router "
-            f"work, {state['router_s']:.0f} s on the clock, run.timeout_clock = cpu{changed}): result may differ between "
+            f"time budget hit: CPU-time limit of {state['limit']:.0f} s reached ({out.optimize_cpu_s:.0f} CPU s of "
+            f"optimizing, {state['opt_s']:.0f} s on the clock, run.timeout_clock = cpu{changed}): result may differ between "
             f"runs{stable_why}"]}
     elif out.stop_reason == "timeout":
         out.stop_reason = "timeout_wall"
@@ -1378,6 +1409,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                   "fallbacks": [via_fallback_text(out.via_fallback)] if out.via_fallback else []}
     build_report({**rr, "items": out.items}, classified, cfg, findings, scope_info, before_stats,
                  {"router_s": out.router_s, "router_cpu_s": out.router_cpu_s, "drc_rounds": loop.rounds,
+                  "optimize_s": out.optimize_s, "optimize_cpu_s": out.optimize_cpu_s, "draw_s": out.draw_s,
                   # not router time, shown apart in the summary: the engine's measurements outside the limit and
                   # the whole run so far (pre-flight, KiCad's DRC and the rest on top of the router time)
                   "measure_s": float(getattr(state.get("last"), "measure_s", 0.0) or 0.0),
@@ -1386,7 +1418,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                         "time_limit": out.time_limit, "compass": out.compass,
                         "notes": [f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + _ripup_notes(rr) + _via_relax_notes(rr) + (
                             ["time budget exhausted"] if loop.budget_exhausted else [])})
-    log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, "
+    log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s (optimizing "
+             f"{out.optimize_s:.1f} s, CPU {out.optimize_cpu_s:.1f} s; drawing {out.draw_s:.1f} s), CPU {out.router_cpu_s:.1f} s, "
              f"{rr.get('threads_used', '?')} threads, {rr.get('iterations', '?')} cycles (picked run), rounds {loop.rounds}, "
              f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}, {time_limit_text(out.time_limit)}")
     drc_src = routed_dir / "drc-routed.json"

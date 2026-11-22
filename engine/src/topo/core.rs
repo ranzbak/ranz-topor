@@ -413,17 +413,18 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         } else if cancel {
             "Cancel stopped the run before its routes were stable".to_string()
         } else if share_stop {
-            let at = ctl.limit.elapsed_s(); // the limit's own clock (the engine job's), as `limit`
-            // the limit can still pass after the share, while the drawing runs (soft: it is drawn to its end)
+            let at = ctl.limit.elapsed_s(); // the limit's own clock (optimizing time), as `limit`
+            // timeout_scope = "all" only: the limit can still pass after the share, while the drawing
+            // runs (soft: it is drawn to its end); with "optimizing" the clock stops at the drawing
             let after = if at >= limit {
                 // soft: the drawing runs to its end; past [run] drawing_grace_s only its optional passes stop
                 let what = if ctl.limit.draw_grace_hit() { "every wire was drawn, only its optional passes stopped at [run] drawing_grace_s (see the time limit wait line)" } else { "it cut nothing" };
                 format!("the time limit of {limit:.0} s (wall clock) passed only after the loop, during the drawing: {what}")
             } else {
-                format!("the time limit of {limit:.0} s (wall clock) was not reached, {:.0} s of it were left", limit - at)
+                format!("the time limit of {limit:.0} s (wall clock, optimizing time) was not reached, {:.0} s of it were left", limit - at)
             };
             format!(
-                "the TopoR loop's own time share stopped it, not the time limit: [optimize] loop_time_share = {:.2} lets the loop use at most that share of the time left when it began and keeps the rest for the drawing; the last loop ended at {share_end_s:.0} s, the run at {at:.0} s; {after}",
+                "the TopoR loop's own time share stopped it, not the time limit: [optimize] loop_time_share = {:.2} (below the default 1.0) lets the loop use at most that share of the time left when it began; the last loop ended at {share_end_s:.0} s, the optimizing at {at:.0} s; {after}",
                 opts.loop_time_share.clamp(0.05, 1.0)
             )
         } else if ctl.limit.changed() {
@@ -528,7 +529,9 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
     // (from `route_topo`'s `t0`, later): a limit reached just before the run ended would read "not
     // reached" while a stop test had already cut a step on it (limit-flake 2026-11-18: cut_steps
     // named the via reduction with reached = false and no step).
-    let runtime_s = ctl.limit.elapsed_s().max(r.runtime_s);
+    // time-limit-fix r2: once the final drawing ran off the clock, the limit's clock stood still
+    // there (optimizing time); `r.runtime_s` then holds the drawing too.
+    let runtime_s = if ctl.limit.in_drawing() { ctl.limit.elapsed_s() } else { ctl.limit.elapsed_s().max(r.runtime_s) };
     let mode = if opts.timeout_mode == "hard" { "hard" } else { "soft" };
     let reached = runtime_s >= limit_s;
     let step = if reached { ctl.snapshot().limit_step } else { String::new() };
@@ -561,9 +564,12 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
     };
     if reached {
         r.warnings.push(format!(
-            "time limit ({mode}, [run] timeout_mode): {limit_s:.0} s reached during {}; {}; the result was ready {overrun_s:.1} s past the limit (wall clock)",
+            "time limit ({mode}, [run] timeout_mode): {limit_s:.0} s reached during {}; {}; {} {overrun_s:.1} s past the limit (wall clock{})",
             if step.is_empty() { "the run" } else { step.as_str() },
-            if cap_hit { format!("the step that ran went on until the overrun cap, then {as_hard}") } else if mode == "soft" { "the step that ran finished, no new one began and the best kept variant was drawn".to_string() } else { as_hard.clone() }
+            if cap_hit { format!("the step that ran went on until the overrun cap, then {as_hard}") } else if mode == "soft" { "the step that ran finished, no new one began and the best kept variant was drawn".to_string() } else { as_hard.clone() },
+            // time-limit-fix r2: with the final drawing off the clock the overrun ends with the optimizing
+            if ctl.limit.in_drawing() { "the optimizing ended" } else { "the result was ready" },
+            if ctl.limit.in_drawing() { format!("; the final drawing after it took {:.1} s and is not counted", ctl.limit.drawing_s()) } else { String::new() }
         ));
     }
     if cap_hit {
@@ -618,7 +624,7 @@ fn limit_report(ctl: &RunControl, opts: &Options, r: &mut RouteResult) -> Option
         };
         r.warnings.push(wait_line(&w));
     }
-    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps, grace_s, grace_hit, wait_s, cycle_dropped, draw_grace_s, draw_grace_hit, draw_grace_erbs })
+    Some(crate::route::LimitReport { limit_s, mode: mode.into(), reached, step, overrun_s, cap_s, cap_hit, cut: cut.into(), cut_steps, grace_s, grace_hit, wait_s, cycle_dropped, draw_grace_s, draw_grace_hit, draw_grace_erbs, optimize_s: (runtime_s * 1e3).round() / 1e3, draw_s: (ctl.limit.drawing_s() * 1e3).round() / 1e3, scope: if ctl.limit.in_drawing() || opts.timeout_scope != "all" { "optimizing" } else { "all" }.into() })
 }
 
 /// What the `time limit wait:` line says ([`wait_line`]).
@@ -4542,8 +4548,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // the drawing's). time-limit-fix: read live, so a limit the user changes during the loop
         // (the progress dialog's Time limit, +5 / +15 min) moves the share with it; before, the
         // share kept the limit as it stood at the loop's start.
+        // time-limit-fix r2: share >= 1 (the default) = no extra stop, the loop runs to the limit (the
+        // final drawing after it is not counted, `[run] timeout_scope = "optimizing"`).
         let share = opts.loop_time_share.clamp(0.05, 1.0);
-        let loop_deadline = || ctl.deadline().map(|d| t_loop + d.saturating_duration_since(t_loop).mul_f64(share));
+        let loop_deadline = || if share >= 1.0 { None } else { ctl.deadline().map(|d| t_loop + d.saturating_duration_since(t_loop).mul_f64(share)) };
         let n_sig = if b.n_signal == 0 { proj.n_layers } else { b.n_signal };
         let tiers: Vec<u8> = (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect();
         // 5.2 (price = criterion): the predicted violations of a state with its layering, the one
@@ -7186,6 +7194,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             sp.restore(&arch.items[pick].payload.var);
             why
         };
+        // time-limit-fix r2 (user 2026-11-22: the limit is optimizing time, the drawing afterwards is
+        // not counted): the gate opened, every run has ended its loop and offered its pick; the final
+        // drawing (the picked variants, their via reduction and stitching) runs off the clock. The
+        // first run here stops the clock (idempotent); a draw-only round finds it stopped.
+        if opts.opt_loop == "topor" && opts.timeout_scope != "all" {
+            ctl.limit.enter_drawing();
+        }
         if super::prof::on() {
             // site-price-cost: the size of the packer's point_free memo (entries; key 32 B + value 8 B).
             let n = packer.point_free_memo_len();

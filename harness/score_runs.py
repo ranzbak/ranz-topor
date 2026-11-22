@@ -8,6 +8,10 @@ Writes `<root>/<board>/s<k>/` (k = 0..5; s0 = the default run, s<k> = `--set opt
 second). The limit is fixed on purpose (user 2026-11-07: raising `timeout_s` to 1800 skewed the algorithm
 comparison): CPU time, 2400 s (= the old 600 s wall x 4 rayon threads), RAYON_NUM_THREADS=4. CPU time is summed over
 all threads, so a busy machine or extra threads neither buy nor cost budget (`[run] timeout_clock`, docs/user/operate.md).
+Since 2026-11-22 (time-limit-fix r2, `[run] timeout_scope = "optimizing"`) the limit counts optimizing time only: the
+final drawing after it is not counted and runs to its end, so a run takes up to 2 x the limit (the headless overrun
+cap, `timeout_overrun_s = auto`) plus its drawing (qmtech about 50-360 s wall). There is no hard kill here (a run
+ends by itself); size a VM unit's `--hours` with that drawing per run on top. limits.json records the scope.
 After every run its M1 compass row (predicted / drawn / KiCad DRC per violation class, `toporlib.compass`) is appended
 to `<root>/compass.tsv` and printed. Every run has `[capacity] compass_cut_check = true` (a measurement: the
 read-only cut test of the plan runs after the drawing, outside the time limit, so the compass's model-gap rows are
@@ -140,6 +144,8 @@ def main(argv: list | None = None) -> int:
     if not a.no_cut_check and not any(kv.startswith("capacity.compass_cut_check=") for kv in a.set):
         a.set.append(CUT_CHECK)
     lim["sets"] = list(a.set)
+    # time-limit-fix r2: what the limit counts (the final drawing is off the clock unless a set says all)
+    lim["scope"] = next((kv.split("=", 1)[1] for kv in a.set if kv.startswith("run.timeout_scope=")), "optimizing")
     lf = a.root / "limits.json"
     lf.write_text(json.dumps(lim, indent=1))
     env = {**os.environ, "RAYON_NUM_THREADS": str(a.threads)}

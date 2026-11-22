@@ -372,7 +372,7 @@ fn ok_at_stable_then_a_hard_limit_cuts_the_drawing_is_a_timeout() {
     use std::sync::Arc;
     for mode in [Mode::Dialog, Mode::Headless] {
         for (board, m) in [("eprom", eprom()), ("pour", pour_cut_board())] {
-            let o = opts(mode, Clock::Wall, r#", "topo_rounds": 100000, "timeout_mode": "hard""#);
+            let o = opts(mode, Clock::Wall, r#", "topo_rounds": 100000, "timeout_mode": "hard", "timeout_scope": "all""#);
             let mut ctl = RunControl::new();
             let (lim, c4) = (ctl.limit.clone(), ctl.clone());
             let fired = Arc::new(AtomicUsize::new(0));
@@ -539,21 +539,90 @@ fn loop_time_share_follows_a_limit_raised_during_the_loop() {
 
 #[test]
 fn loop_time_share_then_the_limit_in_the_drawing_is_still_the_share_and_says_the_limit_passed_later() {
-    // the share ends the loop; the limit then passes while the drawing runs (soft: drawn to its end,
-    // nothing cut): the share ended the search, and the text must not call the limit unreached
-    let o = Options::from_json(&format!(r#"{{"runs": 1, "wall_clock_s": 60, "stop_when_stable": false, "loop_time_share": 0.05{NEVER_STABLE}}}"#)).expect("options");
+    // the share ends the loop; the limit is then reached while the final drawing runs. With
+    // timeout_scope = "all" (the limit counts the drawing; soft: drawn to its end, nothing cut) the
+    // share ended the search and the text must not call the limit unreached; with the default
+    // "optimizing" (time-limit-fix r2) the drawing is off the clock: the reach does nothing there
+    for scope in ["all", "optimizing"] {
+        let o = Options::from_json(&format!(r#"{{"runs": 1, "wall_clock_s": 60, "stop_when_stable": false, "loop_time_share": 0.05, "timeout_scope": "{scope}"{NEVER_STABLE}}}"#)).expect("options");
+        let mut ctl = RunControl::new();
+        let lim = ctl.limit.clone();
+        ctl.set_test_hook(move |p| {
+            if p == "no sequential run" {
+                lim.reach(); // the drawing of the loop's pick runs: the limit passes now
+            }
+            false
+        });
+        let r = route_with(&eprom(), &o, &ctl);
+        let l = r.limit.as_ref().expect("limit report");
+        assert_eq!(l.reached, scope == "all", "{scope}: the limit reached in the drawing counts only with all: {l:?}");
+        assert!(l.cut == "none" && l.scope == scope, "{scope}: nothing cut: {l:?}");
+        assert_eq!(r.stop_reason, "loop_time_share", "{scope}: {:?}", r.warnings);
+        assert!(r.routed == r.connections_total, "{scope}: drawn in full");
+        share_end_s(&r);
+        if scope == "optimizing" {
+            assert!(l.draw_s > 0.0 && l.optimize_s < 60.0, "{scope}: the drawing apart: {l:?}");
+        }
+    }
+}
+
+/// time-limit-fix r2 (user 2026-11-22: "3600 s = 3600 s optimizing, the drawing afterwards is
+/// constant for a board so doesn't count"): by default the final drawing runs off the clock. A hard
+/// limit that would pass inside it (the hook at the first drawn wire sets it just ahead and sleeps
+/// past it, as in `ok_at_stable_then_a_hard_limit_cuts_the_drawing_is_a_timeout`, which keeps that
+/// behaviour under timeout_scope = "all") cuts nothing: every wire drawn, the run is "stable", the
+/// limit report says not reached, the drawing's seconds apart from the optimizing ones, and the
+/// progress says drawing with the optimizing clock standing still.
+#[test]
+fn the_final_drawing_is_off_the_clock_by_default_a_hard_limit_there_cuts_nothing() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    let o = opts(Mode::Headless, Clock::Wall, r#", "topo_rounds": 100000, "timeout_mode": "hard""#);
+    assert_eq!(o.timeout_scope, "optimizing", "the default");
     let mut ctl = RunControl::new();
-    let lim = ctl.limit.clone();
-    ctl.set_test_hook(move |p| {
-        if p == "no sequential run" {
-            lim.reach(); // the drawing of the loop's pick runs: the limit passes now
+    let (lim, c4) = (ctl.limit.clone(), ctl.clone());
+    let seen = Arc::new((AtomicBool::new(false), AtomicU64::new(0)));
+    let s2 = seen.clone();
+    ctl.set_test_hook(move |pt| {
+        if pt == "fail wire drawing" && !s2.0.swap(true, Ordering::SeqCst) {
+            let p = c4.snapshot();
+            assert!(p.drawing && lim.in_drawing(), "the drawing runs off the clock: {p:?}");
+            lim.set(lim.elapsed_s() + 0.05);
+            let before = lim.elapsed_s();
+            std::thread::sleep(Duration::from_millis(1300));
+            // the optimizing clock stands still in the drawing, the drawing's own runs on
+            assert!(lim.elapsed_s() == before && !lim.passed(), "frozen: {before} vs {}", lim.elapsed_s());
+            s2.1.store((lim.drawing_s() * 1e3) as u64, Ordering::SeqCst);
         }
         false
     });
     let r = route_with(&eprom(), &o, &ctl);
+    assert!(seen.0.load(Ordering::SeqCst), "premise: the hook reached the drawing");
+    assert!(seen.1.load(Ordering::SeqCst) >= 1300, "the drawing's seconds ran on");
+    assert_eq!(r.stop_reason, "stable", "{:?}", r.warnings);
+    assert_eq!(r.routed, r.connections_total, "drawn in full: {:?}", r.warnings);
     let l = r.limit.as_ref().expect("limit report");
-    assert!(l.reached && l.cut == "none", "the limit passed in the drawing and cut nothing: {l:?}");
-    assert_eq!(r.stop_reason, "loop_time_share", "{:?}", r.warnings);
+    assert!(!l.reached && l.cut == "none" && l.cut_steps.is_empty() && l.scope == "optimizing", "{l:?}");
+    assert!(l.draw_s >= 1.3 && l.optimize_s < l.limit_s, "{l:?}");
+    assert!(!r.warnings.iter().any(|w| w.starts_with("time budget hit") || w.contains("drawing of the traces was cut")), "{:?}", r.warnings);
+    no_budget_warning(&r);
+}
+
+/// time-limit-fix r2: [optimize] loop_time_share defaults to 1.0, no extra stop: a loop that never
+/// gets stable runs to the time limit (stop "timeout", the loop ended by the time limit), not to a
+/// share of it; the drawing after it is not counted, so the limit report's optimizing seconds are
+/// the limit plus the soft wait, and the drawing's apart.
+#[test]
+fn the_loop_runs_to_the_limit_by_default_no_share() {
+    let wall = if cfg!(debug_assertions) { 30.0 } else { 3.0 };
+    let o = Options::from_json(&format!(r#"{{"runs": 1, "wall_clock_s": {wall}, "stop_when_stable": false{NEVER_STABLE}}}"#)).expect("options");
+    assert!((o.loop_time_share - 1.0).abs() < 1e-12, "the default share");
+    let r = route_with(&eprom(), &o, &RunControl::new());
+    assert_eq!(r.stop_reason, "timeout", "{:?}", r.warnings);
+    let (_, _, by) = loop_line(&r);
+    assert_eq!(by, "time", "the loop line: ended by the time limit");
+    assert!(!r.warnings.iter().any(|w| w.contains("loop_time_share")), "{:?}", r.warnings);
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.cut == "none" && l.optimize_s >= wall && l.draw_s > 0.0, "{l:?}");
     assert!(r.routed == r.connections_total, "drawn in full");
-    share_end_s(&r);
 }

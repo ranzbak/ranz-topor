@@ -701,6 +701,49 @@ def test_progress_shows_cpu_time_next_to_router_time(app):
         cpu.Destroy()
 
 
+def test_progress_shows_optimizing_its_end_and_the_drawing_apart(app):
+    """time-limit-fix r2 (user 2026-11-22: "3600 s = 3600 s optimizing, the drawing afterwards is constant for a board
+    so doesn't count"): the limit's row is Optimizing x / limit; Optimizing ends gives the clock time (the limit),
+    limit reached, ended (drawing) or no limit; Drawing is its own row, "–" before it; the limit row is off once the
+    drawing runs (+5 / +15 extend the optimizing only)."""
+    dlg = ui_wx.ProgressDialog("qmtech", 600.0, 4, limit_editable=True)
+    try:
+        labels = [c.GetLabel() for c in dlg.GetChildren() if isinstance(c, ui_wx.wx.StaticText)]
+        assert "Optimizing" in labels and "Optimizing ends" in labels and "Drawing" in labels
+        t0 = ui_wx.time.time()
+        dlg.update(Progress("route", 2, 120, 426, 30, 130.0, cpu_s=465.0, optimize_s=130.0, opt_cpu_s=465.0))
+        assert dlg.elapsed_value.GetLabel() == "2:10 / 10:00 · CPU 7:45"
+        end = dlg.ends_value.GetLabel()
+        want = {ui_wx.time.strftime("%H:%M:%S", ui_wx.time.localtime(t0 + 470 + d)) for d in (0, 1, 2)}
+        assert end.startswith("about ") and end[len("about "):] in want, end
+        assert dlg.draw_value.GetLabel() == "–" and dlg.limit_open()
+        dlg.add_minutes(5)  # extends the optimizing
+        assert dlg.timeout_s == 900
+        # the final drawing: the optimizing clock stands still, the drawing has its own seconds, the limit row is off
+        dlg.update(Progress("route", 2, 426, 426, 30, 650.0, cpu_s=2100.0, optimize_s=600.4, opt_cpu_s=2000.0,
+                            draw_s=49.6, drawing=True, limit_s=900.0))
+        assert dlg.elapsed_value.GetLabel() == "10:00 / 15:00 · CPU 33:20"
+        assert dlg.ends_value.GetLabel() == "ended" and dlg.draw_value.GetLabel() == "0:49 (not counted)"
+        assert not dlg.limit_open() and not dlg.limit_add5.IsEnabled()
+        dlg.update(Progress("route", 2, 426, 426, 30, 920.0, optimize_s=905.0, limit_s=900.0))
+        assert dlg.ends_value.GetLabel() == "limit reached"
+    finally:
+        dlg.Destroy()
+
+
+def test_optimizing_ends_text():
+    now = 1_000_000.0
+    at = lambda s: "about " + ui_wx.time.strftime("%H:%M:%S", ui_wx.time.localtime(now + s))  # noqa: E731
+    assert ui_wx._ends_text(600, 100, 100, 400, False, False, now) == at(500)
+    # CPU clock: what is left of the CPU limit at the CPU rate so far (400 CPU s in 100 s = 4 per second)
+    assert ui_wx._ends_text(2400, 400, 100, 400, True, False, now) == at(500)
+    assert ui_wx._ends_text(0, 100, 100, 400, False, False, now) == "– (no limit)"
+    assert ui_wx._ends_text(600, 600, 600, 400, False, False, now) == "limit reached"
+    assert ui_wx._ends_text(600, 100, 100, 400, False, True, now) == "ended"
+    # a progress without the run flow's optimizing figures: the router time and CPU seconds
+    assert ui_wx._opt_times(Progress("route", 1, 1, 1, 0, 42.0, cpu_s=90.0)) == (42.0, 90.0)
+
+
 def test_splash_shows_name_logo_version_and_status_and_closes_at_the_first_window(app):
     """User 2026-11-08: the router shows a splash at once (start-up takes a few seconds): logo, "Ranz Topor",
     version, a status line; one window, its status updated in place; closed when the progress dialog opens."""
