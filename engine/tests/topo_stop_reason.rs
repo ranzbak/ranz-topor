@@ -495,7 +495,7 @@ fn share_run(wall: f64, raise_to: Option<f64>, threads: usize) -> (RouteResult, 
 fn share_end_s(r: &RouteResult) -> f64 {
     let l = r.warnings.iter().find(|w| w.starts_with("time budget hit")).unwrap_or_else(|| panic!("time budget line: {:?}", r.warnings));
     let reached = r.limit.as_ref().is_some_and(|x| x.reached);
-    let tail = if reached { "passed only after the loop, during the drawing, and cut nothing" } else { "was not reached" };
+    let tail = if reached { "passed only after the loop, during the drawing: " } else { "was not reached" };
     assert!(l.contains("loop_time_share = 0.05") && l.contains("not the time limit") && l.contains(tail), "{l}");
     assert!(!l.contains("the wall-clock limit of"), "the limit's text for the share's stop: {l}");
     l.split("the last loop ended at ").nth(1).and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok()).unwrap_or_else(|| panic!("loop end in {l}"))

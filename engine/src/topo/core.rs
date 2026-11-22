@@ -416,7 +416,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
             let at = ctl.limit.elapsed_s(); // the limit's own clock (the engine job's), as `limit`
             // the limit can still pass after the share, while the drawing runs (soft: it is drawn to its end)
             let after = if at >= limit {
-                format!("the time limit of {limit:.0} s (wall clock) passed only after the loop, during the drawing, and cut nothing")
+                // soft: the drawing runs to its end; past [run] drawing_grace_s only its optional passes stop
+                let what = if ctl.limit.draw_grace_hit() { "every wire was drawn, only its optional passes stopped at [run] drawing_grace_s (see the time limit wait line)" } else { "it cut nothing" };
+                format!("the time limit of {limit:.0} s (wall clock) passed only after the loop, during the drawing: {what}")
             } else {
                 format!("the time limit of {limit:.0} s (wall clock) was not reached, {:.0} s of it were left", limit - at)
             };
