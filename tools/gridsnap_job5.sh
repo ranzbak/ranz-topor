@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# grid-snap r5 (rebased on main 2d54a276, first-draw-45) on the VM: det seed 0 (score_runs --only 0, rounds=1, runs=1),
+# grid-snap r5/r6 (on main 2d54a276, first-draw-45) on the VM: det seed 0 (score_runs --only 0, rounds=1, runs=1),
 # grid 0.254 mm. 2 hzq units: U1 off on esp/qmtech/eprom/wiccon; U2 prefer on the same 4 + the pattern grid_snap_bends
 # (off + prefer, PNG). After each run: tools/gridsnap_measure.py on the routed copy.
 #   tools/gridsnap_job5.sh            (the job)      tools/gridsnap_job5.sh unit <off|prefer>   (one unit)
@@ -36,8 +36,8 @@ if [ "${1:-}" = unit ]; then
   fi
   exit 0
 fi
-hzq run --threads 4 --name gs5-off -- bash tools/gridsnap_job5.sh unit off &
+hzq run --threads 4 --name gs6-off -- bash tools/gridsnap_job5.sh unit off &
 sleep 2
-hzq run --threads 4 --name gs5-prefer -- bash tools/gridsnap_job5.sh unit prefer &
+hzq run --threads 4 --name gs6-prefer -- bash tools/gridsnap_job5.sh unit prefer &
 wait
 note "all done"

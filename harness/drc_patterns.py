@@ -1165,14 +1165,20 @@ def grid_snap_bends() -> Pat:
                f"through the off-grid pin centre: pad snap wins, as in KiCad), the second on it. That is not free: to the same level every mm of extra pad leg "
                f"costs 2 - sqrt(2) = 0.586 mm of length, so this answer is about 1.12 mm longer in all than the shortest "
                f"octilinear one (B +0.254, C +0.22, D +0.649 mm); the grid is worth it here because the bends of B and C "
-               f"then keep the room the plan gives the next trace. {total:.3f} mm in all. Every track end on a pad at the pad centre.",
+               f"then keep the room the plan gives the next trace. Known open (ROOM-FROM-OCTI, shopping list): "
+               f"the router does not reach this yet, because C's planned room is taken from its taut path, not from the "
+               f"diagonal it is drawn on, so B's shorter form takes it. {total:.3f} mm in all. Every track end on a pad at the pad centre.",
         why="Users fix autorouted boards by hand in KiCad with grid snap on (user 2026-11-17); off-grid bends make "
             "those edits awkward. The grid is a graded price (off_grid, 0.15 mm per bend fully off), never a rule: "
             "a wire leaves the grid where clearance, packing or the 45 deg form need it (user 2026-11-21).",
         size=(Wd, Hd), nets=["A"] + nets, fps=[ja, jb, blk, u] + tps,
         connections=[("A", "J1.1", "J2.1")] + [(n, f"U1.{i + 1}", f"T{n}.1") for i, n in enumerate(nets)],
         ref_tracks=ref, expect={"vias": 0, "layers": {n: ["F.Cu"] for n in ["A"] + nets}, "octilinear": True,
-                                "pad_ends_at_centre": True, "grid_mm": g, "grid_off_bends_max": 3},
+                                "pad_ends_at_centre": True, "grid_mm": g, "grid_off_bends_max": 3,
+                                "known_open": {"grid_off_bends_max": "ROOM-FROM-OCTI: C's planned room comes from its "
+                                               "taut path, not from the 45 deg diagonal it is drawn on, so B (drawn first, "
+                                               "shorter form) takes that diagonal's room; C and D then run as a packed "
+                                               "bundle off the grid (prefer: 8 bends off, grid-snap r5/r6)"}},
         marks=[{"xy": [10.0, 1.27], "text": "grid line 1.27"}, {"xy": [4.0, 6.922], "text": "pad leg bend (off grid)"}])
 
 

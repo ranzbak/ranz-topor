@@ -645,26 +645,44 @@ impl Drawer<'_> {
         let t = std::time::Instant::now();
         let on = self.octi.grid.is_some();
         let r = match self.octi.grid_mode {
-            Mode::Prefer if on => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true, &mut 0.0),
+            Mode::Prefer if on => {
+                // grid-snap r6: the grid pass's form, unless it takes more of the room the plan
+                // keeps for undrawn neighbours than the plain pass's form ([`grid_keeps_room`]):
+                // the off_grid price never buys a neighbour's planned room (esp IO7 moved onto the
+                // grid column by the left edge, IO8_SCL drawn later found no legal form there).
+                let mut pg = [f64::INFINITY, 0.0];
+                let g = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true, &mut pg);
+                if g.is_some() && pg[1] <= 0.0 {
+                    g
+                } else {
+                    let mut p0 = [f64::INFINITY, 0.0];
+                    let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut p0);
+                    match g {
+                        Some(o) if r.is_none() || grid_keeps_room(p0[1], pg[1]) => Some(o),
+                        _ => r,
+                    }
+                }
+            }
             Mode::Fallback if on => {
                 // grid-snap "fallback": the grid pass only where the plain pass leaves an any-angle
                 // stretch (the last spacing fallback), and its form only when its whole DP price
                 // (length, bends, room, any_angle, violations, off_grid) is lower than the plain
-                // pass's ([`fallback_takes`]; ties: the plain one).
-                let mut p0 = f64::INFINITY;
+                // pass's ([`fallback_takes`]; ties: the plain one) and it takes no more planned
+                // room ([`grid_keeps_room`]).
+                let mut p0 = [f64::INFINITY, 0.0];
                 let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut p0);
                 if !breaks(r.as_ref().map_or(pts, |o| &o.pts[..])).0.is_empty() {
-                    let mut pg = f64::INFINITY;
+                    let mut pg = [f64::INFINITY, 0.0];
                     let g = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true, &mut pg);
                     match g {
-                        Some(o) if fallback_takes(p0, pg) => Some(o),
+                        Some(o) if fallback_takes(p0[0], pg[0]) && grid_keeps_room(p0[1], pg[1]) => Some(o),
                         _ => r,
                     }
                 } else {
                     r
                 }
             }
-            _ => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut 0.0),
+            _ => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut [0.0; 2]),
         };
         // first-draw-45 r9 debug (`TOPO_REDUCEDBG`, copper-neutral): an octilinear call over 0.5 s.
         if std::env::var_os("TOPO_REDUCEDBG").is_some() && t.elapsed().as_secs_f64() > 0.5 {
@@ -688,7 +706,7 @@ impl Drawer<'_> {
     #[allow(clippy::too_many_arguments)]
     /// `price`: set to the DP's price of its best form (INFINITY when the DP does not run or finds
     /// no form; the taut path kept then).
-    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, grid: bool, price: &mut f64) -> Option<OctiOut> {
+    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, grid: bool, price: &mut [f64; 2]) -> Option<OctiOut> {
         let cfg = self.octi;
         // grid-snap: the track grid of this pass (None: the plain pass, no grid node, no price).
         let lat = if grid { cfg.grid } else { None };
@@ -1632,7 +1650,7 @@ impl Drawer<'_> {
         if !dist[j][d].is_finite() {
             return None;
         }
-        *price = dist[j][d];
+        price[0] = dist[j][d];
         let mut chain: Vec<Vec<Leg>> = Vec::new();
         while let Some((i, din, s)) = back[j][d].clone() {
             chain.push(s);
@@ -1640,6 +1658,18 @@ impl Drawer<'_> {
             d = din;
         }
         chain.reverse();
+        // grid-snap r6: the planned-room price of the chosen form (its legs in undrawn
+        // neighbours' planned room, the DP's `room` term).
+        price[1] = 0.0;
+        if !room_none {
+            let mut from = taut[0];
+            for s in &chain {
+                for &(e, _) in s {
+                    price[1] += room_f(from, e);
+                    from = e;
+                }
+            }
+        }
         if octi_nodes_dbg(w) {
             let mut from = taut[0];
             for s in &chain {
@@ -2403,6 +2433,16 @@ pub fn fallback_takes(plain: f64, grid: f64) -> bool {
     grid.is_finite() && grid < plain - 1e-6
 }
 
+/// grid-snap r6: a grid pass's form may replace the plain pass's only when it takes no more of
+/// the room the plan keeps for undrawn neighbours (`planned_room` price `grid` against `plain`,
+/// nm; 1 nm of slack for rounding). The grid is a preference on free space: a graded off_grid
+/// saving must never move a trace into a neighbour's planned room, which costs that neighbour its
+/// legal form later (esp prefer: IO7 onto the grid column by the left edge, IO8_SCL forced onto
+/// the board edge, KiCad copper_edge_clearance).
+pub fn grid_keeps_room(plain: f64, grid: f64) -> bool {
+    grid <= plain + 1.0
+}
+
 /// grid-snap: per interior taut vertex off the grid, at most this many points of its grid cell become
 /// extra nodes of the octilinear DP.
 const GRID_PER_NODE: usize = 2;
@@ -2864,6 +2904,14 @@ mod tests {
         let inf = f64::INFINITY;
         assert!(fallback_takes(2.0e6, 1.0e6) && fallback_takes(inf, 5.0e6));
         assert!(!fallback_takes(1.0e6, 1.0e6) && !fallback_takes(1.0e6, 2.0e6) && !fallback_takes(inf, inf) && !fallback_takes(1.0e6, inf));
+    }
+
+    /// grid-snap r6: a grid form that takes more planned room than the plain form is refused;
+    /// equal or less room is taken (rounding slack 1 nm).
+    #[test]
+    fn grid_keeps_room_refuses_more_planned_room() {
+        assert!(grid_keeps_room(0.0, 0.0) && grid_keeps_room(5.0e5, 5.0e5 + 0.5) && grid_keeps_room(5.0e5, 1.0e5));
+        assert!(!grid_keeps_room(0.0, 2.0) && !grid_keeps_room(5.0e5, 5.0e5 + 2.0));
     }
 
     #[test]
