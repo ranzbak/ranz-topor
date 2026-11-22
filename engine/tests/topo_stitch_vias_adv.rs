@@ -200,9 +200,11 @@ fn vfy_dropped_island_wholly_under_a_bga_gets_no_via() {
 /// U1.1 (B.Cu, GND) at (2.85, 10) sits in the strip. Via grid 2 x 0.5 mm from (0, 0): the strip's
 /// grid columns x = 2 / 4 lie on its edges, so no grid point of the strip is legal; the strip's
 /// raster sites near the pad pay no k·d (no legal grid corner), only the wide part's sites
-/// stand on the grid. Expected: the via near its pad, in the strip (off the grid, noted).
+/// stand on the grid. r2 expected the via near its pad, in the strip, off the grid; round 5 (user
+/// 2026-11-22: off the via grid NEVER): the via stands on the nearest legal grid point of the
+/// piece, in its wide part.
 #[test]
-fn vfy_class1_via_near_its_pad_when_no_grid_point_there_is_legal() {
+fn vfy_class1_via_stays_on_the_grid_when_no_grid_point_near_its_pad_is_legal() {
     let mut m = model(&[r#"{ "uuid": "U1", "ref": "U1", "number": "1", "net": 1, "attr": "smd", "center": [2850000, 10000000], "layers": [31],
         "shapes": { "31": { "kind": "circle", "d": 1000000 } } }"#.to_string()]);
     m.pours[0].pads.push("U1.1".into());
@@ -225,5 +227,6 @@ fn vfy_class1_via_near_its_pad_when_no_grid_point_there_is_legal() {
     let v = vias(&s.items.iter().filter(|i| matches!(i, Item::Via(_))).cloned().collect::<Vec<_>>());
     eprintln!("k vias {v:?} notes {:?}", s.notes);
     assert_eq!(v.len(), 1, "{:?}", s.notes);
-    assert!(v[0].1 < 20 * MM && v[0].0 < 4 * MM, "class-1 via left its pad's strip: {v:?}");
+    assert!(v[0].0 % (2 * MM) == 0 && v[0].1 % (MM / 2) == 0, "class-1 via off the via grid: {v:?}");
+    assert!(v[0].1 > 20 * MM, "no grid point of the strip is legal: {v:?}");
 }

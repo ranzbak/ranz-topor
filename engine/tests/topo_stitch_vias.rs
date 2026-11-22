@@ -507,7 +507,7 @@ fn a_small_piece_gets_its_vias_at_opposite_corners() {
         // area (1.0 mm) to where the squeeze price is gone (1.25 mm), not onto the edge
         assert!(cx >= 1_200_000 && cy >= 1_200_000, "on the edge of the legal area: {p:?}");
     }
-    assert!(s.notes.iter().any(|n| n.starts_with("stitching vias placement: 0 on the board lattice, 2 at piece extremities (0 off the via grid)")), "{:?}", s.notes);
+    assert!(s.notes.iter().any(|n| n.starts_with("stitching vias placement: 0 on the board lattice, 2 at piece extremities, 0 moved")), "{:?}", s.notes);
 }
 
 /// Round 5: a strip [4, 31] x [14, 17] mm (a dropped island) holding one lattice point (20, 15)
@@ -596,4 +596,84 @@ fn a_priced_out_lattice_point_gets_no_via() {
     assert_eq!(v.len(), 7, "{:?}", s.notes);
     assert!(v.iter().all(|&p| on_lattice(p, (0, 0), 4 * MM)), "{v:?}");
     assert!(v.iter().all(|p| !(p.0 > 12_000_000 && p.0 < 18_000_000 && p.1 > 17_000_000 && p.1 < 23_000_000)), "via under the BGA: {v:?}");
+}
+
+/// Round 5 (user 2026-11-22: off the via grid NEVER; pattern piece E): a dropped strip [8, 22] x
+/// [14, 17] mm where a via fits only in the band y in [14.88, 16.12]; the 2 mm via grid from
+/// (0, 0.5) mm has rows y = 14.5 and 16.5, both outside it. No via is placed off the grid: the
+/// piece gets none, and its warning names the piece and the reason (the grid).
+#[test]
+fn room_only_between_grid_points_gets_no_via_and_a_warning() {
+    let m = model(&[]);
+    let items = square(0, 8, 14, 22, 17);
+    let g = 2 * MM;
+    let o = Options {
+        stitch_min_vias: 2,
+        stitch_per_area: false,
+        stitch_pitch_x_nm: 10 * MM,
+        stitch_pitch_y_nm: 10 * MM,
+        grid_via_nm: [g, g],
+        grid_origin_nm: [0, MM / 2],
+        stitch_lattice: "straight".into(),
+        ..opts(true, 0.0, false)
+    };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    assert!(vias(&s.items).is_empty(), "{:?}", s.notes);
+    assert!(
+        s.notes.iter().any(|n| n.starts_with("stitch (dropped island): GND on F.Cu") && n.contains(": 0 of 2 via(s)") && n.contains("no more legal site on the via grid 2 x 2 mm") && n.contains("never leave the via grid")),
+        "{:?}",
+        s.notes
+    );
+    // Without the grid the same strip gets its vias (the room is real).
+    let free = Options { stitch_on_grid: false, ..o.clone() };
+    let s = stitch_regions(&m, &free, &reg(), &items, &[], None, &|| false);
+    assert_eq!(vias(&s.items).len(), 2, "{:?}", s.notes);
+}
+
+/// Round 5b (user 2026-11-22: "the option to put them everywhere on the pcb, not only the missing
+/// ground pours" = stitch_area): area stitching follows the round-5 rules: every via on a board
+/// lattice point (on the via grid), none under a BGA (priced out, though legal between the balls),
+/// lattice points without room dropped, and the note lists every position.
+#[test]
+fn area_stitching_keeps_the_round5_rules() {
+    let mut balls = Vec::new();
+    for j in 0..4 {
+        for i in 0..4 {
+            let (x, y) = (12_750_000 + i * 1_500_000, 17_750_000 + j * 1_500_000);
+            balls.push(format!(
+                r#"{{ "uuid": "B{i}{j}", "ref": "U9", "number": "{}", "net": 2, "attr": "smd", "center": [{x}, {y}], "layers": [0],
+                    "shapes": {{ "0": {{ "kind": "circle", "d": 300000 }} }} }}"#,
+                j * 4 + i + 1
+            ));
+        }
+    }
+    let m = model(&balls);
+    let g = 250_000;
+    let o = Options { grid_via_nm: [g, g], stitch_pitch_x_nm: 4 * MM, stitch_pitch_y_nm: 4 * MM, ..opts(false, 0.0, true) };
+    let s = stitch_regions(&m, &o, &reg(), &[], &[], None, &|| false);
+    let v = vias(&s.items);
+    assert!(v.len() >= 10, "{:?}", s.notes);
+    assert!(v.iter().all(|&p| on_lattice(p, (0, 0), 4 * MM)), "{v:?}");
+    assert!(v.iter().all(|p| !(p.0 > 12_000_000 && p.0 < 18_000_000 && p.1 > 17_000_000 && p.1 < 23_000_000)), "via under the BGA: {v:?}");
+    let listed: usize = s.notes.iter().filter(|n| n.starts_with("stitch (area")).map(|n| n.split("via(s)").nth(1).map_or(0, |t| t.matches(", ").count())).sum();
+    assert_eq!(listed, v.len(), "{:?}", s.notes);
+    assert!(s.notes.iter().any(|n| n.starts_with("stitching vias placement: ") && n.contains(" on the board lattice, 0 at piece extremities, 0 moved")), "{:?}", s.notes);
+}
+
+/// Round 5b: a strip [4, 31] x [14, 17] mm worth 3 vias by its fill (54 mm², 5 mm pitch) that holds no
+/// lattice point (rows y = 12.5 / 17.5 from the grid origin (0, 2.5) mm) gets its minimum (2) at its
+/// ends, and its note says why it got no more.
+#[test]
+fn an_extremity_only_piece_says_why_it_got_its_minimum() {
+    let m = model(&[]);
+    let items = square(0, 4, 14, 31, 17);
+    let g = 250_000;
+    let o = Options { grid_via_nm: [g, g], grid_origin_nm: [0, 2_500_000], stitch_lattice: "straight".into(), ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    assert_eq!(vias(&s.items).len(), 2, "{:?}", s.notes);
+    assert!(
+        s.notes.iter().any(|n| n.starts_with("stitch (dropped island)") && n.contains(": 2 of 3 via(s)") && n.contains("fewer legal board-lattice points than stitch_min_vias 2: the minimum at the piece's extremities, no more")),
+        "{:?}",
+        s.notes
+    );
 }

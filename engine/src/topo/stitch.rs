@@ -243,16 +243,10 @@ pub fn want_vias(area: f64, pitch: f64, min_vias: usize) -> usize {
 #[derive(Clone, Copy, Debug)]
 struct Site {
     p: Vec2,
-    /// Graded price, nm (squeeze, foreign pads, BGA, plane neck, lattice offset, off-grid): ranks
-    /// the sites.
-    price: f64,
-    /// The site's own cost, nm (squeeze, foreign pads, BGA, plane neck): what classes 2-4 weigh
-    /// against the value of a via. The lattice offset and the off-grid price only rank sites, they
-    /// never make a piece's only sites "not worth a via".
+    /// The site's graded cost, nm (squeeze, foreign pads, BGA, plane neck): ranks the sites, and
+    /// classes 2-4 weigh it against the value of a via. With a via grid every site stands on it
+    /// (round 5: off the grid never).
     cost: f64,
-    /// stitch_on_grid: 0 = on the grid (or no grid), 1 = off it while a grid point of its cell
-    /// passed the site tests, 2 = off it with no grid point of its cell legal.
-    off: u8,
 }
 
 /// Band height of [`MaskHole`]'s edge buckets, nm.
@@ -423,8 +417,6 @@ struct Ctx<'a> {
     /// x shift of the odd lattice rows (nm; 0 straight).
     shift: f64,
     grid: StitchGrid,
-    /// The `off_grid` price (nm per site fully off the grid).
-    off_grid_nm: f64,
     origin: Vec2,
     min_vias: usize,
     per_area: bool,
@@ -435,9 +427,12 @@ struct Ctx<'a> {
     pad_buckets: std::collections::HashMap<(i64, i64), Vec<usize>>,
     /// Solder-mask openings and the nets they expose (F1).
     masks: Vec<MaskHole>,
-    /// Vias placed off the via grid: [a grid point of the cell was legal but refused or spaced
-    /// out, no grid point of the cell legal].
-    off_grid: [usize; 2],
+    /// Round 5 (user 2026-11-22: off the via grid NEVER): legal raster sites of the current piece
+    /// left out because they stand off the via grid (only named in the piece's warning when it
+    /// gets fewer vias than wanted; [`Ctx::place_piece`]).
+    off_grid_legal: std::cell::Cell<usize>,
+    /// Why the last [`Ctx::place_piece`] placed fewer vias than wanted ("" = it did not).
+    why: String,
     /// `stitch_nudge_nm` (nm; 0 = a blocked lattice point is dropped).
     nudge: f64,
     /// Round 5: how the vias were placed.
@@ -479,7 +474,6 @@ impl<'a> Ctx<'a> {
             staggered: lattice_staggered(opts),
             shift: lattice_shift(opts),
             grid: StitchGrid::from_opts(opts),
-            off_grid_nm: super::gridsnap::price_nm(opts),
             origin: StitchGrid::from_opts(opts).origin,
             min_vias: opts.stitch_min_vias,
             per_area: opts.stitch_per_area,
@@ -487,7 +481,8 @@ impl<'a> Ctx<'a> {
             thin: if opts.stitch_thin_nm > 0 { opts.stitch_thin_nm as f64 } else { 1.0e6 },
             pad_buckets,
             masks: mask_holes(model, items),
-            off_grid: [0, 0],
+            off_grid_legal: std::cell::Cell::new(0),
+            why: String::new(),
             nudge: opts.stitch_nudge_nm.max(0) as f64,
             kinds: Kinds::default(),
         }
@@ -641,15 +636,11 @@ impl<'a> Ctx<'a> {
             let Some(ras) = reach.raster(zi, l) else { continue };
             let lat = ras.lattice_sites(isl, need, self.px, self.py, self.shift, self.origin);
             let fb = if fallback { ras.island_sites(isl, need, STEP) } else { Vec::new() };
-            // stitch_on_grid: a fallback site offers the via-grid points of its cell (each through
-            // the same tests) and stays itself at an off-grid price k·d + off_grid·amount (d = its
-            // distance to the nearest grid point). k is above the steepest slope of every smooth
-            // term of the price (distance and spread 1, squeeze on two layers,
-            // foreign-pad proximity, plane neck, each per nm moved), so no smooth difference lets
-            // the raster point beat a legal grid point near it; a step price (a BGA) still can.
-            // Graded in d, no cutoff: a via is off the grid only where no grid point near it is
-            // legal, or those are refused by the checker or spaced out.
-            let k_off = 1.0 + 2.0 * self.squeeze(0.0, sz.d as f64) / (sz.d as f64).max(1.0) + 2.0 * PROX_PRICE_NM / PROX_REACH_NM + 2.0 * self.pitch / self.thin;
+            // stitch_on_grid (round 5, user 2026-11-22: off the grid NEVER): with a via grid a
+            // fallback (raster) site offers only the via-grid points of its cell, each through the
+            // same tests; the raster point itself is never a site (a legal one is counted for the
+            // piece's warning). Without a grid (stitch_on_grid false, or no grid known) the raster
+            // point is the site.
             // Round 5 (verifier r2, lead 2026-11-22): no lattice-offset price any more. It pulled the
             // D4 single via up to 2.98 mm from its pad towards a lattice point; the lattice is now a
             // placement rule of its own (Ctx::place_lattice), not a price.
@@ -665,15 +656,15 @@ impl<'a> Ctx<'a> {
                     let pr = site_price(p);
                     e.insert(pr);
                     if let Some(cost) = pr {
-                        out.push(Site { p, price: cost, cost, off: 0 });
+                        out.push(Site { p, cost });
                     }
                 }
             }
             for p in fb {
-                let grid = self.grid.grid_at(p).filter(|g| !g.on(p));
-                let mut best_corner = f64::INFINITY;
-                if let Some(g) = grid {
-                    for q in g.cell(p) {
+                if let Some(g) = self.grid.grid_at(p) {
+                    let qs: Vec<Vec2> = if g.on(p) { vec![g.nearest(p)] } else { g.cell(p).to_vec() };
+                    let mut any = false;
+                    for q in qs {
                         if ras.island_at(q) != isl || ras.depth_at(q) < need {
                             continue;
                         }
@@ -683,15 +674,17 @@ impl<'a> Ctx<'a> {
                                 let pr = site_price(q);
                                 memo.insert(key(q), pr);
                                 if let Some(cost) = pr {
-                                    out.push(Site { p: q, price: cost, cost, off: 0 });
+                                    out.push(Site { p: q, cost });
                                 }
                                 pr
                             }
                         };
-                        if let Some(pr) = pr {
-                            best_corner = best_corner.min(pr);
-                        }
+                        any |= pr.is_some();
                     }
+                    if !any && !g.on(p) && site_price(p).is_some() {
+                        self.off_grid_legal.set(self.off_grid_legal.get() + 1);
+                    }
+                    continue;
                 }
                 if memo.contains_key(&key(p)) {
                     continue;
@@ -699,15 +692,7 @@ impl<'a> Ctx<'a> {
                 let pr = site_price(p);
                 memo.insert(key(p), pr);
                 let Some(cost) = pr else { continue };
-                let mut price = cost;
-                let mut off = 0;
-                if let Some(g) = grid {
-                    // k only where a grid point near it is legal: with none, the raster point is
-                    // the site (off_grid alone), so the piece still gets its via.
-                    price += if best_corner.is_finite() { k_off * g.off(p) } else { 0.0 } + self.off_grid_nm * g.amount(p);
-                    off = if best_corner.is_finite() { 1 } else { 2 };
-                }
-                out.push(Site { p, price, cost, off });
+                out.push(Site { p, cost });
             }
         }
         out
@@ -743,7 +728,7 @@ impl<'a> Ctx<'a> {
         let cands = self.sites(reach, net, sz, need, islands, keep, fallback);
         // A site whose own cost is at or above the value of one via is not worth one (classes
         // 2-4): it is left out, the cheaper sites stay (verifier V2: a priced-out lattice site
-        // ended the piece). The lattice offset and off-grid price only rank (`Site::cost`).
+        // ended the piece).
         let mut dead: Vec<bool> = cands.iter().map(|c| value.is_some_and(|v| c.cost >= v)).collect();
         let mut placed: Vec<Vec2> = Vec::new();
         let mut near: Vec<Vec2> = anchors.to_vec();
@@ -751,16 +736,14 @@ impl<'a> Ctx<'a> {
         'via: while placed.len() < n {
             let mut tries = 0usize;
             loop {
-                // One graded score (verifier V1): a fallback site's distance to the lattice is part
-                // of its price (Ctx::sites), so a BGA or neck price outweighs the lattice, never
-                // the other way round by rank.
+                // One graded score (verifier V1): distance and the site's own cost.
                 let score = |s: &Site| -> f64 {
                     if near.is_empty() {
                         let t = targets.iter().map(|&t| (t - s.p).len()).fold(f64::INFINITY, f64::min);
-                        -(if t.is_finite() { t } else { 0.0 } + s.price)
+                        -(if t.is_finite() { t } else { 0.0 } + s.cost)
                     } else {
                         let d = near.iter().map(|&a| (a - s.p).len()).fold(f64::INFINITY, f64::min);
-                        d.min(pitch) - s.price
+                        d.min(pitch) - s.cost
                     }
                 };
                 let eligible = |i: usize| {
@@ -793,9 +776,6 @@ impl<'a> Ctx<'a> {
                     self.add(&v);
                     self.new.push(v);
                     placed.push(p);
-                    if cands[i].off > 0 {
-                        self.off_grid[cands[i].off as usize - 1] += 1;
-                    }
                     near.push(p);
                     continue 'via;
                 }
@@ -841,16 +821,47 @@ impl<'a> Ctx<'a> {
     #[allow(clippy::too_many_arguments)]
     fn place_piece(&mut self, reach: &PourReach, net: i32, sz: crate::vias::ViaSize, need: f64, islands: &[(usize, u32, u32)], keep: &dyn Fn(usize, Vec2) -> bool, targets: &[Vec2], n: usize, value: Option<f64>) -> Vec<Vec2> {
         let n_min = self.min_vias.max(1);
-        if n_min <= 1 && n <= 1 {
-            return self.place_spread(reach, net, sz, need, islands, keep, targets, &[], n, value, 0.0, true);
-        }
-        let legal = self.sites(reach, net, sz, need, islands, keep, false).iter().filter(|s| value.is_none_or(|v| s.cost < v)).count();
-        let mut placed = if legal >= n_min { self.place_lattice(reach, net, sz, need, islands, keep, &[], n, value, 0.0) } else { Vec::new() };
-        if placed.len() < n_min {
-            let anchors = placed.clone();
-            placed.extend(self.place_extremes(reach, net, sz, need, islands, keep, &anchors, n_min - placed.len(), value));
-        }
+        self.off_grid_legal.set(0);
+        let mut lattice_ok = true;
+        let placed = if n_min <= 1 && n <= 1 {
+            self.place_spread(reach, net, sz, need, islands, keep, targets, &[], n, value, 0.0, true)
+        } else {
+            let legal = self.sites(reach, net, sz, need, islands, keep, false).iter().filter(|s| value.is_none_or(|v| s.cost < v)).count();
+            lattice_ok = legal >= n_min;
+            let mut placed = if lattice_ok { self.place_lattice(reach, net, sz, need, islands, keep, &[], n, value, 0.0) } else { Vec::new() };
+            if placed.len() < n_min {
+                let anchors = placed.clone();
+                placed.extend(self.place_extremes(reach, net, sz, need, islands, keep, &anchors, n_min - placed.len(), value));
+            }
+            placed
+        };
+        self.why = self.short_reason(placed.len(), n, n_min, lattice_ok);
         placed
+    }
+
+    /// Why a piece got `placed` of `n` wanted vias (minimum `n_min`); "" when it got them all.
+    /// Round 5 (user 2026-11-22): stitching vias never leave the via grid, so a piece whose only
+    /// room lies between grid points gets fewer vias (pattern piece E), and the warning says so.
+    fn short_reason(&self, placed: usize, n: usize, n_min: usize, lattice_ok: bool) -> String {
+        if placed >= n {
+            return String::new();
+        }
+        if placed >= n_min.min(n) {
+            return if lattice_ok {
+                "fewer legal board-lattice points than wanted (area vias stand on the lattice only)".to_string()
+            } else {
+                format!("fewer legal board-lattice points than stitch_min_vias {n_min}: the minimum at the piece's extremities, no more")
+            };
+        }
+        let k = self.off_grid_legal.get();
+        match self.grid.base() {
+            Some(g) if k > 0 => format!(
+                "no more legal site on the via grid {} x {} mm; {k} legal spot(s) between grid points not used: stitching vias never leave the via grid (a finer KiCad via grid, or more room in the pour, gives this piece its vias)",
+                g.g[0] / 1e6,
+                g.g[1] / 1e6
+            ),
+            _ => "no more legal site: no spot of the piece has room for a via that also stands in the net's fill on another layer".to_string(),
+        }
     }
 
     /// Lattice fill (stitch-vias round 5): vias on the board lattice points of `islands` only
@@ -1024,12 +1035,8 @@ impl<'a> Ctx<'a> {
             }
         }
         let centre = if cnt > 0 { sum * (1.0 / cnt as f64) } else { Vec2::default() };
-        let on_grid: Vec<Site> = match self.grid.grid_at(centre) {
-            Some(g) => alive.iter().copied().filter(|s| g.on(s.p)).collect(),
-            None => alive.clone(),
-        };
-        let off = on_grid.is_empty() && self.grid.grid_at(centre).is_some();
-        let cands = if on_grid.is_empty() { alive } else { on_grid };
+        // With a via grid every site is a grid point (Ctx::sites): no off-grid path.
+        let cands = alive;
         let mut dead = vec![false; cands.len()];
         let mut near: Vec<Vec2> = anchors.to_vec();
         let mut placed: Vec<Vec2> = Vec::new();
@@ -1057,9 +1064,6 @@ impl<'a> Ctx<'a> {
                 match self.try_via(p, net, sz) {
                     Some(true) => {
                         self.kinds.corners.push(p);
-                        if off {
-                            self.kinds.corners_off_grid += 1;
-                        }
                         placed.push(p);
                         near.push(p);
                         continue 'via;
@@ -1085,8 +1089,6 @@ struct Kinds {
     lattice: usize,
     /// Vias at a piece's extremities (the minimum-via repair), math frame.
     corners: Vec<Vec2>,
-    /// Of those, off the via grid (the piece had no legal grid site).
-    corners_off_grid: usize,
     /// Vias moved off their blocked lattice point along the via grid (`stitch_nudge_mm`).
     nudged: Vec<Vec2>,
     /// Legal lattice points refused (own-net copper gap or the checker).
@@ -1103,10 +1105,9 @@ impl Kinds {
         }
         let pts = |v: &[Vec2]| v.iter().map(|p| format!(" {}", kicad_mm(*p))).collect::<String>();
         Some(format!(
-            "{what} placement: {} on the board lattice, {} at piece extremities ({} off the via grid), {} moved along the via grid (stitch_nudge_mm); {} lattice point(s) refused by the checker, {} wanted lattice point(s) dropped; extremities at{}; nudged at{}",
+            "{what} placement: {} on the board lattice, {} at piece extremities, {} moved along the via grid (stitch_nudge_mm); {} lattice point(s) refused by the checker, {} wanted lattice point(s) dropped; extremities at{}; nudged at{}",
             self.lattice,
             self.corners.len(),
-            self.corners_off_grid,
             self.nudged.len(),
             self.refused,
             self.dropped,
@@ -1180,7 +1181,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 out.notes.push(format!("stitch via {} mm at {} for {}", sz.d as f64 / 1e6, kicad_mm(*p), cut_text(model, c)));
             }
             if done_vias && placed.len() < want {
-                out.notes.push(format!("stitch vias: {} of {} wanted for {} (no more legal site)", placed.len(), want, cut_text(model, c)));
+                out.notes.push(format!("stitch vias: {} of {} wanted for {} ({})", placed.len(), want, cut_text(model, c), cx.why));
             }
             out.island_vias += placed.len();
             out.items.extend(cx.take_new());
@@ -1197,7 +1198,9 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 continue;
             }
             if fine {
-                if !fine_on || out.fine_points >= FINE_POINTS_MAX || c.pads.is_empty() || fine_failed.contains(&c.pads[0]) {
+                // With a via grid the coarse pass already tried every grid point out to
+                // STUB_MAX_NM; the fine lattice has nothing new to offer.
+                if !fine_on || out.fine_points >= FINE_POINTS_MAX || c.pads.is_empty() || fine_failed.contains(&c.pads[0]) || cx.grid.base().is_some() {
                     break;
                 }
                 out.fine_cuts += 1;
@@ -1209,17 +1212,48 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 let w = model.rules.net_rule(c.net).width.max(1) as f64;
                 let layers: Vec<u32> = pad.layers.iter().copied().filter(|l| model.layers.iter().any(|x| x.id == *l && x.routable)).collect();
                 let mut tries = 0usize;
+                // stitch_on_grid (round 5b, user 2026-11-22: off the via grid NEVER): every via-grid
+                // point out to d_max, nearest the pad first (ties by x, y), ring by ring; snapping
+                // the ray points instead stepped over grid points between two rays (qmtech C6.2,
+                // C32.1). Without a grid the ray points, as before.
+                let grid_pts: Option<Vec<(f64, Vec2)>> = cx.grid.grid_at(cpos).map(|g| {
+                    let base = g.nearest(cpos);
+                    let m = (d_max / g.g[0].min(g.g[1]).max(1.0)).ceil() as i64 + 1;
+                    let mut v: Vec<(f64, Vec2)> = Vec::new();
+                    for j in -m..=m {
+                        for i in -m..=m {
+                            let q = base + Vec2 { x: i as f64 * g.g[0], y: j as f64 * g.g[1] };
+                            let rr = (q - cpos).len();
+                            if rr <= d_max {
+                                v.push((rr, q));
+                            }
+                        }
+                    }
+                    v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.x.total_cmp(&b.1.x)).then(a.1.y.total_cmp(&b.1.y)));
+                    v
+                });
+                let mut gi = 0usize;
                 // Out from the pad centre; the own-pad test keeps a via off the pad.
                 let mut d: f64 = 0.2e6;
                 while d <= d_max && tries < 4 * MAX_TRIES && !(fine && out.fine_points >= FINE_POINTS_MAX) {
-                    out.fine_points += usize::from(fine) * n_dir;
-                    for k in 0..n_dir {
-                        let a = k as f64 * std::f64::consts::TAU / n_dir as f64;
-                        let raw = cpos + Vec2 { x: a.cos(), y: a.sin() } * d;
-                        // stitch_on_grid: the nearest via-grid point first, the ray point after it
-                        // (a via off the grid only where the grid point is not legal).
-                        let snapped = cx.grid.grid_at(raw).map(|g| g.nearest(raw)).filter(|q| (*q - raw).len() > super::gridsnap::ON_TOL_NM);
-                        for p in snapped.into_iter().chain(std::iter::once(raw)) {
+                    let ring: Vec<Vec2> = match &grid_pts {
+                        Some(gp) => {
+                            let from = gi;
+                            while gi < gp.len() && gp[gi].0 <= d {
+                                gi += 1;
+                            }
+                            gp[from..gi].iter().map(|x| x.1).collect()
+                        }
+                        None => (0..n_dir)
+                            .map(|k| {
+                                let a = k as f64 * std::f64::consts::TAU / n_dir as f64;
+                                cpos + Vec2 { x: a.cos(), y: a.sin() } * d
+                            })
+                            .collect(),
+                    };
+                    out.fine_points += usize::from(fine) * ring.len();
+                    for p in ring {
+                        {
                             for &sl in &layers {
                                 // Track only, into the main fill of its own layer.
                                 let same = model.pours.iter().enumerate().any(|(zi, z)| {
@@ -1337,15 +1371,17 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
             out.fine_s * 1e3
         ));
     }
-    out.notes.extend(unplaced.into_iter().map(|s| format!("no stitch site for {s}")));
-    if cx.off_grid != [0, 0] {
-        out.notes.push(format!(
-            "stitch vias (cut pieces) off the via grid: {} (no grid point near them legal: {}; their grid points refused by the checker or spaced out: {})",
-            cx.off_grid[0] + cx.off_grid[1],
-            cx.off_grid[1],
-            cx.off_grid[0]
-        ));
-    }
+    // Round 5b: the reason names the via grid (stitching vias never leave it).
+    let why = match cx.grid.base() {
+        Some(g) => format!(
+            " (no legal point of the via grid {} x {} mm for an island via, nor for a pad stub within {:.0} mm of its pads: stitching vias never leave the via grid)",
+            g.g[0] / 1e6,
+            g.g[1] / 1e6,
+            STUB_MAX_NM / 1e6
+        ),
+        None => String::new(),
+    };
+    out.notes.extend(unplaced.into_iter().map(|s| format!("no stitch site for {s}{why}")));
 
     if let Some(n) = cx.kinds.note("stitch vias (cut pieces)") {
         out.notes.push(n);
@@ -1563,14 +1599,15 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
             out.dropped[2] += placed.len();
             out.items.extend(cx.take_new());
             out.notes.push(format!(
-                "stitch (dropped island): {} on {} {:.2} mm² near {}: {} of {} via(s){}",
+                "stitch (dropped island): {} on {} {:.2} mm² near {}: {} of {} via(s){}{}",
                 net_name(d.net),
                 layer_name(d.island.1),
                 d.area / 1e12,
                 kicad_mm(d.at),
                 placed.len(),
                 want,
-                placed.iter().map(|p| format!(" {}", kicad_mm(*p))).collect::<String>()
+                placed.iter().map(|p| format!(" {}", kicad_mm(*p))).collect::<String>(),
+                if cx.why.is_empty() { String::new() } else { format!(" ({})", cx.why) }
             ));
         }
     }
@@ -1610,14 +1647,15 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
                     out.thin[2] += placed.len();
                     out.items.extend(cx.take_new());
                     out.notes.push(format!(
-                        "stitch (thin neck < {:.2} mm): {} on {} core {:.2} mm²: {} of {} via(s){}",
+                        "stitch (thin neck < {:.2} mm): {} on {} core {:.2} mm²: {} of {} via(s){}{}",
                         2.0 * half / 1e6,
                         net_name(z.net),
                         layer_name(l),
                         area / 1e12,
                         placed.len(),
                         want,
-                        placed.iter().map(|p| format!(" {}", kicad_mm(*p))).collect::<String>()
+                        placed.iter().map(|p| format!(" {}", kicad_mm(*p))).collect::<String>(),
+                        if cx.why.is_empty() { String::new() } else { format!(" ({})", cx.why) }
                     ));
                 }
             }
@@ -1643,7 +1681,15 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
                 out.area[1] += usize::from(!placed.is_empty());
                 out.area[2] += placed.len();
                 out.items.extend(cx.take_new());
-                out.notes.push(format!("stitch (area, lattice {:.2} x {:.2} mm): {} on {}: {} via(s)", cx.px / 1e6, cx.py / 1e6, net_name(z.net), layer_name(l), placed.len()));
+                out.notes.push(format!(
+                    "stitch (area, lattice {:.2} x {:.2} mm): {} on {}: {} via(s){}",
+                    cx.px / 1e6,
+                    cx.py / 1e6,
+                    net_name(z.net),
+                    layer_name(l),
+                    placed.len(),
+                    placed.iter().map(|p| format!(" {}", kicad_mm(*p))).collect::<String>()
+                ));
             }
         }
     }
@@ -1671,14 +1717,6 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
     );
     for (k, n) in lattice_grid_notes(opts).into_iter().enumerate() {
         out.notes.insert(1 + k, n);
-    }
-    if cx.off_grid != [0, 0] {
-        out.notes.push(format!(
-            "stitching vias off the via grid: {} (no grid point near them legal: {}; their grid points refused by the checker or spaced out: {})",
-            cx.off_grid[0] + cx.off_grid[1],
-            cx.off_grid[1],
-            cx.off_grid[0]
-        ));
     }
     if let Some(n) = cx.kinds.note("stitching vias") {
         out.notes.push(n);

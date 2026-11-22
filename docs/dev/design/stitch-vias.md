@@ -84,7 +84,7 @@ well".
   term (distance, lattice offset, squeeze on two layers, foreign-pad proximity, plane neck), so no
   smooth difference lets it beat a legal grid point near it; a step price (a BGA) still can. With no
   legal grid point in its cell it pays off_grid·amount only, so the piece still gets its via. The
-  engine notes how many vias ended off the grid and why (no legal grid point near, or refused). A pad stub's via tries the nearest grid point before the ray point.
+  engine notes how many vias ended off the grid and why (no legal grid point near, or refused). A pad stub's via tries the nearest grid point before the ray point. *(Superseded in r5b: off the via grid never, see Round 5.)*
 - **`stitch_on_grid`** (default true). No grid found = a warning, and the behaviour before round 4.
 - **One graded site price (verifier V1/V2).** `place_spread` no longer ranks lattice sites first: a
   fallback site pays `LATTICE_OFFSET_WEIGHT` (2.0) times its distance to the lattice. Because the weight
@@ -118,7 +118,7 @@ pourcheck.rs:160, origin = grid origin): there is no per-piece offset. The cause
   extremities: farthest-point sampling over the legal **via-grid** sites of the piece, seeded at the site
   farthest from the piece's centroid, no saturation (score = distance to the nearest chosen via or seed −
   site cost). A rectangle gets opposite corners first, then the other two; a strip or a thin-neck core its
-  two ends. Off the grid only where the piece has no legal grid site (counted, as before).
+  two ends. Never off the via grid (r5b, user 2026-11-22: "Off-grid: NEVER"): see below.
 - Lattice fill placing fewer than the minimum (refusals): the rest at the extremities, anchored on the vias placed.
 - **Blocked lattice point** (site tests fail or the checker refuses): `[planes] stitch_nudge_mm` (new,
   default 0 = drop it). > 0: the via may move to a via-grid point at most that far, priced
@@ -129,6 +129,20 @@ pourcheck.rs:160, origin = grid origin): there is no per-piece offset. The cause
   doc says ("1 = the behaviour before stitching vias"): stitching off stays bit-identical.
 - Prices stay graded (squeeze, proximity, BGA, plane neck); a corner moves inwards while the squeeze price
   falls faster than the distance it gives up (a via with a full diameter of slack, as a designer insets it).
+
+**r5b (user answers 2026-11-22)**: blocked lattice point = drop (default stays 0); neck price stays graded;
+**off the via grid never**. With a via grid, `Ctx::sites` offers only grid points (a raster site gives the
+grid points of its cell; the raster point itself is never a site, a legal one is only counted), the
+extremity rule has no off-grid fallback, and a pad stub ends on the nearest grid point of its ray. The r4
+off-grid price (k·d + off_grid·amount, `Site::off`, the "off the via grid" notes) is gone. A piece that gets
+fewer vias than wanted carries the reason in its note, naming the piece: "no more legal site on the via
+grid G x G mm; N legal spot(s) between grid points not used: stitching vias never leave the via grid",
+or "fewer legal board-lattice points than wanted", or "no spot of the piece has room for a via that also
+stands in the net's fill on another layer" (pattern piece E: 1 of 2 on the 10 mil grid, its left pocket
+lies between the grid columns 2.286 and 2.540). Without a grid (stitch_on_grid false, or none found) the
+raster point is the site, as before. `stitch_area` (user: "the option to put them everywhere on the pcb")
+uses the same lattice-only rule (`Ctx::place_lattice`, value = pitch so a BGA site is never worth a via,
+blocked points dropped).
 
 **Tests**: pattern fixture extended (PROPOSED) with a small piece (no lattice point: 2 corner vias) and a strip
 (two ends); engine tests: corners of a rectangle, two ends of a strip, lattice-only fill with a blocked point

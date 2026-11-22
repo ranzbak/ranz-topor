@@ -989,10 +989,13 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   points gets its vias on lattice points only (at most one per lattice cell of its area); a lattice point
   without room is left out, or with `stitch_nudge_mm` > 0 moved along the via grid by at most that much.
   A smaller piece gets `stitch_min_vias` at its extremities: its corners, the two ends of a strip, on the
-  via grid (off it only where no grid point of the piece is legal). With `stitch_min_vias` = 1 a one-via
+  via grid. A stitching via never stands off the via grid: a piece whose only room lies between grid points
+  gets fewer vias, and the report warns, naming the piece and the grid (a finer KiCad via grid, or more
+  room in the pour, fixes it). With `stitch_min_vias` = 1 a one-via
   piece gets its via near its pad, as before stitching vias. After the run's result is picked, islands KiCad
   would drop (`stitch_dropped`), pour parts behind necks thinner than `stitch_thin_mm` and, as an option, the
-  whole pour area (`stitch_area`) get vias by the same rule, only where the pour is solid on another layer of the
+  whole pour area (`stitch_area`: vias on every legal lattice point of the board's pours, a pitch away from
+  the vias and through-hole pads already there) get vias by the same rule, only where the pour is solid on another layer of the
   net and never under a BGA (`STITCH_VIAS`). The report lists each piece and each stitch, and the pieces it
   could not join. A kept island that holds no pad
   (KiCad: isolated copper, e.g. Remove islands = never) and that no stitching via reaches is joined to the

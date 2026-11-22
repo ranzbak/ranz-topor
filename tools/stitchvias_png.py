@@ -7,7 +7,7 @@ area, vias placed of wanted) taken from the run's notes, and per pattern piece t
 
 REFILLED = the measured copy kicad-cli refilled and saved (tools/stitchvias_measure.py `<out>-work/`);
 RESULT = the run's report result.json (route.warnings carry the stitch notes); PIECES = a pattern's
-expected.json ({"expect": {"pieces": {name: [x0, y0, x1, y1] mm}}, "marks": [...]}). Two panels are put side
+expected.json ({"expect": {"pieces": {name: [x0, y0, x1, y1] mm}}, "marks": [...]}). Two or more panels are put side
 by side. O(fill points + notes).
 """
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -69,7 +70,7 @@ def stitch_points(notes: list[str]) -> tuple[list[tuple[float, float]], set]:
         if m:
             pts.append((float(m.group(1)), float(m.group(2))))
             continue
-        m = re.match(r"stitch \((dropped island|thin neck < [\d.]+ mm)\): .*?: \d+(?: of \d+)? via\(s\)(.*)$", n)
+        m = re.match(r"stitch \((dropped island|thin neck < [\d.]+ mm|area, lattice [\d.]+ x [\d.]+ mm)\): .*?: \d+(?: of \d+)? via\(s\)(.*)$", n)
         if m:
             pts += [(float(x), float(y)) for x, y in re.findall(_XY, m.group(2))]
             continue
@@ -192,8 +193,14 @@ def main(argv=None) -> int:
                           lattice=lat))
     if len(pngs) == 1:
         Path(pngs[0]).replace(a.out)
-    else:
+    elif len(pngs) == 2:
         render.compose_compare(pngs[0], pngs[1], a.out)
+    else:
+        # three or more panels side by side, each padded as compose_compare pads two
+        cmd = ["convert", "-background", "white"]
+        for q in pngs:
+            cmd += ["(", str(q), "-bordercolor", "white", "-border", str(render.COMPARE_PAD_PX), ")"]
+        subprocess.run(cmd + ["+append", str(a.out)], check=True)
     print(a.out)
     return 0
 

@@ -298,3 +298,25 @@ fn a_coarse_stub_never_reaches_the_fine_lattice() {
     assert_eq!((s.fine_cuts, s.fine_points, s.fine_stubs), (0, 0, 0), "{:?}", s.notes);
     assert!(!s.notes.iter().any(|n| n.starts_with("fine stub lattice")));
 }
+
+/// Round 5b (user 2026-11-22: stitching vias off the via grid NEVER): the boxed pad's stub via
+/// stands on the via grid. On a 0.05 mm grid the column x = 10.05 lies in the 0.03..0.10 mm window:
+/// the stub is found there. On a 0.25 mm grid no column lies in it (10.00 / 10.25): no stub, no
+/// via off the grid, and the piece stays reported.
+#[test]
+fn a_pad_stub_via_stands_on_the_via_grid() {
+    let m = boxed_model();
+    let items = boxed_items();
+    let fine = Options { grid_via_nm: [50_000, 50_000], ..Options::default() };
+    let s = stitch(&m, &fine, &reg(), &items, &[], None);
+    assert_eq!((s.after, s.pad_stubs), (0, 1), "{:?}", s.notes);
+    let v = s.items.iter().find_map(|it| if let Item::Via(v) = it { Some(v) } else { None }).expect("a stub via");
+    assert!(v.at.x % 50_000 == 0 && v.at.y % 50_000 == 0, "stub via off the 0.05 mm grid: {:?}", v.at);
+    let coarse = Options { grid_via_nm: [250_000, 250_000], ..Options::default() };
+    let s = stitch(&m, &coarse, &reg(), &items, &[], None);
+    for it in &s.items {
+        if let Item::Via(v) = it {
+            assert!(v.at.x % 250_000 == 0 && v.at.y % 250_000 == 0, "via off the 0.25 mm grid: {:?} {:?}", v.at, s.notes);
+        }
+    }
+}
