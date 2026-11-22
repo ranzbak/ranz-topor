@@ -113,7 +113,7 @@ tools/gui_e2e.sh bornhack2026 scratch/k1/gui/bornhack --from-hand --cancel-after
 Dialogs: first-run, pre-flight, progress, preview, finished, error. Per the wireframes §0 / §7:
 
 - [ ] **Tab order** = reading order. Pre-flight: list → Cause/Fix → Accept → Scope radios (arrows) →
-  Existing copper → Respect locked → Trace shape → Time limit → Save → Help → Cancel → Route.
+  Existing copper → Respect locked → Trace shape → Snap to KiCad grid → Time limit → Save → Help → Cancel → Route.
   Preview: Zoom → Current board image → Result image (arrows / PgUp / PgDn scroll) → Summary → findings list →
   Cause / Fix → Report folder → Open report folder →
   Reject → Accept. First-run: path → Open file → Continue. Error: Details → Copy details → Open report
