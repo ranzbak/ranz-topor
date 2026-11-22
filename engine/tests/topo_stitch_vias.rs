@@ -554,4 +554,9 @@ fn a_blocked_lattice_point_is_dropped_or_moved_along_the_grid() {
     assert!(on_grid(q, (0, 0), g), "{q:?}");
     assert!((((q.0 - 16 * MM) as f64).hypot((q.1 - 20 * MM) as f64)) <= 1_250_001.0, "{q:?}");
     assert!(s.notes.iter().any(|n| n.contains("1 moved along the via grid")), "{:?}", s.notes);
+    // The bound holds: no legal grid point within 0.5 mm of (16, 20) (the B.Cu fill needs ~1 mm
+    // from the track), so with stitch_nudge_mm = 0.5 the point is dropped as with 0.
+    let short = Options { stitch_nudge_nm: 500_000, ..o.clone() };
+    let s = stitch_regions(&m, &short, &reg(), &items, &[], None, &|| false);
+    assert_eq!(vias(&s.items).len(), 8, "{:?}", s.notes);
 }
