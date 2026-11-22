@@ -122,11 +122,8 @@ def pick_settings_dir(dirs: list[Path]) -> Path | None:
     return next((d for d in dirs if (d / "pcbnew.json").is_file()), dirs[0] if dirs else None)
 
 
-def resolve(grid_mm, pcb_text: str, settings_dir: Path | None) -> tuple[dict, list[str]]:
-    """Engine options ``grid_track_nm`` / ``grid_via_nm`` / ``grid_origin_nm`` and the log lines (``warning:``
-    lines for a missing or coarse grid). `grid_mm`: the ``[drawing] grid_mm`` value (a number or "auto");
-    `settings_dir`: the running KiCad's settings folder (pcbnew.json), None when unknown (headless)."""
-    lines: list[str] = []
+def _find(grid_mm, settings_dir: Path | None) -> tuple:
+    """(track grid, via grid, source text) in mm, first hit wins (see the module doc); (None, None, "") for none."""
     track = via = None
     src = ""
     if grid_mm != "auto" and parse_size(grid_mm):
@@ -141,6 +138,30 @@ def resolve(grid_mm, pcb_text: str, settings_dir: Path | None) -> tuple[dict, li
         if isinstance(d, dict):
             track, via, how = kicad_grids(d)
             src = f"KiCad {p} ({how})"
+    return track, via, src
+
+
+def describe(grid_mm, pcb_text: str, settings_dir: Path | None) -> str:
+    """One line for the pre-flight dialog: the grid ``resolve`` would use (the same lookup, ``_find``): size in mm,
+    where it comes from, and the origin (from the board's grid origin). O(file size)."""
+    track, via, src = _find(grid_mm, settings_dir)
+    if track is None:
+        return "no grid found (neither [drawing] grid_mm nor KiCad's grid settings)"
+    via = via or track
+    ox, oy = (v / 1e6 for v in grid_origin_nm(pcb_text))
+    what = f"{track[0]:g} mm" if track[0] == track[1] else f"{track[0]:g} x {track[1]:g} mm"
+    if via != track:
+        what += f" (vias {via[0]:g} x {via[1]:g} mm)"
+    where = "topor.toml" if src.startswith("topor.toml") else "KiCad settings"
+    return f"{what} from {where}; origin ({ox:g}, {oy:g}) mm from the board"
+
+
+def resolve(grid_mm, pcb_text: str, settings_dir: Path | None) -> tuple[dict, list[str]]:
+    """Engine options ``grid_track_nm`` / ``grid_via_nm`` / ``grid_origin_nm`` and the log lines (``warning:``
+    lines for a missing or coarse grid). `grid_mm`: the ``[drawing] grid_mm`` value (a number or "auto");
+    `settings_dir`: the running KiCad's settings folder (pcbnew.json), None when unknown (headless)."""
+    lines: list[str] = []
+    track, via, src = _find(grid_mm, settings_dir)
     origin = grid_origin_nm(pcb_text)
     if track is None:
         where = f" (looked in {Path(settings_dir) / 'pcbnew.json'})" if settings_dir is not None else ""

@@ -94,6 +94,14 @@ WORDING: dict[str, dict[str, str]] = {
         "drawing_style_tip": "45°: straight and 45 degree segments, few bends, 90 degree bends only where needed; where "
                              "45 degrees does not fit a stretch goes any-angle at a price (warned per stretch). Any "
                              "angle: the taut, curved-looking drawing. Set in topor.toml as [drawing] style.",
+        "grid_snap": "Snap to KiCad grid",
+        "grid_snap_tip": "Ticked: [drawing] grid_snap = prefer, bends and vias move onto your KiCad grid where that "
+                         "costs less than its price. Unticked: off (the default; prefer adds DRC violations on dense "
+                         "boards). Half-ticked: topor.toml has grid_snap = \"fallback\"; it stays unless you click. "
+                         "The grid (size from KiCad's saved settings or [drawing] grid_mm, origin from the board) is "
+                         "shown next to it. Saved to topor.toml with the box below.",
+        "grid_line": "Grid: {grid}",
+        "grid_none": "Grid: not known (headless run)",
         "timeout_clock_label": "Count",
         "timeout_clock_wall": "Wall time (what you wait)",
         "timeout_clock_cpu": "CPU time (all threads)",
@@ -899,12 +907,33 @@ class _FindingsMixin:
 
 
 # --------------------------------------------------------------------------------------------- (2) pre-flight
+def grid_tick_state(value: str) -> int:
+    """[drawing] grid_snap -> the tick: prefer = checked, off = unchecked, fallback = undetermined (kept as is)."""
+    return {"prefer": wx.CHK_CHECKED, "fallback": wx.CHK_UNDETERMINED}.get(value, wx.CHK_UNCHECKED)
+
+
+def grid_snap_value(state: int, current: str) -> str:
+    """The tick -> [drawing] grid_snap: checked = prefer, unchecked = off, undetermined = `current` when that is
+    fallback (the user did not click it), else off. O(1)."""
+    if state == wx.CHK_CHECKED:
+        return "prefer"
+    if state == wx.CHK_UNDETERMINED:
+        return current if current == "fallback" else "off"
+    return "off"
+
+
+def grid_line_text(grid: str) -> str:
+    """The read-only grid line next to the tick; `grid` = RunSummary.grid_line (grid.describe), "" = not known."""
+    W = WORDING["preflight"]
+    return W["grid_line"].format(grid=grid) if grid else W["grid_none"]
+
+
 class PreflightDialog(_FindingsMixin, _Base):
     _wk = "preflight"
     #: tab order from the note §2 (one Accept checkbox, relabelled per selected code)
     TAB_ORDER = ("findings", "cause", "accept", "use_default", "scope_whole", "scope_between",
-                 "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
-                 "save_toml", "help", "cancel", "route")
+                 "scope_touching", "existing", "respect_locked", "drawing_style", "grid_snap", "timeout",
+                 "timeout_clock", "save_toml", "help", "cancel", "route")
 
     def __init__(self, findings: list, summary: RunSummary, cfg: Config):
         super().__init__(WORDING["preflight"]["title"].format(board=summary.board), resizable=True)
@@ -1030,6 +1059,18 @@ class PreflightDialog(_FindingsMixin, _Base):
         grid.Add(self.text(self, "preflight", "drawing_style_label"), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.drawing_style)
 
+        # snap to the KiCad grid ([drawing] grid_snap prefer | off; fallback = the half-ticked third state, kept)
+        self._grid_snap0 = str(cfg.get("drawing", "grid_snap"))
+        self.grid_snap = wx.CheckBox(self, label=_mn(W["grid_snap"], "g"), name="grid_snap", style=wx.CHK_3STATE)
+        self.grid_snap.Set3StateValue(grid_tick_state(self._grid_snap0))
+        self.grid_snap.SetToolTip(W["grid_snap_tip"])
+        self.grid_line = self.text(self, "preflight", "grid_line", text=grid_line_text(summary.grid_line))
+        self.grid_line.SetForegroundColour(wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+        grid.AddSpacer(0)
+        grid.Add(self.grid_snap)
+        grid.AddSpacer(0)
+        grid.Add(self.grid_line, 0)
+
         # time limit (reached by Tab; spin controls carry a preceding label)
         self.timeout = wx.SpinCtrlDouble(self, name="timeout", min=0, max=86400, inc=10,
                                          initial=min(86400.0, float(cfg.get("run", "timeout_s"))))
@@ -1127,6 +1168,9 @@ class PreflightDialog(_FindingsMixin, _Base):
         style = self._style_keys[self.drawing_style.GetSelection()]
         if style != cfg.get("drawing", "style"):
             ov["drawing_style"] = style
+        snap = grid_snap_value(self.grid_snap.Get3StateValue(), self._grid_snap0)
+        if snap != self._grid_snap0:
+            ov["grid_snap"] = snap
         put("timeout_s", float(self.timeout.GetValue()))
         put("timeout_clock", self._clock_keys[self.timeout_clock.GetSelection()])
         use = tuple(k for k, on in self.use_default_state.items() if on)

@@ -1,4 +1,5 @@
 """wx dialogs (B9). Dialogs are constructed but NEVER shown (Ruling C18: DISPLAY may be the live desktop)."""
+import json
 import re
 from pathlib import Path
 
@@ -92,7 +93,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
     expected_tab = {
         "first_run": ["toml_path", "open_file", "continue"],
         "preflight": ["findings", "cause", "accept", "use_default", "scope_whole", "scope_between",
-                      "scope_touching", "existing", "respect_locked", "drawing_style", "timeout", "timeout_clock",
+                      "scope_touching", "existing", "respect_locked", "drawing_style", "grid_snap", "timeout", "timeout_clock",
                       "save_toml", "help", "cancel", "route"],
         "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel"],
         "preview": ["zoom", "image_before", "image_after", "summary", "findings", "cause", "report_dir",
@@ -147,6 +148,11 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         assert p.drawing_style.GetSelection() == 0 and "drawing_style" not in d1.overrides
         p.drawing_style.SetSelection(1)
         assert p.decision(True).overrides["drawing_style"] == "smooth"
+        # grid snap tick: default off = unticked, no override; ticking = prefer
+        assert p.grid_snap.Get3StateValue() == wx.CHK_UNCHECKED and "grid_snap" not in d1.overrides
+        p.grid_snap.Set3StateValue(wx.CHK_CHECKED)
+        assert p.decision(True).overrides["grid_snap"] == "prefer"
+        assert p.grid_line.GetLabel() == "Grid: not known (headless run)"
     finally:
         for d in dlgs.values():
             d.Destroy()
@@ -923,3 +929,42 @@ def test_the_cause_pane_never_reads_full_stop_colon(app):
         assert "no via set up...: a" in p.cause_text(ell)
     finally:
         p.Destroy()
+
+
+def test_grid_snap_tick_mapping_and_line(app):
+    """grid-ui: tick <-> [drawing] grid_snap (prefer = ticked, off = unticked, fallback = half-ticked and kept)
+    and the read-only grid line (grid.describe, the run's own lookup)."""
+    from topor import grid
+    assert [ui_wx.grid_tick_state(v) for v in ("off", "prefer", "fallback")] == \
+        [wx.CHK_UNCHECKED, wx.CHK_CHECKED, wx.CHK_UNDETERMINED]
+    for cur in ("off", "prefer", "fallback"):
+        assert ui_wx.grid_snap_value(wx.CHK_CHECKED, cur) == "prefer"
+        assert ui_wx.grid_snap_value(wx.CHK_UNCHECKED, cur) == "off"
+    assert ui_wx.grid_snap_value(wx.CHK_UNDETERMINED, "fallback") == "fallback"
+    assert ui_wx.grid_snap_value(wx.CHK_UNDETERMINED, "off") == "off"
+    cfg = Config.defaults().with_values({("drawing", "grid_snap"): "fallback"})
+    pcb = "(kicad_pcb (setup (grid_origin 75.927 45)))"
+    s = RunSummary(board="b", grid_line=grid.describe(0.25, pcb, None))
+    d = ui_wx.PreflightDialog([], s, cfg)
+    try:
+        assert d.grid_snap.Get3StateValue() == wx.CHK_UNDETERMINED
+        assert "grid_snap" not in d.decision(True).overrides  # untouched fallback stays
+        d.grid_snap.Set3StateValue(wx.CHK_UNCHECKED)
+        assert d.decision(True).overrides["grid_snap"] == "off"
+        d.grid_snap.Set3StateValue(wx.CHK_CHECKED)
+        assert d.decision(True).overrides["grid_snap"] == "prefer"
+        assert d.grid_line.GetLabel() == \
+            "Grid: 0.25 mm from topor.toml; origin (75.927, 45) mm from the board"
+    finally:
+        d.Destroy()
+
+
+def test_grid_describe(tmp_path):
+    from topor import grid
+    pcb = "(kicad_pcb (setup (grid_origin 1 2)))"
+    assert grid.describe("auto", pcb, None).startswith("no grid found")
+    (tmp_path / "pcbnew.json").write_text(json.dumps({"window": {"grid": {"sizes": [{"x": "0.5 mm", "y": "0.5 mm"}],
+                                                                        "last_size": 0}}}))
+    assert grid.describe("auto", pcb, tmp_path) == "0.5 mm from KiCad settings; origin (1, 2) mm from the board"
+    assert grid.describe(0.1, pcb, tmp_path).startswith("0.1 mm from topor.toml")
+    assert grid.resolve("auto", pcb, tmp_path)[0]["grid_track_nm"] == [500000, 500000]
