@@ -734,9 +734,9 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** The time limit (or a Cancel) stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines. The stop reason says which clock fired: timeout_wall (seconds on the clock) or timeout_cpu (CPU seconds summed over all threads, run.timeout_clock = cpu).
+**Cause.** A time bound stopped the topological core before its routes were stable ([optimize] stable_window / stable_gain_pct); the result is the best so far and may differ between runs and machines. The stop reason says which: timeout_wall (the time limit on the wall clock), timeout_cpu (the time limit in CPU seconds summed over all threads, run.timeout_clock = cpu), or loop_time_share (the time limit was NOT reached: the TopoR loop's own share of it, [optimize] loop_time_share, ended the loop and kept the rest of the limit for the drawing; the router time then ends well before run.timeout_s, about half way with the default 0.5 when the drawing is quick).
 
-**Fix.** Raise run.timeout_s (0 = no limit; Accept and Cancel always work; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit), or lower [optimize] runs (best of N runs share the threads); wait for "Routes stable" and press OK for a reproducible result.
+**Fix.** Raise run.timeout_s (0 = no limit; Accept and Cancel always work; run.timeout_clock chooses wall or cpu seconds) and route again, or add time while the router runs (progress dialog: +5 min / +15 min or a new Time limit; the loop's share follows the new limit), or lower [optimize] runs (best of N runs share the threads); with stop reason loop_time_share raise [optimize] loop_time_share (up to 1.0) so the loop may use more of the limit; wait for "Routes stable" and press Accept for a reproducible result.
 
 ### TIME_DRAWING_CUT
 

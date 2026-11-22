@@ -272,3 +272,89 @@ def test_bests_table_md_rows_predicted_drawn_and_applied():
     assert rows[3] == ("| shortest |  | cycle 27 (gen 6) | n/a | 0 errors / 41 vias / 865.6 mm | "
                        "n/a errors / n/a vias / n/a mm | n/a | n/a |  |"), rows[3]
     assert len(rows) == 4 and bests_table_md([]) == rows[:2]
+
+
+# ------------------------------------------------------------------ time-limit-fix: the Stopped line, one clock
+TL_WALL = {"clock": "wall", "start_s": 3600.0, "final_s": 3600.0, "changes": [], "reached": False}
+
+
+def _stopped(**facts):
+    from topor.report import stopped_line
+    return stopped_line(facts)
+
+
+def test_stopped_line_names_the_share_and_the_limit_not_reached():
+    """User 2026-11-22 (qmtech, 3600 s): the TopoR loop's share ended the run at 2357.5 s router time; the line said
+    "Stopped: timeout_wall after 1 iterations, 2357.5 s, 1 threads ... limit 3600 s wall". Now: the share as the stop
+    reason, the picked run's cycles, router time named as such, the engine's threads, the limit as not reached with
+    the seconds left, and the whole run apart."""
+    line = _stopped(stop_reason="loop_time_share", iterations=9, elapsed_s=2357.5, threads=8, router_cpu_s=11480.1,
+                    time_limit=TL_WALL, run_s=2400.8)
+    assert line == ("Stopped: loop_time_share after 9 cycles, router time 2357.5 s, 8 threads, CPU 11480.1 s · "
+                    "limit 3600 s wall, not reached (1242 s left) · whole run 2400.8 s to the result (pre-flight and "
+                    "KiCad's DRC not counted)")
+
+
+@pytest.mark.parametrize("stop", ["timeout_wall", "timeout_cpu", "stable", "round cap", "cancel"])
+def test_stopped_line_says_not_reached_only_for_the_share(stop):
+    """Rule 13: every stop reason; only the share's stop adds "not reached" (the limit fired, or nothing timed)."""
+    line = _stopped(stop_reason=stop, iterations=3, elapsed_s=10.0, threads=4, time_limit=TL_WALL)
+    assert line.startswith(f"Stopped: {stop} after 3 cycles, router time 10.0 s, 4 threads · limit 3600 s wall")
+    assert "not reached" not in line and "whole run" not in line and "CPU" not in line
+
+
+def test_stopped_line_without_a_limit_or_facts():
+    # no limit (0 = none): the share's stop names no limit as not reached
+    assert _stopped(stop_reason="loop_time_share", iterations=2, elapsed_s=5.0, threads=1,
+                    time_limit={**TL_WALL, "final_s": 0.0}) == ("Stopped: loop_time_share after 2 cycles, router time "
+                                                                 "5.0 s, 1 threads · no time limit")
+    # the limit reached (a soft limit passed while the drawing ran after the share): no "not reached"
+    assert "not reached" not in _stopped(stop_reason="loop_time_share", iterations=2, elapsed_s=3700.0, threads=1,
+                                         time_limit={**TL_WALL, "reached": True, "overrun_s": 100.0})
+    # nothing known: n/a, never a crash
+    assert _stopped() == "Stopped: n/a after n/a cycles, router time n/a s, n/a threads"
+
+
+def test_stopped_line_shows_measurements_apart_and_counts_them_out_of_the_left_time():
+    """[capacity] compass_cut_check: its time moves the engine's limit later (not router time): shown apart, and the
+    seconds left of the limit are those of the router time without it."""
+    line = _stopped(stop_reason="loop_time_share", iterations=4, elapsed_s=130.0, threads=2, measure_s=30.0,
+                    time_limit={**TL_WALL, "final_s": 600.0})
+    assert "router time 130.0 s (+30.0 s measurements, not counted), 2 threads" in line
+    assert line.endswith("limit 600 s wall, not reached (500 s left)")
+
+
+@pytest.mark.parametrize("share", [0.5, 0.05, 1.0, None])
+def test_time_budget_line_for_the_share_names_it_not_the_limit(share):
+    from topor.report import time_budget_line
+    line = time_budget_line({"stop_reason": "loop_time_share", "loop_time_share": share, "time_limit": TL_WALL})
+    want = 0.5 if share is None else share
+    assert f"[optimize] loop_time_share = {want:g} of the time left when the loop began" in line
+    assert "the time limit of 3600 s wall was not reached" in line and "stopped the topological core" not in line
+    assert "the time limit was not reached" in time_budget_line({"stop_reason": "loop_time_share"})
+    # the limit passed later, in the drawing after the share (soft): never called unreached
+    late = time_budget_line({"stop_reason": "loop_time_share", "time_limit": {**TL_WALL, "reached": True}})
+    assert "the time limit of 3600 s wall passed only later, while the drawing ran" in late and "not reached" not in late
+
+
+@pytest.mark.parametrize("stop,clock", [("timeout_wall", "wall"), ("timeout_cpu", "cpu")])
+def test_time_budget_line_for_the_limit_is_unchanged(stop, clock):
+    from topor.report import time_budget_line
+    line = time_budget_line({"stop_reason": stop, "timeout_clock": clock, "time_limit": {**TL_WALL, "clock": clock}})
+    assert line == ("Warning: time budget hit: result may differ between runs (time limit 3600 s, run.timeout_s, "
+                    f"clock {clock}, stopped the topological core before its [optimize] work caps)")
+
+
+def test_build_report_carries_the_separate_times_and_the_share(tmp_path):
+    res = {**_result(), "stop_reason": "loop_time_share", "iterations": 9, "threads_used": 8,
+           "warnings": ["time budget hit: result may differ between runs (the TopoR loop's own time share ...)"]}
+    rep = build_report(res, DRC, Config.defaults(), [], "whole board", None,
+                       {"router_s": 2357.46, "router_cpu_s": 11480.1, "measure_s": 0.0, "run_s": 2400.83},
+                       dir=tmp_path, facts={"time_limit": TL_WALL})
+    f = rep.facts
+    assert (f["elapsed_s"], f["run_s"], f["threads"], f["iterations"], f["loop_time_share"]) == (2357.5, 2400.8, 8, 9, 0.5)
+    assert "measure_s" not in f  # 0 = none: not shown
+    lines = rep.summary_lines()
+    assert any(ln.startswith("Stopped: loop_time_share after 9 cycles, router time 2357.5 s, 8 threads") for ln in lines)
+    assert any("loop_time_share = 0.5 of the time left" in ln for ln in lines if ln.startswith("Warning: time budget"))
+    assert len(lines) <= SUMMARY_MAX_LINES

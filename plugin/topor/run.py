@@ -1333,7 +1333,10 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         rr = {**rr, "stop_reason": "timeout_wall"}
     # M-B0: OK after "Routes stable" is not a cancel (stop_reason "stable"): the user took the stable result.
     out.cancelled = bool((state["cancel"] and not state.get("ok_stable")) or out.stop_reason == "cancel")
-    out.rounds, out.router_s = loop.rounds, loop.router_s
+    # time-limit-fix: one clock for the router time: the wall seconds of the engine jobs as the poll loop measured
+    # them (job start to result), what the wall limit counts (engine_limit), the progress dialog shows (Router time)
+    # and the summary prints; the DRC loop's own figure also held the JSON and arc work around the job
+    out.rounds, out.router_s = loop.rounds, (state["router_s"] if state["router_s"] > 0 else loop.router_s)
     # K1: the engine's report lines that need the user's attention become findings (postrun.py); a post-run
     # finding replaces a pre-flight one of the same code (e.g. DIFF_PAIRS_SKIPPED: "will not" -> "were not").
     post = postrun.route_findings(rr)
@@ -1374,12 +1377,17 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                   "accepted_codes": list(decision.accepted_codes),
                   "fallbacks": [via_fallback_text(out.via_fallback)] if out.via_fallback else []}
     build_report({**rr, "items": out.items}, classified, cfg, findings, scope_info, before_stats,
-                 {"router_s": out.router_s, "router_cpu_s": out.router_cpu_s, "drc_rounds": loop.rounds}, report=report,
+                 {"router_s": out.router_s, "router_cpu_s": out.router_cpu_s, "drc_rounds": loop.rounds,
+                  # not router time, shown apart in the summary: the engine's measurements outside the limit and
+                  # the whole run so far (pre-flight, KiCad's DRC and the rest on top of the router time)
+                  "measure_s": float(getattr(state.get("last"), "measure_s", 0.0) or 0.0),
+                  "run_s": time.monotonic() - t0}, report=report,
                  facts={"layers": report.facts.get("layers"), "versions": report.facts.get("versions"),
                         "time_limit": out.time_limit, "compass": out.compass,
                         "notes": [f"geometry: {geometry}", f"DRC rounds: {loop.rounds}"] + _ripup_notes(rr) + _via_relax_notes(rr) + (
                             ["time budget exhausted"] if loop.budget_exhausted else [])})
-    log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, rounds {loop.rounds}, "
+    log.line(f"routed {out.routed}/{out.total}, stop {out.stop_reason}, router {out.router_s:.1f} s, CPU {out.router_cpu_s:.1f} s, "
+             f"{rr.get('threads_used', '?')} threads, {rr.get('iterations', '?')} cycles (picked run), rounds {loop.rounds}, "
              f"routing_new {classified['routing_new']}, unconnected_new {inc['unconnected_new']}, {time_limit_text(out.time_limit)}")
     drc_src = routed_dir / "drc-routed.json"
     if state.get("no_project") is not None:

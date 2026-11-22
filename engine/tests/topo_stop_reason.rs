@@ -457,3 +457,103 @@ fn a_stable_run_past_the_limit_keeps_its_slot() {
     assert!(!r.warnings.iter().any(|w| w.contains("gave its compute slot")), "{:?}", r.warnings);
     assert_eq!(r.stop_reason, "timeout", "{:?}", r.warnings);
 }
+
+/// time-limit-fix (user 2026-11-22, qmtech in KiCad: "Stopped: timeout_wall after 1 iterations,
+/// 2357.5 s, 1 threads, CPU 11480.1 s · limit 3600 s wall"): the TopoR loop's own time share
+/// (`[optimize] loop_time_share`) ended every loop at about half the limit and the run was then
+/// reported as stopped by the limit, which it never reached (result.json time_limit.reached false).
+/// The share's stop is its own stop reason, its text names the share and says the limit was not
+/// reached; the result carries the engine's real thread count and the picked run's cycles, not the
+/// classic engine's placeholders 1 and 1.
+fn share_run(wall: f64, raise_to: Option<f64>, threads: usize) -> (RouteResult, f64) {
+    let json = format!(r#"{{"runs": 2, "wall_clock_s": {wall}, "stop_when_stable": false, "loop_time_share": 0.05{NEVER_STABLE}}}"#);
+    let o = Options::from_json(&json).expect("options parse");
+    let ctl = RunControl::new();
+    let (c2, o2) = (ctl.clone(), o.clone());
+    let h = std::thread::spawn(move || {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("pool");
+        pool.install(|| route_with(&eprom(), &o2, &c2))
+    });
+    let t = Instant::now();
+    let bound = Duration::from_secs(if cfg!(debug_assertions) { 300 } else { 60 });
+    // when the first loop began, on the limit's clock (the run's start)
+    let loop_at = loop {
+        let p = ctl.snapshot();
+        if p.stage.contains("TopoR loop") {
+            break ctl.limit.elapsed_s();
+        }
+        assert!(!h.is_finished() && t.elapsed() < bound, "the run ended before its loop: {p:?}");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    if let Some(s) = raise_to {
+        ctl.set_time_limit(s); // the progress dialog's Time limit / +15 min
+    }
+    (h.join().expect("run thread"), loop_at)
+}
+
+/// The share's own time-budget line: when the last loop ended (s on the limit's clock).
+fn share_end_s(r: &RouteResult) -> f64 {
+    let l = r.warnings.iter().find(|w| w.starts_with("time budget hit")).unwrap_or_else(|| panic!("time budget line: {:?}", r.warnings));
+    let reached = r.limit.as_ref().is_some_and(|x| x.reached);
+    let tail = if reached { "passed only after the loop, during the drawing, and cut nothing" } else { "was not reached" };
+    assert!(l.contains("loop_time_share = 0.05") && l.contains("not the time limit") && l.contains(tail), "{l}");
+    assert!(!l.contains("the wall-clock limit of"), "the limit's text for the share's stop: {l}");
+    l.split("the last loop ended at ").nth(1).and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok()).unwrap_or_else(|| panic!("loop end in {l}"))
+}
+
+#[test]
+fn loop_time_share_stop_is_its_own_stop_reason_not_the_time_limit() {
+    // 5 % of the time left: the loops end after a few seconds, the 60 s limit is far away
+    let wall = if cfg!(debug_assertions) { 100.0 } else { 60.0 };
+    let (r, loop_at) = share_run(wall, None, 2);
+    assert_eq!(r.stop_reason, "loop_time_share", "{:?}", r.warnings);
+    let lim = r.limit.as_ref().expect("limit report");
+    assert!(!lim.reached && (lim.limit_s - wall).abs() < 1e-6, "the limit was not reached: {lim:?}");
+    assert!(r.timed_out && !r.converged, "a time bound ended the search before stable");
+    let end = share_end_s(&r);
+    assert!(end < wall * 0.5 && end >= loop_at, "the share ended the loop at {end} s (loop began {loop_at} s)");
+    let (cycles, st, by) = loop_line(&r);
+    assert_eq!(by, "loop_time_share", "the loop line names its stop");
+    assert!(st.is_none());
+    // the result's own figures (the plugin's summary "after N cycles, ... N threads")
+    assert_eq!(r.threads_used, 2, "the engine's thread pool");
+    assert!(cycles > 1, "premise: the loop ran several cycles ({cycles})");
+    assert_eq!(r.iterations as usize, cycles, "iterations = the picked run's loop cycles");
+}
+
+#[test]
+fn loop_time_share_follows_a_limit_raised_during_the_loop() {
+    // the loop begins under a 4 s limit (its share: 5 % of the time left, about 0.2 s), then the
+    // limit is raised to 60 s: the share is of the new limit (about 3 s), as the dialog shows it
+    let (wall, raised) = if cfg!(debug_assertions) { (30.0, 200.0) } else { (4.0, 60.0) };
+    let (r, loop_at) = share_run(wall, Some(raised), 1);
+    assert_eq!(r.stop_reason, "loop_time_share", "{:?}", r.warnings);
+    let lim = r.limit.as_ref().expect("limit report");
+    assert!((lim.limit_s - raised).abs() < 1e-6 && !lim.reached, "the raised limit, not reached: {lim:?}");
+    let end = share_end_s(&r);
+    let old = loop_at + 0.05 * (wall - loop_at); // the share of the limit at the loop's start
+    let new = loop_at + 0.05 * (raised - loop_at);
+    assert!(end >= loop_at + 0.9 * (new - loop_at), "the loop ended at {end} s: the share of the raised limit ends at {new:.2} s, of the old one at {old:.2} s");
+    assert_eq!(r.threads_used, 1);
+}
+
+#[test]
+fn loop_time_share_then_the_limit_in_the_drawing_is_still_the_share_and_says_the_limit_passed_later() {
+    // the share ends the loop; the limit then passes while the drawing runs (soft: drawn to its end,
+    // nothing cut): the share ended the search, and the text must not call the limit unreached
+    let o = Options::from_json(&format!(r#"{{"runs": 1, "wall_clock_s": 60, "stop_when_stable": false, "loop_time_share": 0.05{NEVER_STABLE}}}"#)).expect("options");
+    let mut ctl = RunControl::new();
+    let lim = ctl.limit.clone();
+    ctl.set_test_hook(move |p| {
+        if p == "no sequential run" {
+            lim.reach(); // the drawing of the loop's pick runs: the limit passes now
+        }
+        false
+    });
+    let r = route_with(&eprom(), &o, &ctl);
+    let l = r.limit.as_ref().expect("limit report");
+    assert!(l.reached && l.cut == "none", "the limit passed in the drawing and cut nothing: {l:?}");
+    assert_eq!(r.stop_reason, "loop_time_share", "{:?}", r.warnings);
+    assert!(r.routed == r.connections_total, "drawn in full");
+    share_end_s(&r);
+}

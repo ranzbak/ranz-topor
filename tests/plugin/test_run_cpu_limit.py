@@ -260,7 +260,9 @@ class _Dialog(ScriptedUi):
         self.waits_for_ok = True
 
 
-ENGINE_LABELS = ["stable", "round cap", "timeout", "cancel", "stop_after plan"]
+#: time-limit-fix: "loop_time_share" = the TopoR loop's own share of the wall limit ended the loop, the limit was not
+#: reached; the plugin keeps it on both clocks (never timeout_wall / timeout_cpu: no limit fired)
+ENGINE_LABELS = ["stable", "round cap", "timeout", "cancel", "stop_after plan", "loop_time_share"]
 
 
 def _expected(label, clock):
@@ -268,6 +270,8 @@ def _expected(label, clock):
     fired during the job (wall: the engine's own deadline; cpu: the plugin's reach_limit). verify-slfx F2: only an
     engine "timeout" / "cancel" means the CPU limit cut the run; "stable" / "round cap" = it had ended (or was
     stable) before the limit cut anything, so no timeout_cpu and no "result may differ between runs"."""
+    if label == "loop_time_share":
+        return label, True, False
     if clock == "cpu" and label in ("timeout", "cancel"):
         return "timeout_cpu", True, False
     if label == "timeout":
@@ -285,8 +289,8 @@ def test_stop_reason_for_every_engine_label_clock_and_mode(app, eprom, tmp_path,
     during the job (3 s, +1 CPU s per poll, 12 polls); the wall clock's limit is the engine's, so its label says."""
     cfg = CFG.with_values({("run", "timeout_clock"): clock, ("run", "timeout_s"): 3.0 if clock == "cpu" else 600.0,
                            ("optimize", "rounds"): 20})
-    timed_out = label in ("timeout", "cancel")
-    warn = {"warnings": ["time budget hit: result may differ between runs"]} if label == "timeout" else {}
+    timed_out = label in ("timeout", "cancel", "loop_time_share")
+    warn = {"warnings": ["time budget hit: result may differ between runs"]} if label in ("timeout", "loop_time_share") else {}
     eng = RecordingEngine(hold=12, patch=_as(label, timed_out=timed_out, **warn))
     ui = _Dialog(accept=False) if mode == "dialog" else ScriptedUi(accept=False)
     _, _, out = do_run(eprom, tmp_path, ui=ui, cfg=cfg, engine=eng)
@@ -297,9 +301,14 @@ def test_stop_reason_for_every_engine_label_clock_and_mode(app, eprom, tmp_path,
     assert (out.stop_reason, "TIME_BUDGET_HIT" in codes, out.cancelled) == (want, tbh, cancelled), (label, clock, mode)
     assert _result_json(out)["stop_reason"] == want
     assert any(f"Stopped: {want} after" in line for line in out.report.summary_lines()), out.report.summary_lines()
-    if tbh and clock == "cpu":
+    if tbh and clock == "cpu" and label != "loop_time_share":
         f = next(x for x in out.findings if x.code == "TIME_BUDGET_HIT")
         assert "CPU-time limit of 3 s" in f.message and "result may differ between runs" in f.message
+    if label == "loop_time_share":
+        # the share's stop is no CPU limit hit (a real engine gives it only on the wall clock: the CPU clock gives the
+        # engine no deadline): the engine's own line stays, the plugin adds no CPU-limit line
+        f = next(x for x in out.findings if x.code == "TIME_BUDGET_HIT")
+        assert "CPU-time limit" not in f.message, f.message
 
 
 # ------------------------------------------------------------------ OK at Routes stable, then the limit cut the drawing
@@ -351,3 +360,25 @@ def test_the_cpu_line_carries_no_other_engine_reason(app, eprom, tmp_path, repor
     _, _, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=cfg, engine=eng)
     f = next(x for x in out.findings if x.code == "TIME_BUDGET_HIT")
     assert out.stop_reason == "timeout_cpu" and "CPU-time limit of 3 s" in f.message and why not in f.message, f.message
+
+
+# ------------------------------------------------------------------ time-limit-fix: one router clock
+def test_router_time_is_the_clock_the_dialog_shows_and_the_summary_prints(app, eprom, tmp_path, reports, cpu_counter):
+    """User 2026-11-22: the dialog's Router time, the summary's Stopped line and result.json's router_s are one clock
+    (the engine job's wall seconds, what the wall limit counts); the whole run up to the result (pre-flight, KiCad's
+    DRC) is shown apart and is longer."""
+    eng = RecordingEngine(hold=6, patch=_as("loop_time_share", timed_out=True, threads_used=3, iterations=7,
+                                             warnings=["time budget hit: result may differ between runs (share)"]))
+    _, ui, out = do_run(eprom, tmp_path, ui=ScriptedUi(accept=False), cfg=CFG.with_values({("run", "timeout_s"): 60.0}),
+                        engine=eng)
+    shown = [c[1][0].elapsed_s for c in ui.calls if c[0] == "progress"]
+    res = _result_json(out)
+    assert res["router_s"] == pytest.approx(shown[-1], abs=1e-3) and shown[-1] == max(shown) > 0
+    assert out.stop_reason == "loop_time_share" and res["stop_reason"] == "loop_time_share"
+    line = next(ln for ln in out.report.summary_lines() if ln.startswith("Stopped:"))
+    assert line.startswith(f"Stopped: loop_time_share after 7 cycles, router time {round(out.router_s, 1)} s, 3 threads")
+    assert "limit 60 s wall, not reached (" in line
+    run_s = out.report.facts["run_s"]
+    assert run_s > out.router_s and f"whole run {run_s} s to the result" in line
+    log = (out.report_dir / "log.txt").read_text()
+    assert "3 threads, 7 cycles (picked run)" in log

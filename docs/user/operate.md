@@ -489,6 +489,25 @@ idle machine. When the limit fires, the best result so far is kept either way an
 *Stopped: timeout_wall* or *Stopped: timeout_cpu*. The progress dialog, the report summary (*CPU ... s*), `result.json`
 (`router_cpu_s`) and the preview summary show the CPU time in both modes.
 
+**Router time: the one clock the limit counts.** Router time is the wall-clock seconds of the engine jobs, from each
+job's start to its result. The wall-clock limit counts it, the progress dialog shows it as **Router time** (*x / limit*),
+and the summary prints it in its *Stopped:* line (*router time x s*). Some time is not counted, and each part is shown
+on its own line. The dialog's **Total time** and the summary's *whole run ... s to the result* cover the pre-flight
+(DRC of the untouched copy, the pre-flight dialog), KiCad's DRC rounds and the preview exports. Measurements outside the
+limit (`[capacity] compass_cut_check`) appear as *(+x s measurements, not counted)*. The time the preview dialog waits
+for your Accept is counted nowhere. The summary also names the cycles of the picked run (*after N cycles*: TopoR loop
+cycles) and the engine's thread pool (*N threads*).
+
+**The TopoR loop's own time share.** With `[optimize] loop = "topor"` (the default) the loop may use only
+`[optimize] loop_time_share` (default 0.5) of the time left when it begins. The rest of the limit is kept for the
+drawing. When that share ends the loop before the routes are stable, the limit itself is *not* reached. The summary
+then says *Stopped: loop_time_share ... · limit 3600 s wall, not reached (N s left)*, and the time budget warning
+([`TIME_BUDGET_HIT`](troubleshoot.md#time_budget_hit)) names the share. On a board whose drawing is quick, the run so
+ends well before `timeout_s`. In a 3600 s qmtech run (2026-11-22), the loops ended at about 1940-2000 s, the drawing
+took about 360 s, and the run ended at 2357 s. Raise `loop_time_share` (up to 1.0) to give the loop more of the
+limit. The share follows a limit you change while the router runs. It acts on the wall clock only: with
+`timeout_clock = "cpu"` the engine has no wall deadline, so the loop runs to the CPU limit.
+
 **Changing the time limit while the router runs.** A run that takes longer than you planned need not lose its
 progress: the progress dialog has a **Time limit** row with the limit in force (seconds on the run's clock, *s wall
 time* or *s CPU time*). **+5 min** and **+15 min** add to it; or type a new value and press **Set limit** (or Enter

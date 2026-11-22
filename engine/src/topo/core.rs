@@ -334,6 +334,14 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     // (the user took the stable plan; the limit, not the OK, ended what is drawn of it).
     let (draw_cut, drawn_stable) = (outs[pick].draw_cut, outs[pick].stable);
     let ok_kept = ok_stop && !draw_cut;
+    // time-limit-fix (user 2026-11-22: "Stopped: timeout_wall ... 2357.5 s ... limit 3600 s wall"):
+    // the runs' TopoR loops ended at their own time share ([optimize] loop_time_share) and nothing
+    // else did: the time limit was not what stopped the run, so the stop reason and the text say
+    // the share (before, the share's stop was reported as the limit's "timeout").
+    let share_stop = time_hit && !cancel && !draw_cut && outs.iter().filter(|o| o.time_hit).all(|o| o.share_stop);
+    let share_end_s = outs.iter().filter(|o| o.share_stop).map(|o| o.loop_end_s).fold(0.0f64, f64::max);
+    // the picked run's cycles (TopoR loop cycles, or whole-route cycles with loop = "cycles")
+    let picked_cycles = outs[pick].loop_cycles;
     // Every cycle's variants were stitched before they were judged (pour pieces still cut off
     // count as errors), so the picked board is the one the progress showed.
     let pick_k = outs[pick].k;
@@ -367,6 +375,8 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         } else {
             "cancel"
         }
+    } else if share_stop {
+        "loop_time_share"
     } else if time_hit || draw_cut {
         "timeout"
     } else if stable_stop_all {
@@ -402,6 +412,18 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
             )
         } else if cancel {
             "Cancel stopped the run before its routes were stable".to_string()
+        } else if share_stop {
+            let at = ctl.limit.elapsed_s(); // the limit's own clock (the engine job's), as `limit`
+            // the limit can still pass after the share, while the drawing runs (soft: it is drawn to its end)
+            let after = if at >= limit {
+                format!("the time limit of {limit:.0} s (wall clock) passed only after the loop, during the drawing, and cut nothing")
+            } else {
+                format!("the time limit of {limit:.0} s (wall clock) was not reached, {:.0} s of it were left", limit - at)
+            };
+            format!(
+                "the TopoR loop's own time share stopped it, not the time limit: [optimize] loop_time_share = {:.2} lets the loop use at most that share of the time left when it began and keeps the rest for the drawing; the last loop ended at {share_end_s:.0} s, the run at {at:.0} s; {after}",
+                opts.loop_time_share.clamp(0.05, 1.0)
+            )
         } else if ctl.limit.changed() {
             format!("the time limit of {limit:.0} s wall clock (changed during the run; [run] timeout_s = {:.0} s at this engine job's start) stopped the run before its routes were stable", opts.wall_clock_s)
         } else if opts.wall_clock_s <= 0.0 {
@@ -412,6 +434,10 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         best.warnings.push(format!("{TIME_HIT} ({why})"));
     }
     best.limit = limit_report(ctl, opts, &mut best);
+    // time-limit-fix: the result's own figures, not the classic engine's placeholders (1 and 1):
+    // the engine's thread pool (the compute slots the runs share) and the picked run's cycles.
+    best.threads_used = rayon::current_num_threads().max(1);
+    best.iterations = u32::try_from(picked_cycles).unwrap_or(u32::MAX);
     best
 }
 
@@ -722,6 +748,12 @@ struct RunOut {
     stable_stop: bool,
     /// TW3 D2: its TopoR loop ended at the re-lay budget (`[optimize] loop_relays`).
     relay_stop: bool,
+    /// time-limit-fix: its TopoR loop ended at the loop's own time share
+    /// (`[optimize] loop_time_share`) before the time limit passed, and nothing cut it after.
+    share_stop: bool,
+    /// The cycles of its TopoR loop (0 without one), and when the loop ended (s on the limit's clock).
+    loop_cycles: usize,
+    loop_end_s: f64,
     /// The time limit, acting as hard, cut the one drawing of its TopoR loop pick (the traces, the
     /// via reduction or the pour stitching): its board is drawn only in part, whatever ended the
     /// loop (verify-sl3 F1: an OK at Routes stable then a hard limit in the drawing).
@@ -1585,6 +1617,10 @@ struct Run {
     time_hit: bool,
     stable_stop: bool,
     relay_stop: bool,
+    /// time-limit-fix: see [`RunOut::share_stop`], [`RunOut::loop_cycles`], [`RunOut::loop_end_s`].
+    share_stop: bool,
+    loop_cycles: usize,
+    loop_end_s: f64,
     draw_cut: bool,
     stable_at: Option<usize>,
     first: Option<usize>,
@@ -1623,6 +1659,9 @@ impl Run {
             time_hit: false,
             stable_stop: false,
             relay_stop: false,
+            share_stop: false,
+            loop_cycles: 0,
+            loop_end_s: 0.0,
             draw_cut: false,
             stable_at: None,
             first: None,
@@ -1752,6 +1791,7 @@ impl Run {
                     self.stable_stop = e.stopped_stable;
                     self.relay_stop = e.relay_stop;
                     self.time_hit = e.time_hit;
+                    (self.share_stop, self.loop_cycles, self.loop_end_s) = (e.share_stop, e.cycles, e.at_s);
                 }
                 self.busy_s += t.elapsed().as_secs_f64();
                 return;
@@ -1761,6 +1801,7 @@ impl Run {
                 if e.stable {
                     self.stable_at.get_or_insert(cycle);
                 }
+                (self.share_stop, self.loop_cycles, self.loop_end_s) = (e.share_stop, e.cycles, e.at_s);
                 coord.report(self.k, |r| r.stable = e.stable);
             }
             self.time_hit = self.stable_at.is_none();
@@ -1989,6 +2030,7 @@ impl Run {
             // TW3 draw-only round: the loop's flags are those of the first round.
             self.draw_cut |= interrupted || cycle_stitch_cut;
             self.time_hit |= interrupted;
+            self.share_stop &= !interrupted;
             self.done = self.queue.is_empty();
             return;
         }
@@ -2001,6 +2043,8 @@ impl Run {
                 self.stable_stop = e.stopped_stable && !interrupted;
                 self.relay_stop = e.relay_stop && !interrupted;
                 self.time_hit = e.time_hit || interrupted;
+                // a drawing the limit or a Cancel cut: the share is no longer what ended the run
+                (self.share_stop, self.loop_cycles, self.loop_end_s) = (e.share_stop && !interrupted, e.cycles, e.at_s);
             } else {
                 self.time_hit = interrupted;
             }
@@ -2075,7 +2119,7 @@ impl Run {
             self.picked_at,
             self.busy_s
         );
-        Ok(RunOut { k: self.k, rows_drawn: std::mem::take(&mut self.rows_drawn), result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, relay_stop: self.relay_stop, draw_cut: self.draw_cut, stable: self.stable_at.is_some(), line, cycles_line })
+        Ok(RunOut { k: self.k, rows_drawn: std::mem::take(&mut self.rows_drawn), result: best, crit, time_hit: self.time_hit, stable_stop: self.stable_stop, relay_stop: self.relay_stop, share_stop: self.share_stop, loop_cycles: if opts.opt_loop == "topor" { self.loop_cycles } else { self.cycles }, loop_end_s: self.loop_end_s, draw_cut: self.draw_cut, stable: self.stable_at.is_some(), line, cycles_line })
     }
 }
 
@@ -2292,6 +2336,13 @@ struct LoopEnd {
     time_hit: bool,
     /// TW3 D2: the loop stopped at its re-lay budget (`[optimize] loop_relays`).
     relay_stop: bool,
+    /// time-limit-fix: the loop's own time share (`[optimize] loop_time_share`) ended it, the
+    /// time limit had not passed then (`time_hit` is set too: a time bound ended the search).
+    share_stop: bool,
+    /// The cycles the loop ran (the result's `iterations` when its run is the pick).
+    cycles: usize,
+    /// When the loop ended: seconds since the limit's start (the engine job's clock).
+    at_s: f64,
 }
 
 impl RoundOut {
@@ -4485,11 +4536,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         /// TW5 (a): the factor index of the violation weight's own oscillation (apart from the
         /// registry's factors).
         const VIOL_FACTOR: usize = 1 << 20;
-        // The loop's own emergency stop: a share of the time left (the rest is the drawing's).
-        let loop_deadline = ctl.deadline().map(|d| {
-            let now = Instant::now();
-            now + d.saturating_duration_since(now).mul_f64(opts.loop_time_share.clamp(0.05, 1.0))
-        });
+        // The loop's own emergency stop: a share of the time left at the loop's start (the rest is
+        // the drawing's). time-limit-fix: read live, so a limit the user changes during the loop
+        // (the progress dialog's Time limit, +5 / +15 min) moves the share with it; before, the
+        // share kept the limit as it stood at the loop's start.
+        let share = opts.loop_time_share.clamp(0.05, 1.0);
+        let loop_deadline = || ctl.deadline().map(|d| t_loop + d.saturating_duration_since(t_loop).mul_f64(share));
         let n_sig = if b.n_signal == 0 { proj.n_layers } else { b.n_signal };
         let tiers: Vec<u8> = (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect();
         // 5.2 (price = criterion): the predicted violations of a state with its layering, the one
@@ -6995,7 +7047,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // (no new step begins); inside a cycle only Cancel / OK stops it with the soft limit (the
         // cycle finishes and is offered), with `hard` the limits too. A cycle Cancel cut short is
         // not offered (Cancel = the best variant kept so far).
-        let loop_over = || loop_deadline.is_some_and(|d| Instant::now() >= d);
+        let loop_over = || loop_deadline().is_some_and(|d| Instant::now() >= d);
         // Fair slots (sync-wait; user 2026-11-17 "free the slot"): before each cycle the run gives
         // its compute slot to a waiting run that is behind it (not begun yet, or fewer cycles
         // finished, [`Slots::turn`]) and goes on when it is the lowest waiter again; with fewer
@@ -7189,7 +7241,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         st.site_k.clear();
         let loop_s = t_loop.elapsed().as_secs_f64();
         let time_hit = rep.stop == "time limit" || rep.stop == "loop_time_share";
-        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit, relay_stop: rep.stop == "re-lay budget" });
+        loop_end = Some(LoopEnd { stable: rep.stable_at.is_some(), stopped_stable: rep.stop == "stable", time_hit, relay_stop: rep.stop == "re-lay budget", share_stop: rep.stop == "loop_time_share", cycles: rep.cycles, at_s: ctl.limit.elapsed_s() });
         let pc = arch.items[pick].crit;
         let table = table_text(&arch.table(Some(pick)), &obj);
         // TW3: the restarts whose descent then gave the shared table a new row (before the next
@@ -7305,7 +7357,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 }
             ));
         }
-        if time_hit {
+        if time_hit && rep.stop == "loop_time_share" {
+            warnings.push(format!("TopoR loop: its own time share ([optimize] loop_time_share = {share:.2} of the time left when it began) ended the loop at {:.1} s before its plan was stable; the time limit was not reached ({TIME_HIT})", ctl.limit.elapsed_s()));
+        } else if time_hit {
             warnings.push(format!("TopoR loop: the time limit ended the loop before its plan was stable ({TIME_HIT})"));
         }
         loop_json = Some(serde_json::json!({
