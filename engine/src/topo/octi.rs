@@ -788,12 +788,7 @@ impl Drawer<'_> {
         let mut cors = if fd45_off("loser") { Vec::new() } else { self.loser_corridors(w, layer, &taut, &region) };
         // fd45 r11: the P2 bands (room + crossing price); a band that is a loser corridor too
         // gets the crossing price on that corridor (its room is priced once).
-        for bnd in bands {
-            match cors.iter_mut().find(|c| c.wire == bnd.wire && c.path == bnd.path) {
-                Some(c) => c.viol_nm = bnd.viol_nm,
-                None => cors.push(bnd),
-            }
-        }
+        merge_bands(&mut cors, bands);
         let ents = self.local_ents(&wp, region.grow(self.qgrow));
         let nr = self.near(ents.clone(), &wp);
         // Cumulative length of the taut path, for the node order.
@@ -1673,8 +1668,7 @@ impl Drawer<'_> {
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let mut out = Vec::new();
-        for k in k0..k1 {
-            let pid = wi.passes[k];
+        for &pid in &wi.passes[k0..k1] {
             let [p, q] = pr.edges[st.passes[pid].edge];
             let (pp, pq) = (pr.pos[p], pr.pos[q]);
             let len = (pq - pp).len();
@@ -2052,6 +2046,18 @@ pub(super) struct Corridor {
     pub wire: WireId,
 }
 
+/// fd45 r11: add the P2 `bands` to the joint losers' corridors `cors`; a band that is a loser
+/// corridor too (same wire, same path) keeps one corridor with the band's crossing price (its room
+/// is priced once).
+pub(super) fn merge_bands(cors: &mut Vec<Corridor>, bands: Vec<Corridor>) {
+    for bnd in bands {
+        match cors.iter_mut().find(|c| c.wire == bnd.wire && c.path == bnd.path) {
+            Some(c) => c.viol_nm = bnd.viol_nm,
+            None => cors.push(bnd),
+        }
+    }
+}
+
 /// fd45 r11: the price (nm, after every factor) of the leg `a-b` crossing the centre lines of the
 /// corridors `cors` that carry a crossing price (`viol_nm` > 0): per proper crossing with a
 /// segment of the path, `viol_nm x violation_amount(reach, cl)`, `cl` = the leg's length inside
@@ -2076,12 +2082,35 @@ pub(super) fn corridor_cross(cors: &[Corridor], a: Vec2, b: Vec2) -> f64 {
         for x in c.path.windows(2) {
             let e = x[1] - x[0];
             let el = e.len();
-            if el < 1.0 || !super::draw::seg_proper(a, b, x[0], x[1]) {
+            if el < 1.0 {
                 continue;
             }
-            let sin = (d.cross(e) / (l * el)).abs().max(1e-3);
+            let den = d.cross(e);
+            if den.abs() < 1e-9 {
+                // A leg on the band's centre line (collinear): its length along the line is all in
+                // the band, a clearance violation of the full depth over that length.
+                let (u, s0, s1) = (e * (1.0 / el), (a - x[0]).dot(e) / el, (b - x[0]).dot(e) / el);
+                if (a - x[0]).cross(u).abs() < 1.0 && (b - x[0]).cross(u).abs() < 1.0 {
+                    let ov = (s0.max(s1).min(el) - s0.min(s1).max(0.0)).max(0.0);
+                    if ov > 0.0 {
+                        tot += c.viol_nm * super::factors::violation_amount(c.reach, ov);
+                    }
+                }
+                continue;
+            }
+            // A proper crossing counts 1; a touch at an end point of the leg or of the band's
+            // segment (a DP vertex or a band corner exactly on the other) counts 1/2: the adjacent
+            // leg or segment shares that point, so a pass through it still pays once in all.
+            let (t, u) = ((x[0] - a).cross(e) / den, (x[0] - a).cross(d) / den);
+            let eps = 1e-9;
+            if !(-eps..=1.0 + eps).contains(&t) || !(-eps..=1.0 + eps).contains(&u) {
+                continue;
+            }
+            let end = |v: f64| v <= eps || v >= 1.0 - eps;
+            let weight = if end(t) || end(u) { 0.5 } else { 1.0 };
+            let sin = (den / (l * el)).abs().max(1e-3);
             let cl = (2.0 * c.reach / sin).min(l);
-            tot += c.viol_nm * super::factors::violation_amount(c.reach, cl);
+            tot += weight * c.viol_nm * super::factors::violation_amount(c.reach, cl);
         }
     }
     tot
@@ -2524,6 +2553,53 @@ mod tests {
         let once = corridor_cross(std::slice::from_ref(&bent), v(3.0, -1.0), v(3.0, 1.0));
         assert!(thrice > 3.0 * once, "{thrice} {once}");
         assert_eq!(band_crossings(std::slice::from_ref(&bent), &[v(3.0, -1.0), v(7.0, 6.0)]), vec![(1, 3)]);
+    }
+
+    /// fd45 r11 (verifier r11 finding 5): the degenerate crossings of a band's centre line. Real
+    /// copper through such a point violates the undrawn wire's clearance like any crossing, so a
+    /// DP vertex exactly on the centre line (two legs sharing it) pays the square crossing once
+    /// in all, a leg on the centre line pays for its length there, a pass through a band corner
+    /// pays once.
+    #[test]
+    fn band_crossing_degenerate_cases_are_priced() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+        let viol = OctiCfg::default().viol_nm;
+        let path = vec![v(0.0, 0.0), v(10.0, 0.0)];
+        let reach = 0.3 * MM;
+        let c = [Corridor { bb: bbox_of(&path).grow(reach), path, reach, pitch: reach, viol_nm: viol, wire: 1 }];
+        let square = corridor_cross(&c, v(5.0, -1.0), v(5.0, 1.0));
+        let halves = corridor_cross(&c, v(5.0, -1.0), v(5.0, 0.0)) + corridor_cross(&c, v(5.0, 0.0), v(5.0, 1.0));
+        assert!(square > 0.0 && (halves - square).abs() < 1e-6 * square, "vertex on the centre line: {halves} vs {square}");
+        let slant = corridor_cross(&c, v(4.0, -1.0), v(5.0, 0.0)) + corridor_cross(&c, v(5.0, 0.0), v(6.0, 1.0));
+        assert!(slant > 0.0, "{slant}");
+        let along = corridor_cross(&c, v(2.0, 0.0), v(6.0, 0.0));
+        let want = viol * super::super::factors::violation_amount(reach, 4.0 * MM);
+        assert!((along - want).abs() < 1e-6 * want && want > 0.0, "{along} {want}");
+        assert_eq!(corridor_cross(&c, v(2.0, 0.5), v(6.0, 0.5)), 0.0, "parallel off the line");
+        assert_eq!(corridor_cross(&c, v(11.0, 0.0), v(14.0, 0.0)), 0.0, "collinear past the end");
+        let bent = Corridor { path: vec![v(0.0, 0.0), v(5.0, 0.0), v(5.0, 5.0)], bb: Aabb { min: v(-1.0, -1.0), max: v(6.0, 6.0) }, ..c[0].clone() };
+        let corner = corridor_cross(std::slice::from_ref(&bent), v(4.0, -1.0), v(6.0, 1.0));
+        assert!(corner > 0.0, "{corner}");
+    }
+
+    /// fd45 r11 (verifier r11 finding 1): a P2 band that is also a joint loser's corridor (same
+    /// wire, same path) merges into one corridor carrying the crossing price; other bands are
+    /// added. Without the merge the loser corridor keeps `viol_nm = 0` and the crossing is free.
+    #[test]
+    fn band_that_is_a_loser_corridor_gets_the_crossing_price() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+        let mk = |wire: usize, y: f64, viol: f64| {
+            let path = vec![v(0.0, y), v(10.0, y)];
+            Corridor { bb: bbox_of(&path).grow(0.3 * MM), path, reach: 0.3 * MM, pitch: 0.3 * MM, viol_nm: viol, wire }
+        };
+        let viol = OctiCfg::default().viol_nm;
+        let mut cors = vec![mk(1, 0.0, 0.0), mk(2, 5.0, 0.0)];
+        merge_bands(&mut cors, vec![mk(1, 0.0, viol), mk(3, 9.0, viol)]);
+        assert_eq!(cors.len(), 3, "the loser corridor is not doubled");
+        assert_eq!(cors[0].viol_nm, viol, "the loser corridor now carries the crossing price");
+        assert_eq!(cors[1].viol_nm, 0.0);
+        assert!(corridor_cross(&cors, v(5.0, -1.0), v(5.0, 1.0)) > 0.0);
+        assert!(corridor_cross(&cors[1..2], v(5.0, 4.0), v(5.0, 6.0)) == 0.0, "an unrelated loser stays unpriced");
     }
 
     /// fd45 r10 (verifier F8): at `bend_mm = 0` ("only length counts") a staircase still costs

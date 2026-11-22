@@ -1618,10 +1618,10 @@ mod tests {
     /// runs of the routed wire with and without pad exits.
     #[test]
     fn octilinear_shape_cache_matches_the_reference_loop() {
-        use super::super::octi::{OCTI_HITS, OCTI_LANE_MIN, OCTI_NODE_SPLIT, OCTI_REF};
+        use super::super::octi::{Corridor, OCTI_HITS, OCTI_LANE_MIN, OCTI_NODE_SPLIT, OCTI_REF, OCTI_TEST_BANDS};
         // per lane count: nodes done alone and on the crew (lanes 2, 4, 8 must do every node on the crew)
         let mut split = [[0usize; 2]; 4];
-        let (mut some, mut runs) = (0, 0);
+        let (mut some, mut runs, mut banded) = (0, 0, 0);
         with_octi_fields(&mut |dr, g| {
             let dr: &Drawer = dr;
             let wi = &dr.st.wires[0];
@@ -1638,6 +1638,28 @@ mod tests {
                 };
                 let layer = g.int(0, 1) as usize;
                 let forced = [None, Some(dr.octi.viol_nm), Some(dr.octi.short_nm)][g.int(0, 2) as usize];
+                // fd45 r11: half of the runs with undrawn wires' bands (the crossing price of
+                // `room_f` / `room_x`): one band across a random leg of the run, off it by a random
+                // distance, plus a loser-style band (no crossing price) beside it.
+                let mut test_bands: Vec<Corridor> = Vec::new();
+                if g.int(0, 1) == 1 {
+                    let i = g.int(0, pts.len() as i64 - 2) as usize;
+                    let (p, q) = (pts[i], pts[i + 1]);
+                    if let Some(u) = (q - p).unit() {
+                        let n = Vec2 { x: -u.y, y: u.x };
+                        let m = p + (q - p) * (0.2 + 0.6 * g.f()) + n * ((g.f() - 0.5) * 1.2 * MM);
+                        let h = (0.1 + 0.8 * g.f()) * MM;
+                        let path = vec![m - (n * h) + u * (g.f() * 0.4 * MM), m + n * h];
+                        let reach = 0.2 * MM + 0.3 * MM * g.f();
+                        let mk = |path: Vec<Vec2>, viol_nm: f64| Corridor { bb: bbox_of(&path).grow(reach), path, reach, pitch: reach, viol_nm, wire: 1 };
+                        let far = vec![m + u * (0.5 * MM), m + u * (0.5 * MM) + n * h];
+                        test_bands = vec![mk(path, dr.octi.viol_nm), mk(far, 0.0)];
+                        banded += 1;
+                    }
+                }
+                // the hook is a thread-local: set it on each thread that calls `octilinear`
+                let set_bands = |b: &[Corridor]| OCTI_TEST_BANDS.with(|x| *x.borrow_mut() = b.to_vec());
+                set_bands(&test_bands);
                 OCTI_REF.with(|f| f.set(false));
                 let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced);
                 // par-draw: every node's successors on 1/2/4/8 lanes (pair rule 1, the reverse
@@ -1649,6 +1671,7 @@ mod tests {
                     .map(|(ki, &k)| {
                         let pool = rayon::ThreadPoolBuilder::new().num_threads(k).build().expect("pool");
                         pool.install(|| {
+                            set_bands(&test_bands);
                             OCTI_LANE_MIN.with(|f| f.set(1));
                             OCTI_NODE_SPLIT.with(|c| c.set([0, 0]));
                             let r = super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced));
@@ -1662,6 +1685,7 @@ mod tests {
                 OCTI_REF.with(|f| f.set(true));
                 let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced);
                 OCTI_REF.with(|f| f.set(false));
+                set_bands(&[]);
                 runs += 1;
                 some += usize::from(want.is_some());
                 let bits = |v: &Option<super::super::octi::OctiOut>| v.as_ref().map(|o| o.pts.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>());
@@ -1673,6 +1697,7 @@ mod tests {
         });
         let hits = OCTI_HITS.with(|h| h.get());
         assert!(some > 10 && hits[0] > 20, "{some} of {runs}, hits {hits:?}");
+        assert!(banded > 10, "{banded} runs with bands of {runs}");
         // one lane: every node alone; 2, 4, 8 lanes: every node on the crew
         assert!(split[0][0] > 0 && split[0][1] == 0, "1 lane: {:?}", split[0]);
         for (ki, k) in [(1usize, 2usize), (2, 4), (3, 8)] {
@@ -2193,8 +2218,7 @@ mod tests {
                 let taut = st.polyline(w);
                 let walls = dr.lane_order_walls(w, 0, k1, &taut);
                 let strip = Strip::new(Vec::new(), walls.clone());
-                for k in 0..k1 {
-                    let pid = wi.passes[k];
+                for (k, &pid) in wi.passes.iter().enumerate() {
                     let [p, q] = pr.edges[st.passes[pid].edge];
                     let (pp, pq) = (pr.pos[p], pr.pos[q]);
                     let len = (pq - pp).len();
