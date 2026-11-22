@@ -582,9 +582,6 @@ pub struct BoardModel {
     pub rules: Rules,
     /// Solder-mask openings drawn as graphics ([`MaskOpening`]).
     pub mask_openings: Vec<MaskOpening>,
-    /// The board's grid origin (KiCad `(setup (grid_origin x y))`, KiCad frame, nm; math frame
-    /// after [`BoardModel::from_json`]): the origin of the stitching lattice (stitch-vias).
-    pub grid_origin: [i64; 2],
 }
 
 impl BoardModel {
@@ -640,7 +637,6 @@ impl BoardModel {
             d.end.flip();
             d.direction[1] = -d.direction[1];
         }
-        self.grid_origin[1] = -self.grid_origin[1];
     }
 
     /// Pad skeleton for `layer` (math frame); falls back to any layer's shape.
@@ -1096,6 +1092,11 @@ pub struct Options {
     /// stitch-vias (`[planes] stitch_lattice`, default `"staggered"`; user 2026-11-22 "straight or
     /// staggered"): `"staggered"` shifts every other lattice row by half the x spacing.
     pub stitch_lattice: String,
+    /// stitch-vias (`[planes] stitch_on_grid`, default true; user 2026-11-22 "the vias should use
+    /// that as well"): the stitching vias stand on the user's KiCad via grid (`grid_via_nm`, else
+    /// `grid_track_nm`, from `grid_origin_nm`), the lattice pitch a multiple of it; independent of
+    /// `grid_snap`. No grid known = as off (the plugin warns).
+    pub stitch_on_grid: bool,
     /// stitch-vias class 2 (`[planes] stitch_dropped`, default true, lead 2026-11-21): an island
     /// of a pour that KiCad's island removal would drop (no pad, via or track of its net) and of
     /// at least pitch²/4 gets stitching vias into solid pour of its net on another layer, so its
@@ -1895,6 +1896,7 @@ impl Default for Options {
             stitch_pitch_x_nm: 5_000_000,
             stitch_pitch_y_nm: 5_000_000,
             stitch_lattice: "staggered".into(),
+            stitch_on_grid: true,
             stitch_dropped: true,
             stitch_thin_nm: 1_000_000,
             stitch_area: false,

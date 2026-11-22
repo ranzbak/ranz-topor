@@ -65,13 +65,39 @@ change which variant is picked.
   value of a via), class 1 takes it last.
 - **`stitch_per_area`** (default true): false = every piece gets `stitch_min_vias` only (the D1 arm).
 
+## Round 4: on the user's KiCad grid (lead-approved 2026-11-22)
+User 2026-11-22: "We can wait for snap to grid to be completed, because the vias should use that as
+well".
+- **One grid source (G1).** The plugin resolves the grid with grid-snap's `topor/grid.py resolve`
+  ([drawing] grid_mm, else KiCad's pcbnew.json, the via grid override first) also when grid_snap is off
+  and stitching is on (`run.grid_run_options`). The engine reads `Options::grid_via_nm` (else
+  `grid_track_nm`) and `grid_origin_nm`; `BoardModel.grid_origin` and the two exporter copies are gone.
+  The drawn copper still uses the grid only with grid_snap on (gridsnap gates on the mode).
+- **`StitchGrid::grid_at(p)`** returns the grid at a position. Today one grid holds everywhere; BGA-GRID
+  (a courtyard's ball array) plugs in there without touching `place_spread`.
+- **Lattice on the grid (G2).** The x/y pitch is rounded to a multiple of the via grid (at least one
+  step). A changed pitch is named in the run log and in an engine note. The staggered shift is half the
+  x pitch rounded to the grid. The origin is the grid origin, so every lattice site is a grid point.
+- **Fallback and stub sites (G3).** A raster fallback site offers the via-grid corners of its cell, each
+  through the same site tests. It stays itself at an off-grid price of (2 + LATTICE_OFFSET_WEIGHT)·d + off_grid·amount
+  (d = its distance to the nearest grid point). That is graded, but a legal grid point near it always
+  wins. A pad stub's via tries the nearest grid point before the ray point.
+- **`stitch_on_grid`** (default true). No grid found = a warning, and the behaviour before round 4.
+- **One graded site price (verifier V1/V2).** `place_spread` no longer ranks lattice sites first: a
+  fallback site pays `LATTICE_OFFSET_WEIGHT` (2.0) times its distance to the lattice. Because the weight
+  is above 1, a legal and unpriced lattice point still always wins. A BGA price (100 via prices), a plane
+  neck or a squeeze now outweighs the lattice: V1 puts the class-1 via near its pad and outside the BGA.
+  A site priced at or above the value of a via is skipped instead of ending the piece (V2).
+- Own-net copper refusals no longer count towards `MAX_TRIES`, as before stitch-vias.
+
 ## Options (`[planes]`, documented in schema.py + docs/user/configuration.md)
 - `stitch_islands` (exists) = class 1;
 - `stitch_min_vias` = 2;
 - `stitch_pitch_x_mm` = `stitch_pitch_y_mm` = 5.0, `stitch_lattice` = "staggered" (r3, user 2026-11-22: x and y spacing, straight or staggered = odd rows shifted by x/2; default staggered, user 2026-11-22 "Default is staggered, I like it more");
 - `stitch_dropped` = true;
 - `stitch_thin_mm` = 1.0 (0 = off);
-- `stitch_area` = false.
+- `stitch_area` = false;
+- `stitch_on_grid` = true (round 4).
 
 The KiCad pointer for these is zone properties (min width, island removal) and Board Setup →
 vias. Defaults decided after cost: the via count added per board.

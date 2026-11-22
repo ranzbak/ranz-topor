@@ -5,7 +5,7 @@ use topor_engine::geom::quant::{IVec2, TrackPrim};
 use topor_engine::model::{BoardModel, Item, MaskOpening, Options, PourFill, Pt, TrackItem};
 use topor_engine::pourcheck::check_pour_reach;
 use topor_engine::topo::factors::{standard_factors, FactorConfig, Registry};
-use topor_engine::topo::stitch::{lattice_pitch, stitch, stitch_regions, want_vias};
+use topor_engine::topo::stitch::{lattice_shift, lattice_xy, lattice_pitch, stitch, stitch_regions, want_vias};
 
 const MM: i64 = 1_000_000;
 
@@ -87,6 +87,16 @@ fn on_lattice(p: (i64, i64), origin: (i64, i64), pitch: i64) -> bool {
     (p.0 - origin.0).rem_euclid(pitch) == 0 && (p.1 - origin.1).rem_euclid(pitch) == 0
 }
 
+/// Within `tol` of a lattice point: one graded site price (round 4, verifier V1/V2) lets a
+/// fallback site a little inside win over a lattice point squeezed at the fill edge.
+fn near_lattice(p: (i64, i64), origin: (i64, i64), pitch: i64, tol: i64) -> bool {
+    let off = |v: i64, o: i64| {
+        let r = (v - o).rem_euclid(pitch);
+        r.min(pitch - r)
+    };
+    (off(p.0, origin.0) as f64).hypot(off(p.1, origin.1) as f64) <= tol as f64
+}
+
 /// Class 2: a closed F.Cu signal square [8, 22] x [12, 26] mm leaves a pad-less F.Cu island that
 /// KiCad's island removal ("always") would drop. It gets want_vias(area) vias, spread, inside
 /// it, on the 5 mm lattice where a lattice site is legal; afterwards it is in the main
@@ -108,8 +118,10 @@ fn a_dropped_island_gets_spread_lattice_vias_and_stays() {
     for p in &v {
         assert!(p.0 > 8 * MM && p.0 < 22 * MM && p.1 > 12 * MM && p.1 < 26 * MM, "{p:?}");
     }
-    // The lattice points inside (10..20 x 15..25, 9 of them) all fit: every via is on it.
-    assert!(v.iter().all(|&p| on_lattice(p, (0, 0), 5 * MM)), "{v:?}");
+    // The lattice points inside (10..20 x 15..25, 9 of them) all fit: every via is on it, or
+    // (a lattice point squeezed at the fill edge) less than 0.5 mm inside it.
+    assert!(v.iter().all(|&p| near_lattice(p, (0, 0), 5 * MM, MM / 2)), "{v:?}");
+    assert!(v.iter().filter(|&&p| on_lattice(p, (0, 0), 5 * MM)).count() >= 5, "{v:?}");
     // Spread: the first two are the farthest pair the farthest-point rule gives (corners).
     let dist = |a: (i64, i64), b: (i64, i64)| (((a.0 - b.0) as f64).powi(2) + ((a.1 - b.1) as f64).powi(2)).sqrt();
     assert!(dist(v[0], v[1]) >= 5.0 * MM as f64 - 1.0, "{v:?}");
@@ -140,17 +152,17 @@ fn no_via_without_solid_pour_on_another_layer() {
 /// The lattice starts at the board's grid origin.
 #[test]
 fn the_lattice_follows_the_grid_origin() {
-    let mut m = model(&[]);
-    // KiCad frame (1, 2) mm; the model holds the math frame.
-    m.grid_origin = [MM, -2 * MM];
+    let m = model(&[]);
+    // KiCad frame (1, 2) mm (Options::grid_origin_nm, the one origin source with grid-snap).
+    let o = Options { grid_origin_nm: [MM, 2 * MM], ..opts(true, 0.0, false) };
     let items = square(0, 8, 12, 22, 26);
-    let s = stitch_regions(&m, &opts(true, 0.0, false), &reg(), &items, &[], None, &|| false);
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
     let v = vias(&s.items);
-    // The 6 lattice points inside (x 11, 16, 21 x y 17, 22) come first; the 7th via the area
-    // wants is a fallback site off the lattice.
+    // The 6 lattice points inside (x 11, 16, 21 x y 17, 22); the 7th via the area wants is a
+    // fallback site off the lattice.
     assert_eq!(v.len(), 7, "{:?}", s.notes);
-    assert!(v[..6].iter().all(|&p| on_lattice(p, (MM, 2 * MM), 5 * MM)), "{v:?}");
-    assert!(!on_lattice(v[6], (MM, 2 * MM), 5 * MM), "{v:?}");
+    assert_eq!(v.iter().filter(|&&p| near_lattice(p, (MM, 2 * MM), 5 * MM, MM / 2)).count(), 6, "{v:?}");
+    assert!(v.iter().filter(|&&p| on_lattice(p, (MM, 2 * MM), 5 * MM)).count() >= 4, "{v:?}");
 }
 
 /// Small dropped islands (under pitch²/4) are not worth a via.
@@ -344,11 +356,11 @@ fn no_stitching_via_that_leaves_a_thin_neck_in_another_plane() {
     let v = vias(&s.items);
     assert!(!v.is_empty(), "{:?}", s.notes);
     assert!(!v.contains(&(15 * MM, 20 * MM)), "{v:?}");
-    assert!(v.contains(&(20 * MM, 25 * MM)), "{v:?}");
+    assert!(v.iter().any(|&p| near_lattice(p, (20 * MM, 25 * MM), 100 * MM, MM / 2)), "{v:?}");
 }
 
-/// r3 (user 2026-11-22: "x space and y space in mm, straight or staggered"): the dropped island
-/// of the first test with 7 vias wanted. Staggered 5 x 5 mm from the origin: rows y = 15 and 25
+/// r3 (user 2026-11-22: "x space and y space in mm, straight or staggered"): a dropped island
+/// [8, 22] x [12, 27] mm with 7 vias wanted. Staggered 5 x 5 mm from the origin: rows y = 15 and 25
 /// (odd rows) are shifted by 2.5 mm, so every via stands on {12.5, 17.5} x {15, 25} or
 /// {10, 15, 20} x {20}. Straight 4 x 6 mm (6 vias, no area scaling): x in {12, 16, 20}, y in
 /// {18, 24}.
@@ -356,8 +368,9 @@ fn no_stitching_via_that_leaves_a_thin_neck_in_another_plane() {
 fn the_lattice_has_x_and_y_spacing_straight_or_staggered() {
     assert_eq!(Options::default().stitch_lattice, "staggered", "default lattice (user 2026-11-22)");
     let m = model(&[]);
-    let items = square(0, 8, 12, 22, 26);
-    let o = Options { stitch_min_vias: 7, stitch_lattice: Options::default().stitch_lattice, ..opts(true, 0.0, false) };
+    // y to 27 mm: the y = 25 row is not squeezed at the fill edge (round 4: one graded price).
+    let items = square(0, 8, 12, 22, 27);
+    let o = Options { stitch_min_vias: 7, stitch_per_area: false, stitch_lattice: Options::default().stitch_lattice, ..opts(true, 0.0, false) };
     let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
     let mut v = vias(&s.items);
     v.sort_unstable();
@@ -373,4 +386,78 @@ fn the_lattice_has_x_and_y_spacing_straight_or_staggered() {
     let mut want: Vec<(i64, i64)> = [12, 16, 20].iter().flat_map(|&x| [18, 24].map(|y| (x * MM, y * MM))).collect();
     want.sort_unstable();
     assert_eq!(v, want, "{:?}", s.notes);
+}
+
+fn on_grid(p: (i64, i64), origin: (i64, i64), step: i64) -> bool {
+    (p.0 - origin.0).rem_euclid(step) == 0 && (p.1 - origin.1).rem_euclid(step) == 0
+}
+
+/// Round 4 (user 2026-11-22: "the vias should use that as well"): with a via grid of 10 mil
+/// (0.254 mm) from the grid origin (1, 2) mm, the 5 mm pitch becomes 5.08 mm (a note names it),
+/// the staggered shift 2.54 mm, and every stitching via of a dropped island stands on the grid
+/// (lattice sites and the fallback sites both). stitch_on_grid off: the same island gets vias off
+/// the grid (5 mm lattice, raster fallback sites).
+#[test]
+fn stitching_vias_stand_on_the_via_grid() {
+    let m = model(&[]);
+    let items = square(0, 8, 12, 22, 26);
+    let g = 254_000;
+    let o = Options { grid_via_nm: [g, g], grid_origin_nm: [MM, 2 * MM], stitch_lattice: "staggered".into(), ..opts(true, 0.0, false) };
+    assert_eq!(lattice_xy(&o), (5_080_000.0, 5_080_000.0));
+    assert_eq!(lattice_shift(&o), 2_540_000.0);
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert!(v.len() >= 7, "{:?}", s.notes);
+    assert!(v.iter().all(|&p| on_grid(p, (MM, 2 * MM), g)), "{v:?} {:?}", s.notes);
+    assert!(s.notes[0].contains("staggered from the grid origin, on the via grid 0.254 x 0.254 mm"), "{}", s.notes[0]);
+    assert!(s.notes.iter().any(|n| n == "stitching vias: stitch_pitch_x_mm 5 is not a multiple of the via grid 0.254 mm: the lattice uses 5.08 mm"), "{:?}", s.notes);
+    // The track grid stands in for a missing via grid.
+    let o2 = Options { grid_via_nm: [0, 0], grid_track_nm: [g, g], ..o.clone() };
+    assert_eq!(lattice_xy(&o2), (5_080_000.0, 5_080_000.0));
+    // Off: the 0.05 mm rounding, no grid.
+    let off = Options { stitch_on_grid: false, ..o.clone() };
+    assert_eq!(lattice_xy(&off), (5_000_000.0, 5_000_000.0));
+    let s = stitch_regions(&m, &off, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert!(v.iter().any(|&p| !on_grid(p, (MM, 2 * MM), g)), "{v:?}");
+}
+
+/// Round 4: no lattice site fits the island (pitch 26 mm from (1, 1) mm: x 1 / 27, y 1 / 27; the
+/// island is worth a via at 169 mm² <= its area), so every via is a fallback site; on
+/// the 0.25 mm via grid they all stand on grid points (the raster cell centres are 0.025 mm off
+/// it). Without the grid at least one is off it.
+#[test]
+fn fallback_sites_snap_to_the_via_grid() {
+    let m = model(&[]);
+    let items = square(0, 8, 12, 22, 26);
+    let g = 250_000;
+    let base = Options { stitch_min_vias: 3, stitch_per_area: false, stitch_pitch_x_nm: 26 * MM, stitch_pitch_y_nm: 26 * MM, grid_origin_nm: [MM, MM], ..opts(true, 0.0, false) };
+    let o = Options { grid_via_nm: [g, g], ..base.clone() };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert_eq!(v.len(), 3, "{:?}", s.notes);
+    assert!(v.iter().all(|&p| on_grid(p, (MM, MM), g)), "{v:?}");
+    let s = stitch_regions(&m, &base, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert_eq!(v.len(), 3, "{:?}", s.notes);
+    assert!(v.iter().any(|&p| !on_grid(p, (MM, MM), g)), "{v:?}");
+}
+
+/// Round 4 (pins the lattice offset of a staggered lattice, earlier mutant offset_no_stagger): a
+/// dropped island [6, 22] x [23, 31] mm holds no point of the 20 x 20 mm lattice (rows y = 20 and
+/// 40), so its one via is a fallback site, drawn towards the nearest lattice point by the offset
+/// price. Straight, the nearest is (20, 20); staggered, the odd row y = 20 is shifted to x = 10 / 30,
+/// so the via moves to the other side of the island.
+#[test]
+fn the_lattice_offset_follows_the_staggered_rows() {
+    let m = model(&[]);
+    let items = square(0, 6, 23, 22, 31);
+    let base = Options { stitch_min_vias: 1, stitch_per_area: false, stitch_pitch_x_nm: 20 * MM, stitch_pitch_y_nm: 20 * MM, ..opts(true, 0.0, false) };
+    let st = stitch_regions(&m, &Options { stitch_lattice: "straight".into(), ..base.clone() }, &reg(), &items, &[], None, &|| false);
+    let sg = stitch_regions(&m, &Options { stitch_lattice: "staggered".into(), ..base }, &reg(), &items, &[], None, &|| false);
+    let (a, b) = (vias(&st.items), vias(&sg.items));
+    eprintln!("straight {a:?} staggered {b:?} {:?}", sg.notes);
+    assert_eq!((a.len(), b.len()), (1, 1), "{:?} {:?}", st.notes, sg.notes);
+    assert!(a[0].0 > 15 * MM && a[0].1 > 22 * MM, "straight: towards (20, 20) {a:?}");
+    assert!(b[0].0 < 15 * MM, "staggered: towards x = 10 {b:?}");
 }

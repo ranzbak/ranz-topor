@@ -65,7 +65,8 @@ fn a_cut_off_island_with_a_pad_gets_a_stitch_via() {
     let before = check_pour_reach(&m, &items, &[]);
     assert_eq!(before.cuts.len(), 1, "{:?}", before.notes);
     assert_eq!(before.cuts[0].pads, vec![0]);
-    let o = Options::default();
+    // The straight 5 mm lattice this test pins (the default is staggered since 2026-11-22).
+    let o = Options { stitch_lattice: "straight".into(), ..Options::default() };
     let s = stitch(&m, &o, &reg(), &items, &[], None);
     // stitch-vias: at least 2, one per pitch² of the piece (131.6 mm² / 25 mm² -> 6).
     let want = want_vias(before.cuts[0].area, lattice_pitch(&o), o.stitch_min_vias);

@@ -1,6 +1,6 @@
 """BoardModel exporter over kicad-python (kipy 0.8): the IPC twin of ``harness.model.export_model`` (same
 schema: ``units, board, layers, nets, pads, vias, kept, copper_shapes, holes, outline, keepouts, net_ties,
-pours, dangling_ends, rules, grid_origin, mask_openings``; KiCad frame, Y down, integer nm). No pcbnew (M4-R1).
+pours, dangling_ends, rules, mask_openings``; KiCad frame, Y down, integer nm). No pcbnew (M4-R1).
 
 Everything that only reshapes data is a pure function over kipy wrappers (unit-tested with wrappers built from
 protos): ``pad_from_kipy``, ``shape_to_prims``, ``shape_to_polys``, ``zone_to_keepouts``, ``zone_to_pour``,
@@ -61,7 +61,6 @@ trapezoid / chamfered / offset pads); dangling ends are linear for small nets (`
 from __future__ import annotations
 
 import math
-import re
 from pathlib import Path
 
 from kipy.board_types import (ArcTrack, BoardArc, BoardBezier, BoardCircle, BoardLayer, BoardPolygon,
@@ -603,19 +602,6 @@ def _dru_text(project, board_name: str, dru_text: str | None) -> str | None:
         return None
 
 
-_GRID_ORIGIN = re.compile(r"\(grid_origin\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\)")
-
-
-def grid_origin_of(pcb_text: str) -> list[int]:
-    """The board's grid origin (``(setup (grid_origin x y))``, mm in the file) in nm, KiCad frame; [0, 0]
-    when the file sets none (KiCad writes it only when it is not the default). The stitching lattice's
-    origin (stitch-vias). O(len)."""
-    m = _GRID_ORIGIN.search(pcb_text or "")
-    if not m:
-        return [0, 0]
-    return [int(round(float(m.group(1)) * 1e6)), int(round(float(m.group(2)) * 1e6))]
-
-
 def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: str,
                      layer_roles: dict | None = None, dru_text: str | None = None,
                      net_codes: dict | None = None) -> dict:
@@ -757,7 +743,6 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
                              for z in zones if z.type == bt.ZoneType.ZT_TEARDROP), key=lambda d: d["uuid"]),
         "dangling_ends": dangling,
         "rules": rules,
-        "grid_origin": grid_origin_of(pcb_copy_text),
         "mask_openings": mask_openings,
     }
     # custom rules: courtyard / rule-area clearance regions and pad clearance overrides (toporlib.custom_rules)

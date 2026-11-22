@@ -123,8 +123,9 @@ def test_grid_settings_values():
 
 
 class _Cfg:
-    def __init__(self, snap="prefer", mm="auto"):
-        self.v = {("drawing", "grid_snap"): snap, ("drawing", "grid_mm"): mm}
+    def __init__(self, snap="prefer", mm="auto", stitch=False, px=5.0, py=5.0):
+        self.v = {("drawing", "grid_snap"): snap, ("drawing", "grid_mm"): mm, ("planes", "stitch_islands"): stitch,
+                  ("planes", "stitch_on_grid"): stitch, ("planes", "stitch_pitch_x_mm"): px, ("planes", "stitch_pitch_y_mm"): py}
 
     def get(self, section, key):
         return self.v[(section, key)]
@@ -155,3 +156,27 @@ def test_run_options_wiring_reads_the_ports_settings_dir(tmp_path):
     # off, or the engine lacks the option: nothing
     assert grid_run_options(_Cfg("off"), known, _Port(d), PCB) == ({}, None)
     assert grid_run_options(_Cfg(), {}, _Port(d), PCB) == ({}, None)
+
+
+def test_stitching_vias_use_the_same_grid_with_grid_snap_off(tmp_path):
+    """stitch-vias round 4 (user 2026-11-22 "the vias should use that as well"): with grid_snap off and the
+    stitching vias on the grid, the same grid.resolve source (via override first, the board's grid origin) is
+    passed; a pitch that is not a multiple of the via grid is named; no grid = a stitching warning."""
+    from topor.run import grid_run_options
+    d = _settings(tmp_path, {"sizes": SIZES, "last_size": 3, "overrides_enabled": False})
+    known = {"grid_track_nm": [0, 0], "stitch_on_grid": True}
+    opts, lines = grid_run_options(_Cfg("off", stitch=True), known, _Port(d), PCB)
+    assert opts["grid_origin_nm"] == [75_927_000, 45_000_000] and min(opts["grid_track_nm"]) > 0, opts
+    assert all("grid snap:" not in x for x in lines), lines
+    # 5 mm on a 0.254 mm grid: 5.08 mm, named
+    o, ls = grid_run_options(_Cfg("off", mm=0.254, stitch=True), known, object(), PCB)
+    assert any("stitch_pitch_x_mm 5 is not a multiple of the via grid 0.254 mm: the lattice uses 5.08 mm" in x for x in ls), ls
+    # 5 mm on a 0.25 mm grid: exact, nothing named
+    o, ls = grid_run_options(_Cfg("off", mm=0.25, stitch=True), known, object(), PCB)
+    assert not any("not a multiple" in x for x in ls), ls
+    # no grid found: a stitching warning
+    o, ls = grid_run_options(_Cfg("off", stitch=True), known, object(), PCB)
+    assert any(x.startswith("warning: stitching vias: no grid found") for x in ls), ls
+    # stitching off (or stitch_on_grid off) and grid_snap off: nothing; an engine without stitch_on_grid: nothing
+    assert grid_run_options(_Cfg("off"), known, _Port(d), PCB) == ({}, None)
+    assert grid_run_options(_Cfg("off", stitch=True), {"grid_track_nm": [0, 0]}, _Port(d), PCB) == ({}, None)

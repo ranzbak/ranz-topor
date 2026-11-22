@@ -456,7 +456,7 @@ def test_export_model_ipc_end_to_end_and_engine_loads_it(engine):
         '(6 "In2.Cu" signal) ', "").replace('(4 "In1.Cu" signal) ', ""), rules, name="stub.kicad_pcb",
         layer_roles={}, dru_text=dru)
     assert list(m) == ["units", "board", "layers", "nets", "pads", "vias", "kept", "copper_shapes", "holes",
-                       "outline", "keepouts", "net_ties", "pours", "teardrops", "dangling_ends", "rules", "grid_origin",
+                       "outline", "keepouts", "net_ties", "pours", "teardrops", "dangling_ends", "rules",
                        "mask_openings"]
     assert m["teardrops"] == []
     assert [(o["layer"], o["owner_ref"]) for o in m["mask_openings"]] == [(0, None)]
@@ -616,10 +616,3 @@ def test_footprint_clearance_pad_explicit_zero_wins():
     assert conv(mk_pad("1", uid="py"), fp_clearance=0)[0]["local_clearance"] == 0
 
 
-def test_grid_origin_from_the_board_file():
-    """stitch-vias: the stitching lattice starts at the board's grid origin, (setup (grid_origin x y)) in mm;
-    KiCad omits it at the default (0, 0)."""
-    assert M.grid_origin_of("(kicad_pcb (setup\n\t\t(grid_origin 75.927 45)\n\t))") == [75_927_000, 45_000_000]
-    assert M.grid_origin_of("(setup (aux_axis_origin 1 2) (grid_origin -1.5 0.25))") == [-1_500_000, 250_000]
-    assert M.grid_origin_of("(kicad_pcb (setup (pad_to_mask_clearance 0)))") == [0, 0]
-    assert M.grid_origin_of("") == [0, 0]

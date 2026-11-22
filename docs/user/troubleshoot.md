@@ -712,7 +712,7 @@ copper violates a rule anywhere else, file a bug.
 
 **Cause.** topor added stitching vias between the copper pours of a net on two layers, before the zone refill: in islands KiCad would otherwise remove (planes.stitch_dropped), in parts of a pour joined to the rest only by a thin neck (planes.stitch_thin_mm), and with planes.stitch_area on a regular grid (planes.stitch_pitch_mm from the board's grid origin). Each piece and its vias are listed.
 
-**Fix.** Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). Set the spacing with planes.stitch_pitch_x_mm / stitch_pitch_y_mm and the pattern with planes.stitch_lattice (straight or staggered) and the grid origin with KiCad → Place → Grid Origin; planes.stitch_dropped = false and planes.stitch_thin_mm = 0 switch the stitching off.
+**Fix.** Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). Set the spacing with planes.stitch_pitch_x_mm / stitch_pitch_y_mm and the pattern with planes.stitch_lattice (straight or staggered) and the grid origin with KiCad → Place → Grid Origin; the vias stand on your KiCad via grid (View → Grid Properties; planes.stitch_on_grid = false = off the grid); planes.stitch_dropped = false and planes.stitch_thin_mm = 0 switch the stitching off.
 
 ### TIME_BUDGET_HIT
 

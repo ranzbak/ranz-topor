@@ -534,16 +534,6 @@ def _export_mask_openings(board, max_err: int) -> list[dict]:
     return out
 
 
-def _grid_origin(board) -> list[int]:
-    """The board's grid origin (nm, KiCad frame): the stitching lattice's origin (stitch-vias); [0, 0] when
-    this pcbnew has no accessor."""
-    try:
-        o = board.GetDesignSettings().GetGridOrigin()
-        return [int(o.x), int(o.y)]
-    except Exception:  # noqa: BLE001 - older pcbnew: the default origin
-        return [0, 0]
-
-
 def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) -> dict:
     """The BoardModel dict. `dru_text` (the .kicad_dru) adds its `disallow` rules as keepouts."""
     cu = _cu_layers(board)
@@ -578,7 +568,6 @@ def export_model(board, rules: dict, *, name: str, dru_text: str | None = None) 
                              if z.IsTeardropArea()), key=lambda d: d["uuid"]),
         "dangling_ends": find_dangling_ends(board),
         "rules": rules,
-        "grid_origin": _grid_origin(board),
         "mask_openings": _export_mask_openings(board, max_err),
     }
     return apply_to_model(model, dru_text, courtyards=_courtyards(board) if dru_text else {})

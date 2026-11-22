@@ -3,7 +3,7 @@
 # (tools/stitchvias_measure.py) and drawn with the refilled pours (tools/stitchvias_png.py).
 #   wiccon arms for D1: p5 (defaults), p7.5, p10, noarea (stitch_per_area = false, pitch 5)
 #   regression of F1 / D2: eprom, esp, qmtech at the defaults; the PROPOSED pattern
-#   usage: TOPOR_VENV=<venv> tools/stitchvias_r2.sh OUT [arm ...]     (arms: p5 p7.5 p10 noarea stag ep esp qm pattern; wicoff epoff espoff qmoff = stitching off)
+#   usage: TOPOR_VENV=<venv> tools/stitchvias_r2.sh OUT [arm ...]     (arms: p5 p7.5 p10 noarea stag straight ep esp qm pattern; wg epg espg qmg = on the 0.254 mm grid; wicoff epoff espoff qmoff = stitching off)
 set -u
 OUT=$(realpath -m "$1"); shift
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -11,6 +11,8 @@ cd "$ROOT"
 PY="${TOPOR_VENV:-$ROOT/.venv}/bin/python"
 # stitching as before stitch-vias (one via per cut piece, no region classes): the same-rev baseline (r3)
 OFF=(--set planes.stitch_dropped=false --set planes.stitch_thin_mm=0 --set planes.stitch_min_vias=1 --set planes.stitch_per_area=false)
+# round 4: the stitching vias on the user's KiCad grid (10 mil, KiCad 10's current grid; grid_snap stays off)
+G=(--set drawing.grid_mm=0.254)
 S=(--set optimize.runs=1 --set optimize.rounds=1 --set optimize.stable_patience=1)
 B=$ROOT/../../boards
 [ -d "$B" ] || B=$ROOT/scratch/boards
@@ -46,13 +48,18 @@ for a in "${@:-p5 p7.5 p10 noarea ep esp qm pattern}"; do
   for arm in $a; do
     case $arm in
       p5) run p5 "$WIC" ;;
-      p7.5) run p7.5 "$WIC" --set planes.stitch_pitch_mm=7.5 ;;
-      p10) run p10 "$WIC" --set planes.stitch_pitch_mm=10 ;;
+      p7.5) run p7.5 "$WIC" --set planes.stitch_pitch_x_mm=7.5 --set planes.stitch_pitch_y_mm=7.5 ;;
+      p10) run p10 "$WIC" --set planes.stitch_pitch_x_mm=10 --set planes.stitch_pitch_y_mm=10 ;;
       noarea) run noarea "$WIC" --set planes.stitch_per_area=false ;;
       ep) run ep "$EP" ;;
       esp) run esp "$ESP" ;;
       qm) run qm "$QM" ;;
       stag) run stag "$WIC" --set planes.stitch_lattice=staggered ;;
+      straight) run straight "$WIC" --set planes.stitch_lattice=straight ;;
+      wg) run wg "$WIC" "${G[@]}" ;;
+      epg) run epg "$EP" "${G[@]}" ;;
+      espg) run espg "$ESP" "${G[@]}" ;;
+      qmg) run qmg "$QM" "${G[@]}" ;;
       wicoff) run wicoff "$WIC" "${OFF[@]}" ;;
       epoff) run epoff "$EP" "${OFF[@]}" ;;
       espoff) run espoff "$ESP" "${OFF[@]}" ;;
