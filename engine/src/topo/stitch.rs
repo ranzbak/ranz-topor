@@ -699,7 +699,7 @@ impl<'a> Ctx<'a> {
                                 // r5c: a connection via may stand off the grid, at the graded
                                 // off_grid price (the gridsnap factor), never ahead of a legal
                                 // grid point of the same score.
-                                out.push(Site { p, cost: cost + self.off_grid_nm * g.amount(p) });
+                                out.push(Site { p, cost: off_grid_site_cost(cost, self.off_grid_nm, g.amount(p)) });
                             }
                         }
                     }
@@ -1786,4 +1786,30 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
         out.notes.push(n);
     }
     out
+}
+
+/// Cost of a connection-via site off the via grid (r5c): its own price plus the graded `off_grid`
+/// price (nm) times the off-grid `amount` (0 on the grid, 1 at a cell centre), so a site off the
+/// grid never ranks ahead of a legal grid site of the same own price and a nearer-to-grid spot
+/// ranks ahead of a farther one. O(1).
+fn off_grid_site_cost(cost: f64, off_grid_nm: f64, amount: f64) -> f64 {
+    cost + off_grid_nm * amount
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn off_grid_site_ranks_behind_a_grid_site_of_the_same_price_and_by_distance() {
+        let price = 2.0e6;
+        let grid = Site { p: Vec2 { x: 0.0, y: 0.0 }, cost: 5.0e5 };
+        let near = Site { p: Vec2 { x: 1.0e5, y: 0.0 }, cost: off_grid_site_cost(5.0e5, price, 0.1) };
+        let far = Site { p: Vec2 { x: 5.0e5, y: 0.0 }, cost: off_grid_site_cost(5.0e5, price, 0.8) };
+        assert!(grid.cost < near.cost && near.cost < far.cost);
+        assert_eq!(off_grid_site_cost(5.0e5, price, 0.0), grid.cost, "on the grid costs nothing extra");
+        assert!((far.cost - near.cost - 0.7 * price).abs() < 1e-6);
+        // a zero price makes the sites tie (the factor off), so the price is what ranks them
+        assert_eq!(off_grid_site_cost(5.0e5, 0.0, 0.8), 5.0e5);
+    }
 }

@@ -239,3 +239,41 @@ fn vfy_class1_via_stays_on_the_grid_when_no_grid_point_near_its_pad_is_legal() {
     assert!(v[0].1 < 20 * MM && v[0].0 < 4 * MM, "the off-grid connection via near its pad: {v:?}");
     assert!(s.notes.iter().any(|n| n.starts_with("stitch via off the via grid at ") && n.contains("pads [U1.1]") && n.contains("the piece's only connection")), "{:?}", s.notes);
 }
+
+/// r6: the off-grid price ranks the sites of a connection via that leaves the via grid. The
+/// fixture of the test above (the strip's only connection via, grid columns at x = 0 / 20 mm): the
+/// price is graded by the distance to the nearest grid point, so with a high `off_grid` weight the
+/// via moves towards the grid column (smaller x) and with weight 0 it stays by its pad (x = 2.85).
+/// Kills the `off_price` mutant (the price term dropped at the site).
+#[test]
+fn off_grid_price_ranks_the_sites_of_a_connection_via() {
+    let mut m = model(&[r#"{ "uuid": "U1", "ref": "U1", "number": "1", "net": 1, "attr": "smd", "center": [2850000, 10000000], "layers": [31],
+        "shapes": { "31": { "kind": "circle", "d": 1000000 } } }"#.to_string()]);
+    m.pours[0].pads.push("U1.1".into());
+    let items = [
+        seg(2, 31, (4 * MM, MM), (4 * MM, 20 * MM)),
+        seg(2, 31, (4 * MM, 20 * MM), (15 * MM, 20 * MM)),
+        seg(2, 31, (15 * MM, 20 * MM), (15 * MM, 33 * MM)),
+    ];
+    let at = |w: f64| {
+        let o = Options {
+            grid_via_nm: [20 * MM, MM / 2],
+            grid_origin_nm: [0, 0],
+            stitch_min_vias: 1,
+            stitch_per_area: false,
+            stitch_pitch_x_nm: 4 * MM,
+            stitch_pitch_y_nm: 5 * MM,
+            stitch_lattice: "straight".into(),
+            factors: FactorConfig { weight: [("off_grid".to_string(), w)].into_iter().collect(), ..FactorConfig::default() },
+            ..Options::default()
+        };
+        let s = stitch(&m, &o, &reg(), &items, &[], None);
+        let v = vias(&s.items.iter().filter(|i| matches!(i, Item::Via(_))).cloned().collect::<Vec<_>>());
+        assert_eq!(v.len(), 1, "{:?}", s.notes);
+        v[0]
+    };
+    let free = at(0.0);
+    let dear = at(5000.0);
+    eprintln!("free {free:?} dear {dear:?}");
+    assert!(dear.0 < free.0, "a high off_grid price pulls the via towards the grid column: free {free:?} dear {dear:?}");
+}
