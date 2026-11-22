@@ -318,3 +318,171 @@ fn drawn_sketches_carry_the_places_of_their_violations() {
     assert_eq!(last.errors_at.len(), last.violations, "last sketch: one place per violation of its round");
     assert!(!last.errors_at.is_empty());
 }
+
+/// plan-dots (user 2026-11-21: "I only see the errors when the routing is rendered to copper"): the
+/// loop's plan sketches seen at the loop's end, with sketches asked for at every other hook point.
+fn plan_sketches(m: &BoardModel, o: &Options) -> Vec<Sketch> {
+    let ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    ctl.sketches.enable();
+    let seen: Arc<std::sync::Mutex<Vec<Sketch>>> = Arc::default();
+    let mut c2 = ctl.clone();
+    {
+        let (c3, s2) = (ctl.clone(), seen.clone());
+        c2.set_test_hook(move |_| {
+            for sk in [c3.sketches.get(false, 0), c3.sketches.get(true, 1)].into_iter().flatten() {
+                let mut s = s2.lock().expect("seen");
+                if sk.kind == "plan" && !s.iter().any(|x| x.seq == sk.seq) {
+                    s.push((*sk).clone());
+                }
+            }
+            c3.sketches.request();
+            false
+        });
+    }
+    let _ = route_with(m, o, &c2);
+    let v = seen.lock().expect("seen").clone();
+    v
+}
+
+fn channel_overfull() -> BoardModel {
+    let path = format!("{}/tests/fixtures/fit/channel_overfull.json", env!("CARGO_MANIFEST_DIR"));
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).expect("fixture")).expect("json");
+    BoardModel::from_json(&doc["model"].to_string()).expect("model")
+}
+
+/// plan-dots: a plan sketch carries one place per predicted violation its plan counts. On
+/// `channel_overfull` (4 wires through a slot between the pads at x = 4.15 and 6.05 mm, y = 6 mm
+/// that fits 2) every model (per-edge edges, per-layer cuts) predicts the slot over-full, and a
+/// dot lies in the slot's middle (x 5.1 +- 0.3 mm, y 6 +- 0.5 mm; the pads' facing sides are at
+/// x 4.30 and 5.90, their corners at y 5.6 / 6.4: an edge or cut across it has its middle there).
+#[test]
+fn plan_sketches_carry_the_places_of_their_predicted_violations() {
+    let m = channel_overfull();
+    for model in ["edges", "cuts"] {
+        let o = Options::from_json(&format!(r#"{{"runs": 1, "wall_clock_s": 120.0, "topo_rounds": 2, "opt_loop": "topor", "initial": "once", "capacity_model": "{model}"}}"#)).expect("options");
+        let seen = plan_sketches(&m, &o);
+        assert!(!seen.is_empty(), "{model}: no plan sketch");
+        for sk in &seen {
+            assert_eq!(sk.errors_at.len(), sk.violations, "{model}: cycle {}: one dot per predicted violation (no forced path here)", sk.cycle);
+            assert!(sk.violations > 0, "{model}: cycle {}: the slot must be predicted over-full, else this test proves nothing", sk.cycle);
+            let in_slot = sk.errors_at.iter().filter(|p| (p[0] - 5_100_000).abs() <= 300_000 && (p[1] - 6_000_000).abs() <= 500_000).count();
+            assert!(in_slot > 0, "{model}: cycle {}: no dot in the slot: {:?}", sk.cycle, sk.errors_at);
+        }
+    }
+}
+
+/// plan-dots: on real crops (2 layers, vias, crossings, via cuts) every plan sketch of the loop
+/// has as many dots as its plan's predicted violations (less the connections placed without a
+/// legal path, which have no place: none on these crops with `initial = "once"` at this cap).
+#[test]
+fn every_plan_sketch_has_one_dot_per_predicted_violation() {
+    let mut any = 0;
+    for fixture in [EPROM, "esp-rust-board-usb-crop.json"] {
+        let m = BoardModel::from_json(&fixture_text(fixture)).expect("fixture parses");
+        let o = Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 4, "runs": 1, "refine_lanes": 1}"#).expect("options parse");
+        let seen = plan_sketches(&m, &o);
+        assert!(!seen.is_empty(), "{fixture}: no plan sketch");
+        for sk in &seen {
+            assert_eq!(sk.errors_at.len(), sk.violations, "{fixture}: cycle {}: dots vs predicted violations", sk.cycle);
+            any += sk.violations;
+        }
+    }
+    assert!(any > 0, "no plan predicted any violation: the test proves nothing");
+}
+
+/// plan-dots: a small board (KiCad frame, mm): `w` x `h` outline, `layers` signal layers (F.Cu,
+/// then B.Cu), SMD rect pads `(net, x, y, w, h, layer id)`; nets 1..=3.
+fn board(w: f64, h: f64, layers: usize, pads: &[(i32, f64, f64, f64, f64, i32)]) -> BoardModel {
+    let p = |v: f64| (v * 1e6).round() as i64;
+    let c = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
+    let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+    let pj: Vec<String> = pads
+        .iter()
+        .enumerate()
+        .map(|(i, &(net, x, y, pw, ph, l))| format!(r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":{net},"attr":"smd","center":[{},{}],"rotation_deg":0.0,"layers":[{l}],"shapes":{{"{l}":{{"kind":"rect","w":{},"h":{}}}}},"drill":null}}"#, p(x), p(y), p(pw), p(ph)))
+        .collect();
+    let ly = [r#"{"id":0,"name":"F.Cu","kind":"signal"}"#, r#"{"id":2,"name":"B.Cu","kind":"signal"}"#][..layers].join(",");
+    let s = format!(
+        r#"{{"units":"nm","board":"plandots","layers":[{ly}],
+            "nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}},{{"code":3,"name":"C"}}],
+            "pads":[{}],"keepouts":[],"outline":[{}],
+            "rules":{{"min_clearance":200000,"min_track_width":250000,"min_via_diameter":600000,"min_via_drill":300000,
+                     "min_annular":50000,"hole_clearance":250000,"hole_to_hole":250000,"edge_clearance":500000,
+                     "default":{{"clearance":200000,"width":250000,"via_d":600000,"via_drill":300000}}}}}}"#,
+        pj.join(","),
+        segs.join(",")
+    );
+    BoardModel::from_json(&s).expect("board")
+}
+
+fn loop_opts() -> Options {
+    Options::from_json(r#"{"wall_clock_s": 120.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 2, "runs": 1, "refine_lanes": 1}"#).expect("options parse")
+}
+
+/// plan-dots: a wall of another net's copper (net B, x 4.5..5.5 mm, the board's whole height, on
+/// both layers) between A's two pads: A is placed through it (never drop: a connection without a legal
+/// path, `forced`) and its traversal of B's copper is a predicted violation with its dot in the
+/// wall. The forced connection itself is counted with no place: exactly one dot fewer than the
+/// predicted violations.
+#[test]
+fn a_traversal_of_foreign_copper_has_its_dot_in_the_copper_and_the_forced_path_none() {
+    let m = board(10.0, 10.0, 2, &[(1, 1.5, 5.0, 1.0, 1.0, 0), (1, 8.5, 5.0, 1.0, 1.0, 0), (2, 5.0, 5.0, 1.0, 10.0, 0), (2, 5.0, 5.0, 1.0, 10.0, 2)]);
+    let seen = plan_sketches(&m, &loop_opts());
+    assert!(!seen.is_empty(), "no plan sketch");
+    for sk in &seen {
+        assert_eq!(sk.errors_at.len() + 1, sk.violations, "cycle {}: one dot per predicted violation but the forced connection", sk.cycle);
+        assert!(sk.errors_at.iter().any(|p| (p[0] - 5_000_000).abs() <= 500_000), "cycle {}: no dot in the wall: {:?}", sk.cycle, sk.errors_at);
+    }
+}
+
+/// plan-dots: `board`'s connections planned by hand (each its shortest path, the loop's layer
+/// assignment), the per-edge capacity model of it and the places of its predicted violations,
+/// with the parts the measure counts: `(places, over-full of the model, unlayerable, foreign)`.
+fn hand_plan(m: &BoardModel) -> (topor_engine::topo::compass::PlanPlaces, usize, usize, usize) {
+    hand_plan_with(m, |_| {})
+}
+
+/// [`hand_plan`] with the layer report changed by `edit` before the places are taken.
+fn hand_plan_with(m: &BoardModel, edit: impl FnOnce(&mut topor_engine::topo::layers::LayerReport)) -> (topor_engine::topo::compass::PlanPlaces, usize, usize, usize) {
+    use topor_engine::topo::board::{self as tb, BuildOpts};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::layers::{self, LayerParams};
+    use topor_engine::topo::optimise::{foreign_copper, layers_now};
+    use topor_engine::topo::pack::Packer;
+    use topor_engine::topo::refine::CapModel;
+    use topor_engine::topo::state::State;
+    let o = Options::default();
+    let b = tb::build(m, &BuildOpts::default()).expect("build");
+    let conns = b.connections(m);
+    let mut st = State::new(&b.proj);
+    for c in &conns {
+        st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+    }
+    let packer = Packer::for_model(m, &o, &b.proj);
+    let smd = |ob: usize| b.smd_layer(ob);
+    let mut lr = layers::assign_with(&st, &smd, &LayerParams::default(), Some(&packer));
+    edit(&mut lr);
+    let dirs = packer.taut_dirs(&st);
+    let bottom = 1;
+    let cm = CapModel::new(&st, &packer, &dirs, &lr.events, bottom, 1.0);
+    let pl = topor_engine::topo::compass::plan_places(&st, &lr, &cm, bottom, 0, &[]);
+    let fc = foreign_copper(&st, &layers_now(&st, &lr.events, bottom)).0;
+    (pl, cm.overfull(), lr.unlayerable.len(), fc)
+}
+
+/// plan-dots: each crossing no layer separates has its dot at the crossing: the hand plan of a
+/// board with two over-full edges (B's pads on B.Cu over net C's B.Cu cover), and the same plan
+/// with one more such crossing at (3, 2) mm (KiCad frame) in its layer report: one dot more,
+/// there; the rest unchanged.
+#[test]
+fn each_unlayerable_crossing_of_the_layer_report_has_a_dot_there() {
+    let m = board(10.0, 6.0, 2, &[(1, 1.0, 3.0, 1.0, 1.0, 0), (1, 9.0, 3.0, 1.0, 1.0, 0), (2, 5.0, 1.0, 1.0, 1.0, 2), (2, 5.0, 5.0, 1.0, 1.0, 2), (3, 5.0, 3.0, 9.6, 5.6, 2)]);
+    let (pl, over, unl, fc) = hand_plan(&m);
+    assert_eq!(pl.at.len(), over + unl + fc, "one dot per counted violation: {pl:?}");
+    assert!(over > 0, "the case shows: over-full edges");
+    let (pl2, ..) = hand_plan_with(&m, |lr| lr.unlayerable.push(topor_engine::geom::Vec2 { x: 3e6, y: -2e6 }));
+    assert_eq!(pl2.at.len(), pl.at.len() + 1);
+    assert!(pl2.at.contains(&[3_000_000, 2_000_000]), "the crossing's dot at (3, 2) mm: {:?}", pl2.at);
+    assert!(pl.at.iter().all(|p| pl2.at.contains(p)));
+}

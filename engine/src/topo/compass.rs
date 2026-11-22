@@ -167,9 +167,25 @@ fn cut_items(v: &PlanView, cm: &CapModel, over: bool, class: &str) -> Vec<Compas
 /// [`super::optimise::foreign_copper`] (same test, same loops). O(traversals x obstacles per
 /// triangle).
 pub fn foreign_items(v: &PlanView) -> Vec<CompassItem> {
-    let st = v.st;
+    let pr = v.st.proj;
+    foreign_hits(v.st, &v.lr.events, v.bottom)
+        .into_iter()
+        .map(|(w, bits, chords)| {
+            let ls = (0..pr.n_layers.min(64)).filter(|&l| bits & (1u64 << l) != 0).map(|l| (v.layer)(l)).collect();
+            CompassItem { class: "foreign_copper".into(), layers: ls, conns: conns_of(v, [w]), segs: chords.into_iter().map(|(a, b)| seg(a, b)).collect(), over_nm: 0, members: 1 }
+        })
+        .collect()
+}
+
+/// One traversal through foreign copper: the wire, the layer bits the object blocks it on, its
+/// chords inside the object.
+type ForeignHit = (WireId, u64, Vec<(Vec2, Vec2)>);
+
+/// The (wire, object) traversals [`super::optimise::foreign_copper`] counts, in its order (same
+/// test, same loops), under the layering `events`. O(traversals x obstacles per triangle).
+fn foreign_hits(st: &State, events: &[Vec<(usize, f64, i32)>], bottom: i32) -> Vec<ForeignHit> {
     let pr = st.proj;
-    let layers = layers_now(st, &v.lr.events, v.bottom);
+    let layers = layers_now(st, events, bottom);
     let all = if pr.n_layers >= 64 { u64::MAX } else { (1u64 << pr.n_layers) - 1 };
     let mut out = Vec::new();
     for (w, wi) in st.wires.iter().enumerate() {
@@ -206,12 +222,37 @@ pub fn foreign_items(v: &PlanView) -> Vec<CompassItem> {
                 }
             }
         }
-        for (_, bits, chords) in inside {
-            let ls = (0..pr.n_layers.min(64)).filter(|&l| bits & (1u64 << l) != 0).map(|l| (v.layer)(l)).collect();
-            out.push(CompassItem { class: "foreign_copper".into(), layers: ls, conns: conns_of(v, [w]), segs: chords.into_iter().map(|(a, b)| seg(a, b)).collect(), over_nm: 0, members: 1 });
-        }
+        out.extend(inside.into_iter().map(|(_, bits, chords)| (w, bits, chords)));
     }
     out
+}
+
+/// plan-dots: where a plan's predicted violations are, for the progress dialog's dots on a plan
+/// sketch (`control::Sketch::errors_at`, KiCad frame, nm), and how many have no place.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlanPlaces {
+    pub at: Vec<[i64; 2]>,
+    /// Counted but not located: the connections placed without a legal path (`forced`; the
+    /// plan knows the connection, not the spot where its path breaks a rule).
+    pub unplaced: usize,
+}
+
+/// plan-dots: one place per predicted violation the TopoR loop's measure counts for the plan
+/// `st` + `lr` ([`super::optimise::Predicted::count`]), part by part in its order: the capacity
+/// model `cm`'s count ([`CapModel::error_places`]: over-full edge-layers or cuts, vias without a
+/// site, over-full via cuts), the crossings no layer separates (`lr.unlayerable`, at the
+/// crossing), the traversals through foreign copper (at the middle of the first chord inside
+/// the object, [`foreign_hits`]), the pour pieces the plan cuts off (`pour`, at the pieces'
+/// centroid, [`super::pourplan::cut_components`]); `forced` connections without a place
+/// ([`PlanPlaces::unplaced`]). So `at.len() + unplaced` is the measure's count of the same plan
+/// built with the same capacity model. Places may coincide (two layers of one edge). Measurement
+/// only. O(as the measure).
+pub fn plan_places(st: &State, lr: &super::layers::LayerReport, cm: &CapModel, bottom: i32, forced: usize, pour: &[super::pourplan::CutComp]) -> PlanPlaces {
+    let mut at: Vec<[i64; 2]> = cm.error_places(&lr.events).into_iter().map(kicad).collect();
+    at.extend(lr.unlayerable.iter().map(|&p| kicad(p)));
+    at.extend(foreign_hits(st, &lr.events, bottom).into_iter().filter_map(|(_, _, ch)| ch.first().map(|&(a, b)| kicad((a + b) * 0.5))));
+    at.extend(pour.iter().map(|c| kicad(c.at)));
+    PlanPlaces { at, unplaced: forced }
 }
 
 /// The plan's necked stretches, located (TW4 meter: before, `shrinkage` items came only from the

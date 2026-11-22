@@ -327,3 +327,60 @@ fn best_point_candidates_keep_the_via_clear_of_other_pads() {
     }
     assert!(fewer > 0, "the case shows: some site points lack room");
 }
+
+/// plan-dots (the progress dialog's dots on a plan sketch): the capacity model places one dot per
+/// predicted violation it counts. On the hand-planned gap board TXD's via in the gap with RST
+/// through it is an over-full via cut: `via_cut_places` has `via_cut_count` places, each at the
+/// via's planned point (in the gap, x 4.75..7.25 mm, y 4.5..5.5 mm); `nosite_places` has
+/// `nosite` places; `error_places` has `overfull` places. Over the gap's variants (U21 shifted,
+/// T1 moved; with and without `via_best_point`) the counts stay equal.
+#[test]
+fn the_capacity_model_places_one_dot_per_counted_violation() {
+    use topor_engine::topo::board::{self as tb, BuildOpts};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::layers::{self, LayerParams};
+    use topor_engine::topo::pack::Packer;
+    use topor_engine::topo::refine::CapModel;
+    use topor_engine::topo::state::State;
+    let mut shown = 0;
+    for json in [r#"{"via_cuts": true}"#, r#"{"via_cuts": true, "via_best_point": true}"#] {
+        let o = gap_opts(json);
+        for dx in [0.0, 0.8, 1.6] {
+            for tx in [-0.8, 0.0, 0.8] {
+                let mut pads = GAP_PADS;
+                pads[2].2 += dx;
+                pads[1].2 += tx;
+                let m = gap_with(&pads);
+                let b = tb::build(&m, &BuildOpts::default()).unwrap();
+                let conns = b.connections(&m);
+                let mut st = State::new(&b.proj);
+                for c in &conns {
+                    st.route_conn(c, &InitWeights::default(), (c.w + c.s) / 400_000.0).expect("routes");
+                }
+                let packer = Packer::for_model(&m, &o, &b.proj);
+                let smd = |ob: usize| b.smd_layer(ob);
+                let lr = layers::assign_with(&st, &smd, &LayerParams::default(), Some(&packer));
+                let dirs = packer.taut_dirs(&st);
+                let cm = CapModel::new(&st, &packer, &dirs, &lr.events, 1, 1.0);
+                let vc = cm.via_cut_places();
+                assert_eq!(vc.len(), cm.via_cut_count(), "{json} U21 +{dx} T1 {tx:+}: one place per over-full via cut");
+                assert_eq!(cm.nosite_places(&lr.events).len(), cm.nosite(), "{json} U21 +{dx} T1 {tx:+}: one place per via without a site");
+                assert_eq!(cm.error_places(&lr.events).len(), cm.overfull(), "{json} U21 +{dx} T1 {tx:+}: one place per counted violation");
+                if vc.is_empty() {
+                    continue;
+                }
+                shown += 1;
+                // math frame (y up): the gap between U22 (y 4) and U21 (y 6), round T1
+                for p in &vc {
+                    assert!(p.x > 4.75 * MM + tx * MM - 1.0 && p.x < 7.25 * MM + tx * MM + 1.0 && -p.y > 4.5 * MM - 1.0 && -p.y < 5.5 * MM + 1.0, "{json} U21 +{dx} T1 {tx:+}: via cut place ({:.3}, {:.3}) mm not in the gap", p.x / MM, -p.y / MM);
+                }
+                if !json.contains("best") {
+                    let pts: Vec<_> = cm.via_cut_points().into_iter().map(|x| x.1).collect();
+                    assert!(vc.iter().all(|p| pts.contains(p)), "{json}: every via cut place is a planned via point");
+                }
+            }
+        }
+    }
+    assert!(shown > 0, "the case shows: an over-full via cut");
+}
+

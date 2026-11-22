@@ -70,7 +70,7 @@ are not public; its rows stay as measurements, the public stand-in for new runs 
 
 The **Topor: route** button runs this core in KiCad 10: pre-flight findings (pads inside track keepouts), a progress dialog that names the stage and round and shows router time and
 total time (`[run] timeout_s` is now 600 s, an emergency stop; the `[optimize]` work caps end a run), Cancel at any
-time, a preview with the open ratsnest in blue and a yellow dot at each rule violation the engine reports, findings after routing (unrouted connections by reason, pour
+time, a preview with the open ratsnest in blue and a yellow dot at each rule violation the engine reports (while the loop runs, smaller dots at the plan's predicted errors), findings after routing (unrouted connections by reason, pour
 islands and stitches, via squeeze, necking, ignored rules, ...; [operate.md](docs/user/operate.md#findings-after-routing)),
 Accept (routes = one undo step, zone refill = a second). Every `topor.toml` setting the core reads reaches it (before K1 the `[optimize]`,
 `[factors]` and the other core settings were dropped as "since 0.5.0"); settings of the classic engine say so in

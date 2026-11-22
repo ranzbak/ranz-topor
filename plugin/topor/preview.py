@@ -41,6 +41,11 @@ RATSNEST_RGB = (0, 80, 255)
 ERROR_DOT_RGB = (255, 221, 0)
 ERROR_DOT_EDGE_RGB = (24, 24, 24)
 ERROR_DOT_R_MM = 0.55
+#: plan-dots (user 2026-11-21: "the yellow markers a bit smaller on the route finder preview as well"): the dots of a
+#: plan sketch (the plan's own predicted errors, ``Sketch.errors_at`` of a ``"plan"`` sketch) are this share of the
+#: copper dots' radius, same yellow, so predicted and drawn errors read apart
+PLAN_DOT_SCALE = 0.6
+PLAN_DOT_R_MM = ERROR_DOT_R_MM * PLAN_DOT_SCALE
 PREVIEW_HIGHLIGHT_FALLBACK_RGB = (208, 64, 208)
 MIN_CONTRAST = 3.0  # WCAG graphics
 
@@ -516,11 +521,12 @@ def live_base(model: dict) -> dict | None:
             "svg": f'<g opacity="{LIVE_BASE_OPACITY}">' + "".join(parts) + "</g>\n"}
 
 
-def live_svg(base: dict, items: list, errors=None) -> str:
+def live_svg(base: dict, items: list, errors=None, *, plan: bool = False) -> str:
     """The progress dialog's board image as SVG text (mm units, origin at the outline's minimum corner): the board
     ground, `base` (:func:`live_base`) and `items` (a sketch's tracks and vias, KiCad frame) in their layers'
     default colours on top, then `errors` (yellow dots, :func:`error_dots`; positions only when the engine
-    exports them). O(items)."""
+    exports them). `plan`: the sketch is a plan, its dots are its predicted errors, drawn at
+    :data:`PLAN_DOT_SCALE` of the copper dots' radius. O(items)."""
     ox, oy = base["origin"]
     w, h = base["size"]
     m = 0.5  # mm of margin around the outline
@@ -546,4 +552,11 @@ def live_svg(base: dict, items: list, errors=None) -> str:
             f'viewBox="{-m:.4f} {-m:.4f} {w + 2 * m:.4f} {h + 2 * m:.4f}">\n'
             f'<rect x="{-m:.4f}" y="{-m:.4f}" width="{w + 2 * m:.4f}" height="{h + 2 * m:.4f}" '
             f'fill="{_hex(LIVE_BOARD_RGB)}" />\n' + base["svg"] + "<g>" + "".join(core) + "</g>\n"
-            + error_dots(error_points(errors), (ox, oy), r_mm=error_dot_radius(big, 60.0)) + "</svg>\n")
+            + error_dots(error_points(errors), (ox, oy), r_mm=live_dot_radius(big, plan)) + "</svg>\n")
+
+
+def live_dot_radius(board_mm: float, plan: bool) -> float:
+    """The progress dialog's dot radius (mm): :func:`error_dot_radius` for the dialog's box (about 6 px), a plan
+    sketch's dots :data:`PLAN_DOT_SCALE` of it. O(1)."""
+    r = error_dot_radius(board_mm, 60.0)
+    return r * PLAN_DOT_SCALE if plan else r

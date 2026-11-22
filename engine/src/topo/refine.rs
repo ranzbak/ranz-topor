@@ -925,6 +925,20 @@ impl<'a> Frame<'a> {
     /// 5.2: the end-traversal site ([`end_site`]) of via interval `i` of `w` under events `ev`
     /// when the interval has no traversal strictly between its events (`[vias]
     /// between_crossings`); `None` otherwise or when there is none. Cached ([`Arrays::end_sites`]).
+    /// plan-dots: whether via `i` of `w` (traversals `ks`, events `ev`, `between` =
+    /// `via_ranges(ev, true).1` with `[vias] between_crossings`) has no site, by the test of
+    /// [`Frame::apply`]'s no-site count, read-only: an end site not in the cache is computed and
+    /// not stored (as [`CapModel::nosite_debug`]). Keep in step with `apply`. O(one via test).
+    fn via_no_site<M: MemRead + ?Sized>(&self, m: &M, w: WireId, ev: &[LEv], ks: &[usize], between: &[bool], i: usize) -> bool {
+        if self.lead_via(w, i, ks.len(), ev).is_some() {
+            false
+        } else if between.get(i) == Some(&false) {
+            self.end_key(w, ev, i).and_then(|(key, a, b)| m.end_site(&key).unwrap_or_else(|| self.end_site_raw(m, w, a, b))).is_none()
+        } else {
+            self.rank(m, w, ks[i]).0
+        }
+    }
+
     fn end_site_of<M: Mem + ?Sized>(&self, m: &mut M, w: WireId, ev: &[LEv], i: usize) -> Option<(usize, Vec2)> {
         let (key, a, b) = self.end_key(w, ev, i)?;
         if let Some(x) = m.end_site(&key) {
@@ -1228,13 +1242,24 @@ impl<'a> Frame<'a> {
     /// neighbours)).
     pub(crate) fn exit_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> viacut::Over {
         let mut tot = viacut::Over::default();
-        let Some(norm) = self.packer.via_cuts else { return tot };
-        if self.vfocus.as_ref().is_some_and(|f| !f.get(w).copied().unwrap_or(false)) {
-            return tot;
+        self.exit_over_each(m, w, |_, o| {
+            tot.count += o.count;
+            tot.graded += o.graded;
+        });
+        tot
+    }
+
+    /// plan-dots: [`Frame::exit_over`] term by term, in its order: `f(place, term)` per term it
+    /// adds, the place being the middle of the exit's stub. The sum of the terms in call order is
+    /// `exit_over` (bit for bit: `exit_over` is this sum). O(as exit_over).
+    pub(crate) fn exit_over_each<M: MemRead + ?Sized>(&self, m: &M, w: WireId, mut f: impl FnMut(Vec2, viacut::Over)) {
+        let Some(norm) = self.packer.via_cuts else { return };
+        if self.vfocus.as_ref().is_some_and(|fo| !fo.get(w).copied().unwrap_or(false)) {
+            return;
         }
         let geos = self.exits(w);
         if geos.is_empty() {
-            return tot;
+            return;
         }
         let st = self.st;
         let wi = &st.wires[w];
@@ -1255,10 +1280,6 @@ impl<'a> Frame<'a> {
             let wd = xi.passes.get(j).and_then(|&p| st.pass_w.get(p).copied()).unwrap_or(xi.w);
             super::demand::Item { net: xi.net, w: wd, s: xi.s }
         };
-        let add = |tot: &mut viacut::Over, o: viacut::Over| {
-            tot.count += o.count;
-            tot.graded += o.graded;
-        };
         let r = 0.5 * self.wire_d[w];
         // Diagnosis hook, not a setting: `TOPO_PX_TERMS` (letters of the terms priced, default all
         // three "abc") is read once per process and only here, so it matters only with
@@ -1270,6 +1291,7 @@ impl<'a> Frame<'a> {
             [v.contains('a'), v.contains('b'), v.contains('c')]
         });
         for g in geos.iter() {
+            let at = (g.a + g.b) * 0.5;
             let pitch = (g.w_e + wi.s).max(1.0);
             // The pad's layer as a planning layer (a pad off the signal layers prices no cuts).
             let pl = st.proj.n_layers.min(64);
@@ -1277,8 +1299,8 @@ impl<'a> Frame<'a> {
                 continue;
             }
             // (a)
-            if let Some((f, c)) = viacut::price(g.stat, pitch, ramp).filter(|_| terms[0] && self.packer.pad_exit_static) {
-                add(&mut tot, viacut::Over { count: c as usize, graded: f });
+            if let Some((fv, c)) = viacut::price(g.stat, pitch, ramp).filter(|_| terms[0] && self.packer.pad_exit_static) {
+                f(at, viacut::Over { count: c as usize, graded: fv });
             }
             // (b)
             let stub = super::demand::Item { net: wi.net, w: g.w_e, s: wi.s };
@@ -1291,15 +1313,14 @@ impl<'a> Frame<'a> {
                     best = o;
                 }
             }
-            add(&mut tot, best);
+            f(at, best);
             // (c), one self-contained term. TW6 part A: with `[vias] site_price = "graded"` the
             // site price ([`Frame::site_over`], the same room measure) prices it, counted once.
             let vias: Vec<Vec2> = m.vpts(w).iter().flatten().map(|&(_, p)| p).collect();
             if terms[2] && !self.packer.site_price {
-                add(&mut tot, super::padexit::exit_via_room(st, g, &vias, r, wi.s, ramp));
+                f(at, super::padexit::exit_via_room(st, g, &vias, r, wi.s, ramp));
             }
         }
-        tot
     }
 
     /// tw4-r2 (1): the planned pad exits with an over-full term, located: `(wire, end, layer,
@@ -1334,15 +1355,27 @@ impl<'a> Frame<'a> {
     /// O(vias x (cuts x crossers + partners x chords)).
     pub(crate) fn via_over<M: MemRead + ?Sized>(&self, m: &M, w: WireId) -> viacut::Over {
         let mut tot = viacut::Over::default();
-        let Some(norm) = self.packer.via_cuts else { return tot };
-        if self.vfocus.as_ref().is_some_and(|f| !f.get(w).copied().unwrap_or(false)) {
-            return tot;
+        self.via_over_each(m, w, |_, o| {
+            tot.count += o.count;
+            tot.graded += o.graded;
+        });
+        tot
+    }
+
+    /// plan-dots: [`Frame::via_over`] via by via, in its order: `f(place, term)` per planned via
+    /// point of `w`, the place being the point the via was measured at (its planned point, or
+    /// with `[capacity] via_best_point` the better candidate point taken). The sum of the terms in
+    /// call order is `via_over` (bit for bit: `via_over` is this sum). O(as via_over).
+    pub(crate) fn via_over_each<M: MemRead + ?Sized>(&self, m: &M, w: WireId, mut f: impl FnMut(Vec2, viacut::Over)) {
+        let Some(norm) = self.packer.via_cuts else { return };
+        if self.vfocus.as_ref().is_some_and(|fo| !fo.get(w).copied().unwrap_or(false)) {
+            return;
         }
         let st = self.st;
         let wi = &st.wires[w];
         let d = self.wire_d[w];
         if !wi.alive || d <= 0.0 || m.vpts(w).is_empty() {
-            return tot;
+            return;
         }
         let via = super::demand::Item { net: wi.net, w: d, s: wi.s };
         let on = |x: WireId, k: usize, l: usize| {
@@ -1392,6 +1425,7 @@ impl<'a> Frame<'a> {
                 o
             };
             let mut o = at(&self.geo(t, wi.net, p, norm));
+            let mut op = p;
             // tw4-r2 `[capacity] via_best_point`: an over-full via is priced at the least-over
             // site point of its triangle with static room (Maley 1987 pp. 32-33: routable iff no
             // critical cut is over-full for the via at some position; the drawing relocates vias).
@@ -1401,16 +1435,15 @@ impl<'a> Frame<'a> {
                     let oq = at(&self.geo(t, wi.net, q, norm));
                     if oq.graded < o.graded {
                         o = oq;
+                        op = q;
                         if o.graded <= 0.0 {
                             break;
                         }
                     }
                 }
             }
-            tot.count += o.count;
-            tot.graded += o.graded;
+            f(op, o);
         }
-        tot
     }
 
     /// Move the vias `which` of `w` through their intervals (one sweep each, in order) to the
@@ -2095,6 +2128,77 @@ impl<'a> CapModel<'a> {
     #[doc(hidden)]
     pub fn planned_via_points(&self, w: WireId) -> Vec<Option<Vec2>> {
         self.vpts.get(w).map_or(Vec::new(), |v| v.iter().map(|x| x.map(|(_, p)| p)).collect())
+    }
+
+    /// plan-dots (the progress dialog's dots on a plan sketch): one place per predicted violation
+    /// [`CapModel::overfull`] counts, in its order (math frame, nm): each over-full edge-layer at
+    /// its edge's middle (cut model: each over-full cut at its middle), each via without a site at
+    /// that via ([`CapModel::nosite_places`]), each over-full via cut / pad-exit term at its via
+    /// point / stub middle ([`CapModel::via_cut_places`]). `len() == overfull()`. Read-only.
+    /// O(overfull + vias x their via-cut pricing).
+    pub fn error_places(&self, evl: &[Vec<LEv>]) -> Vec<Vec2> {
+        let mut out = match self.cut.as_ref() {
+            Some(c) => c.over_places(),
+            None => {
+                let pr = self.fx.st.proj;
+                self.overfull_list()
+                    .into_iter()
+                    .map(|(e, _)| {
+                        let [a, b] = pr.edges[e];
+                        (pr.pos[a] + pr.pos[b]) * 0.5
+                    })
+                    .collect()
+            }
+        };
+        out.extend(self.nosite_places(evl));
+        out.extend(self.via_cut_places());
+        out
+    }
+
+    /// plan-dots: `nosite[w]` places per wire `w` (the count [`CapModel::nosite`] sums): its vias
+    /// without a site by the build's own test ([`Frame::via_no_site`]), then, should the sites
+    /// taken by other nets' vias have changed since `w` was placed (the build places wire by
+    /// wire), its other vias: every place is a planned via of the counted wire. Read-only (an end
+    /// site not yet cached is computed, not stored). O(vias).
+    pub fn nosite_places(&self, evl: &[Vec<LEv>]) -> Vec<Vec2> {
+        let mut out = Vec::new();
+        for w in (0..self.nosite.len()).filter(|&w| self.nosite[w] > 0) {
+            let ks = self.via_k.get(w).map_or(&[][..], |v| v.as_slice());
+            let ev = evl.get(w).map_or(&[][..], |v| v.as_slice());
+            let between = if self.fx.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
+            let (no, yes): (Vec<usize>, Vec<usize>) = (0..ks.len()).partition(|&i| self.fx.via_no_site(&self.a, w, ev, ks, &between, i));
+            out.extend(no.into_iter().chain(yes).take(self.nosite[w]).map(|i| self.via_place(w, i)));
+        }
+        out
+    }
+
+    /// plan-dots: one place per count of [`CapModel::via_cut_count`] (the over-full via cuts,
+    /// with `[capacity] pad_exits` the over-full exit terms), term by term
+    /// ([`Frame::via_over_each`], [`Frame::exit_over_each`]). O(as via_cut_count).
+    pub fn via_cut_places(&self) -> Vec<Vec2> {
+        let mut out = Vec::new();
+        for w in (0..self.vpts.len()).filter(|&w| self.cost[self.fx.vbase + w] > 0.0) {
+            let mut put = |p: Vec2, o: viacut::Over| out.extend(std::iter::repeat_n(p, o.count));
+            self.fx.via_over_each(&self.a, w, &mut put);
+            if self.fx.packer.pad_exits {
+                self.fx.exit_over_each(&self.a, w, &mut put);
+            }
+        }
+        out
+    }
+
+    /// plan-dots: the place of via `i` of `w`: its planned point (CM1), else the pass point of
+    /// its traversal (the compass's `via_site` place), else the wire's first end. O(1).
+    fn via_place(&self, w: WireId, i: usize) -> Vec2 {
+        if let Some(Some((_, p))) = self.vpts.get(w).and_then(|v| v.get(i)) {
+            return *p;
+        }
+        let st = self.fx.st;
+        let wi = &st.wires[w];
+        match self.via_k.get(w).and_then(|v| v.get(i)) {
+            Some(&k) if !wi.passes.is_empty() => st.pass_point(wi.passes[k.min(wi.passes.len() - 1)]),
+            _ => st.proj.pos[wi.a],
+        }
     }
 
     /// CM1: the planned vias with an over-full via cut, located: `(wire, via point)` (the compass).
