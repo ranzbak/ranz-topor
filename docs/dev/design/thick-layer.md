@@ -176,6 +176,19 @@ is the same keep test as every pattern move. Otherwise everything comes back exa
 The patterns get PNGs (setup | expected | main) for the user, are PROPOSED and stay out of the suite, and show the
 optimal path with every constraint visible (memory patterns-teach-optimal-path).
 
+## S1 diagnosis (2026-11-23, plan report on the synthetic fixture `engine/tests/topo_thick_layer.rs`)
+
+Default options, one run: P is planned with 3 vias (B | F | B | F), every via `site: true`, deficit 0, predicted 0,
+while the drawing makes 2 shorts (B2, B3) and 4 clearance items. P's last via interval lies in traversal 7, between
+its crossings with F4 (event s 0.44) and B2 (s 0.65). The site (`refine::end_site`) is chosen on the pass-point
+polyline (`State::polyline`), where those two crossings are about 1 mm apart, at (11.27, 6.50). On the taut lines
+the drawing realises, F4 is at x 10 and B2 at x 11: the point is past B2, and the 1.0 mm gap leaves 0.5 mm, too little
+for the 0.9 mm via with clearances. CM1's gap cuts start at static features, so here they run parallel to the
+vertical crossers and never count them. M3 therefore measures the gap between the two crossers that bound the via
+event, at their taut positions, along the wire. The graded deficit is taken against the slack the two crossers have
+on their far sides, so a crosser that can bend aside does not make the via a predicted error. Target test:
+`thick_dive_grouping_predicts_what_it_draws` (ignored, fails on 7513b3db).
+
 ## Stages (each test-first, its own tiny repro named after the mechanism)
 
 - S1: M3 (F1), on thick_dive_grouping.
