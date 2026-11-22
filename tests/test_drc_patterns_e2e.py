@@ -21,14 +21,14 @@ ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.drcpat
 
 
-def _route(name: str, tmp_path: Path) -> tuple[dict, Path]:
+def _route(name: str, tmp_path: Path, sets: tuple[str, ...] = ()) -> tuple[dict, Path]:
     # a fresh process: the canonical board (KiCad's KIIDs, so the saved footprint order, depend on the process history)
     subprocess.run([sys.executable, "-m", "harness.drc_patterns", str(tmp_path / "boards"), name], check=True, cwd=ROOT,
                    env={**os.environ, "PYTHONPATH": str(ROOT)}, capture_output=True, timeout=120)
     paths = {"problem": tmp_path / "boards" / name / "problem" / f"{name}.kicad_pcb"}
     out = tmp_path / "run"
     env = {**os.environ, "RAYON_NUM_THREADS": os.environ.get("RAYON_NUM_THREADS", "2"), "TOPOR_HAND_LABEL": "problem"}
-    r = subprocess.run([str(ROOT / "tools" / "route_board.sh"), str(paths["problem"]), str(out), "--keep-copper", "--no-png"],
+    r = subprocess.run([str(ROOT / "tools" / "route_board.sh"), str(paths["problem"]), str(out), "--keep-copper", "--no-png", *[a for x in sets for a in ("--set", x)]],
                        env=env, capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-3000:]
     return json.loads((out / f"{name}--metrics.json").read_text()), out
@@ -50,3 +50,22 @@ def test_via_in_fanin_matches_expected(tmp_path):
     (x, y, _d, net), = vias
     assert net == "VX" and y >= pat.expect["via_y_min"] - 1e-3, (x, y, net)
     assert any(t.GetClass() == "PCB_VIA" for t in pcbnew.LoadBoard(str(pcb)).GetTracks())
+
+
+def _bundle_octilinear(name: str, tmp_path: Path, sets: tuple[str, ...] = ()) -> dict:
+    pat = getattr(dp, name)()
+    m, out = _route(name, tmp_path, sets)
+    segs, vias = read_copper(out / f"{name}-topor" / f"{name}.kicad_pcb")
+    r = judge(pat, segs, vias, m, _drc_new(out, name))
+    assert r["free_angle_segments"] == 0, json.dumps(r, default=str)
+    assert r["verdict"] == "matches expected", json.dumps(r, default=str)
+    return r
+
+
+def test_jst_fanout_45_close_octilinear_bundle(tmp_path):
+    """K5 (accepted round 3, user: "triggers the free angle bug"): the six wires follow the kept 3V3 as one parallel
+    45 deg / horizontal / 45 deg bundle on B.Cu: 0 free-angle segments, 0 vias, no DRC, within 5 % of the reference.
+    Base 5571d1bd kept 2 free-angle legs (D1, D2): the draw order started in the middle of the bundle and each 45 deg
+    form crossed the reserved bands of the undrawn neighbours; fixed by the sweep order (first-draw-45 P3,
+    [drawing] octi_order = "sweep", the default since first-draw-45 r9)."""
+    _bundle_octilinear("jst_fanout_45_close", tmp_path, ())

@@ -959,6 +959,11 @@ impl RunControl {
         self.test_hook = TestHook(Some(Arc::new(f)));
     }
 
+    /// A test hook is installed (tests only: a probe that formats its point name asks first).
+    pub fn has_test_hook(&self) -> bool {
+        self.test_hook.0.is_some()
+    }
+
     /// Ask the test hook (if any) at the named point; `false` without one.
     pub fn test_point(&self, point: &str) -> bool {
         self.test_hook.0.as_ref().is_some_and(|h| h(point))

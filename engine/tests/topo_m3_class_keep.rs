@@ -10,18 +10,64 @@ use topor_engine::model::{BoardModel, Options};
 /// `erbs_margin` 0 (every ERBS longer than its band meets a sequential competitor), the test
 /// hooks `hooks` on.
 fn route(hooks: &'static [&'static str]) -> (Vec<(String, f64, usize)>, Vec<String>) {
+    let (got, warn, _) = route_m(hooks, false);
+    (got, warn)
+}
+
+/// The fixture model, mirrored in x (`x -> 24 mm - x`) when `mirror`: the same geometry with
+/// left and right swapped.
+fn model(mirror: bool) -> BoardModel {
     let path = std::env::var("TOPO_FIXTURE").unwrap_or_else(|_| format!("{}/tests/fixtures/m3/model-shortcut_across.json", env!("CARGO_MANIFEST_DIR")));
-    let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    if mirror {
+        let w = 24_000_000i64;
+        let fx = |p: &mut serde_json::Value| p[0] = serde_json::json!(w - p[0].as_i64().unwrap());
+        for pad in m["pads"].as_array_mut().unwrap() {
+            fx(&mut pad["center"]);
+        }
+        for s in m["outline"].as_array_mut().unwrap() {
+            assert_eq!(s["kind"], "seg", "the fixture outline is segments");
+            fx(&mut s["a"]);
+            fx(&mut s["b"]);
+        }
+        for k in m["keepouts"].as_array_mut().unwrap() {
+            let poly = k["poly"].as_array_mut().unwrap();
+            poly.iter_mut().for_each(fx);
+            poly.reverse();
+        }
+        for key in ["copper_shapes", "holes", "kept", "pours", "vias", "dangling_ends"] {
+            assert!(m[key].as_array().is_none_or(|a| a.is_empty()), "mirror: {key} is not empty");
+        }
+    }
+    BoardModel::from_json(&m.to_string()).unwrap()
+}
+
+/// (connections (net, length mm, violations), warnings, ERBS draw order by net name)
+type Routed = (Vec<(String, f64, usize)>, Vec<String>, Vec<String>);
+
+/// As [`route`], on the fixture mirrored in x when `mirror`, and the ERBS draw order by net name
+/// (the engine's `erbs draw order` test probe).
+fn route_m(hooks: &'static [&'static str], mirror: bool) -> Routed {
+    let m = model(mirror);
     let mut val = serde_json::to_value(Options::default()).unwrap();
     val["runs"] = serde_json::json!(1);
     val["realise"] = serde_json::json!("erbs");
     val["erbs_margin"] = serde_json::json!(0.0);
     let o: Options = serde_json::from_value(val).unwrap();
     let mut ctl = RunControl::new();
-    ctl.set_test_hook(move |p| hooks.contains(&p));
+    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let rec = order.clone();
+    ctl.set_test_hook(move |p| {
+        if let Some(o) = p.strip_prefix("erbs draw order ") {
+            *rec.lock().unwrap() = o.split(',').map(str::to_string).collect();
+            return false;
+        }
+        hooks.contains(&p)
+    });
     let r = topor_engine::route::route_with(&m, &o, &ctl);
     assert_eq!(r.routed, r.connections_total, "every connection routes");
-    (r.connections.iter().map(|c| (c.name.clone(), c.length_nm as f64 / 1e6, c.violations)).collect(), r.warnings.clone())
+    let order = order.lock().unwrap().clone();
+    (r.connections.iter().map(|c| (c.name.clone(), c.length_nm as f64 / 1e6, c.violations)).collect(), r.warnings.clone(), order)
 }
 
 fn kept_count(warn: &[String]) -> usize {
@@ -65,13 +111,21 @@ fn inner_wire_keeps_its_erbs_against_a_shortcut_across_the_outer() {
 
 /// Condition 1 (lead, round i): an undrawn wire without an ERBS (its sleeve failed: the test hook
 /// fails the first stretch, B's) is checked by its planned path, never skipped.
+/// fd45 r10 (lead): the precondition is that A is drawn while B is undrawn. Under the default
+/// `octi_order = "sweep"` (left first) the fixture as approved draws B first (B is checked as
+/// drawn copper then, the class test has no case); mirrored in x, A comes first. The order is
+/// asserted, so a future order change fails here instead of testing nothing.
 #[test]
 fn a_wire_without_erbs_is_checked_by_its_planned_path() {
-    let (got, warn) = route(&["straight sequential run", "fail erbs sleeve"]);
+    let (got, warn, order) = route_m(&["straight sequential run", "fail erbs sleeve"], true);
     if std::env::var_os("TOPO_FIXTURE").is_some() {
-        eprintln!("FAILED-B {got:?} kept {}\n{:?}", kept_count(&warn), warn.iter().filter(|w| w.contains("ERBS")).collect::<Vec<_>>());
+        eprintln!("FAILED-B {got:?} kept {} order {order:?}\n{:?}", kept_count(&warn), warn.iter().filter(|w| w.contains("ERBS")).collect::<Vec<_>>());
     }
+    assert_eq!(order, ["A", "B"], "precondition: A is drawn first, B undrawn (the ERBS draw order)");
     assert!(warn.iter().any(|w| w.contains("1 without a sleeve")), "B's sleeve failed: {warn:?}");
     assert!(got.iter().all(|c| c.2 == 0), "no violation: {got:?}");
     assert_eq!(kept_count(&warn), 1, "B's planned path keeps A's ERBS: {warn:?}");
+    // The fixture as approved draws B first under the default order (why the test mirrors it).
+    let (_, _, plain) = route_m(&["straight sequential run", "fail erbs sleeve"], false);
+    assert_eq!(plain, ["B", "A"], "the unmirrored fixture's order changed: the mirror may no longer be needed");
 }

@@ -77,6 +77,26 @@ fn forced_free_line(octi_on: bool, s: &draw::DrawStats) -> Option<String> {
     })
 }
 
+/// first-draw-45 r9 forensics (`TOPO_FREEDBG`, copper-neutral): the free-angle segments (not at
+/// 0/45/90 degrees) of every drawn wire after the step `stage` of the drawing, one stderr line
+/// each (mm, KiCad frame), so a segment of the final copper can be traced to the step that wrote
+/// it (the r9 forensics script). Read only.
+fn free_snap(stage: &str, drawn: &BTreeMap<WireId, WireOut>, st: &State) {
+    if std::env::var_os("TOPO_FREEDBG").is_none() {
+        return;
+    }
+    eprintln!("FREESTAGE {stage}");
+    for (w, wo) in drawn {
+        for (layer, pts) in &wo.runs {
+            for s in pts.windows(2) {
+                if (s[1] - s[0]).len() >= 1_000.0 && super::octi::octi_dir(s[1] - s[0]).is_none() {
+                    eprintln!("FREESNAP {stage} w{w} net {} L{layer} {:.6} {:.6} {:.6} {:.6}", st.wires[*w].net, s[0].x / MM, -s[0].y / MM, s[1].x / MM, -s[1].y / MM);
+                }
+            }
+        }
+    }
+}
+
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
 /// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
 /// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
@@ -2291,6 +2311,25 @@ pub fn split_line(fuse: usize, polish: usize, split: &[String]) -> Option<String
         l.push_str(&format!("; engine bug: {} with copper apart or a new dangling end after the steps after the drawing: {}", if split.len() == 1 { "1 net" } else { "nets" }, split.join(", ")));
     }
     Some(l)
+}
+
+/// first-draw-45 P4: most passes of the straightening over the draw order (a work bound; a pass
+/// that changes nothing ends it earlier, at a fixpoint). r7: the qmtech USB corner reaches its
+/// fixpoint in the 3rd pass (`straightening_reaches_its_fixpoint`); the boards take 3 (esp,
+/// wiccon) to 4 (qmtech, at the bound) passes.
+const STRAIGHTEN_PASSES: usize = 4;
+
+/// first-draw-45 P4: the straightening pass's report line: `n` stretches of two or more bends
+/// redrawn as one straight, elbow or Z form, the length that changed (mm, + added), the steps the
+/// split guard refused, the passes and whether the last one changed nothing (`fixpoint`; else the
+/// loop stopped at [`STRAIGHTEN_PASSES`]), the time (s).
+pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, fixpoint: bool, secs: f64) -> String {
+    format!(
+        "octilinear straightening after drawing (draw order, {passes} passes, {}): {n} stretches of two or more bends redrawn as one straight, elbow or Z form, {:.1} mm {} in length; {refused} refused by the split guard ({secs:.1} s)",
+        if fixpoint { "the last without a change".to_string() } else { format!("stopped at the bound of {STRAIGHTEN_PASSES} passes with changes in the last") },
+        added_mm.abs(),
+        if added_mm > 0.0 { "added" } else { "saved" }
+    )
 }
 
 /// The octilinear polish's report line: `n` segments redrawn as an elbow or Z, which changed the
@@ -7976,6 +8015,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             draw_start: erbs_soft.then_some(t_draw),
             floor: Some(floor),
             fail_first: ctl.test_point("fail erbs sleeve"),
+            octi_order: super::erbs::OctiOrder::parse(&opts.octi_order).unwrap_or_else(|| {
+                warnings.push(format!("[drawing] octi_order = {:?} is not \"sweep\" or \"bends\": \"sweep\" (the default) used", opts.octi_order));
+                super::erbs::OctiOrder::Sweep
+            }),
             ..super::erbs::ErbsOpts::default()
         };
         match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, stops) {
@@ -8012,6 +8055,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     r.unbanded
                 ));
                 live = r.order.clone();
+                // Test probe (fd45 r10): the ERBS draw order by net name, for a test whose
+                // precondition is an order (topo_m3_class_keep); nothing is formatted without a hook.
+                if ctl.has_test_hook() {
+                    let names: Vec<String> = live.iter().map(|&w| model.nets.iter().find(|n| n.code == st.wires[w].net).map_or_else(|| st.wires[w].net.to_string(), |n| n.name.clone())).collect();
+                    ctl.test_point(&format!("erbs draw order {}", names.join(",")));
+                }
                 dr.erbs = r.runs;
                 dr.test_no_sequential = ctl.test_point("no sequential run");
                 dr.test_no_class_keep = ctl.test_point("erbs class keep off");
@@ -8050,6 +8099,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 live.reverse();
             }
             dr.reserve_bands(&live, &plans, &placed, &skip, &key, mode);
+            // fd45 r10 (mechanism C), debug arm `TOPO_FD45_ON=loserfirst`, off by default: the
+            // wires the joint check rejected (no reserved copper) draw first, against the kept
+            // bands only. It fixes tw2 swap_vias under the sweep order (X2: drawn after its kept
+            // neighbours, whose octilinear redraws left their bands and took its room), but on
+            // esp it added 15 DRC items (IO10_SDA/USB_D-/ENABLE, IO8_SCL/+3V3): the lead's rule
+            // (keep it only if no board gets worse) reverted it. Shopping list TW2-SWEEP.
+            if super::octi::fd45_on("loserfirst") {
+                let losers: BTreeSet<WireId> = dr.joint.class.keys().map(|&(o, _)| o).collect();
+                let (mut a, b): (Vec<WireId>, Vec<WireId>) = live.iter().partition(|w| losers.contains(w));
+                a.extend(b);
+                live = a;
+            }
         }
     }
     let over_n = dr.over.iter().filter(|&&o| o).count();
@@ -8610,6 +8671,99 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if super::par::meter::on() {
         eprintln!("[topo round {round}] {}", super::par::meter::report());
     }
+    // The nets' drawn wires and terminals, and their copper pieces (the split guard of the
+    // straightening, the fuse and the polish, [`super::netconn`]).
+    let mut net_wires: BTreeMap<i32, Vec<WireId>> = BTreeMap::new();
+    for &w in drawn.keys() {
+        net_wires.entry(st.wires[w].net).or_default().push(w);
+    }
+    let mut net_terms: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (o, ob) in proj.obstacles.iter().enumerate() {
+        if let Some(n) = ob.net.filter(|&n| n != 0 && !ob.bare) {
+            net_terms.entry(n).or_default().push(o);
+        }
+    }
+    // The pieces of net `net` with the drawn wires `drawn` (`extra`: one wire taken out of it).
+    let pieces_of = |net: i32, drawn: &BTreeMap<WireId, WireOut>, extra: Option<(WireId, &WireOut)>| -> super::netconn::Conn {
+        let ws = net_wires.get(&net).map_or(&[][..], |v| v.as_slice());
+        let pcs: Vec<super::netconn::Piece> = ws
+            .iter()
+            .filter_map(|&w| {
+                let wo = match extra {
+                    Some((x, o)) if x == w => o,
+                    _ => drawn.get(&w)?,
+                };
+                Some(super::netconn::Piece { runs: &wo.runs, vias: wo.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w: st.wires[w].w / 2.0 })
+            })
+            .collect();
+        let ts: Vec<super::netconn::Term> = net_terms
+            .get(&net)
+            .map_or(&[][..], |v| v.as_slice())
+            .iter()
+            .map(|&o| {
+                let ob = &proj.obstacles[o];
+                super::netconn::Term { poly: &ob.poly, layers: ob.layers, center: ob.center }
+            })
+            .collect();
+        super::netconn::conn(&pcs, &ts)
+    };
+    // first-draw-45 P4 step 2: the straightening pass (Staepelaere 1992, StraightenLayer, ch. 5
+    // p. 15), part of the drawing (so the variant as drawn has it): the wires in the draw (sweep)
+    // order, each one's jogs redrawn where the neighbours drawn and straightened before it leave
+    // room, its middle legs beside them (each segment pushed onto the transformed ones, PDF pp.
+    // 16, 33). Keep points: the other wires' ends and vias of the net on it ([`super::netconn::feet_on`]);
+    // the split guard as for the fuse and the polish.
+    free_snap("draw", &drawn, &st);
+    if octi_on && opts.octi_straighten && !super::octi::fd45_off("p4s") {
+        let t_str = Instant::now();
+        let (mut n_str, mut str_nm, mut str_refused) = (0usize, 0.0, 0usize);
+        let mut str_pieces: BTreeMap<i32, super::netconn::Conn> = BTreeMap::new();
+        let order: Vec<WireId> = live.iter().copied().filter(|w| drawn.contains_key(w)).collect();
+        // Passes over the order until one changes nothing (each step lowers the wire's price, so
+        // it ends; at most STRAIGHTEN_PASSES, a work bound): a wire straightened before its
+        // neighbours gets another turn once they have moved.
+        let mut pass_changed = true;
+        let mut passes = 0usize;
+        while pass_changed && passes < STRAIGHTEN_PASSES {
+            pass_changed = false;
+            passes += 1;
+            for &w in &order {
+                let mut wo = drawn.remove(&w).expect("drawn wire");
+                let (len0, net) = (wo.length_nm, st.wires[w].net);
+                let mut joined = |pre: &WireOut, now: &WireOut| -> bool {
+                    let before = str_pieces.entry(net).or_insert_with(|| pieces_of(net, &drawn, Some((w, pre)))).clone();
+                    let after = pieces_of(net, &drawn, Some((w, now)));
+                    if super::netconn::worse(&before, &after) {
+                        str_refused += 1;
+                        return false;
+                    }
+                    str_pieces.insert(net, after);
+                    true
+                };
+                let keep: Vec<Vec2> = {
+                    fn piece(o: &WireOut, half_w: f64) -> super::netconn::Piece<'_> {
+                        super::netconn::Piece { runs: &o.runs, vias: o.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w }
+                    }
+                    let others: Vec<super::netconn::Piece> = net_wires.get(&net).map_or(&[][..], |v| v.as_slice()).iter().filter(|&&x| x != w).filter_map(|&x| drawn.get(&x).map(|o| piece(o, st.wires[x].w / 2.0))).collect();
+                    super::netconn::feet_on(&piece(&wo, st.wires[w].w / 2.0), &others)
+                };
+                let k = dr.octi_straighten(&mut wo, &keep, &mut joined);
+                if k > 0 {
+                    pass_changed = true;
+                    n_str += k;
+                    str_nm += wo.length_nm - len0;
+                    let ci = conn_of[wire_conn[w]];
+                    necking.retain(|(c, _)| *c != ci);
+                    settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+                }
+                drawn.insert(w, wo);
+            }
+        }
+        if n_str > 0 || str_refused > 0 {
+            warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, !pass_changed, t_str.elapsed().as_secs_f64()));
+        }
+    }
+    free_snap("straighten", &drawn, &st);
     ctl.stage(rnd, rnds, "via reduction and fuse");
     let t_red = Instant::now();
     // The result as drawn is a variant of its own (more vias, maybe shorter).
@@ -8664,6 +8818,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     } else {
         warnings.push(format!("via reduction after drawing: off; {causes_before}"));
     }
+    free_snap("reduce", &drawn, &st);
     // ---- Fuse (D6b): a branch that leaves its junction (or a pad) beside its trunk leaves the
     // trunk's copper where the two part (TopoR FreeStyle auto move of T-points, black-box E8c-e;
     // overlap removal, REPORT section 4.C). Geometric, after everything is drawn: the checker sees
@@ -8689,40 +8844,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // main's JS1_2: a branch fused onto a free-angle trunk segment that the polish then redrew as an
     // elbow without its foot, a dangling branch for KiCad Cleanup). `pieces`: the partition per net as
     // the copper is now (made at the net's first step), `pieces0`: before the fuse pass.
-    let mut net_wires: BTreeMap<i32, Vec<WireId>> = BTreeMap::new();
-    for &w in drawn.keys() {
-        net_wires.entry(st.wires[w].net).or_default().push(w);
-    }
-    let mut net_terms: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
-    for (o, ob) in proj.obstacles.iter().enumerate() {
-        if let Some(n) = ob.net.filter(|&n| n != 0 && !ob.bare) {
-            net_terms.entry(n).or_default().push(o);
-        }
-    }
-    // The pieces of net `net` with the drawn wires `drawn` (`extra`: one wire taken out of it).
-    let pieces_of = |net: i32, drawn: &BTreeMap<WireId, WireOut>, extra: Option<(WireId, &WireOut)>| -> super::netconn::Conn {
-        let ws = net_wires.get(&net).map_or(&[][..], |v| v.as_slice());
-        let pcs: Vec<super::netconn::Piece> = ws
-            .iter()
-            .filter_map(|&w| {
-                let wo = match extra {
-                    Some((x, o)) if x == w => o,
-                    _ => drawn.get(&w)?,
-                };
-                Some(super::netconn::Piece { runs: &wo.runs, vias: wo.vias.iter().map(|&(p, sz)| (p, sz.d as f64 / 2.0)).collect(), half_w: st.wires[w].w / 2.0 })
-            })
-            .collect();
-        let ts: Vec<super::netconn::Term> = net_terms
-            .get(&net)
-            .map_or(&[][..], |v| v.as_slice())
-            .iter()
-            .map(|&o| {
-                let ob = &proj.obstacles[o];
-                super::netconn::Term { poly: &ob.poly, layers: ob.layers, center: ob.center }
-            })
-            .collect();
-        super::netconn::conn(&pcs, &ts)
-    };
     let mut pieces: BTreeMap<i32, super::netconn::Conn> = BTreeMap::new();
     let mut pieces0: BTreeMap<i32, super::netconn::Conn> = BTreeMap::new();
     // Steps not taken by the guard: (fuse, polish).
@@ -8960,6 +9081,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             version = draw::lazy_taken(&mut pool, version, net);
         }
     }
+    free_snap("fuse", &drawn, &st);
     // M-45: what the steps after the drawing left not at 0/45/90 degrees (a fused branch end)
     // becomes an elbow or Z where the checker accepts it.
     if octi_on {
@@ -9047,6 +9169,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             ));
         }
     }
+    free_snap("polish", &drawn, &st);
     if !moves.is_empty() {
         use super::fusepour;
         let t_pc = Instant::now();
@@ -9439,6 +9562,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             erbs_failed.len(),
             if ex.is_empty() { "" } else { ": " },
             ex.join("; ")
+        ));
+    }
+    if dr.stats.octi_asis > 0 {
+        // first-draw-45 P1: counted, not hidden (the free-angle count does not see them: they are
+        // octilinear).
+        warnings.push(format!(
+            "octilinear drawing: {} octilinear pieces of taut runs kept as drawn where no 45 degree connector passed the leg test ({} of them below the clearance in the DP's check, priced as a violation; the full checker still checks every run)",
+            dr.stats.octi_asis, dr.stats.octi_asis_below
         ));
     }
     if opts.via_relocate && opts.search_length == "taut" {

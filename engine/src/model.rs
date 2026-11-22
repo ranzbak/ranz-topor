@@ -1496,6 +1496,12 @@ pub struct Options {
     /// M-45 (`[drawing] bend_spacing_mm`): preferred least length between two bends (`L_pref`); a
     /// shorter leg pays more the shorter it is (jog penalty), down to `min(L_pref, 2 (w + s))`.
     pub bend_spacing_mm: f64,
+    /// first-draw-45 r7 (`[drawing] short_leg_mm`): price weight (mm) of a staircase: a bend after
+    /// two consecutive legs shorter than the jog leg (`min(L_pref, 2 (w + s))`) pays the weight
+    /// times the geometric mean of their graded shortness `((L - l) / (l + L / 8))^2` (0 at the jog
+    /// leg, 0.64 at half of it, at most 64), on top of the jog penalty. A single short leg between
+    /// two long ones pays nothing extra. 0 = off.
+    pub short_leg_mm: f64,
     /// M-45 (`[drawing] octilinear_room`): with the octilinear style, the planner (P3 / P4) and
     /// the drawing's packing count the room an octilinear wire takes in a passage (the octagon
     /// around a wrapped corner, the 0/45 degree legs of a slanted stretch; `demand::octi_stretch`)
@@ -1518,6 +1524,26 @@ pub struct Options {
     /// kept bands of the highest priority tier first, then of the next) or `"count"` (the most
     /// kept bands). Ties by route order.
     pub erbs_conflict_keep: String,
+    /// first-draw-45 P3 (`[drawing] octi_order`): with realise = "erbs", the order in which the
+    /// wires whose band is not kept as is get their octilinear form ([`crate::topo::erbs::OctiOrder`]):
+    /// `"sweep"` (default; Staepelaere 1992 OrderSegments, PDF pp. 22, 29: the bend relation plus
+    /// one sweep axis per group of cut neighbours, a cycle broken at the fewest unmet predecessors)
+    /// or `"bends"` (the bend relation only, a cycle broken at the earliest wire). Sweep fixes
+    /// K5-type bundles and draws U6 as one parallel bundle (the user-approved shape); on the r8
+    /// ladder (det s0, 4 boards) it has 12 fewer new DRC items than bends with the same
+    /// unconnected, vias and routed (first-draw-45 r9, lead decision 2026-11-21).
+    pub octi_order: String,
+    /// first-draw-45 P2 (`[drawing] octi_own_portals`): in the first draw's octilinear form, an
+    /// edge the run's own taut path crosses (no portal of its sleeve) opens in the room the plan
+    /// left free there (up to an undrawn wire's planned crossing less the spacing); false = the
+    /// whole edge stays a wall (the behaviour before). Default true.
+    pub octi_own_portals: bool,
+    /// first-draw-45 P4 step 2 (`[drawing] octi_straighten`): with style = "octilinear", after the
+    /// drawing every wire in the draw (sweep) order, to a fixpoint of at most 4 passes, gets its stretches of two or more bends
+    /// redrawn as one straight, elbow or Z form where that is cheaper on the octilinear DP's scale
+    /// (length, bends, jog penalty) and legal (StraightenLayer, Staepelaere 1992 ch. 5, p. 15);
+    /// an end leg on its pad keeps its pad anchor (r10); false = the staircases of the first draw stay. Default true.
+    pub octi_straighten: bool,
     /// TW2 (`[drawing] erbs_gap_keep_max_mm`): with realise = "erbs", two bands the joint check
     /// finds too close by a model gap of the ERBS (`RunBand::gap`, no over-full cut predicts it)
     /// are both kept when the overlap is at most this: the gap stays as a clearance violation of
@@ -1538,6 +1564,13 @@ pub struct Options {
     /// taken off its price where it runs beside a drawn trace of another net at the clearance, so
     /// a trace follows its neighbour and a bundle keeps its pitch through its bends (0 = off).
     pub bundle_pull: f64,
+    /// first-draw-45 r7 (`[drawing] bundle_pull_range_mm`): how far (mm) a drawn trace of another
+    /// net may pull a trace off its own path to run beside it (`bundle_pull`): in the
+    /// straightening pass (the tie on depth broken towards the neighbour) and, r9, in the
+    /// octilinear DP (a drawn neighbour's corner is a node only within the range of the taut
+    /// path, and up to 2 pitches past its clearance as before). 0 = no limit beyond those (the
+    /// behaviour before this key).
+    pub bundle_pull_range_mm: f64,
     /// Inflated sketch U0 (`topor.toml [capacity] mixed_clearance`): how the per-layer cut test
     /// (`topo::sheet`, `topo::cutflow`) spaces neighbours of different nets on a cut:
     /// `"conservative"` (default; every gap at the largest clearance of the cut's items, the
@@ -1882,14 +1915,19 @@ impl Default for Options {
             acute: "costly".into(),
             bend_mm: 0.25,
             bend_spacing_mm: 0.5,
+            short_leg_mm: 2.0,
             octi_room: true,
             draw_pull_taut: true,
             realise: "erbs".into(),
             erbs_conflict_keep: "tier".into(),
+            octi_order: "sweep".into(),
+            octi_own_portals: true,
+            octi_straighten: true,
             erbs_gap_keep_max_mm: 0.15,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
             bundle_pull: 0.3,
+            bundle_pull_range_mm: 0.0,
             reserve_via_sites: true,
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,

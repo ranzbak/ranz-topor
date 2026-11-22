@@ -1618,10 +1618,10 @@ mod tests {
     /// runs of the routed wire with and without pad exits.
     #[test]
     fn octilinear_shape_cache_matches_the_reference_loop() {
-        use super::super::octi::{OCTI_HITS, OCTI_LANE_MIN, OCTI_NODE_SPLIT, OCTI_REF};
+        use super::super::octi::{Corridor, OCTI_HITS, OCTI_LANE_MIN, OCTI_NODE_SPLIT, OCTI_REF, OCTI_TEST_BANDS};
         // per lane count: nodes done alone and on the crew (lanes 2, 4, 8 must do every node on the crew)
         let mut split = [[0usize; 2]; 4];
-        let (mut some, mut runs) = (0, 0);
+        let (mut some, mut runs, mut banded) = (0, 0, 0);
         with_octi_fields(&mut |dr, g| {
             let dr: &Drawer = dr;
             let wi = &dr.st.wires[0];
@@ -1638,6 +1638,28 @@ mod tests {
                 };
                 let layer = g.int(0, 1) as usize;
                 let forced = [None, Some(dr.octi.viol_nm), Some(dr.octi.short_nm)][g.int(0, 2) as usize];
+                // fd45 r11: half of the runs with undrawn wires' bands (the crossing price of
+                // `room_f` / `room_x`): one band across a random leg of the run, off it by a random
+                // distance, plus a loser-style band (no crossing price) beside it.
+                let mut test_bands: Vec<Corridor> = Vec::new();
+                if g.int(0, 1) == 1 {
+                    let i = g.int(0, pts.len() as i64 - 2) as usize;
+                    let (p, q) = (pts[i], pts[i + 1]);
+                    if let Some(u) = (q - p).unit() {
+                        let n = Vec2 { x: -u.y, y: u.x };
+                        let m = p + (q - p) * (0.2 + 0.6 * g.f()) + n * ((g.f() - 0.5) * 1.2 * MM);
+                        let h = (0.1 + 0.8 * g.f()) * MM;
+                        let path = vec![m - (n * h) + u * (g.f() * 0.4 * MM), m + n * h];
+                        let reach = 0.2 * MM + 0.3 * MM * g.f();
+                        let mk = |path: Vec<Vec2>, viol_nm: f64| Corridor { bb: bbox_of(&path).grow(reach), path, reach, pitch: reach, viol_nm, wire: 1 };
+                        let far = vec![m + u * (0.5 * MM), m + u * (0.5 * MM) + n * h];
+                        test_bands = vec![mk(path, dr.octi.viol_nm), mk(far, 0.0)];
+                        banded += 1;
+                    }
+                }
+                // the hook is a thread-local: set it on each thread that calls `octilinear`
+                let set_bands = |b: &[Corridor]| OCTI_TEST_BANDS.with(|x| *x.borrow_mut() = b.to_vec());
+                set_bands(&test_bands);
                 OCTI_REF.with(|f| f.set(false));
                 let got = dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced);
                 // par-draw: every node's successors on 1/2/4/8 lanes (pair rule 1, the reverse
@@ -1649,6 +1671,7 @@ mod tests {
                     .map(|(ki, &k)| {
                         let pool = rayon::ThreadPoolBuilder::new().num_threads(k).build().expect("pool");
                         pool.install(|| {
+                            set_bands(&test_bands);
                             OCTI_LANE_MIN.with(|f| f.set(1));
                             OCTI_NODE_SPLIT.with(|c| c.set([0, 0]));
                             let r = super::super::par::with_mode(Some(super::super::refine_par::lanes::Mode::Fixed(k)), true, || dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced));
@@ -1662,6 +1685,7 @@ mod tests {
                 OCTI_REF.with(|f| f.set(true));
                 let want = dr.octilinear(0, 0, k1, layer, &pts, None, exits, forced);
                 OCTI_REF.with(|f| f.set(false));
+                set_bands(&[]);
                 runs += 1;
                 some += usize::from(want.is_some());
                 let bits = |v: &Option<super::super::octi::OctiOut>| v.as_ref().map(|o| o.pts.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect::<Vec<_>>());
@@ -1673,6 +1697,7 @@ mod tests {
         });
         let hits = OCTI_HITS.with(|h| h.get());
         assert!(some > 10 && hits[0] > 20, "{some} of {runs}, hits {hits:?}");
+        assert!(banded > 10, "{banded} runs with bands of {runs}");
         // one lane: every node alone; 2, 4, 8 lanes: every node on the crew
         assert!(split[0][0] > 0 && split[0][1] == 0, "1 lane: {:?}", split[0]);
         for (ki, k) in [(1usize, 2usize), (2, 4), (3, 8)] {
@@ -1816,6 +1841,571 @@ mod tests {
             }
         });
         assert!(tot <= tot0 + 1e-9 && lower > 3 && below > 0, "priced {tot} vs free {tot0}, lower in {lower} and octilinear legs below the rule in {below} of {runs} runs");
+    }
+
+    /// A two-pad board (net 1, A and B, KiCad frame mm) with wire 0 routed between them, the
+    /// drawer built with the octilinear style on; `f` gets it (math frame: y up).
+    fn two_pads(a: (f64, f64), b: (f64, f64), f: &mut dyn FnMut(&mut Drawer)) {
+        let p = |v: f64| (v * MM) as i64;
+        let pad = |i: usize, x: f64, y: f64| format!(r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":1,"attr":"smd","center":[{x},{y}],"rotation_deg":0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{s},"h":{s}}}}},"drill":null}}"#, x = p(x), y = p(y), s = p(0.4));
+        let c = [(0.0, 0.0), (24.0, 0.0), (24.0, 24.0), (0.0, 24.0)];
+        let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+        let js = format!(
+            r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}},{{"code":3,"name":"C"}}],"pads":[{},{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+            pad(0, a.0, a.1),
+            pad(1, b.0, b.1),
+            segs.join(",")
+        );
+        let m = BoardModel::from_json(&js).unwrap();
+        let bd = board::build(&m, &BuildOpts::default()).unwrap();
+        let conns = bd.connections(&m);
+        let mut st = State::new(&bd.proj);
+        let cn = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
+        st.route_conn(cn, &InitWeights::default(), (cn.w + cn.s) / 400_000.0).expect("routes");
+        let opts = Options::default();
+        let checker = Checker::new(&m, &opts);
+        let mut dr = Drawer::new(&m, &opts, &bd, &st, &checker);
+        dr.octi = crate::topo::octi::OctiCfg { on: true, ..dr.octi };
+        f(&mut dr);
+    }
+
+    /// first-draw-45 r7 (`[drawing] short_leg_mm`, the esp +3V3 staircase): a net-1 run from A
+    /// (2, 12) to B (8, 10) mm, the taut chord at 18.4 degrees, in a corridor of two foreign net-2
+    /// tracks parallel to it, each `dw` beyond the chord's clearance. Every octilinear form in the
+    /// corridor is a staircase whose steps stay within `dw` of the chord: legs far below the jog
+    /// leg. Without the short-leg price (weight 0) the first-draw DP takes such a staircase (its
+    /// bends and jogs cost less than one free-angle stretch); with it (the default weight) no bend
+    /// follows two consecutive legs below the jog leg: the chord stays as drawn (free-angle,
+    /// one item) or the steps are long. Returns (such staircase bends at weight 0, at the default).
+    fn short_legs_in_corridor(dw: f64) -> (usize, usize) {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        let (a, b) = (v(2.0, 12.0), v(8.0, 10.0));
+        let mut got = (0, 0);
+        two_pads((2.0, 12.0), (8.0, 10.0), &mut |dr| {
+            let u = (b - a).unit().expect("A != B");
+            let left = Vec2 { x: -u.y, y: u.x };
+            let wi = dr.st.wires[0].clone();
+            let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+            let tw = 150_000.0;
+            dr.commit(&track_item(2, 0, tw, a + left * 20.0 * MM, b + left * 20.0 * MM, None));
+            let need = dr.need_of(dr.ents.len() - 1, &wp, wi.w);
+            for sg in [-1.0, 1.0] {
+                dr.commit(&track_item(2, 0, tw, a - u * 1.5 * MM + left * sg * (need + dw), b + u * 1.5 * MM + left * sg * (need + dw), None));
+            }
+            let k1 = dr.st.wires[0].passes.len();
+            let leff = super::super::octi::jog_leg(&dr.octi, wi.w + wi.s);
+            let short = |pts: &[Vec2]| -> usize {
+                let segs: Vec<Vec2> = pts.windows(2).map(|x| x[1] - x[0]).filter(|d| d.len2() > 1.0).collect();
+                // a bend after two consecutive legs below the jog leg (a staircase step)
+                (1..segs.len().saturating_sub(1)).filter(|&k| super::super::octi::turn_deg(segs[k], segs[k + 1]) > 0.5 && segs[k].len() < leff - 1_000.0 && segs[k - 1].len() < leff - 1_000.0).count()
+            };
+            let pts = vec![a, b];
+            let form = |dr: &Drawer| dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).map_or(pts.clone(), |o| o.pts);
+            let keep = dr.octi;
+            assert!(keep.short_leg_nm > 0.0, "the default weight is on");
+            dr.octi.short_leg_nm = 0.0;
+            let f0 = form(dr);
+            dr.octi = keep;
+            let f1 = form(dr);
+            let mm = |q: &[Vec2]| q.iter().map(|p| format!("({:.3},{:.3})", p.x / MM, -p.y / MM)).collect::<Vec<_>>().join(" ");
+            eprintln!("dw {dw}: weight 0 {} legs {} short [{}]; default {} legs {} short [{}]; leff {leff}", f0.len() - 1, short(&f0), mm(&f0), f1.len() - 1, short(&f1), mm(&f1));
+            // r7 chord nodes at least the jog leg apart: the unpriced staircase's steps (from the
+            // start of one flat leg to the next, along the chord) are no shorter than the jog leg.
+            let starts: Vec<f64> = (1..f0.len().saturating_sub(1)).filter(|&k| super::super::octi::octi_dir(f0[k + 1] - f0[k]).is_some_and(|d| d % 4 == 0) && super::super::octi::octi_dir(f0[k] - f0[k - 1]).is_some_and(|d| d % 2 == 1)).map(|k| (f0[k] - a).dot(u)).collect();
+            if let Some(m) = starts.windows(2).map(|x| x[1] - x[0]).reduce(f64::min) {
+                assert!(m >= leff - 2_000.0, "dw {dw}: staircase step {m} nm below the jog leg {leff}");
+            }
+            got = (short(&f0), short(&f1));
+        });
+        got
+    }
+
+    #[test]
+    fn short_leg_price_keeps_the_steps_long() {
+        let mut seen = Vec::new();
+        for dw in [0.03 * MM, 0.06 * MM, 0.1 * MM] {
+            let (s0, s1) = short_legs_in_corridor(dw);
+            seen.push((dw / MM, s0, s1));
+            assert_eq!(s1, 0, "dw {} mm: a staircase step (two legs below the jog leg) with the price: {seen:?}", dw / MM);
+        }
+        // dw 0.06 mm: the unpriced DP draws a 24-leg staircase of 0.32 / 0.22 mm legs (all below
+        // the 0.5 mm jog leg); with the price the chord stays as drawn (one item).
+        assert!(seen.iter().any(|x| x.1 > 5), "the fixture must make the unpriced DP staircase: {seen:?}");
+        // The shortness: 0 at and above the jog leg, graded below it, bounded.
+        let p = |l: f64| super::super::octi::shortness(0.5 * MM, l * MM);
+        assert!(p(0.5) == 0.0 && p(0.7) == 0.0 && p(0.499) > 0.0 && p(0.499) < 1e-4);
+        assert!((p(0.25) - 0.64).abs() < 1e-9 && (p(0.0) - 64.0).abs() < 1e-9);
+        assert!(p(0.1) > p(0.2) && p(0.2) > p(0.3) && p(0.3) > p(0.4));
+        // The staircase price reads two consecutive legs: a single short leg between two long
+        // ones (eprom A0: 45 degrees, 0.17 mm, 45 degrees) pays no more than without the weight;
+        // two short legs in a row do.
+        let on = super::super::octi::OctiCfg { on: true, short_leg_nm: 2.0 * MM, ..Default::default() };
+        let off = super::super::octi::OctiCfg { short_leg_nm: 0.0, ..on };
+        let pitch = 0.375 * MM;
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+        let jog = [v(0.0, 0.0), v(0.665, 0.665), v(0.835, 0.665), v(1.5, 1.33)];
+        let st = |c: &super::super::octi::OctiCfg, q: &[Vec2]| super::super::octi::style_price(c, pitch, q);
+        assert_eq!(st(&on, &jog), st(&off, &jog), "a single short leg pays only the jog penalty");
+        let stair = [v(0.0, 0.0), v(0.158, 0.0), v(0.316, 0.158), v(0.474, 0.158), v(0.632, 0.316), v(2.0, 0.316)];
+        assert!(st(&on, &stair) > st(&off, &stair) + 2.0 * MM, "a staircase pays: {} vs {}", st(&on, &stair), st(&off, &stair));
+    }
+
+    /// first-draw-45 r9 (`[drawing] bundle_pull_range_mm` in the DP, user: a configurable bundle
+    /// pull range): a net-1 run from A (2, 12) to B (12, 9) mm (KiCad frame) and a drawn net-2
+    /// track along y = 12 + need + 0.3 mm from x = 3 to 8 (need = the centre distance at the
+    /// clearance), below the run's own octilinear forms (the elbows along y = 12 or y = 9). Only
+    /// the DP's own bundle reach can give the hug: the track's octagon corners are nodes up to 2
+    /// pitches past its clearance from the taut chord (here about 0.9 mm), and from the corner
+    /// node an elbow runs along the track at its clearance (0.3 mm below y = 12, 5 mm beside it:
+    /// the `bundle_pull` share of that length outweighs its two bends and 0.25 mm of length).
+    /// Range off (0, the default): the form has that hug leg. Range 0.5 mm (below the corners'
+    /// distance from the chord): no corner of the track is a node, no leg beside it; the form is
+    /// an elbow of the run's own (on y = 12 or y = 9). The straightening is not involved (the DP
+    /// output itself is checked).
+    #[test]
+    fn bundle_pull_range_limits_the_dp_reach() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        let (a, b) = (v(2.0, 12.0), v(12.0, 9.0));
+        let tw = 150_000.0;
+        let mut got: Vec<(f64, bool, f64, Vec<Vec2>)> = Vec::new();
+        for range in [f64::INFINITY, 0.5 * MM] {
+            two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
+                let wi = dr.st.wires[0].clone();
+                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                // the need of a net-2 track of width tw: its half width + the clearance + the run's half width
+                let h = dr.commit(&track_item(2, 0, tw, v(3.0, 30.0), v(8.0, 30.0), None));
+                let id = dr.handles[h].1;
+                let need = dr.need_of(id, &wp, wi.w);
+                dr.uncommit(h);
+                let ny = 12.0 + need / MM + 0.3;
+                dr.commit(&track_item(2, 0, tw, v(3.0, ny), v(8.0, ny), None));
+                dr.octi.pull_range = range;
+                let k1 = dr.st.wires[0].passes.len();
+                let pts = vec![a, b];
+                let dr: &Drawer = dr;
+                let o = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).expect("a form");
+                assert!(o.pts.windows(2).all(|x| super::super::octi::octi_dir(x[1] - x[0]).is_some()), "range {range}: free-angle in {:?}", o.pts);
+                // the longest horizontal leg at the hug level (the track's clearance line, KiCad y = ny - need)
+                let hug_y = -(ny * MM - need);
+                let hug: f64 = o.pts.windows(2).filter(|x| (x[0].y - hug_y).abs() < 2_000.0 && (x[1].y - hug_y).abs() < 2_000.0).map(|x| (x[1] - x[0]).len()).fold(0.0, f64::max);
+                let own = o.pts.windows(2).any(|x| (x[1] - x[0]).len() > 4.0 * MM && ((x[0].y - a.y).abs() < 2_000.0 && (x[1].y - a.y).abs() < 2_000.0 || (x[0].y - b.y).abs() < 2_000.0 && (x[1].y - b.y).abs() < 2_000.0));
+                got.push((range, own, hug, o.pts.clone()));
+            });
+        }
+        let mm = |q: &[Vec2]| q.iter().map(|p| format!("({:.3},{:.3})", p.x / MM, -p.y / MM)).collect::<Vec<_>>().join(" ");
+        for g in &got {
+            eprintln!("range {} mm: own elbow leg {}, hug leg {:.3} mm: {}", g.0 / MM, g.1, g.2 / MM, mm(&g.3));
+        }
+        assert!(got[0].2 >= 4.0 * MM, "no limit: the DP's form runs beside the drawn track (hug leg >= 4 mm): {}", mm(&got[0].3));
+        assert!(got[1].2 < 1_000.0 && got[1].1, "range 0.5 mm: the run keeps an elbow of its own, no leg beside the track: {}", mm(&got[1].3));
+    }
+
+    /// first-draw-45 P1: an octilinear piece of the taut run is a chain of the DP as drawn, without
+    /// the leg test, priced by its clearance below the rule and counted. A run from A (2, 12)
+    /// along the line y = 12 to M (8, 12), then any-angle to B (12, 9); foreign net-2 tracks
+    /// 0.3 mm off that line (below the rule, not a short).
+    /// - Case 1, a track on both sides from x = 1 to 7.5 (past A): no leg out of A passes the leg
+    ///   test, so before P1 the DP had no chain at all (the whole run stayed any-angle, `None`).
+    ///   With P1 the piece A-M stays as drawn (counted, below the clearance) and M-B is drawn
+    ///   octilinear.
+    /// - Case 2, one track from x = 3 to 7: a legal 45 degree form runs below it; the piece A-M as
+    ///   drawn pays its clearance and loses (costly, not failed: a priced piece is not taken where
+    ///   a legal connector exists).
+    #[test]
+    fn octilinear_taut_piece_is_a_chain_as_drawn_priced_and_counted() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        let (a, m, b) = (v(2.0, 12.0), v(8.0, 12.0), v(12.0, 9.0));
+        let tw = 150_000.0;
+        for case in 0..2 {
+            two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
+                let tracks: &[(f64, f64, f64)] = if case == 0 { &[(1.0, 7.5, 0.3), (1.0, 7.5, -0.3)] } else { &[(3.0, 7.0, 0.3)] };
+                for &(x0, x1, dy) in tracks {
+                    dr.commit(&track_item(2, 0, tw, v(x0, 12.0 - dy), v(x1, 12.0 - dy), None));
+                }
+                let k1 = dr.st.wires[0].passes.len();
+                let pts = vec![a, m, b];
+                let dr: &Drawer = dr;
+                let wi = &dr.st.wires[0];
+                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                let nr = dr.near(dr.local_ents(&wp, bbox_of(&pts).grow(4.0 * MM)), &wp);
+                assert!(!dr.seg_clear_near(&nr, a, m) && dr.seg_deficit_near(&nr, a, m) > 0.0, "case {case}: A-M must be below the rule");
+                let o = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None);
+                let o = o.unwrap_or_else(|| panic!("case {case}: no octilinear form"));
+                let octi_legs = o.pts.windows(2).all(|x| super::super::octi::octi_dir(x[1] - x[0]).is_some());
+                assert!(octi_legs, "case {case}: free-angle left in {:?}", o.pts);
+                let below = o.pts.windows(2).any(|x| dr.seg_deficit_near(&nr, x[0], x[1]) > 0.0);
+                if case == 0 {
+                    // A-M kept as drawn (merged with the collinear start of the octilinear rest).
+                    assert!(o.pts[0] == a && o.pts[1].y == a.y && o.pts[1].x >= m.x, "case 0: A-M kept as drawn: {:?}", o.pts);
+                    assert!(below && (o.asis, o.asis_below) == (1, 1), "case 0: counted {} / {}: {:?}", o.asis, o.asis_below, o.pts);
+                } else {
+                    assert!(!below && (o.asis, o.asis_below) == (0, 0), "case 1: the legal form must win: {:?} (asis {})", o.pts, o.asis);
+                }
+            });
+        }
+        // Case 3 (r4, the price changes the form; kills mutant P1-price): case 2 without the
+        // bundle-follow reward (`pull` 0) and a second foreign track at y = 10.5 (x 3 to 7) that
+        // closes the one-bend legal forms (45 degrees out of A, then along y = 9). Every
+        // monotone octilinear form is equally long; the as-drawn A-(9, 12)-B has one bend, the
+        // legal form between the tracks (45 degrees to y = 11.1, along it, 45 degrees to B) two:
+        // only the clearance price of the as-drawn piece makes the legal form win (unpriced,
+        // A-M would stay below the rule, counted).
+        two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
+            dr.octi.pull = 0.0;
+            dr.commit(&track_item(2, 0, tw, v(3.0, 11.7), v(7.0, 11.7), None));
+            dr.commit(&track_item(2, 0, tw, v(3.0, 10.5), v(7.0, 10.5), None));
+            let k1 = dr.st.wires[0].passes.len();
+            let pts = vec![a, m, b];
+            let dr: &Drawer = dr;
+            let wi = &dr.st.wires[0];
+            let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+            let nr = dr.near(dr.local_ents(&wp, bbox_of(&pts).grow(4.0 * MM)), &wp);
+            let o = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).expect("case 3: a form");
+            let below = o.pts.windows(2).any(|x| dr.seg_deficit_near(&nr, x[0], x[1]) > 0.0);
+            assert!(!below && o.asis == 0, "case 3: the priced piece must lose to the legal form: {:?} (asis {})", o.pts, o.asis);
+        });
+    }
+
+    /// first-draw-45 P2: an edge the run's own taut path crosses (no portal of its sleeve) that an
+    /// undrawn wire crosses too is a portal of the run in the room the plan left free there: open
+    /// at the run's own crossing and up to the undrawn wire's planned crossing less the spacing,
+    /// a wall from there on (r3: the wire's room and its packed slack stay its own; esp RCA). On
+    /// the pad field: wire 0's run gets a detour vertex just past such an edge, crossing it 1.3
+    /// spacings short of the undrawn wire's planned crossing. Before P2 the whole edge was a
+    /// wall. Checked: no wall at the run's crossing nor in the free room next to the spacing
+    /// limit, a wall just past the limit and at the far end; the DP finds a form in most runs.
+    #[test]
+    fn own_taut_crossings_are_portals_in_free_room() {
+        let (mut cases, mut limit_checked, mut some) = (0usize, 0usize, 0usize);
+        // candidate edges dropped per filter: not one undrawn pass, its planned crossing,
+        // distance, position, own gate
+        let mut why = [0usize; 5];
+        with_octi_fields(&mut |dr, _g| {
+            // The undrawn wires on layer 0 (the fixture sets no plan layers, and the packer leaves
+            // a pass without a layer unpacked: no planned crossing), packed again.
+            for l in dr.pass_layer.iter_mut() {
+                *l = 0;
+            }
+            dr.compute_intervals();
+            let dr: &Drawer = dr;
+            let (st, pr) = (dr.st, &dr.b.proj);
+            let wi = &st.wires[0];
+            let k1 = wi.passes.len();
+            let poly = st.polyline(0);
+            let portal: Vec<usize> = wi.passes.iter().map(|&q| st.passes[q].edge).collect();
+            let mut tried = 0;
+            for e in 0..pr.edges.len() {
+                if tried >= 6 || portal.contains(&e) {
+                    continue;
+                }
+                if pr.edge_tris[e].iter().flatten().filter(|&&t| !pr.tri_out[t]).count() < 2 {
+                    continue;
+                }
+                let [ea, eb] = pr.edges[e];
+                let (pp, pq) = (pr.pos[ea], pr.pos[eb]);
+                let len = (pq - pp).len();
+                let qs: Vec<usize> = st.edge_order[e].iter().copied().filter(|&q| st.passes[q].wire != 0).collect();
+                let [q] = qs[..] else {
+                    why[0] += 1;
+                    continue;
+                };
+                let Some(tq) = dr.iv.nom.get(q).copied().filter(|x| x.is_finite()).map(|x| x * len) else {
+                    why[1] += 1;
+                    continue;
+                };
+                let oi = &st.wires[st.passes[q].wire];
+                let sp = 0.5 * wi.w + wi.s.max(oi.s) + 0.5 * oi.w;
+                let u = (pq - pp) * (1.0 / len.max(1.0));
+                let Some((i, d)) = poly.windows(2).enumerate().filter(|(_, x)| !super::super::draw::seg_proper(x[0], x[1], pp, pq)).map(|(i, x)| (i, super::super::draw::seg_seg_dist(x[0], x[1], pp, pq))).min_by(|a, b| a.1.total_cmp(&b.1)) else { continue };
+                if !(0.3 * MM..=2.0 * MM).contains(&d) {
+                    why[2] += 1;
+                    continue;
+                }
+                let (a, b) = (poly[i], poly[i + 1]);
+                let mid = (a + b) * 0.5;
+                let near = (mid - pp).dot(u).clamp(0.0, len);
+                let below = near < tq;
+                let tx = if below { tq - 1.3 * sp } else { tq + 1.3 * sp };
+                if !(0.2 * MM..len - 0.2 * MM).contains(&tx) {
+                    why[3] += 1;
+                    continue;
+                }
+                let nrm = Vec2 { x: -u.y, y: u.x };
+                let side = if (mid - pp).dot(nrm) > 0.0 { 1.0 } else { -1.0 };
+                let x = pp + u * tx - nrm * (side * 50_000.0);
+                let mut pts = poly.clone();
+                pts.insert(i + 1, x);
+                tried += 1;
+                let (strip, gates, _) = dr.open_strip(0, 0, k1, 0, &pts);
+                let Some(&(gp, gu, glen, _, _)) = gates.iter().find(|g| (g.0 - pp).len() < 1.0 && (g.2 - len).abs() < 1.0) else {
+                    why[4] += 1;
+                    continue;
+                };
+                cases += 1;
+                let n = Vec2 { x: -gu.y, y: gu.x } * 1_000.0;
+                let wall_at = |t: f64| strip.crosses_wall(gp + gu * t - n, gp + gu * t + n);
+                let far = if below { glen - 3_000.0 } else { 3_000.0 };
+                assert!(wall_at(far), "edge {e}: no wall beyond the undrawn crossing");
+                let hit: Vec<_> = strip.walls.iter().filter(|w| Strip::new(Vec::new(), vec![**w]).crosses_wall(gp + gu * tx - n, gp + gu * tx + n)).collect();
+                assert!(hit.is_empty(), "edge {e} ({pp:?}-{pq:?}, tq {tq}, tx {tx}): the run's own crossing is a wall: {hit:?}");
+                // the spacing limit: free room short of it, a wall past it
+                let lim = if below { tq - sp } else { tq + sp };
+                let (inside, past) = if below { (lim - 5_000.0, lim + 5_000.0) } else { (lim + 5_000.0, lim - 5_000.0) };
+                assert!(wall_at(past), "edge {e}: no wall just past the spacing limit {lim} (planned crossing {tq})");
+                if (inside - tx).abs() > 5_000.0 {
+                    assert!(!wall_at(inside), "edge {e}: a wall in the free room short of the spacing limit {lim}");
+                    limit_checked += 1;
+                }
+                some += usize::from(dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).is_some());
+            }
+        });
+        eprintln!("P2: dropped {why:?}; {cases} runs with an own portal, spacing limit checked in {limit_checked}, DP form in {some}");
+        assert!(cases > 5 && limit_checked > 0 && some > 0, "{cases} runs, limit checked {limit_checked}, DP forms {some}");
+    }
+
+    /// Three nets, each a pad pair from the row A (x = 4) to the row B (x = 20), all wires routed
+    /// and on layer 0, packed (`compute_intervals`), none drawn: the middle wire has an undrawn
+    /// lane neighbour on both sides of its passes.
+    fn pad_rows(f: &mut dyn FnMut(&mut Drawer)) {
+        let p = |v: f64| (v * MM) as i64;
+        let pad = |i: usize, net: i32, x: f64, y: f64| format!(r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":{net},"attr":"smd","center":[{x},{y}],"rotation_deg":0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{s},"h":{s}}}}},"drill":null}}"#, x = p(x), y = p(y), s = p(0.4));
+        let c = [(0.0, 0.0), (24.0, 0.0), (24.0, 24.0), (0.0, 24.0)];
+        let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+        let mut pads = Vec::new();
+        for n in 0..3 {
+            pads.push(pad(2 * n, n as i32 + 1, 4.0, 14.0 + 0.8 * n as f64));
+            pads.push(pad(2 * n + 1, n as i32 + 1, 20.0, 8.0 + 0.8 * n as f64));
+        }
+        let js = format!(
+            r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}},{{"code":3,"name":"C"}}],"pads":[{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+            pads.join(","),
+            segs.join(",")
+        );
+        let m = BoardModel::from_json(&js).unwrap();
+        let bd = board::build(&m, &BuildOpts::default()).unwrap();
+        let conns = bd.connections(&m);
+        let mut st = State::new(&bd.proj);
+        for net in 1..=3 {
+            let cn = conns.iter().find(|c| c.w > 0.0 && c.net == net).expect("a connection per net");
+            st.route_conn(cn, &InitWeights::default(), (cn.w + cn.s) / 400_000.0).expect("routes");
+        }
+        let opts = Options::default();
+        let checker = Checker::new(&m, &opts);
+        let mut dr = Drawer::new(&m, &opts, &bd, &st, &checker);
+        dr.octi = crate::topo::octi::OctiCfg { on: true, ..dr.octi };
+        for l in dr.pass_layer.iter_mut() {
+            *l = 0;
+        }
+        dr.compute_intervals();
+        f(&mut dr);
+    }
+
+    /// first-draw-45 r4 (qmtech MAX_SCLK RCA): the octilinear search keeps the plan's lane order.
+    /// Three parallel wires (`pad_rows`), none drawn: for each pass of each wire with an undrawn
+    /// lane neighbour on a side, the edge is a wall from just past that neighbour's planned
+    /// crossing on (a leg there passes the neighbour on its other side) and open at the run's own
+    /// crossing and in the slot between (that slot is the graded lane-slot price, M6; a wall at
+    /// the neighbour's bound, its crossing less the lane spacing, would close it).
+    #[test]
+    fn octilinear_keeps_the_lane_order_of_undrawn_neighbours() {
+        let (mut sides, mut slots) = (0usize, 0usize);
+        pad_rows(&mut |dr| {
+            let dr: &Drawer = dr;
+            let (st, pr) = (dr.st, &dr.b.proj);
+            for w in 0..st.wires.len() {
+                let wi = &st.wires[w];
+                let k1 = wi.passes.len();
+                let taut = st.polyline(w);
+                let walls = dr.lane_order_walls(w, 0, k1, &taut);
+                let strip = Strip::new(Vec::new(), walls.clone());
+                for (k, &pid) in wi.passes.iter().enumerate() {
+                    let [p, q] = pr.edges[st.passes[pid].edge];
+                    let (pp, pq) = (pr.pos[p], pr.pos[q]);
+                    let len = (pq - pp).len();
+                    let u = (pq - pp) * (1.0 / len);
+                    let n = Vec2 { x: -u.y, y: u.x } * 1_000.0;
+                    let at = |t: f64| strip.crosses_wall(pp + u * t - n, pp + u * t + n);
+                    let nom = dr.iv.nom.get(pid).copied().filter(|x| x.is_finite()).unwrap_or(0.5) * len;
+                    let Some(xt) = super::super::draw::crossing(&taut, pp, pq, nom) else { continue };
+                    assert!(!at(xt), "wire {w} pass {k}: the run's own crossing is a wall");
+                    let (before, after) = dr.lane_sides(pid);
+                    let (pd, nd) = dr.lane_next_drawn(pid);
+                    for (side, on, drawn) in [(false, before, pd), (true, after, nd)] {
+                        let Some(xn) = dr.neighbour_x(pid, side).filter(|_| on && !drawn) else { continue };
+                        let past = if side { xn + 5_000.0 } else { xn - 5_000.0 };
+                        if (side && xn <= xt + 1.0) || (!side && xn >= xt - 1.0) || !(1.0..len - 1.0).contains(&past) {
+                            continue;
+                        }
+                        assert!(at(past), "wire {w} pass {k}: no wall past the undrawn neighbour's crossing {xn} (own {xt}, edge {len})");
+                        sides += 1;
+                        let mid = 0.5 * (xt + xn);
+                        if (mid - xt).abs() > 10_000.0 && (mid - xn).abs() > 10_000.0 {
+                            assert!(!at(mid), "wire {w} pass {k}: a wall in the slot between the own crossing {xt} and the neighbour's {xn}");
+                            slots += 1;
+                        }
+                    }
+                }
+            }
+        });
+        eprintln!("lane order: {sides} neighbour sides walled, {slots} slots open");
+        assert!(sides > 3 && slots > 0, "{sides} sides, {slots} slots");
+    }
+
+    /// fd45 r11 (P2 bands priced): the octilinear DP pays for crossing an undrawn wire's ERBS band.
+    /// A net-1 run from (2, 12) to (12, 9) mm on an empty board, the room factor 0 (no depth price):
+    /// the DP's elbow form crosses a short band placed across its first leg, off the taut run
+    /// (the plan's own crossing is never priced). With the band's crossing price the DP takes a
+    /// form that crosses no band (the other elbow, as short); without it (mutant B2) it keeps the
+    /// crossing form.
+    #[test]
+    fn dp_form_avoids_crossing_an_undrawn_band_when_a_free_form_exists() {
+        use super::super::octi::{band_crossings, Corridor, OCTI_TEST_BANDS};
+        two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
+            dr.octi.room = 0.0;
+            let dr: &Drawer = dr;
+            let k1 = dr.st.wires[0].passes.len();
+            let poly = dr.st.polyline(0);
+            let (a, b) = (poly[0], poly[poly.len() - 1]);
+            // the taut run: the straight chord (the empty board's taut path)
+            let pts = vec![a, b];
+            let f0 = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).expect("an octilinear form").pts;
+            assert!(f0.len() >= 3, "{f0:?}");
+            // a short band across the first leg at 80 %, on its side of the chord, not reaching it
+            let (p0, p1) = (f0[0], f0[1]);
+            let m = p0 + (p1 - p0) * 0.8;
+            let u = (p1 - p0).unit().expect("a leg");
+            let n = Vec2 { x: -u.y, y: u.x };
+            let dist = pts.windows(2).map(|x| super::super::draw::seg_dist(m, x[0], x[1])).fold(f64::INFINITY, f64::min);
+            assert!(dist > 0.4 * MM, "the elbow lies {dist} nm off the taut run {pts:?}");
+            let h = 0.45 * dist;
+            let path = vec![m - n * h, m + n * h];
+            let reach = 0.3 * MM;
+            let band = Corridor { bb: bbox_of(&path).grow(reach), path: path.clone(), reach, pitch: reach, viol_nm: dr.octi.viol_nm, wire: 0 };
+            assert!(!pts.windows(2).any(|x| super::super::draw::seg_proper(x[0], x[1], path[0], path[1])), "the band crosses the taut run");
+            assert!(!band_crossings(std::slice::from_ref(&band), &f0).is_empty(), "the form without the band crosses it: {f0:?}");
+            OCTI_TEST_BANDS.with(|x| *x.borrow_mut() = vec![band.clone()]);
+            let f1 = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).map(|o| o.pts);
+            OCTI_TEST_BANDS.with(|x| x.borrow_mut().clear());
+            let f1 = f1.expect("an octilinear form with the band");
+            assert!(band_crossings(std::slice::from_ref(&band), &f1).is_empty(), "the DP crosses the band: {f1:?} (without it {f0:?})");
+            let len = |v: &[Vec2]| v.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>();
+            assert!(len(&f1) < len(&f0) + 0.01 * MM, "no detour round the band: {} vs {}", len(&f1), len(&f0));
+        });
+    }
+
+    /// fd45 r11: `open_strip` returns the band of every undrawn wire on an edge it opens (P2) as a
+    /// priced corridor: the ERBS path, reach = half widths + the larger clearance, the crossing
+    /// price at the `violation` weight. On the pad field of `own_taut_crossings_are_portals_in_free_room`
+    /// with `realise = "erbs"` and each undrawn wire's ERBS injected as its polyline.
+    #[test]
+    fn opened_edges_return_priced_bands_of_their_undrawn_wires() {
+        let erbs_opts: &'static Options = Box::leak(Box::new(Options { realise: "erbs".to_string(), ..Options::default() }));
+        let mut found = 0usize;
+        with_octi_fields(&mut |dr, _g| {
+            for l in dr.pass_layer.iter_mut() {
+                *l = 0;
+            }
+            dr.compute_intervals();
+            dr.opts = erbs_opts;
+            for w in 1..dr.st.wires.len() {
+                if !dr.st.wires[w].alive || dr.st.wires[w].passes.is_empty() {
+                    continue;
+                }
+                let path = dr.st.polyline(w);
+                let (s0, e0) = (path[0], path[path.len() - 1]);
+                dr.erbs.insert(w, vec![super::super::erbs::RunBand { layer: 0, s: s0, e: e0, band_len: path.windows(2).map(|x| (x[1] - x[0]).len()).sum(), path, gap: false }]);
+            }
+            let dr: &Drawer = dr;
+            let (st, pr) = (dr.st, &dr.b.proj);
+            let wi = &st.wires[0];
+            let k1 = wi.passes.len();
+            let poly = st.polyline(0);
+            let portal: Vec<usize> = wi.passes.iter().map(|&q| st.passes[q].edge).collect();
+            for e in 0..pr.edges.len() {
+                if portal.contains(&e) || pr.edge_tris[e].iter().flatten().filter(|&&t| !pr.tri_out[t]).count() < 2 {
+                    continue;
+                }
+                let qs: Vec<usize> = st.edge_order[e].iter().copied().filter(|&q| st.passes[q].wire != 0).collect();
+                let [q] = qs[..] else { continue };
+                let ow = st.passes[q].wire;
+                let [ea, eb] = pr.edges[e];
+                let (pp, pq) = (pr.pos[ea], pr.pos[eb]);
+                let Some((i, d)) = poly.windows(2).enumerate().filter(|(_, x)| !super::super::draw::seg_proper(x[0], x[1], pp, pq)).map(|(i, x)| (i, super::super::draw::seg_seg_dist(x[0], x[1], pp, pq))).min_by(|a, b| a.1.total_cmp(&b.1)) else { continue };
+                if !(0.3 * MM..=2.0 * MM).contains(&d) {
+                    continue;
+                }
+                // a detour vertex just across the edge's middle, on the far side from the run
+                let mid = (pp + pq) * 0.5;
+                let (a, b) = (poly[i], poly[i + 1]);
+                let x = mid + (mid - (a + b) * 0.5).unit().map_or(Vec2::default(), |u| u * 50_000.0);
+                let mut pts = poly.clone();
+                pts.insert(i + 1, x);
+                let band_path = &dr.erbs[&ow][0].path;
+                if band_path.windows(2).any(|bx| pts.windows(2).any(|y| super::super::draw::seg_proper(bx[0], bx[1], y[0], y[1]))) {
+                    continue;
+                }
+                let (_, gates, bands) = dr.open_strip(0, 0, k1, 0, &pts);
+                if !gates.iter().any(|g| (g.0 - pp).len() < 1.0) {
+                    continue;
+                }
+                let oi = &st.wires[ow];
+                let c = bands.iter().find(|c| c.wire == ow).unwrap_or_else(|| panic!("edge {e} opened for wire {ow}: no band"));
+                assert_eq!(c.viol_nm, dr.octi.viol_nm, "edge {e}: the band's crossing price");
+                assert!((c.reach - (0.5 * oi.w + oi.s.max(wi.s) + 0.5 * wi.w)).abs() < 1.0, "edge {e}: reach {}", c.reach);
+                assert_eq!(&c.path, band_path);
+                found += 1;
+            }
+        });
+        eprintln!("P2 bands: {found} opened edges with a priced band");
+        assert!(found > 0, "no opened edge with a band");
+    }
+
+    /// first-draw-45 P5: the taut pull trades an octilinear leg for free angle only where the
+    /// shortcut is cheaper on the DP's scale (length plus the `any_angle` price). A 2 mm leg along
+    /// y = 12 then any-angle to B: the shortcut saves 0.1 mm and makes the whole run free-angle,
+    /// so the corner stays (before: removed). A 6 mm leg up and a sharp turn back: the shortcut
+    /// saves 10.7 mm, more than its any-angle price, and is taken (graded, not a cutoff).
+    #[test]
+    fn pull_keeps_an_octilinear_leg_unless_the_shortcut_pays() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        for (b, c, kept) in [((4.0, 12.0), (12.0, 9.0), true), ((2.0, 6.0), (4.0, 12.5), false)] {
+            two_pads((2.0, 12.0), c, &mut |dr| {
+                let k1 = dr.st.wires[0].passes.len();
+                let pts = vec![v(2.0, 12.0), v(b.0, b.1), v(c.0, c.1)];
+                let got = dr.pull_taut(0, 0, k1, 0, 0, &pts, &None).map(|x| x.0);
+                if kept {
+                    assert_eq!(got, None, "the octilinear leg must stay: {got:?}");
+                } else {
+                    assert_eq!(got, Some(vec![pts[0], pts[2]]), "the paying shortcut must be taken");
+                }
+            });
+        }
+    }
+
+    /// first-draw-45 r10 (verifier: mutants MF1 / MF2 survived): in a forced run (P6 c) the
+    /// corner next to an octilinear leg is judged on the forced scale, violations first, then the
+    /// style price. (a) No violation either way: the 2 mm leg along y = 12 stays (the shortcut
+    /// does not pay its any-angle price; MF2 `pays = true` took it). (b) A foreign track 0.3 mm
+    /// above that leg, closer than the clearance, which the shortcut clears: the violation
+    /// outweighs the any-angle price, the corner goes (MF1, the style price alone, kept it).
+    #[test]
+    fn forced_pull_judges_an_octilinear_corner_on_the_forced_scale() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        for blocked in [false, true] {
+            two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
+                if blocked {
+                    dr.commit(&track_item(2, 0, 150_000.0, v(3.0, 12.3), v(4.5, 12.3), None));
+                }
+                let k1 = dr.st.wires[0].passes.len();
+                let pts = vec![v(2.0, 12.0), v(4.0, 12.0), v(12.0, 9.0)];
+                let got = dr.pull_forced(0, 0, k1, 0, &pts);
+                if blocked {
+                    assert_eq!(got, Some(vec![pts[0], pts[2]]), "the shortcut clearing the violation must be taken");
+                } else {
+                    assert_eq!(got, None, "the octilinear leg must stay: {got:?}");
+                }
+            });
+        }
     }
 
     /// forced-draw (T6, the qmtech `Net-(U9-~{RST})` mechanism: the forced form cut through a

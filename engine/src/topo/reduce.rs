@@ -152,7 +152,18 @@ pub fn reduce_vias(
                 }
                 let old_layers = dr.relayer(w, &layers, &cuts);
                 let mut ids = Vec::new();
+                // first-draw-45 r9 debug (`TOPO_REDUCEDBG`, copper-neutral): each try's time and
+                // where it went (octilinear DP / exact search seconds of the drawing's counters).
+                let rdbg = std::env::var_os("TOPO_REDUCEDBG").map(|_| (Instant::now(), dr.stats));
                 let wo = dr.draw_wire(w, &new_plan, &new_placed, &mut ids);
+                if let Some((t, s0)) = rdbg {
+                    let s1 = dr.stats;
+                    eprintln!(
+                        "REDUCEDBG wire {w} layers {:?} -> {:?}: ok {} {:.2} s (octi {:.2} s, {} ok {} rejected; exact {:.2} s; forced relaxed/funnel/attempt/octi {}/{}/{}/{})",
+                        plan.layers, layers, wo.ok, t.elapsed().as_secs_f64(), s1.octi_s - s0.octi_s, s1.octi_ok - s0.octi_ok, s1.octi_rejected - s0.octi_rejected, s1.exact_s - s0.exact_s,
+                        s1.forced_relaxed - s0.forced_relaxed, s1.forced_funnel - s0.forced_funnel, s1.forced_attempt - s0.forced_attempt, s1.forced_octi - s0.forced_octi
+                    );
+                }
                 if wo.ok {
                     let new_h: Vec<usize> = keep.iter().map(|&i| old_h[i]).collect();
                     stats.accepted += 1;
