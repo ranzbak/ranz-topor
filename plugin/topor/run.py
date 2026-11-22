@@ -70,9 +70,10 @@ ACTION_CLEANUP = "pcbnew.GlobalEdit.cleanupTracksAndVias"
 ACTION_TEARDROPS = "pcbnew.GlobalEdit.editTeardrops"
 POLL_S = 0.25
 NO_BUDGET_S = 1.0e9  # timeout_s = 0: the DRC loop gets no budget cut; drc_loop_cap still bounds it
-_ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "timeout_s", "timeout_clock", "drawing_style")
+_ROUTE_OVERRIDES = ("scope_mode", "existing_copper", "respect_locked", "timeout_s", "timeout_clock", "drawing_style",
+                    "grid_snap")
 #: pre-flight override -> (section, key) in topor.toml; the others are [run] keys of the same name
-_OVERRIDE_KEY = {"drawing_style": ("drawing", "style")}
+_OVERRIDE_KEY = {"drawing_style": ("drawing", "style"), "grid_snap": ("drawing", "grid_snap")}
 
 
 class BoardChanged(RuntimeError):
@@ -710,6 +711,12 @@ def post_commit_finding(step: str, e: BaseException) -> Finding:
 
 
 
+def grid_line_for(cfg, port, copy_text: str) -> str:
+    """The pre-flight dialog's grid line: ``grid.describe`` with the settings folder ``grid_run_options`` uses."""
+    settings = getattr(port, "kicad_settings_dir", None)
+    return grid_mod.describe(cfg.get("drawing", "grid_mm"), copy_text, settings() if callable(settings) else None)
+
+
 def grid_run_options(cfg, known: dict, port, copy_text: str) -> tuple[dict, list[str] | None]:
     """grid-snap: the engine options for the user's KiCad grid and the log lines, or ``(dict(), None)`` when
     ``[drawing] grid_snap`` is off or the engine lacks the option. The settings directory comes from the port
@@ -897,7 +904,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     before_stats = before_stats_from_model(model)
     summary = RunSummary(connections=conns, nets=nets, layers=len(model.get("layers", [])),
                          engine_version=report.facts["version"], board=board_name,
-                         has_selection=bool(sel.footprints or sel.pads),
+                         has_selection=bool(sel.footprints or sel.pads), grid_line=grid_line_for(cfg, port, copy_text),
                          connections_by_scope=connections_by_scope(sel, model, cfg))
     classes_of = port.netclasses()[1]
     priorities, prio_findings = net_priorities([n["name"] for n in model.get("nets", [])], classes_of, cfg)

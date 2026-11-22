@@ -87,6 +87,7 @@ class RunSummary:
     engine_version: str = ""
     board: str = ""  # board name for the dialog titles
     has_selection: bool = False  # the KiCad selection contains footprints (enables the scope radios)
+    grid_line: str = ""  # the KiCad grid the run would use (grid.describe), shown next to the grid-snap tick
     connections_by_scope: dict = field(default_factory=dict)  # "whole"|"between"|"touching" -> count (live header)
 
 
