@@ -220,7 +220,7 @@ MESSAGES: dict[str, Msg] = {
         "Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). planes.stitch_islands = false only reports the pieces."),
     "STITCH_VIAS": Msg("info",
         "topor added stitching vias between the copper pours of a net on two layers, before the zone refill: in islands KiCad would otherwise remove (planes.stitch_dropped), in parts of a pour joined to the rest only by a thin neck (planes.stitch_thin_mm), and with planes.stitch_area on a regular grid (planes.stitch_pitch_mm from the board's grid origin). Each piece and its vias are listed.",
-        "Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). Set the pitch with planes.stitch_pitch_mm and the grid origin with KiCad → Place → Grid Origin; planes.stitch_dropped = false and planes.stitch_thin_mm = 0 switch the stitching off."),
+        "Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). Set the spacing with planes.stitch_pitch_x_mm / stitch_pitch_y_mm and the pattern with planes.stitch_lattice (straight or staggered) and the grid origin with KiCad → Place → Grid Origin; planes.stitch_dropped = false and planes.stitch_thin_mm = 0 switch the stitching off."),
     "PLANE_PAD_SIGNAL": Msg("info",
         "A pad of a plane net (a net whose pour is on a plane layer) had no room for a short stub and via into its pour, so it is joined by an ordinary trace instead: to its net's connected pour fill where its path first reaches it (planes.terminals, the default), or to another pad of its net where the pour has no filled copper to end on.",
         "Nothing to do if the trace is acceptable; otherwise make room next to the pad or allow vias in pads (vias.via_in_pad)."),

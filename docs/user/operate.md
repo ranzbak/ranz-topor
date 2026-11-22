@@ -49,7 +49,7 @@ takes a reported fallback.
 | Via protection (filled + capped), needed for vias in pads | KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection |
 | Locked tracks and vias | KiCad → item Properties → Locked |
 | What to route (scope) | KiCad → select footprints in the PCB editor before you click the button ([Scope by selection](#scope-by-selection)) |
-| Origin of the stitching-via lattice (`[planes] stitch_pitch_mm`) | KiCad → Place → Grid Origin |
+| Origin of the stitching-via lattice (`[planes] stitch_pitch_x_mm`, `stitch_pitch_y_mm`, `stitch_lattice`) | KiCad → Place → Grid Origin |
 | Priority marker `@1`..`@3` in a net name | the net label in the schematic (Eeschema), then Tools → Update PCB from Schematic |
 | Zones and their fill | Place → Add Filled Zone; Edit → Fill All Zones (B) |
 | Grid for the drawn copper (`[drawing] grid_snap`, `grid_mm`): grid sizes and the per-item track / via grid overrides; the grid origin | View → Grid Properties; Place → Grid Origin ([grid snap](#grid-snap-the-drawn-copper-on-your-kicad-grid)) |
@@ -982,7 +982,7 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   minus features thinner than the zone's minimum width, islands dropped or kept as KiCad → zone properties →
   Remove islands says). A piece of a pour net that is no longer joined to the rest of its pour gets
   stitching vias inside it, the first near its pad (or a short stub from the pad), into the pour on another
-  layer: at least `[planes] stitch_min_vias`, one per `stitch_pitch_mm` squared of its area, on a lattice of
+  layer: at least `[planes] stitch_min_vias`, one per `stitch_pitch_x_mm` x `stitch_pitch_y_mm` of its area, on a straight or staggered (`stitch_lattice`) lattice of
   that pitch from KiCad → Place → Grid Origin where legal. After the run's result is picked, islands KiCad
   would drop (`stitch_dropped`), pour parts behind necks thinner than `stitch_thin_mm` and, as an option, the
   whole pour area (`stitch_area`) get lattice vias too, only where the pour is solid on another layer of the

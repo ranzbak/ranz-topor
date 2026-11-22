@@ -153,22 +153,24 @@ impl Raster {
         self.area.get(l as usize).copied().filter(|_| l != 0).unwrap_or(0.0)
     }
 
-    /// stitch-vias lattice: the points `origin + (i, j) * pitch` (math frame) inside the raster
-    /// whose cell is in island `l` with fill depth at least `min_depth` (deterministic, row-major
-    /// in lattice order). O(raster area / pitch²).
-    pub fn lattice_sites(&self, l: u32, min_depth: f64, pitch: f64, origin: Vec2) -> Vec<Vec2> {
+    /// stitch-vias lattice: the points `origin + (i * px [+ px/2 on odd rows when staggered],
+    /// j * py)` (math frame) inside the raster whose cell is in island `l` with fill depth at least
+    /// `min_depth` (deterministic, row-major in lattice order). O(raster area / (px · py)).
+    pub fn lattice_sites(&self, l: u32, min_depth: f64, px: f64, py: f64, staggered: bool, origin: Vec2) -> Vec<Vec2> {
         let mut out = Vec::new();
-        if pitch <= 0.0 || l == 0 {
+        if px <= 0.0 || py <= 0.0 || l == 0 {
             return out;
         }
         let (x1, y1) = (self.x0 + self.nx as f64 * self.res, self.y0 + self.ny as f64 * self.res);
-        let i0 = ((self.x0 - origin.x) / pitch).ceil() as i64;
-        let i1 = ((x1 - origin.x) / pitch).floor() as i64;
-        let j0 = ((self.y0 - origin.y) / pitch).ceil() as i64;
-        let j1 = ((y1 - origin.y) / pitch).floor() as i64;
+        let j0 = ((self.y0 - origin.y) / py).ceil() as i64;
+        let j1 = ((y1 - origin.y) / py).floor() as i64;
         for j in j0..=j1 {
+            // staggered: every other row shifted by half the x pitch
+            let ox = origin.x + if staggered && j.rem_euclid(2) == 1 { 0.5 * px } else { 0.0 };
+            let i0 = ((self.x0 - ox) / px).ceil() as i64;
+            let i1 = ((x1 - ox) / px).floor() as i64;
             for i in i0..=i1 {
-                let p = Vec2 { x: origin.x + i as f64 * pitch, y: origin.y + j as f64 * pitch };
+                let p = Vec2 { x: ox + i as f64 * px, y: origin.y + j as f64 * py };
                 if self.label_at(p) == l && self.depth_at(p) >= min_depth {
                     out.push(p);
                 }

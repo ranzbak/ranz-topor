@@ -121,7 +121,7 @@ def test_island_join_is_a_stitch():
 def test_stitch_vias_finding_lists_the_pieces():
     """stitch-vias: the region stitching summary (engine/tests/topo_stitch_vias.rs pins its words) becomes
     STITCH_VIAS with one item per piece that got a via; none when it placed no via."""
-    head = ("stitching vias (pitch 5.00 mm from the grid origin, at least 2 per piece): dropped islands 1 of 2 stitched "
+    head = ("stitching vias (lattice 5.00 x 5.00 mm straight from the grid origin, at least 2 per piece): dropped islands 1 of 2 stitched "
             "(3 vias), thin-neck cores 0 of 1 (0 vias), area 0 vias; {} vias in all (0.02 s)")
     pieces = ["stitch (dropped island): GND on F.Cu 80.00 mm² near (15.000, 19.000): 3 of 4 via(s) (10.000, 15.000) "
               "(20.000, 25.000) (15.000, 20.000)",

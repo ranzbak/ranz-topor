@@ -117,7 +117,7 @@ fn a_dropped_island_gets_spread_lattice_vias_and_stays() {
     let r1 = check_pour_reach(&m, &all, &[]);
     assert!(r1.dropped.iter().all(|d| d.island.1 != 0), "{:?}", r1.dropped);
     // The summary line plugin/topor/postrun.py parses (STITCH_VIAS; tests/plugin/test_postrun.py).
-    assert!(s.notes[0].starts_with("stitching vias (pitch 5.00 mm from the grid origin, at least 2 per piece): dropped islands 1 of 1 stitched"), "{}", s.notes[0]);
+    assert!(s.notes[0].starts_with("stitching vias (lattice 5.00 x 5.00 mm straight from the grid origin, at least 2 per piece): dropped islands 1 of 1 stitched"), "{}", s.notes[0]);
     assert!(s.notes[0].ends_with(&format!("; {want} vias in all")), "{}", s.notes[0]);
     assert!(s.notes[1].starts_with("stitch (dropped island): GND on F.Cu "), "{}", s.notes[1]);
     let off = stitch_regions(&m, &opts(false, 0.0, false), &reg(), &items, &[], None, &|| false);
@@ -256,7 +256,7 @@ fn cut_off_repair_spreads_its_vias() {
     assert_eq!(v[0], (5 * MM, 15 * MM), "{v:?}");
     assert_eq!(v[1], (5 * MM, 30 * MM), "{v:?}");
     // stitch_min_vias = 1 and a pitch larger than the strip: one via, as before stitch-vias.
-    let o = Options { stitch_min_vias: 1, stitch_pitch_nm: 40 * MM, ..Options::default() };
+    let o = Options { stitch_min_vias: 1, stitch_pitch_x_nm: 40 * MM, stitch_pitch_y_nm: 40 * MM, ..Options::default() };
     let s = stitch(&m, &o, &reg(), &items, &[], None);
     assert_eq!(s.island_vias, 1, "{:?}", s.notes);
 }
@@ -343,4 +343,31 @@ fn no_stitching_via_that_leaves_a_thin_neck_in_another_plane() {
     assert!(!v.is_empty(), "{:?}", s.notes);
     assert!(!v.contains(&(15 * MM, 20 * MM)), "{v:?}");
     assert!(v.contains(&(20 * MM, 25 * MM)), "{v:?}");
+}
+
+/// r3 (user 2026-11-22: "x space and y space in mm, straight or staggered"): the dropped island
+/// of the first test with 7 vias wanted. Staggered 5 x 5 mm from the origin: rows y = 15 and 25
+/// (odd rows) are shifted by 2.5 mm, so every via stands on {12.5, 17.5} x {15, 25} or
+/// {10, 15, 20} x {20}. Straight 4 x 6 mm (6 vias, no area scaling): x in {12, 16, 20}, y in
+/// {18, 24}.
+#[test]
+fn the_lattice_has_x_and_y_spacing_straight_or_staggered() {
+    let m = model(&[]);
+    let items = square(0, 8, 12, 22, 26);
+    let o = Options { stitch_min_vias: 7, stitch_lattice: "staggered".into(), ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let mut v = vias(&s.items);
+    v.sort_unstable();
+    let h = MM / 2;
+    let mut want = vec![(25 * h, 15 * MM), (35 * h, 15 * MM), (10 * MM, 20 * MM), (15 * MM, 20 * MM), (20 * MM, 20 * MM), (25 * h, 25 * MM), (35 * h, 25 * MM)];
+    want.sort_unstable();
+    assert_eq!(v, want, "{:?}", s.notes);
+    assert!(s.notes[0].starts_with("stitching vias (lattice 5.00 x 5.00 mm staggered"), "{}", s.notes[0]);
+    let o = Options { stitch_min_vias: 6, stitch_per_area: false, stitch_pitch_x_nm: 4 * MM, stitch_pitch_y_nm: 6 * MM, ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let mut v = vias(&s.items);
+    v.sort_unstable();
+    let mut want: Vec<(i64, i64)> = [12, 16, 20].iter().flat_map(|&x| [18, 24].map(|y| (x * MM, y * MM))).collect();
+    want.sort_unstable();
+    assert_eq!(v, want, "{:?}", s.notes);
 }

@@ -144,10 +144,28 @@ pub const LATTICE_OFFSET_WEIGHT: f64 = 0.25;
 pub const PROX_PRICE_NM: f64 = 1.0e6;
 pub const PROX_REACH_NM: f64 = 1.0e6;
 
-/// The stitching lattice pitch of `opts` (nm): `[planes] stitch_pitch_mm` rounded to 0.05 mm, at
-/// least 0.05 mm.
+/// One stitching lattice pitch (nm): rounded to 0.05 mm, at least 0.05 mm.
+fn round_pitch(nm: i64) -> f64 {
+    ((nm.max(0) as f64 / 50_000.0).round() * 50_000.0).max(50_000.0)
+}
+
+/// The stitching lattice x and y pitch of `opts` (nm): `[planes] stitch_pitch_x_mm` /
+/// `stitch_pitch_y_mm`, each rounded to 0.05 mm, at least 0.05 mm.
+pub fn lattice_xy(opts: &Options) -> (f64, f64) {
+    (round_pitch(opts.stitch_pitch_x_nm), round_pitch(opts.stitch_pitch_y_nm))
+}
+
+/// Whether the lattice is staggered (`[planes] stitch_lattice = "staggered"`): every other row
+/// shifted by half the x pitch.
+pub fn lattice_staggered(opts: &Options) -> bool {
+    opts.stitch_lattice == "staggered"
+}
+
+/// The stitching lattice's scalar pitch (nm): sqrt(x pitch · y pitch), so one via per pitch² is
+/// one via per lattice cell; also the value of a via and the spread distance of the stitching.
 pub fn lattice_pitch(opts: &Options) -> f64 {
-    ((opts.stitch_pitch_nm.max(0) as f64 / 50_000.0).round() * 50_000.0).max(50_000.0)
+    let (px, py) = lattice_xy(opts);
+    (px * py).sqrt()
 }
 
 /// Via count of a piece of `area` nm² (stitch-vias): at least `min_vias` (and 1), one per
@@ -326,6 +344,10 @@ struct Ctx<'a> {
     bga: Vec<crate::geom::Aabb>,
     via_price_nm: f64,
     pitch: f64,
+    /// Lattice x / y pitch (nm) and stagger (odd rows shifted by px/2).
+    px: f64,
+    py: f64,
+    staggered: bool,
     origin: Vec2,
     min_vias: usize,
     per_area: bool,
@@ -368,6 +390,9 @@ impl<'a> Ctx<'a> {
             bga: super::planes::bga_footprints(model, &opts.plane_bga_refs).into_iter().map(|f| f.area).collect(),
             via_price_nm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()) * 1e6,
             pitch: lattice_pitch(opts),
+            px: lattice_xy(opts).0,
+            py: lattice_xy(opts).1,
+            staggered: lattice_staggered(opts),
             origin: Vec2 { x: model.grid_origin[0] as f64, y: model.grid_origin[1] as f64 },
             min_vias: opts.stitch_min_vias,
             per_area: opts.stitch_per_area,
@@ -494,11 +519,15 @@ impl<'a> Ctx<'a> {
 
     /// Distance from `p` to the nearest lattice point (nm).
     fn lattice_offset(&self, p: Vec2) -> f64 {
-        let f = |v: f64, o: f64| {
-            let k = ((v - o) / self.pitch).round();
-            v - (o + k * self.pitch)
-        };
-        Vec2 { x: f(p.x, self.origin.x), y: f(p.y, self.origin.y) }.len()
+        // the nearest point of the rows around p (a staggered row is shifted by px/2)
+        let j = ((p.y - self.origin.y) / self.py).round() as i64;
+        (j - 1..=j + 1)
+            .map(|j| {
+                let ox = self.origin.x + if self.staggered && j.rem_euclid(2) == 1 { 0.5 * self.px } else { 0.0 };
+                let k = ((p.x - ox) / self.px).round();
+                Vec2 { x: p.x - (ox + k * self.px), y: p.y - (self.origin.y + j as f64 * self.py) }.len()
+            })
+            .fold(f64::INFINITY, f64::min)
     }
 
     /// Candidate sites in `islands` (filtered by `keep(island index, p)`): lattice sites, then
@@ -510,7 +539,7 @@ impl<'a> Ctx<'a> {
         let mut out: Vec<Site> = Vec::new();
         for (k, &(zi, l, isl)) in islands.iter().enumerate() {
             let Some(ras) = reach.raster(zi, l) else { continue };
-            let lat = ras.lattice_sites(isl, need, self.pitch, self.origin);
+            let lat = ras.lattice_sites(isl, need, self.px, self.py, self.staggered, self.origin);
             let fb = if fallback { ras.island_sites(isl, need, STEP) } else { Vec::new() };
             for (p, lattice) in lat.into_iter().map(|p| (p, true)).chain(fb.into_iter().map(|p| (p, false))) {
                 if !keep(k, p) {
@@ -1137,15 +1166,17 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
                 out.area[1] += usize::from(!placed.is_empty());
                 out.area[2] += placed.len();
                 out.items.extend(cx.take_new());
-                out.notes.push(format!("stitch (area, pitch {:.2} mm): {} on {}: {} via(s)", pitch / 1e6, net_name(z.net), layer_name(l), placed.len()));
+                out.notes.push(format!("stitch (area, lattice {:.2} x {:.2} mm): {} on {}: {} via(s)", cx.px / 1e6, cx.py / 1e6, net_name(z.net), layer_name(l), placed.len()));
             }
         }
     }
     out.notes.insert(
         0,
         format!(
-            "stitching vias (pitch {:.2} mm from the grid origin, at least {} per piece): dropped islands {} of {} stitched ({} vias), thin-neck cores {} of {} ({} vias), area {} vias; {} vias in all",
-            pitch / 1e6,
+            "stitching vias (lattice {:.2} x {:.2} mm {} from the grid origin, at least {} per piece): dropped islands {} of {} stitched ({} vias), thin-neck cores {} of {} ({} vias), area {} vias; {} vias in all",
+            cx.px / 1e6,
+            cx.py / 1e6,
+            if cx.staggered { "staggered" } else { "straight" },
             opts.stitch_min_vias.max(1),
             out.dropped[1],
             out.dropped[0],

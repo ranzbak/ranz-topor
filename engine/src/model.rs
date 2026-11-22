@@ -1081,15 +1081,21 @@ pub struct Options {
     pub plane_join_islands: bool,
     /// stitch-vias (`topor.toml [planes] stitch_min_vias`, default 2, lead 2026-11-21: redundancy):
     /// the vias a cut-off pour piece (class 1), a dropped island (class 2) or a thinly connected
-    /// core (class 3) gets at least, where room allows; more by area, one per `stitch_pitch_nm`².
+    /// core (class 3) gets at least, where room allows; more by area, one per `stitch_pitch_x_nm` · `stitch_pitch_y_nm`.
     pub stitch_min_vias: usize,
     /// stitch-vias (`[planes] stitch_per_area`, default true): a piece gets one via per
-    /// `stitch_pitch_nm`² of its area on top of `stitch_min_vias`; false = `stitch_min_vias` only.
+    /// x · y lattice cell of its area on top of `stitch_min_vias`; false = `stitch_min_vias` only.
     pub stitch_per_area: bool,
-    /// stitch-vias (`[planes] stitch_pitch_mm`, default 5 mm, about lambda_g/20 at 1.5 GHz in FR4):
-    /// the stitching lattice pitch (rounded to 0.05 mm), from the board's grid origin; also the
-    /// area per via (pitch²) and the value of a via of classes 2-4 against its site price.
-    pub stitch_pitch_nm: i64,
+    /// stitch-vias (`[planes] stitch_pitch_x_mm` / `stitch_pitch_y_mm`, default 5 mm each, about
+    /// lambda_g/20 at 1.5 GHz in FR4; user 2026-11-22 "a setting for x space and y space in mm"):
+    /// the stitching lattice spacing along x and y (each rounded to 0.05 mm) from the board's grid
+    /// origin; one via per x · y of a piece's area; sqrt(x · y) is the value of a via of classes
+    /// 2-4 against its site price.
+    pub stitch_pitch_x_nm: i64,
+    pub stitch_pitch_y_nm: i64,
+    /// stitch-vias (`[planes] stitch_lattice`, default `"straight"`; user 2026-11-22 "straight or
+    /// staggered"): `"staggered"` shifts every other lattice row by half the x spacing.
+    pub stitch_lattice: String,
     /// stitch-vias class 2 (`[planes] stitch_dropped`, default true, lead 2026-11-21): an island
     /// of a pour that KiCad's island removal would drop (no pad, via or track of its net) and of
     /// at least pitch²/4 gets stitching vias into solid pour of its net on another layer, so its
@@ -1886,7 +1892,9 @@ impl Default for Options {
             plane_join_islands: true,
             stitch_min_vias: 2,
             stitch_per_area: true,
-            stitch_pitch_nm: 5_000_000,
+            stitch_pitch_x_nm: 5_000_000,
+            stitch_pitch_y_nm: 5_000_000,
+            stitch_lattice: "straight".into(),
             stitch_dropped: true,
             stitch_thin_nm: 1_000_000,
             stitch_area: false,
