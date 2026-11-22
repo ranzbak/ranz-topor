@@ -14,7 +14,11 @@ D: a kept U closed by a routed connection whose straight path is the optimal one
   C thin:    the F.Cu fill above y = 20 joins the rest only through a 0.7 mm neck between TP2 and TP3 and holds no
              GND via or THT pad -> class 3, vias;
   D none:    an F.Cu U [3, 23]-[10, 28] closed by the routed CD, with a closed B.Cu loop under it: no solid GND on
-             another layer -> no via (never dangling).
+             another layer -> no via (never dangling);
+  E small:   (round 5) F.Cu loop [1.5, 1]-[6, 4] around the GND pad C2.1: a cut piece holding no lattice point -> its
+             2 vias at opposite corners, on the via grid;
+  F strip:   (round 5) F.Cu U [13, 22]-[38, 25.5] closed by the routed CH: a dropped strip holding no lattice point ->
+             2 vias at its two ends, on the via grid.
 Expected: vias on the 5 mm lattice from the grid origin where legal; nothing else changes. One signal connection (SIG,
 J1.2 -> R1.1) is routed so the run has a result to stitch.
 """
@@ -43,14 +47,16 @@ def _loop(net: str, layer: str, ref: str, x0: float, y0: float, x1: float, y1: f
 
 def pattern() -> D.Pat:
     fps, kept, conns, ref = [], [], [], []
-    for args in (("SA", "F.Cu", "LA", 14, 4, 24, 12), ("SE", "B.Cu", "LE", 2.5, 22.5, 10.5, 28.5)):
+    for args in (("SA", "F.Cu", "LA", 14, 4, 24, 12), ("SE", "B.Cu", "LE", 2.5, 22.5, 10.5, 28.5),
+                 ("SG", "F.Cu", "LG", 1.5, 1.0, 6.0, 4.0)):
         f, t = _loop(*args)
         fps.append(f)
         kept.append(t)
     # B and D: a kept U (three sides) and a connection the router closes it with (the straight, optimal path), so the
     # piece inside is cut off by ROUTED copper (a piece the kept copper alone cut off is not in the pre-route fill:
     # KiCad already removed it).
-    for (net, cnet, ref_, x0, y0, x1, y1) in (("SB", "CB", "UB", 28, 4, 38, 14), ("SD", "CD", "UD", 3, 23, 10, 28)):
+    for (net, cnet, ref_, x0, y0, x1, y1) in (("SB", "CB", "UB", 28, 4, 38, 14), ("SD", "CD", "UD", 3, 23, 10, 28),
+                                              ("SH", "CH", "UH", 13, 22, 38, 25.5)):
         # pads 0.6 mm, 0.9 mm apart: a 0.3 mm gap (>= the 0.15 clearance, too narrow for the fill)
         fps.append(D.Fp(ref_ + "1", [D.Pad("1", net, (x0, y1), (0.6, 0.6))]))
         fps.append(D.Fp(ref_ + "4", [D.Pad("1", net, (x1, y1), (0.6, 0.6))]))
@@ -65,21 +71,27 @@ def pattern() -> D.Pat:
     kept += [D.Trk("SIG4", "F.Cu", D.W, [(0.9, 20.0), (26.0, 20.0)], locked=True),
              D.Trk("SIG5", "F.Cu", D.W, [(27.8, 20.0), (39.1, 20.0)], locked=True)]
     fps.append(D.Fp("C1", [D.Pad("1", "GND", (19.0, 8.0), (0.9, 0.95))]))
+    # E (round 5): a small cut piece around the GND pad C2.1, no lattice point inside -> its corners
+    fps.append(D.Fp("C2", [D.Pad("1", "GND", (3.75, 2.5), (0.6, 0.6))]))
     fps.append(D.Fp("J1", [D.Pad("1", "GND", (4.0, 13.73), (1.7, 1.7), drill=1.0), D.Pad("2", "SIG", (4.0, 16.27), (1.7, 1.7), "circle", drill=1.0)]))
     fps.append(D.Fp("R1", [D.Pad("1", "SIG", (9.0, 16.27), (0.9, 0.95))]))
     return D.Pat(
         name="stitch_pieces", cluster="stitch-vias", title="Stitching vias: cut, dropped, thin and no-second-layer pieces",
         purpose="stitch-vias classes 1-3 and the never-dangling rule on one board",
-        answer="A >= 3 vias (first near C1.1), B >= 4 vias, C vias above y = 20, D none; all on the 5 mm lattice where legal",
+        answer=("A, B, C: vias on the board lattice points inside (rows and columns line up across the pieces); "
+                "E (small cut piece, no lattice point) and F (dropped strip, no lattice point): 2 vias at the corners / "
+                "both ends, on the via grid; D none"),
         why="GND is poured on both layers; a via joins an F.Cu piece to the solid B.Cu pour",
-        size=(40.0, 30.0), nets=["GND", "SIG", "SIG4", "SIG5", "SA", "SB", "SD", "SE", "CB", "CD"], fps=fps,
+        size=(40.0, 30.0), nets=["GND", "SIG", "SIG4", "SIG5", "SA", "SB", "SD", "SE", "CB", "CD", "SG", "SH", "CH"], fps=fps,
         connections=[("SIG", "J1.2", "R1.1")] + conns,
         ref_tracks=[D.Trk("SIG", "F.Cu", D.W, [(4.0, 16.27), (9.0, 16.27)])] + ref,
         kept=kept,
-        expect={"vias_min": {"A": 3, "B": 4, "C": 2, "D": 0},
-                "pieces": {"A": [14, 4, 24, 12], "B": [28, 4, 38, 14], "C": [0, 20, 40, 30], "D": [3, 23, 10, 28]}},
+        expect={"vias_min": {"A": 2, "B": 2, "C": 2, "D": 0, "E": 2, "F": 2},
+                "pieces": {"A": [14, 4, 24, 12], "B": [28, 4, 38, 14], "C": [0, 20, 40, 30], "D": [3, 23, 10, 28],
+                           "E": [1.5, 1.0, 6.0, 4.0], "F": [13, 22, 38, 25.5]}},
         marks=[{"xy": [19, 3], "text": "A cut"}, {"xy": [33, 3], "text": "B dropped"}, {"xy": [27, 21], "text": "C thin neck"},
-               {"xy": [6, 22], "text": "D no B.Cu"}])
+               {"xy": [6, 22], "text": "D no B.Cu"}, {"xy": [6.5, 0.6], "text": "E small cut"},
+               {"xy": [20, 26.2], "text": "F strip"}])
 
 
 def add_zones(b: pcbnew.BOARD, size) -> None:

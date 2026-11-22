@@ -1,12 +1,12 @@
-"""stitch-vias r5: classify the stitching vias of a routed board (vias not in the input board) as on the board
-lattice, on the via grid only, or off the grid, and print the share.
+"""stitch-vias r5: the share of a run's stitching vias that stand on the board lattice or at a piece extremity
+(user 2026-11-22: "I expected either for the placer to search for the corners, or to have a placement grid"),
+from the run's notes (result.json route.warnings), plus the per-piece lines (class, layer, area, vias of wanted).
 
-    python3 tools/stitchvias_lattice_share.py <input.kicad_pcb> <routed.kicad_pcb> [--px 5.08 --py 5.08
-        --shift 2.54 --grid 0.254 --ox 0 --oy 0] [--corners notes.txt] [--json]
+    python3 -m tools.stitchvias_lattice_share RESULT.json --lattice px,py,shift,ox,oy [--grid G] [--json]
 
-Lattice: rows at oy + j·py, odd rows shifted by `shift`, columns at ox (+shift) + i·px (KiCad frame, mm).
---corners: a run log / report whose "at (x, y)" stitch notes tagged "corner" mark corner vias (r5 notes).
-O(vias).
+Lattice in mm, KiCad frame: rows at oy + j·py, odd rows shifted by `shift`. --grid: also count the vias on the
+via grid (origin ox, oy). Kinds: lattice, corner (the engine's "extremities at" note), other (on neither).
+O(notes).
 """
 from __future__ import annotations
 
@@ -14,62 +14,58 @@ import argparse
 import json
 import re
 
+from tools.stitchvias_png import on_lattice, stitch_points
 
-def vias(path):
-    t = open(path).read()
-    out = []
-    for m in re.finditer(r"\(via\b(.*?)\(uuid", t, re.S):
-        b = m.group(1)
-        at = re.search(r"\(at ([-\d.]+) ([-\d.]+)\)", b)
-        net = re.search(r"\(net (\d+|\"[^\"]*\")\)", b)
-        if at:
-            out.append((round(float(at.group(1)), 4), round(float(at.group(2)), 4), net.group(1) if net else "?"))
+
+def share(notes: list[str], lattice, grid: float | None = None) -> dict:
+    pts, corners = stitch_points(notes)
+    kinds = {"lattice": 0, "corner": 0, "other": 0}
+    others = []
+    on_grid = 0
+    for p in pts:
+        if (round(p[0], 3), round(p[1], 3)) in corners:
+            kinds["corner"] += 1
+        elif on_lattice(p, lattice):
+            kinds["lattice"] += 1
+        else:
+            kinds["other"] += 1
+            others.append(p)
+        if grid:
+            ox, oy = lattice[3], lattice[4]
+            if all(abs((v - o) / grid - round((v - o) / grid)) * grid < 1e-3 for v, o in ((p[0], ox), (p[1], oy))):
+                on_grid += 1
+    out = dict(kinds, vias=len(pts), share=round((kinds["lattice"] + kinds["corner"]) / max(1, len(pts)), 3),
+               others=others)
+    if grid:
+        out["on_grid"] = on_grid
+    out["placement_notes"] = [n for n in notes if " placement: " in n]
+    out["pieces"] = [n[:160] for n in notes if re.match(r"stitch \((dropped island|thin neck)", n)]
+    cut: dict = {}
+    for n in notes:
+        m = re.match(r"stitch via [\d.]+ mm at \([-\d.]+, [-\d.]+\) for (.*)$", n)
+        if m:
+            cut[m.group(1)] = cut.get(m.group(1), 0) + 1
+    out["cut_pieces"] = [f"{k[:110]}: {v} via(s)" for k, v in cut.items()]
+    out["no_site"] = [n[:160] for n in notes if n.startswith("no stitch site for")]
     return out
 
 
-def main():
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("inp")
-    ap.add_argument("routed")
-    ap.add_argument("--px", type=float, default=5.08)
-    ap.add_argument("--py", type=float, default=5.08)
-    ap.add_argument("--shift", type=float, default=2.54)
-    ap.add_argument("--grid", type=float, default=0.254)
-    ap.add_argument("--ox", type=float, default=0.0)
-    ap.add_argument("--oy", type=float, default=0.0)
-    ap.add_argument("--corners", default=None)
+    ap.add_argument("result")
+    ap.add_argument("--lattice", required=True)
+    ap.add_argument("--grid", type=float, default=None)
     ap.add_argument("--json", action="store_true")
-    a = ap.parse_args()
-    before = {(x, y) for x, y, _ in vias(a.inp)}
-    new = [(x, y, n) for x, y, n in vias(a.routed) if (x, y) not in before]
-    corner = set()
-    if a.corners:
-        for m in re.finditer(r"corner[^\n]*?\(([-\d.]+), ([-\d.]+)\)", open(a.corners).read()):
-            corner.add((round(float(m.group(1)), 3), round(-float(m.group(2)), 3)))
-    tol = 1e-3
-
-    def on(v, step, o):
-        k = (v - o) / step
-        return abs(k - round(k)) * step < tol
-
-    cls = {"lattice": [], "corner": [], "grid": [], "off": []}
-    for x, y, n in new:
-        j = round((y - a.oy) / a.py)
-        lat = on(y, a.py, a.oy) and on(x, a.px, a.ox + (a.shift if j % 2 else 0.0))
-        if lat:
-            cls["lattice"].append((x, y))
-        elif (round(x, 3), round(y, 3)) in corner:
-            cls["corner"].append((x, y))
-        elif on(x, a.grid, a.ox) and on(y, a.grid, a.oy):
-            cls["grid"].append((x, y))
-        else:
-            cls["off"].append((x, y))
-    res = {k: len(v) for k, v in cls.items()}
-    res["new"] = len(new)
-    res["lattice_or_corner_share"] = round((res["lattice"] + res["corner"]) / max(1, len(new)), 3)
-    res["positions"] = {k: v for k, v in cls.items() if k != "lattice"}
-    print(json.dumps(res, indent=None if not a.json else 1))
+    a = ap.parse_args(argv)
+    lat = tuple(float(v) for v in a.lattice.split(","))
+    res = share(json.load(open(a.result))["route"]["warnings"], lat, a.grid)
+    if a.json:
+        print(json.dumps(res, indent=1))
+    else:
+        print(f"vias {res['vias']}: lattice {res['lattice']}, corner {res['corner']}, other {res['other']} "
+              f"-> share {res['share']}" + (f", on grid {res['on_grid']}" if a.grid else ""))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

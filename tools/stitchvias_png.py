@@ -60,11 +60,41 @@ def piece_labels(notes: list[str]) -> list[tuple[tuple[float, float], str]]:
     return out
 
 
+def stitch_points(notes: list[str]) -> tuple[list[tuple[float, float]], set]:
+    """The stitching via positions of the run's notes (KiCad frame, mm; class 1 "stitch via" lines and the region
+    lines' positions) and the set of those the engine placed at piece extremities (round 5 "extremities at")."""
+    pts, corners = [], set()
+    for n in notes:
+        m = re.match(r"stitch via [\d.]+ mm at " + _XY, n)
+        if m:
+            pts.append((float(m.group(1)), float(m.group(2))))
+            continue
+        m = re.match(r"stitch \((dropped island|thin neck < [\d.]+ mm)\): .*?: \d+(?: of \d+)? via\(s\)(.*)$", n)
+        if m:
+            pts += [(float(x), float(y)) for x, y in re.findall(_XY, m.group(2))]
+            continue
+        m = re.search(r"extremities at(.*?); nudged at", n)
+        if m:
+            corners |= {(round(float(x), 3), round(float(y), 3)) for x, y in re.findall(_XY, m.group(1))}
+    return pts, corners
+
+
+def on_lattice(p, lat) -> bool:
+    """`lat` = (px, py, shift, ox, oy) mm: rows at oy + j·py, odd rows shifted by `shift`."""
+    px, py, sh, ox, oy = lat
+    j = round((p[1] - oy) / py)
+    if abs(p[1] - oy - j * py) > 1e-3:
+        return False
+    x0 = ox + (sh if j % 2 else 0.0)
+    return abs((p[0] - x0) / px - round((p[0] - x0) / px)) * px < 1e-3
+
+
 def _vias_mm(pcb_text: str) -> list[tuple[float, float]]:
     return [(float(x), float(y)) for x, y in re.findall(r"\(via\b[^()]*(?:\([^()]*\)[^()]*)*?\(at (-?[\d.]+) (-?[\d.]+)\)", pcb_text)]
 
 
-def panel(title: str, refilled: Path, result: Path | None, pieces: Path | None, out: Path, *, height: int = 1100) -> Path:
+def panel(title: str, refilled: Path, result: Path | None, pieces: Path | None, out: Path, *, height: int = 1100,
+          lattice=None) -> Path:
     from toporlib import pcbfile
     with tempfile.TemporaryDirectory(prefix="stitchpng-") as tmp:
         cu = Path(tmp) / "cu.png"
@@ -106,6 +136,34 @@ def panel(title: str, refilled: Path, result: Path | None, pieces: Path | None, 
             mark = next((m for m in exp.get("marks", []) if m["text"].startswith(name + " ")), None)
             at = tuple(mark["xy"]) if mark else (bx0, by0)
             labels.append((at, f"{mark['text'] if mark else name}: {n} vias"))
+    if lattice is not None:
+        # round 5: the board lattice as faint crosses, the stitching vias ringed by kind
+        lpx, lpy, lsh, lox, loy = lattice
+        k = max(3, h // 300)
+        j0, j1 = int((y0 / 1e6 - loy) // lpy) - 1, int((y1 / 1e6 - loy) // lpy) + 1
+        for j in range(j0, j1 + 1):
+            xs = lox + (lsh if j % 2 else 0.0)
+            i0, i1 = int((x0 / 1e6 - xs) // lpx) - 1, int((x1 / 1e6 - xs) // lpx) + 1
+            for i in range(i0, i1 + 1):
+                cx, cy = px((xs + i * lpx) * 1e6, (loy + j * lpy) * 1e6)
+                d.line([cx - k, cy, cx + k, cy], fill=(110, 110, 110, 255), width=1)
+                d.line([cx, cy - k, cx, cy + k], fill=(110, 110, 110, 255), width=1)
+        if result is not None:
+            pts, corners = stitch_points(json.loads(result.read_text())["route"]["warnings"])
+            r = max(6, h // 110)
+            for p in pts:
+                kind = "corner" if (round(p[0], 3), round(p[1], 3)) in corners else ("lattice" if on_lattice(p, lattice) else "other")
+                col = {"lattice": (20, 150, 40, 255), "corner": (240, 140, 0, 255), "other": (220, 0, 0, 255)}[kind]
+                cx, cy = px(p[0] * 1e6, p[1] * 1e6)
+                d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=col, width=3)
+            n = {kk: sum(1 for p in pts if ("corner" if (round(p[0], 3), round(p[1], 3)) in corners else
+                                            ("lattice" if on_lattice(p, lattice) else "other")) == kk)
+                 for kk in ("lattice", "corner", "other")}
+            leg = (f"stitch vias: green = on the board lattice ({n['lattice']}), orange = piece corner/end ({n['corner']}), "
+                   f"red = elsewhere ({n['other']}); + = lattice {lpx:g} x {lpy:g} mm")
+            bb = d.textbbox((8, 8), leg, font=font)
+            d.rectangle([bb[0] - 3, bb[1] - 2, bb[2] + 3, bb[3] + 2], fill=LABEL_BG, outline=(90, 90, 90, 255))
+            d.text((8, 8), leg, fill=(0, 0, 0, 255), font=font)
     for (mx, my), s in labels:
         cx, cy = px(mx * 1e6, my * 1e6)
         bb = d.textbbox((cx + 6, cy - 6), s, font=font)
@@ -121,7 +179,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--panel", nargs="+", action="append", required=True,
-                    metavar="ARG", help="TITLE REFILLED [RESULT|-] [PIECES|-]")
+                    metavar="ARG", help="TITLE REFILLED [RESULT|-] [PIECES|-] [LATTICE px,py,shift,ox,oy mm|-]")
     ap.add_argument("--height", type=int, default=1100)
     a = ap.parse_args(argv)
     pngs = []
@@ -129,7 +187,9 @@ def main(argv=None) -> int:
         title, refilled = p[0], Path(p[1])
         result = Path(p[2]) if len(p) > 2 and p[2] != "-" else None
         pieces = Path(p[3]) if len(p) > 3 and p[3] != "-" else None
-        pngs.append(panel(title, refilled, result, pieces, a.out.with_name(f"{a.out.stem}-p{i}.png"), height=a.height))
+        lat = tuple(float(v) for v in p[4].split(",")) if len(p) > 4 and p[4] != "-" else None
+        pngs.append(panel(title, refilled, result, pieces, a.out.with_name(f"{a.out.stem}-p{i}.png"), height=a.height,
+                          lattice=lat))
     if len(pngs) == 1:
         Path(pngs[0]).replace(a.out)
     else:
