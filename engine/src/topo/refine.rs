@@ -606,6 +606,17 @@ struct NStar {
     wires: Vec<WireId>,
 }
 
+/// One planned via of [`CapModel::via_report`]: its interval (traversals), its traversal, its
+/// place, whether it has no site by the build's test, the static room deficit of its triangle (nm).
+#[derive(Clone, Copy, Debug)]
+pub struct ViaRow {
+    pub iv: (usize, usize),
+    pub k: usize,
+    pub at: Vec2,
+    pub nosite: bool,
+    pub deficit: f64,
+}
+
 /// CM1: a planned via's point and its triangle (`None`: no point, the wire has no via size).
 pub(crate) type ViaPt = Option<(usize, Vec2)>;
 
@@ -2170,6 +2181,31 @@ impl<'a> CapModel<'a> {
             out.extend(no.into_iter().chain(yes).take(self.nosite[w]).map(|i| self.via_place(w, i)));
         }
         out
+    }
+
+    /// Plan report (`[output] plan_report`, [`super::plandump`]): per planned via of `w` under
+    /// events `ev`: its interval, its traversal, its place ([`CapModel::via_place`]), whether it
+    /// has no site by the build's own test ([`Frame::via_no_site`], read-only) and the static
+    /// room deficit of its traversal's triangle (nm, [`Packer::site_deficit`]; 0 = a disc fits
+    /// the static copper). Read-only. O(vias x one site test).
+    pub fn via_report(&self, w: WireId, ev: &[LEv]) -> Vec<ViaRow> {
+        let fx = &self.fx;
+        let ks = self.via_k.get(w).map_or(&[][..], |v| v.as_slice());
+        let iv = self.via_iv.get(w).map_or(&[][..], |v| v.as_slice());
+        let between = if fx.packer.via_between { via_ranges(ev, true).1 } else { Vec::new() };
+        let wi = &fx.st.wires[w];
+        let d = fx.packer.via_d(wi.net);
+        (0..ks.len())
+            .map(|i| {
+                let k = ks[i];
+                let t = wi.tris.get(k.min(wi.tris.len().saturating_sub(1))).copied();
+                let deficit = match t {
+                    Some(t) if d > 0.0 => Packer::site_deficit(fx.packer.site_room(t, wi.net, wi.s), d),
+                    _ => 0.0,
+                };
+                ViaRow { iv: iv.get(i).copied().unwrap_or((k, k)), k, at: self.via_place(w, i), nosite: fx.via_no_site(&self.a, w, ev, ks, &between, i), deficit }
+            })
+            .collect()
     }
 
     /// plan-dots: one place per count of [`CapModel::via_cut_count`] (the over-full via cuts,

@@ -34,6 +34,7 @@ pub mod init;
 pub mod layers;
 pub mod learn;
 pub mod planes;
+pub mod plandump;
 pub mod pourplan;
 pub mod padexit;
 pub mod reduce;

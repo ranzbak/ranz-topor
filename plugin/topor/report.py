@@ -1,6 +1,6 @@
 """Run report (B5 seam, B8 full report): the summary block of the wireframe (section 5, at most 20 lines) and the
 report folder files ``report.md``, ``preview.png`` (written by preview.py), ``result.json``, ``drc.json``,
-``log.txt``. Satisfies ``ports.Report`` (``dir``, ``summary_lines()``) and carries ``stop_reason`` (the run flow's
+``log.txt`` and ``plan.json.gz`` (the plan of the drawn row, ``[output] plan_report``; ``toporlib.plandump``). Satisfies ``ports.Report`` (``dir``, ``summary_lines()``) and carries ``stop_reason`` (the run flow's
 stop text).
 
 ``RunReport.facts`` is the one dict of numbers; ``build_report`` fills it from the engine result, the classified
@@ -20,6 +20,7 @@ from pathlib import Path
 
 from toporlib.compass import summary_line as compass_summary_line
 from toporlib.compass import table_md as compass_table_md
+from toporlib import plandump
 from toporlib.detour import detour_line, detour_stats
 
 from .messages import CUT_TEXT
@@ -199,6 +200,8 @@ class RunReport:
         self.facts: dict = dict(facts or {})
         self.status = "pending"
         self.error_code = ""
+        self._plan_src = None  # the engine plan text last written to plan.json.gz (written once per plan)
+        self._plan_info: dict = {}
 
     @property
     def stop_reason(self):
@@ -421,9 +424,12 @@ class RunReport:
             out.append(f"Config file: {f['toml_path']}")
         return out
 
-    @staticmethod
-    def _files() -> list:
-        return [f"- {n}" for n in ("report.md", "preview.png", "result.json", "drc.json", "log.txt")]
+    def _files(self) -> list:
+        out = [f"- {n}" for n in ("report.md", "preview.png", "result.json", "drc.json", "log.txt")]
+        if (p := self.facts.get("plan_file")):
+            out.append(f"- {p['file']}: the plan handed to the drawing of the drawn row ({p['row']}); "
+                       "read it with `python3 -m toporlib.plandump <this folder> --conn <id>` (troubleshoot.md)")
+        return out
 
     def _versions(self) -> list:
         v = self.facts.get("versions") or {"engine": self.facts.get("version", "?")}
@@ -433,11 +439,35 @@ class RunReport:
     def write(self, *, result: dict | None = None, drc_src: Path | None = None) -> None:
         """(Re)write report.md and, when given, result.json / drc.json. O(size)."""
         self.dir.mkdir(parents=True, exist_ok=True)
+        if result is not None:
+            result = self._split_plan(result)
         (self.dir / "report.md").write_text(self.to_markdown())
         if result is not None:
             (self.dir / "result.json").write_text(json.dumps(result, indent=1, default=str))
         if drc_src is not None and Path(drc_src).is_file():
             shutil.copyfile(drc_src, self.dir / "drc.json")
+
+
+    def _split_plan(self, result: dict) -> dict:
+        """thick-layer F4: the engine's plan of the drawn row (``route.plan``) goes to ``plan.json.gz`` (written once
+        per plan: the report is rewritten several times per run), ``result.json`` keeps only ``plan_file``. A plan
+        that cannot be written is said in ``plan_file.error``, never a failed run. O(plan size) on the first write."""
+        route = result.get("route")
+        plan = route.get("plan") if isinstance(route, dict) else None
+        if plan is None:
+            return result
+        result = {**result, "route": {k: v for k, v in route.items() if k != "plan"}}
+        if plan is not self._plan_src:
+            try:
+                head = json.loads(plan) if isinstance(plan, str) else plan
+                path = plandump.write(self.dir, plan)
+                self._plan_info = {"file": plandump.FILE, "row": plandump.row_line(head), "bytes": path.stat().st_size}
+            except (OSError, ValueError, TypeError) as e:
+                self._plan_info = {"file": None, "error": f"{type(e).__name__}: {e}"}
+            self._plan_src = plan
+        self.facts["plan_file"] = self._plan_info if self._plan_info.get("file") else None
+        result["plan_file"] = self._plan_info
+        return result
 
 
 def write_report(report: RunReport, *, result: dict | None = None, drc_src: Path | None = None) -> Path:

@@ -1678,6 +1678,11 @@ pub struct Options {
     /// cut test: over-full) is measured. Its time goes back to the time limit. Off by default
     /// (user 2026-11-13); `harness.score_runs` turns it on. Never changes the routing.
     pub compass_cut_check: bool,
+    /// thick-layer F4 (`[output] plan_report`): keep the plan handed to the drawing of the drawn
+    /// row in the result (`RouteResult::plan`, [`crate::topo::plandump`]), so a user's run can be
+    /// traced plan vs drawing without a re-route. On by default; measurement only (its time goes
+    /// back to the time limit), never changes the routing.
+    pub plan_report: bool,
     /// M0 (`[capacity] edges_test`, `capacity_model = "edges"` only): how the per-edge model's
     /// over-full edge-layers enter P4. `"price"` (default) = as the method prices everything
     /// (Polubasov 2010 «Оптимизация разводки»: one price S = sum k_i x_i): a topology move pays
@@ -2021,6 +2026,7 @@ impl Default for Options {
             cut_report: String::new(),
             capacity_model: "edges".into(),
             compass_cut_check: false,
+            plan_report: true,
             edges_test: "price".into(),
             overflow_softness: 0.1,
             cut_vias: true,

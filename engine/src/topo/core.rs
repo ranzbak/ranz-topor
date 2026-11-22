@@ -7516,26 +7516,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         fc_plan.0, fc_plan.1
     ));
     if let Ok(path) = std::env::var("TOPO_PLANDUMP") {
-        // Debug: the plan handed to the drawing, per wire: net, connection, taut points, the
-        // layering's stretches, the passes (edge ends, room per layer, need) and crossings.
-        let pt = |p: Vec2| serde_json::json!([(p.x / MM * 1e3).round() / 1e3, (-p.y / MM * 1e3).round() / 1e3]);
+        // Debug: the plan handed to the drawing, per wire ([`super::plandump::wire_json`]): net,
+        // connection, taut points, the layering's stretches, the passes (edge ends, room per
+        // layer, need) and crossings, before the unlayerable drops.
         let lnow = super::optimise::layers_now(&st, &lr.events, bottom);
-        let wires: Vec<serde_json::Value> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).map(|w| {
-            let wi = &st.wires[w];
-            let ci = wire_conn.get(w).copied().filter(|&c| c != usize::MAX).map(|c| conn_of[c]);
-            let passes: Vec<serde_json::Value> = wi.passes.iter().enumerate().map(|(k, &p)| {
-                let e = st.passes[p].edge;
-                let [a, c] = proj.edges[e];
-                serde_json::json!({"k": k, "edge": e, "a": pt(proj.pos[a]), "b": pt(proj.pos[c]), "len": ((proj.pos[c] - proj.pos[a]).len() / MM * 1e3).round() / 1e3,
-                    "room": (0..proj.n_layers).map(|l| { let r = st.room(e, l); if r.is_finite() { (r / MM * 1e3).round() / 1e3 } else { -1.0 } }).collect::<Vec<_>>(),
-                    "need": (st.edge_need(e, None) / MM * 1e3).round() / 1e3, "n": st.edge_order[e].len(), "at": pt(st.pass_point(p))})
-            }).collect();
-            let xs: Vec<serde_json::Value> = st.crossings(w).iter().map(|x| serde_json::json!({"k": x.k, "other": x.other, "other_net": st.wires[x.other].net})).collect();
-            serde_json::json!({"wire": w, "net": wi.net, "conn": ci, "w": wi.w / MM, "s": wi.s / MM, "a": pt(proj.pos[wi.a]), "b": pt(proj.pos[wi.b]),
-                "taut": st.taut_points(w).into_iter().map(pt).collect::<Vec<_>>(),
-                "stretches": lr.stretches.get(w).map(|v| v.iter().map(|(l, ps)| serde_json::json!([l, ps.iter().map(|&q| pt(q)).collect::<Vec<_>>()])).collect::<Vec<_>>()).unwrap_or_default(),
-                "events": lr.events.get(w).cloned().unwrap_or_default(), "layers_now": lnow.get(w).cloned().unwrap_or_default(), "passes": passes, "crossings": xs})
-        }).collect();
+        let wires: Vec<serde_json::Value> = (0..st.wires.len())
+            .filter(|&w| st.wires[w].alive)
+            .map(|w| super::plandump::wire_json(&st, &lr, &lnow, w, wire_conn.get(w).copied().filter(|&c| c != usize::MAX).map(|c| conn_of[c])))
+            .collect();
         let _ = std::fs::write(format!("{path}.s{}.r{round}", opts.seed), serde_json::json!({"wires": wires, "foreign": fc_plan.0}).to_string());
     }
     if std::env::var("TOPO_VIADBG").is_ok() {
@@ -7627,6 +7615,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // M1 compass: the same plan's predicted items per violation class (structured, measurement
     // only), carried to this round's result below.
     let mut compass_plan: Option<super::compass::Compass>;
+    let mut plan_dump: Option<String> = None;
     {
         let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
         let crossings: usize = alive.iter().map(|&w| st.crossings(w).iter().filter(|c| st.wires[c.other].net != st.wires[w].net).count()).sum::<usize>() / 2;
@@ -7721,12 +7710,31 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: px.as_deref() };
             let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
+            // thick-layer F4 (`[output] plan_report`): the plan of this row as the drawing gets
+            // it, carried with the round's result (the result handed back is a drawn row's, so it
+            // carries that row's plan). Measurement only, outside the time limit (as the compass
+            // cut test: `RunControl::measured`).
+            if opts.plan_report {
+                let t_plan = Instant::now();
+                let names: Vec<String> = (0..b.n_signal).map(lname).collect();
+                let net_name = |code: i32| model.nets.iter().find(|n| n.code == code).map_or(String::new(), |n| n.name.clone());
+                let row = super::plandump::Row {
+                    label: drew_row.as_ref().map(|a| a.label.as_str()),
+                    roles: drew_row.as_ref().map_or_else(Vec::new, |a| a.roles.iter().map(|r| r.name()).collect()),
+                    round,
+                    seed: opts.seed,
+                    opt_loop: &opts.opt_loop,
+                };
+                plan_dump = Some(super::refine::meter::suspended(|| super::plandump::plan_json(&st, &lr, bottom, &cm_plan, Some(&cp), &wc, &net_name, &names, fc_plan.0, &row)).to_string());
+                ctl.measured(t_plan.elapsed().as_secs_f64());
+            }
             compass_plan = Some(cp);
         }
         if opts.stop_after == "plan" {
             let mut r = unrouted(model_real, opts, "not drawn: [run] stop_after = \"plan\" ends each run after the plan of its first cycle");
             r.warnings.extend(warnings);
             r.compass = compass_plan.take();
+            r.plan = plan_dump.take();
             return (RoundOut::unrouted(r), Vec::new(), mem.clone());
         }
     }
@@ -10029,6 +10037,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             c.drawn_shrinkages = crit_main.shrinkages;
             c
         }),
+
+        plan: plan_dump,
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().filter(|_| cycles).map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
