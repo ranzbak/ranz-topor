@@ -1,18 +1,20 @@
-"""PROPOSED test pattern for pad-pour-via (docs/dev/design/pad-pour-via.md): a GND pad in a 0.5 mm-pitch row whose
-thermal spokes the neighbours' fanouts all cut, joined by a dog-bone to the B.Cu pour. NOT in the test suite: the
-user approves the PNG first (AGENT_RULES "New test patterns need user approval").
+"""PROPOSED test pattern for pad-pour-via (docs/dev/design/pad-pour-via.md): a GND pad of a pin row whose thermal
+spokes are all cut once its neighbours' fanouts are routed, joined by a dog-bone to the B.Cu pour. NOT in the test
+suite: the user approves the PNG first (AGENT_RULES "New test patterns need user approval").
 
     python -m harness.pad_pour_patterns [OUT]      # OUT/pad_dogbone/problem/pad_dogbone.kicad_pcb + expected.json
 
 Board 20 x 20 mm, GND poured on F.Cu and B.Cu (zone clearance 0.25, minimum width 0.25, thermal relief 0.5 gap /
-0.5 spoke). Row U1 at y = 10: pads 1, 2, 4, 5 (signal nets S1..S4) at x = 9.0, 9.5, 10.5, 11.0, GND pad 3 at x = 10.0,
-all 0.3 x 1.2 mm. Kept copper: each signal pad's 0.25 mm fanout runs 2.8 mm up (-y) to a 0.4 mm test pad; a kept
-signal track (S5, between two test pads) crosses 1.24 mm below the row. Spokes of U1.3: left / right in the
-neighbours' clearance, up into the 0.25 mm channel between the fanouts (below the minimum width: no fill), down
-under S5: all cut, U1.3 is cut off. One routed connection (SIG, J1.2 -> R1.1) so the run has a result to stitch.
-Expected (the optimal answer): a dog-bone from U1.3's centre straight up the channel (the net width fits) to a GND
-via just past the test pads (about 3.3 mm from the centre), in the solid B.Cu pour; no other change. The radial pad
-stub has no answer (its 3 mm reach ends before the via room starts).
+0.5 spoke, spokes at 90 degrees), board clearance 0.15, tracks 0.2. Row U1 at y = 10, 0.55 mm pitch: S1, GND pad 2 at
+x = 10, S2, all 0.3 x 1.2 mm; J1.1 (through-hole GND, bottom left) holds the pour's main component. Kept copper: a
+locked S5 track 1.24 mm below the row (covers the bottom spoke's test point); the left / right spoke test points lie
+in the neighbours' clearance. Before routing the top spoke stands (0.25 mm from the neighbours), so U1.2 is joined
+and no plane stub is planned. Routed: S1 and S2 (net class Power, 0.4 mm) straight up 2.8 mm to test pads; they
+leave the channel between them 0.2 mm of fill, below the minimum width, so the top spoke goes too: U1.2 is cut off by
+the routed copper, which is what the dog-bone (stitching, after routing) is for. Run with kept copper
+(`tools/route_board.sh ... --keep-copper`). Expected (the optimal answer): the fanouts straight; a 0.2 mm dog-bone
+from U1.2's centre straight up the channel to a GND via just past the test pads, in the solid B.Cu pour. The radial
+pad stub has no answer (no via fits within its 3 mm reach).
 """
 from __future__ import annotations
 
@@ -28,35 +30,39 @@ from harness import drc_patterns as D
 STATUS = "PROPOSED (awaiting approval)"
 MM = D.MM
 ZONE_CLEAR, ZONE_MIN = 0.25, 0.25
-ROW_Y, FAN = 10.0, 2.8
+ROW_Y = 10.0
+PITCH, FAN, FAN_W = 0.55, 2.8, 0.4
 
 
 def pattern() -> D.Pat:
-    row, kept, tps = [], [], []
-    for k, (x, net) in enumerate(((9.0, "S1"), (9.5, "S2"), (10.0, "GND"), (10.5, "S3"), (11.0, "S4"))):
-        row.append(D.Pad(str(k + 1), net, (x, ROW_Y), (0.3, 1.2)))
-        if net != "GND":
-            tps.append(D.Fp(f"TP{k + 1}", [D.Pad("1", net, (x, ROW_Y - FAN), (0.4, 0.4), "circle")]))
-            kept.append(D.Trk(net, "F.Cu", 0.25, [(x, ROW_Y), (x, ROW_Y - FAN)], locked=True))
-    yb = ROW_Y + 1.24
-    tps += [D.Fp("TP6", [D.Pad("1", "S5", (7.0, yb), (0.4, 0.4), "circle")]), D.Fp("TP7", [D.Pad("1", "S5", (13.0, yb), (0.4, 0.4), "circle")])]
-    kept.append(D.Trk("S5", "F.Cu", 0.25, [(7.0, yb), (13.0, yb)], locked=True))
-    fps = [D.Fp("U1", row)] + tps
-    fps.append(D.Fp("J1", [D.Pad("1", "GND", (3.0, 15.73), (1.7, 1.7), drill=1.0), D.Pad("2", "SIG", (3.0, 18.27), (1.7, 1.7), "circle", drill=1.0)]))
-    fps.append(D.Fp("R1", [D.Pad("1", "SIG", (8.0, 18.27), (0.9, 0.95))]))
+    row = [D.Pad("1", "S1", (10.0 - PITCH, ROW_Y), (0.3, 1.2)), D.Pad("2", "GND", (10.0, ROW_Y), (0.3, 1.2)),
+           D.Pad("3", "S2", (10.0 + PITCH, ROW_Y), (0.3, 1.2))]
+    yb, yt = ROW_Y + 1.24, ROW_Y - FAN
+    fps = [D.Fp("U1", row),
+           D.Fp("TP1", [D.Pad("1", "S1", (10.0 - PITCH, yt), (0.4, 0.4), "circle")]),
+           D.Fp("TP2", [D.Pad("1", "S2", (10.0 + PITCH, yt), (0.4, 0.4), "circle")]),
+           D.Fp("TP6", [D.Pad("1", "S5", (7.0, yb), (0.4, 0.4), "circle")]), D.Fp("TP7", [D.Pad("1", "S5", (13.0, yb), (0.4, 0.4), "circle")])]
+    # a through-hole GND pad far off: the pour's main component holds a pad (KiCad and the estimate judge the
+    # row pad cut off from it)
+    fps.append(D.Fp("J1", [D.Pad("1", "GND", (3.0, 16.0), (1.7, 1.7), drill=1.0)]))
+    kept = [D.Trk("S5", "F.Cu", D.W, [(7.0, yb), (13.0, yb)], locked=True)]
+    fans = [D.Trk(n, "F.Cu", FAN_W, [(x, ROW_Y), (x, yt)]) for n, x in (("S1", 10.0 - PITCH), ("S2", 10.0 + PITCH))]
+    # the via nearest the row on the axis: clearance to the test pads / fanout caps (radius 0.2) at +-PITCH
+    yv = yt - ((0.2 + D.CL + D.VIA_D / 2) ** 2 - PITCH ** 2) ** 0.5
     return D.Pat(
         name="pad_dogbone", cluster="pad-pour-via", title="Dog-bone via for a pour pad whose spokes are all cut",
         purpose="pad-pour-via B: the axis dog-bone where the radial pad stub has no answer",
-        answer="U1.3: stub straight up the channel, GND via past the test pads (~3.3 mm out) in the B.Cu pour",
-        why="the fanouts leave no spoke and no via room near the pad; the pad axis is the only way out",
-        size=(20.0, 20.0), nets=["GND", "SIG", "S1", "S2", "S3", "S4", "S5"], fps=fps,
-        connections=[("SIG", "J1.2", "R1.1")],
-        ref_tracks=[D.Trk("SIG", "F.Cu", D.W, [(3.0, 18.27), (8.0, 18.27)]),
-                    D.Trk("GND", "F.Cu", 0.25, [(10.0, ROW_Y), (10.0, ROW_Y - 3.3)])],
+        answer=f"S1 / S2 straight up; U1.2: {D.W} mm stub straight up the channel, GND via just past the test pads (y {yv:.2f}) in the B.Cu pour",
+        why="the routed fanouts cut the last spoke and leave no via room within the radial stub's 3 mm; the pad axis is the only way out",
+        size=(20.0, 20.0), nets=["GND", "S1", "S2", "S5"], fps=fps,
+        connections=[("S1", "U1.1", "TP1.1"), ("S2", "U1.3", "TP2.1")],
+        ref_tracks=fans + [D.Trk("GND", "F.Cu", D.W, [(10.0, ROW_Y), (10.0, yv)])],
+        ref_vias=[D.Via("GND", (10.0, yv))],
         kept=kept,
-        expect={"dogbone": {"pad": "U1.3", "via_x": 10.0, "via_y_max": ROW_Y - 3.0},
-                "pieces": {"U1.3": [9.3, 5.5, 10.7, 10.7]}},
-        marks=[{"xy": [10.0, 5.0], "text": "dog-bone via"}, {"xy": [10.0, 12.2], "text": "U1.3 spokes all cut"}])
+        classes=[{"name": "Power", "track_width": FAN_W}], class_patterns=[{"netclass": "Power", "pattern": "S1"}, {"netclass": "Power", "pattern": "S2"}],
+        expect={"dogbone": {"pad": "U1.2", "via_x": 10.0, "via_y": round(yv, 3), "via_y_tol": 0.05},
+                "pieces": {"U1.2": [9.75, 9.0, 10.25, 11.0]}},
+        marks=[{"xy": [10.0, yv - 0.6], "text": "dog-bone via"}, {"xy": [10.0, 12.2], "text": "U1.2 spokes all cut"}])
 
 
 def add_zones(b: pcbnew.BOARD, size) -> None:
@@ -88,9 +94,13 @@ def generate(out: Path) -> Path:
         p = d / kind / f"{pat.name}.kicad_pcb"
         p.parent.mkdir(parents=True, exist_ok=True)
         b = D.build_board(pat, copper=copper)
+        for fp in b.GetFootprints():  # KiCad's footprint-library default for a rect SMD pad (the API's default is 45)
+            for pd in fp.Pads():
+                pd.SetThermalSpokeAngleDegrees(90.0)
         add_zones(b, pat.size)
         pcbnew.SaveBoard(str(p), b)
-        D.write_project_file(p, rules=dict(D.RULES), classes=[dict(D.DEFAULT_CLASS)])
+        D.write_project_file(p, rules=dict(D.RULES), patterns=pat.class_patterns,
+                             classes=[dict(D.DEFAULT_CLASS)] + [{**D.DEFAULT_CLASS, "priority": 0, **c} for c in pat.classes])
         paths[kind] = p
     doc = {"status": STATUS, "name": pat.name, "title": pat.title, "purpose": pat.purpose, "answer": pat.answer,
            "why": pat.why, "expect": pat.expect, "marks": pat.marks}

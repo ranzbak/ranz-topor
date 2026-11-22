@@ -25,12 +25,14 @@ unit() { # name board-pcb
   arm "$1" g "$2" $G
   arm "$1" ga "$2" $G --set planes.stitch_dogbone=false
 }
-pat() {
+pat() { # kept copper: the locked S5 track stays, only the fanouts are routed (harness/pad_pour_patterns.py)
   python -m harness.pad_pour_patterns "$OUT/pat" > "$OUT/pat.log" 2>&1
-  arm pat g "$OUT/pat/pad_dogbone/problem/pad_dogbone.kicad_pcb"
-  local res; res=$(ls "$OUT"/g/pad_dogbone/s0/reports/*/*/result.json | tail -1)
+  local P=$OUT/pat/pad_dogbone/problem/pad_dogbone.kicad_pcb R=$OUT/pat-run
+  TOPOR_HAND_LABEL=problem tools/route_board.sh "$P" "$R" --keep-copper --no-png >> "$OUT/pat.log" 2>&1
+  python -m tools.stitchvias_measure "$R/pad_dogbone-topor/pad_dogbone.kicad_pcb" --out "$OUT/pat-measure.json" --work "$OUT/pat-measure-work" >> "$OUT/pat.log" 2>&1
+  local res; res=$(ls "$R"/reports/*/*/result.json | tail -1)
   python -m tools.stitchvias_png --out "$OUT/pad_dogbone.png" \
-    --panel "PROPOSED pad_dogbone: topor (KiCad refill)" "$OUT/g/pad_dogbone-measure-work/pad_dogbone.kicad_pcb" "$res" "$OUT/pat/pad_dogbone/expected.json" \
+    --panel "PROPOSED pad_dogbone: topor (KiCad refill)" "$OUT/pat-measure-work/pad_dogbone.kicad_pcb" "$res" "$OUT/pat/pad_dogbone/expected.json" \
     --panel "PROPOSED pad_dogbone: expected" "$OUT/pat/pad_dogbone/reference/pad_dogbone.kicad_pcb" - "$OUT/pat/pad_dogbone/expected.json" >> "$OUT/pat.log" 2>&1
   echo "pat png $?" >> "$OUT/rc.txt"
 }
