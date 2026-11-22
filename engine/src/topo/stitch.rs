@@ -1635,6 +1635,10 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
     let turns = [0i32, 45, -45, 90, -90];
     let mut blockers: BTreeSet<String> = BTreeSet::new();
     let mut tried = 0usize;
+    // Candidate ends refused before any checker query, by reason (the no-fit note names the
+    // commonest): [no solid main fill of the net on another layer, own pad, foreign mask opening,
+    // own-copper sliver].
+    let refused: [std::cell::Cell<usize>; 4] = Default::default();
     for &sl in &layers {
         let sk = model.skeleton(pad, sl);
         let e = [Vec2 { x: rot.cos(), y: rot.sin() }, Vec2 { x: -rot.sin(), y: rot.cos() }];
@@ -1668,8 +1672,21 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
                         price += cx.via_price_nm * 100.0;
                     }
                     if !share {
-                        let Some((_, _, d2)) = main_elsewhere(reach, model, net, Some(sl), v, need) else { return };
-                        if !cx.own_pad_ok(v, r, net) || cx.under_foreign_mask(v, r, net) || !cx.own_copper_ok(v, r, net) {
+                        let Some((_, _, d2)) = main_elsewhere(reach, model, net, Some(sl), v, need) else {
+                            refused[0].set(refused[0].get() + 1);
+                            return;
+                        };
+                        let why = if !cx.own_pad_ok(v, r, net) {
+                            1
+                        } else if cx.under_foreign_mask(v, r, net) {
+                            2
+                        } else if !cx.own_copper_ok(v, r, net) {
+                            3
+                        } else {
+                            4
+                        };
+                        if why < 4 {
+                            refused[why].set(refused[why].get() + 1);
                             return;
                         }
                         price += cx.squeeze(d2 - r, sz.d as f64) + cx.prox(v, r, net) + cx.plane_neck(reach, v, r, net);
@@ -1694,6 +1711,7 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
                 for &g in &shared {
                     // A shared via needs the fill of another layer under it, as a new one does.
                     if main_elsewhere(reach, model, net, Some(sl), g, r).is_none() {
+                        refused[0].set(refused[0].get() + 1);
                         continue;
                     }
                     if let Some((a, b)) = dog_legs(c0, u, d, g) {
@@ -1802,12 +1820,40 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
         }
     }
     let nets: Vec<String> = blockers.into_iter().take(6).collect();
-    Err(format!(
-        "pad {label} near {} (all thermal spokes cut; {} checker queries{})",
-        kicad_mm(c0),
-        tried,
-        if nets.is_empty() { String::new() } else { format!(", boxed in by {}", nets.join(", ")) }
-    ))
+    Err(format!("pad {label} near {} (all thermal spokes cut; {})", kicad_mm(c0), dog_no_fit(layers.is_empty(), tried, &refused.map(|c| c.get()), &nets)))
+}
+
+/// Why no dog-bone fits, for the no-fit note: the checker's refusals (the nets that box the pad
+/// in) when candidates reached the checker, else the commonest reason the candidate ends were
+/// refused before it (`refused`: no solid main fill of the net on another layer, own pad, foreign
+/// mask opening, own-copper sliver), never a bare count of zero queries. O(1).
+fn dog_no_fit(no_layer: bool, tried: usize, refused: &[usize; 4], nets: &[String]) -> String {
+    const WHY: [&str; 4] = [
+        "no via site in solid fill of the net on another layer within reach",
+        "every via site within reach overlaps the net's own pads",
+        "every via site within reach lies under another net's mask opening",
+        "every via site within reach leaves a sliver against the net's own copper",
+    ];
+    if no_layer {
+        return "the pad is on no routed layer".to_string();
+    }
+    let total: usize = refused.iter().sum();
+    let pre = (0..4)
+        .max_by_key(|&i| (refused[i], std::cmp::Reverse(i)))
+        .filter(|_| total > 0)
+        .map(|i| format!("{} ({} of {} candidate ends)", WHY[i], refused[i], total));
+    if tried == 0 {
+        return pre.unwrap_or_else(|| "no candidate end within reach".to_string());
+    }
+    let mut out = if nets.is_empty() {
+        format!("every candidate refused by the checker ({tried} queries)")
+    } else {
+        format!("boxed in by {} ({tried} checker queries)", nets.join(", "))
+    };
+    if let Some(p) = pre {
+        out.push_str(&format!("; before the checker: {p}"));
+    }
+    out
 }
 
 /// The extent of `sk` from `c` along unit `u`, nm (its support). O(vertices).

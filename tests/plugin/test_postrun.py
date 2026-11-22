@@ -127,8 +127,8 @@ def test_dog_bone_is_a_stitch_and_a_miss_is_named():
         "dog-bone U1.3 -> (10.000, 7.000) (3.000 mm, via, 0.250 mm wide) for GND: 1 island(s) 0.50 mm², pads [U1.3], "
         "0 via(s), near (10.000, 10.000)",
         "pour piece cut off: GND: 1 island(s) 0.50 mm², pads [U2.3], 0 via(s), near (20.000, 10.000)",
-        "no dog-bone via fits for pad U2.3 near (20.000, 10.000) (all thermal spokes cut; 2048 checker queries, "
-        "boxed in by S5)"]}
+        "no dog-bone via fits for pad U2.3 near (20.000, 10.000) (all thermal spokes cut; boxed in by S5 "
+        "(2048 checker queries))"]}
     fs = {f.code: f for f in postrun.route_findings(res)}
     assert "1 pour pad(s) whose thermal spokes were all cut got a dog-bone via" in fs["POUR_STITCHED"].message
     assert any(x.startswith("dog-bone U1.3") for x in fs["POUR_STITCHED"].items)

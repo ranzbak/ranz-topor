@@ -62,8 +62,10 @@ Cause of the misjudgement: differences from KiCad 10.0 (`pcbnew/zone_filler.cpp`
 - Each part is checked alone (leg 1, via, leg 2); a failing leg fails every longer leg on its ray, a failing via site
   every leg ending there; both remembered, so the 2048 checker queries per pad (32·MAX_TRIES) go to new geometry.
 - Placed after routing, against the drawn copper, so it never takes routed copper or planned room.
-- No fit: the note "no dog-bone via fits for pad X.N (all spokes cut; boxed in by NET, NET ...)" lists the foreign
-  nets the refused candidates hit. It goes into the existing POUR_CUTOFF finding.
+- No fit: the note "no dog-bone via fits for pad X.N (all thermal spokes cut; boxed in by NET, NET ... (N checker
+  queries))" lists the foreign nets the refused candidates hit; when no candidate reached the checker it names the
+  commonest reason the ends were refused before it (e.g. "no via site in solid fill of the net on another layer within
+  reach (K of M candidate ends)"), never a count of zero queries (esp, ppv1: 18 of 25 notes). It goes into the existing POUR_CUTOFF finding.
 
 Literature:
 - TopoR 6.3 manual p. 65: "only fanouts will be placing for nets to internal plane layers". A plane-net pad is joined

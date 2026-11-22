@@ -214,6 +214,18 @@ fn no_dog_bone_fit_names_the_pad() {
     assert_eq!(s.dogbone_failed, 1);
 }
 
+/// No fit before any checker query: without GND fill on B.Cu no via site stands in solid fill on
+/// another layer; the warning says so instead of counting zero queries (esp-rust-board, ppv1).
+#[test]
+fn a_no_fit_without_fill_elsewhere_names_the_reason() {
+    let (mut m, items) = row();
+    m.pours[0].fills.retain(|f| f.layer == 0);
+    let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
+    let w = s.notes.iter().find(|n| n.starts_with("no dog-bone via fits for pad G.1")).unwrap_or_else(|| panic!("{:?}", s.notes));
+    assert!(w.contains("no via site in solid fill of the net on another layer"), "{w}");
+    assert!(!w.contains("0 checker queries"), "{w}");
+}
+
 fn first_via(s: &topor_engine::topo::stitch::StitchOut) -> (f64, f64) {
     s.items.iter().find_map(|it| if let Item::Via(v) = it { Some((v.at.x as f64 / MM, v.at.y as f64 / MM)) } else { None }).expect("a via")
 }
