@@ -122,7 +122,7 @@ class Progress:
     limit_s: float | None = None  # plugin: the time limit in force (seconds on the run's clock, 0 = none); None = unknown
     # M-B0 (iterations like TopoR): "Routes stable" (the gain of the best result over the last
     # [optimize] stable_window rounds is below stable_gain_pct in every run), that gain (None before a
-    # full window), the best of N runs and the best result so far (what OK / Cancel keeps).
+    # full window), the best of N runs and the best result so far (what Accept keeps).
     stable: bool = False
     gain_pct: float | None = None
     runs: int = 0
@@ -165,7 +165,7 @@ class Progress:
     cycle_lines: list = field(default_factory=list)
     # M2.TL soft time limit (engine): the limit has passed and the step that runs finishes ([run] timeout_mode =
     # soft); the step that ran then; the dialog's line ("time limit reached, waiting for the current step to finish
-    # (<step>); press Cancel to stop now").
+    # (<step>); press Accept to stop now and keep the best").
     limit_reached: bool = False
     limit_step: str = ""
     notice: str = ""

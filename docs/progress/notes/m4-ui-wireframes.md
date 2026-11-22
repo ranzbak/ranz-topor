@@ -563,8 +563,6 @@ title/label/button/checkbox/choice/heading/text).
 | progress | limit_hint | text | 0 = no limit. A limit below the time spent stops the run now, keeping the best result. |
 | progress | cancel_hint | label | Accept keeps the best result so far. Cancel takes nothing. |
 | progress | cancel_hint_tip | text | Accept stops the run and takes the best result so far (the best shown here is exactly the board you get; the DRC and the preview follow, and you can still reject it there). Cancel stops at once and takes no result: the board stays exactly as it was. "Routes stable" does not stop the run: waiting longer may still find small gains. The time limit counts router time only and is an emergency stop; KiCad's DRC and the preview come on top. |
-| progress | notice_stop_now_engine | text | press Cancel to stop now |
-| progress | notice_stop_now | text | press Accept to stop now and keep the best |
 | progress | cancel | button | Cancel |
 | progress | accept | button | Accept |
 | progress | phase_stable | text | Routes stable |

@@ -538,10 +538,10 @@ def test_progress_says_the_soft_time_limit_is_waiting_for_the_step(app):
     try:
         p = Progress("route", 1, 120, 426, 30, 601.0, "layer assignment, rip-up and reroute", 1, 4, 610.0)
         p.limit_reached = True
-        p.notice = "time limit reached, waiting for the current step to finish (layer assignment, rip-up and reroute); press Cancel to stop now"
+        p.notice = "time limit reached, waiting for the current step to finish (layer assignment, rip-up and reroute); press Accept to stop now and keep the best"
         dlg.update(p)
         assert dlg.phase.GetLabel() == ("Time limit reached, waiting for the current step to finish (layer assignment, "
-                                        "rip-up and reroute); press Accept to stop now and keep the best")  # Cancel takes nothing now
+                                        "rip-up and reroute); press Accept to stop now and keep the best") 
         dlg.cancelled = True
         dlg.update(p)
         assert not dlg.phase.GetLabel().startswith("Time limit reached"), dlg.phase.GetLabel()

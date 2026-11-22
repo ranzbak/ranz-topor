@@ -127,8 +127,8 @@ WORDING: dict[str, dict[str, str]] = {
         # Cancel does not wait for the engine: the run is dropped, its late result is never used
         "phase_cancelling": "Cancel pressed: stopping, nothing is taken… {s} s",
         # M2.TL soft time limit: the engine's notice ("time limit reached, waiting for the current step to finish
-        # (<step>); press Cancel to stop now"), capitalised; the engine's "press Cancel to stop now" is shown as
-        # notice_stop_now (Cancel takes nothing since 2026-11-22, Accept stops now and keeps the best)
+        # (<step>); press Accept to stop now and keep the best"), capitalised
+        # (Cancel takes nothing since 2026-11-22)
         "phase_limit": "{notice}",
         "gauge_value": "{routed} / {total}",
         "iteration_label": "Round",
@@ -158,8 +158,6 @@ WORDING: dict[str, dict[str, str]] = {
                            "stops at once and takes no result: the board stays exactly as it was. \"Routes stable\" "
                            "does not stop the run: waiting longer may still find small gains. The time limit counts "
                            "router time only and is an emergency stop; KiCad's DRC and the preview come on top.",
-        "notice_stop_now_engine": "press Cancel to stop now",
-        "notice_stop_now": "press Accept to stop now and keep the best",
         "score_waiting": "Waiting for round 1…",
         "cancel": "Cancel",
         # two buttons for the whole run (user 2026-11-22): Accept = stop and take the best so far, Cancel = stop at
@@ -1598,9 +1596,7 @@ class ProgressDialog(_Base):
     def set_phase(self, phase: str, stage: str = "", notice: str = "") -> None:
         if notice and not self.cancelled and phase in ("setup", "route"):
             # M2.TL: the time limit is reached; the engine finishes the step that runs (Cancel stops now)
-            W = WORDING["progress"]
-            notice = notice.replace(W["notice_stop_now_engine"], W["notice_stop_now"])
-            self._phase_label(W["phase_limit"].format(notice=notice[:1].upper() + notice[1:]))
+            self._phase_label(WORDING["progress"]["phase_limit"].format(notice=notice[:1].upper() + notice[1:]))
             return
         if self.cancelled:
             # The engine finishes the stage it is in after Cancel / OK: say so, with the seconds since the click; the
