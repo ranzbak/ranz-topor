@@ -10,6 +10,7 @@ use topor_engine::topo::stitch::stitch;
 
 const MM: f64 = 1e6;
 
+#[allow(clippy::too_many_arguments)]
 fn pad(r: &str, num: &str, net: i32, x: f64, y: f64, w: f64, h: f64, layers: &str) -> String {
     let shapes: Vec<String> = layers.split(',').map(|l| format!(r#""{}": {{ "kind": "rect", "w": {}, "h": {} }}"#, l.trim(), (w * MM) as i64, (h * MM) as i64)).collect();
     let attr = if layers.contains(',') { "pth" } else { "smd" };
@@ -222,13 +223,14 @@ fn dog_note(s: &topor_engine::topo::stitch::StitchOut) -> String {
 }
 
 /// 0.4 mm fanouts leave the axis channel room for a 0.2 mm stub only: the dog-bone necks below the
-/// net width (0.25 mm) to fit.
+/// net width (0.25 mm) to fit, to the widest graded step that fits (0.75 x 0.25), not the board
+/// minimum (0.09).
 #[test]
 fn a_narrow_channel_necks_the_dog_bone() {
     let (m, items) = row_fan(0.4, &[]);
     let s = stitch(&m, &Options::default(), &reg(), &items, &[], None);
     let note = dog_note(&s);
-    assert!(note.contains("0.188 mm wide") || note.contains("0.125 mm wide") || note.contains("0.090 mm wide"), "{note}");
+    assert!(note.contains("0.188 mm wide"), "{note}");
 }
 
 /// An existing GND via on the axis just past the fanouts' ends: the dog-bone ends on it (shared

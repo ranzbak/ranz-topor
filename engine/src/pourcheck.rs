@@ -467,7 +467,9 @@ fn build_raster(
         for j in j0..j1 {
             for i in i0..i1 {
                 let c = j * nx + i;
-                if fill[c] && crate::geom::point_skeleton(r.centre(i, j), sk) < *gap {
+                // Spoke copper may stand anywhere in the relief (KiCad adds the spoke outline to the
+                // fill whatever the old fill held there), unless foreign copper's knockout takes it.
+                if crate::geom::point_skeleton(r.centre(i, j), sk) < *gap {
                     fill[c] = false;
                     spokeable[c] = true;
                 }
@@ -1778,7 +1780,8 @@ mod tests {
             no_pads: false,
             no_footprints: false,
         };
-        let (u1, u3) = (Vec2 { x: 4.0e6, y: -15.0e6 }, Vec2 { x: 20.0e6, y: -15.0e6 });
+        // Probes 3 mm beside the pads (a thermal pad's own spot is its relief, no fill: pad-pour-via).
+        let (u1, u3) = (Vec2 { x: 4.0e6, y: -12.0e6 }, Vec2 { x: 20.0e6, y: -12.0e6 });
         let islands = |m: &BoardModel| {
             let r = check_pour_reach(m, &[], &[]);
             let ras = r.raster(0, 31).expect("raster");
@@ -1841,13 +1844,13 @@ mod tests {
         assert_eq!(r.lost_pads, vec![0], "{:?}", r.notes);
         assert!(r.lost_vias.is_empty());
         assert_eq!(r.main_pads[&0], vec![1]);
-        // The site filter keeps the main side only.
+        // The site filter keeps the main side only (3 mm beside U3.1: its own spot is its relief).
         assert!(r.site_in_main(
             0,
             &[0, 31],
             Vec2 {
                 x: 20.0e6,
-                y: -15.0e6
+                y: -12.0e6
             }
         ));
         assert!(!r.site_in_main(

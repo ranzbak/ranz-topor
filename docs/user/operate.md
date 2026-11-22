@@ -887,7 +887,8 @@ unsure about is kept. KiCad's DRC of the result stays the judge.
   `[optimize] allow_violations = false` leaves those connections open instead
   ([`UNROUTED`](troubleshoot.md#unrouted), drawn blue in the preview). Small changes elsewhere on the board can
   move the result by a few connections.
-- Pour islands that the new copper cuts off are stitched afterwards (stitching vias, pad stubs), not prevented.
+- Pour islands that the new copper cuts off are stitched afterwards (stitching vias, pad stubs, dog-bones for pour pads
+  whose thermal spokes are all cut: `[planes] stitch_dogbone`), not prevented; a pad no dog-bone fits is warned by name.
 - The settings of the classic router (`[iterations]`, `[ripup]`, the via cost keys, `[run] threads`, …) were removed
   in the CL cleanup (2026-11-09; list in [configuration.md](configuration.md#removed-keys)): an old `topor.toml`
   that still sets one gets [`CFG_REMOVED_KEY`](troubleshoot.md#cfg_removed_key) and the key is ignored. The

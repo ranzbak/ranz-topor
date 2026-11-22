@@ -1659,7 +1659,7 @@ fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias
                 let d = Vec2 { x: u.x * t.cos() - u.y * t.sin(), y: u.x * t.sin() + u.y * t.cos() };
                 let bend = DOG_BEND_NM * (turn.abs() / 45) as f64;
                 let mut push = |a: f64, b: f64, share: bool| {
-                    if a <= h || a > h + DOG_LEG1_NM + 1.0 || b < 0.0 || b > DOG_LEG2_NM + 1.0 || (turn != 0) != (b > 1.0) {
+                    if a <= h || a > h + DOG_LEG1_NM + 1.0 || !(0.0..=DOG_LEG2_NM + 1.0).contains(&b) || (turn != 0) != (b > 1.0) {
                         return;
                     }
                     let v = c0 + u * a + d * b;

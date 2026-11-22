@@ -9,7 +9,7 @@
 - `options.json`: the engine options of the run's non-default settings (`--set` values are read from the run's
   `report.md` settings line when present, else the defaults);
 - `items.json`: the routed copper (KiCad frame, engine `Item` JSON): every track and via of the routed copy that is
-  not in the input copy, minus the stitching items the run's notes name (stitch vias, pad stubs, region vias);
+  not in the input copy, minus the stitching items the run's notes name (stitch vias, pad stubs, dog-bones, region vias);
 - `routed_pads.json`: `[{"label", "at"}]` of the routed connections' pad ends (the run's `result.json`).
 
 Approximate: tidy/post may have merged a stitch stub with routed copper; the replay says what it dropped.
@@ -83,6 +83,13 @@ def stitch_points(warnings: list[str]) -> tuple[set, list]:
                 p = (round(float(m[1]) * 1e3), round(float(m[2]) * 1e3))
                 stubs.append(p)
                 if m[3]:
+                    vias.add(p)
+        elif w.startswith("dog-bone "):  # pad-pour-via; a bent dog-bone's first leg ends at the bend, kept
+            m = re.search(r"-> " + _PT + r" \([\d.]+ mm[^)]*?, (shared )?via, ", w)
+            if m:
+                p = (round(float(m[1]) * 1e3), round(float(m[2]) * 1e3))
+                stubs.append(p)
+                if not m[3]:
                     vias.add(p)
         elif w.startswith("stitch ("):
             tail = w.split(" via(s)", 1)[-1]

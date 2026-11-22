@@ -118,6 +118,23 @@ def test_island_join_is_a_stitch():
     assert "1 of those join(s) run more than 3 mm from the pad" in msg
 
 
+def test_dog_bone_is_a_stitch_and_a_miss_is_named():
+    """pad-pour-via: a dog-bone (pour pad whose thermal spokes are all cut) is listed with the stitches; a pad no
+    dog-bone fits is listed with the cut-off pieces. Wording pinned by engine/tests/topo_pad_pour_via.rs."""
+    res = {"connections": [_c("GND", "routed")], "warnings": [
+        "pour stitching: 2 pour pieces cut off by the routed copper before, 1 after; 0 island vias, 0 pad stubs, "
+        "0 island joins, 1 dog-bones (0.01 s)",
+        "dog-bone U1.3 -> (10.000, 7.000) (3.000 mm, via, 0.250 mm wide) for GND: 1 island(s) 0.50 mm², pads [U1.3], "
+        "0 via(s), near (10.000, 10.000)",
+        "pour piece cut off: GND: 1 island(s) 0.50 mm², pads [U2.3], 0 via(s), near (20.000, 10.000)",
+        "no dog-bone via fits for pad U2.3 near (20.000, 10.000) (all thermal spokes cut; 2048 checker queries, "
+        "boxed in by S5)"]}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    assert "1 pour pad(s) whose thermal spokes were all cut got a dog-bone via" in fs["POUR_STITCHED"].message
+    assert any(x.startswith("dog-bone U1.3") for x in fs["POUR_STITCHED"].items)
+    assert any("boxed in by S5" in x for x in fs["POUR_ISLANDS"].items)
+
+
 def test_stitch_vias_finding_lists_the_pieces():
     """stitch-vias: the region stitching summary (engine/tests/topo_stitch_vias.rs pins its words) becomes
     STITCH_VIAS with one item per piece that got a via; none when it placed no via."""

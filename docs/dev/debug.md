@@ -247,6 +247,21 @@ the column "cleanup-unstable items". The engine side is `engine/src/topo/tidy.rs
 plugin side `run.commit_fills` (the zones get the fills of the refilled routed copy in the Accept commit); the
 mechanism fixtures `fx_cleanup_*` (`tests/test_mechfix.py`) route each class as drawn and with the defaults.
 
+## Pour stitching replayed (`tools/stitch_replay_dump.py`, `examples/stitch_replay`)
+
+Replays the stitching stage (cut-off pieces, pad stubs, dog-bones, region vias) on a finished run's routed copper in
+seconds, without routing again (pad-pour-via):
+
+    PYTHONPATH=.:plugin ../slot.sh .venv/bin/python -m tools.stitch_replay_dump <run>/<board>/s0 <dump>   # absolute paths
+    ../../slot.sh cargo run --release --example stitch_replay -- <dump> [--pads REF.NUM,...] [--cuts] [--save items.json] [--opt NAME=JSON]
+
+The dump holds the model of the run's ripped copy, the run's non-default options, the routed copper minus the
+stitching items its notes name (nets mapped by name: pcbnew's net codes differ from the model's) and the routed pad
+ends. `--pads` prints each pad's pour-reach verdict, `--cuts` every pad of every cut piece, `--save` the routed plus
+stitching copper (items.json format) to refill in KiCad and compare (KiCad is the spec: compare per pad against
+KiCad's connectivity after the refill, not against "fill touches the pad"). `--opt stitch_dogbone=false` gives the
+A-only arm. Approximate: tracks the rip removed and the router re-drew unchanged are missing from the dump world.
+
 ## Live GUI test (`tools/gui_e2e.sh`)
 
 Drives the real plugin in a real KiCad 10 on Xephyr with a separate KiCad home and checks every step; see

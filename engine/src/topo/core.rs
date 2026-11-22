@@ -2158,12 +2158,13 @@ fn stitch_pours(model: &BoardModel, opts: &Options, best: &mut RouteResult, dead
         return 0;
     }
     best.warnings.push(format!(
-        "pour stitching: {} pour pieces cut off by the routed copper before, {} after; {} island vias, {} pad stubs, {} island joins ({:.2} s); these vias come after routing, the plan has no price for the pour pieces its copper cuts off (vias, plan vs drawn: class \"pour stitching\")",
+        "pour stitching: {} pour pieces cut off by the routed copper before, {} after; {} island vias, {} pad stubs, {} island joins, {} dog-bones ({:.2} s); these vias come after routing, the plan has no price for the pour pieces its copper cuts off (vias, plan vs drawn: class \"pour stitching\")",
         s.before,
         s.after,
         s.island_vias,
         s.pad_stubs,
         s.island_joins,
+        s.dogbones,
         t.elapsed().as_secs_f64()
     ));
     best.warnings.extend(s.notes);
