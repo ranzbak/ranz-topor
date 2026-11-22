@@ -29,7 +29,7 @@ DOCS_HINT = "see docs/user/configuration.md"
 _ENGINE_SCALE = {"margin_nm": 1000, "allowed_drills_nm": 1_000_000, "neck_max_nm": 1_000_000,
                  "diffpair_zip_max_nm": 1_000_000, "via_drill_grid_nm": 1_000_000,
                  "stitch_pitch_x_nm": 1_000_000, "stitch_pitch_y_nm": 1_000_000,
-                 "stitch_thin_nm": 1_000_000}
+                 "stitch_thin_nm": 1_000_000, "stitch_nudge_nm": 1_000_000}
 
 
 def _taut(values: dict) -> bool:

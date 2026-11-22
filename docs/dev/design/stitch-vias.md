@@ -93,6 +93,47 @@ well".
   A site priced at or above the value of a via is skipped instead of ending the piece (V2).
 - Own-net copper refusals no longer count towards `MAX_TRIES`, as before stitch-vias.
 
+## Round 5: deliberate placement (user 2026-11-22: "looks like random placement, I expected either for the placer to search for the corners, or to have a placement grid")
+
+**RCA of today's off-lattice vias** (wiccon g arm at c513c70c, notes of result.json: 30 of 84 stitch vias on
+the lattice, 54 on the via grid only). The lattice itself is one board lattice (`Raster::lattice_sites`,
+pourcheck.rs:160, origin = grid origin): there is no per-piece offset. The causes:
+1. **Seed at a target** (14 of 20 pieces: the first via off the lattice). Class 1 places its first via at
+   min(distance to the piece's pads + price), class 2 at the island's `at` point; a grid point beside the pad
+   beats a lattice point a few mm away (offset weight 2 < the distance gained).
+2. **Saturated spread**: the next vias maximise min(d, pitch) − price. Every site at least a pitch from the
+   seed ties at "pitch", so a raster/grid point priced 2·offset wins over a lattice point nearer than
+   pitch − 2·offset to an off-lattice seed: the rows drift with the seed.
+3. **Count above the lattice**: `want = ceil(A/p²)` counts the whole piece, the legal lattice points lie in
+   the site area (eroded by via radius + min width): the shortfall is filled from the raster's grid corners
+   (G3), i.e. wherever a STEP cell's corner lands.
+4. Checker refusals (MAX_TRIES) take the next best site, usually a raster point beside the refused lattice
+   point: counted on the boards in this round (`blocked` in the notes).
+
+**Rule (classes 1-4, one function `place_deliberate`)**
+- **Lattice fill**: a piece whose site area holds at least `stitch_min_vias` legal board-lattice points gets
+  vias on lattice points only (at most `want`; farthest-point among lattice points when fewer are wanted).
+  Rows and columns line up across pieces because the lattice is the board's.
+- **Extremities** (minimum-via repair): a piece with fewer legal lattice points gets its vias at its
+  extremities: farthest-point sampling over the legal **via-grid** sites of the piece, seeded at the site
+  farthest from the piece's centroid, no saturation (score = distance to the nearest chosen via or seed −
+  site cost). A rectangle gets opposite corners first, then the other two; a strip or a thin-neck core its
+  two ends. Off the grid only where the piece has no legal grid site (counted, as before).
+- Lattice fill placing fewer than the minimum (refusals): the rest at the extremities, anchored on the vias placed.
+- **Blocked lattice point** (site tests fail or the checker refuses): `[planes] stitch_nudge_mm` (new,
+  default 0 = drop it). > 0: the via may move to a via-grid point at most that far, priced
+  2·distance on top of its cost (graded, cheapest first); never to an arbitrary raster point.
+  Default drop: the share "on the lattice or at a corner" is then 100 %, and the minimum per piece is kept
+  by the extremity rule, so a drop never loses a piece.
+- `stitch_min_vias = 1` with a one-via piece keeps the D4 rule (first via near the pad), as the option's
+  doc says ("1 = the behaviour before stitching vias"): stitching off stays bit-identical.
+- Prices stay graded (squeeze, proximity, BGA, plane neck); a corner moves inwards while the squeeze price
+  falls faster than the distance it gives up (a via with a full diameter of slack, as a designer insets it).
+
+**Tests**: pattern fixture extended (PROPOSED) with a small piece (no lattice point: 2 corner vias) and a strip
+(two ends); engine tests: corners of a rectangle, two ends of a strip, lattice-only fill with a blocked point
+dropped / nudged ≤ stitch_nudge_mm on the grid, D4 single via unchanged; mutants on each.
+
 ## Options (`[planes]`, documented in schema.py + docs/user/configuration.md)
 - `stitch_islands` (exists) = class 1;
 - `stitch_min_vias` = 2;

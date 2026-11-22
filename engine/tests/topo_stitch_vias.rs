@@ -158,11 +158,11 @@ fn the_lattice_follows_the_grid_origin() {
     let items = square(0, 8, 12, 22, 26);
     let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
     let v = vias(&s.items);
-    // The 6 lattice points inside (x 11, 16, 21 x y 17, 22); the 7th via the area wants is a
-    // fallback site off the lattice.
-    assert_eq!(v.len(), 7, "{:?}", s.notes);
-    assert_eq!(v.iter().filter(|&&p| near_lattice(p, (MM, 2 * MM), 5 * MM, MM / 2)).count(), 6, "{v:?}");
-    assert!(v.iter().filter(|&&p| on_lattice(p, (MM, 2 * MM), 5 * MM)).count() >= 4, "{v:?}");
+    // The 6 lattice points inside (x 11, 16, 21 x y 17, 22). Round 5 (lead: the count is capped
+    // at the legal lattice points, a shortfall is never filled off the lattice): the area wants 7,
+    // the lattice holds 6, so 6 vias, every one on the lattice.
+    assert_eq!(v.len(), 6, "{:?}", s.notes);
+    assert!(v.iter().all(|&p| on_lattice(p, (MM, 2 * MM), 5 * MM)), "{v:?}");
 }
 
 /// Small dropped islands (under pitch²/4) are not worth a via.
@@ -267,12 +267,17 @@ fn cut_off_repair_spreads_its_vias() {
     let s = stitch(&m, &straight, &reg(), &items, &[], None);
     let v = vias(&s.items);
     assert!(v.len() >= 2, "{:?}", s.notes);
-    assert_eq!(v[0], (5 * MM, 15 * MM), "{v:?}");
-    assert_eq!(v[1], (5 * MM, 30 * MM), "{v:?}");
-    // stitch_min_vias = 1 and a pitch larger than the strip: one via, as before stitch-vias.
+    // Round 5: lattice fill, farthest-point from the ends: the two ends of the x = 5 column first.
+    assert_eq!(v[0], (5 * MM, 30 * MM), "{v:?}");
+    assert_eq!(v[1], (5 * MM, 5 * MM), "{v:?}");
+    assert!(v.iter().all(|&p| on_lattice(p, (0, 0), 5 * MM)), "{v:?}");
+    // stitch_min_vias = 1 and a pitch larger than the strip: one via, as before stitch-vias (the D4
+    // rule, near the pad U1.1 at (4, 15); stitching off stays bit-identical).
     let o = Options { stitch_min_vias: 1, stitch_pitch_x_nm: 40 * MM, stitch_pitch_y_nm: 40 * MM, ..Options::default() };
     let s = stitch(&m, &o, &reg(), &items, &[], None);
     assert_eq!(s.island_vias, 1, "{:?}", s.notes);
+    let v = vias(&s.items);
+    assert!((((v[0].0 - 4 * MM) as f64).hypot((v[0].1 - 15 * MM) as f64)) < 2.0e6, "{v:?}");
 }
 
 /// A solder-mask opening on `layer` over [x0, x1] x [y0, y1] mm (KiCad frame), pushed in the
@@ -407,8 +412,14 @@ fn stitching_vias_stand_on_the_via_grid() {
     assert_eq!(lattice_shift(&o), 2_540_000.0);
     let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
     let v = vias(&s.items);
-    assert!(v.len() >= 7, "{:?}", s.notes);
+    // Round 5: the legal points of the 5.08 mm staggered lattice only (4 of them; the area wants 7).
+    assert_eq!(v.len(), 4, "{:?}", s.notes);
     assert!(v.iter().all(|&p| on_grid(p, (MM, 2 * MM), g)), "{v:?} {:?}", s.notes);
+    let stag = |p: (i64, i64)| {
+        let j = (p.1 - 2 * MM).div_euclid(5_080_000);
+        (p.1 - 2 * MM).rem_euclid(5_080_000) == 0 && (p.0 - MM - if j.rem_euclid(2) == 1 { 2_540_000 } else { 0 }).rem_euclid(5_080_000) == 0
+    };
+    assert!(v.iter().all(|&p| stag(p)), "{v:?}");
     assert!(s.notes[0].contains("staggered from the grid origin, on the via grid 0.254 x 0.254 mm"), "{}", s.notes[0]);
     assert!(s.notes.iter().any(|n| n == "stitching vias: stitch_pitch_x_mm 5 is not a multiple of the via grid 0.254 mm: the lattice uses 5.08 mm"), "{:?}", s.notes);
     // The track grid stands in for a missing via grid.
@@ -443,25 +454,6 @@ fn fallback_sites_snap_to_the_via_grid() {
     assert!(v.iter().any(|&p| !on_grid(p, (MM, MM), g)), "{v:?}");
 }
 
-/// Round 4 (pins the lattice offset of a staggered lattice, earlier mutant offset_no_stagger): a
-/// dropped island [6, 22] x [23, 31] mm holds no point of the 20 x 20 mm lattice (rows y = 20 and
-/// 40), so its one via is a fallback site, drawn towards the nearest lattice point by the offset
-/// price. Straight, the nearest is (20, 20); staggered, the odd row y = 20 is shifted to x = 10 / 30,
-/// so the via moves to the other side of the island.
-#[test]
-fn the_lattice_offset_follows_the_staggered_rows() {
-    let m = model(&[]);
-    let items = square(0, 6, 23, 22, 31);
-    let base = Options { stitch_min_vias: 1, stitch_per_area: false, stitch_pitch_x_nm: 20 * MM, stitch_pitch_y_nm: 20 * MM, ..opts(true, 0.0, false) };
-    let st = stitch_regions(&m, &Options { stitch_lattice: "straight".into(), ..base.clone() }, &reg(), &items, &[], None, &|| false);
-    let sg = stitch_regions(&m, &Options { stitch_lattice: "staggered".into(), ..base }, &reg(), &items, &[], None, &|| false);
-    let (a, b) = (vias(&st.items), vias(&sg.items));
-    eprintln!("straight {a:?} staggered {b:?} {:?}", sg.notes);
-    assert_eq!((a.len(), b.len()), (1, 1), "{:?} {:?}", st.notes, sg.notes);
-    assert!(a[0].0 > 15 * MM && a[0].1 > 22 * MM, "straight: towards (20, 20) {a:?}");
-    assert!(b[0].0 < 15 * MM, "staggered: towards x = 10 {b:?}");
-}
-
 /// Round 4b (esp: squeezed grid points lost to the raster point): a dropped strip [8, 22] x
 /// [14, 17] mm where a via fits only in the band y in [14.88, 16.12]. On a 1.25 mm grid from
 /// (0, 1.15) mm the only grid row in the band is y = 14.90, at its edge (squeezed); the raster
@@ -487,4 +479,79 @@ fn a_squeezed_grid_point_beats_the_raster_point_beside_it() {
     let v = vias(&s.items);
     assert_eq!(v.len(), 2, "{:?}", s.notes);
     assert!(v.iter().all(|&p| on_grid(p, org, g)), "{v:?} {:?}", s.notes);
+}
+
+/// Round 5 (user 2026-11-22: "I expected either for the placer to search for the corners, or to
+/// have a placement grid"): a small dropped island [11, 17] x [11, 15] mm holds no point of the
+/// 5 mm lattice, so its minimum (2) goes to its extremities: two opposite corners of its site
+/// area, inset where the squeeze price falls faster than the distance gained, on the 0.25 mm
+/// via grid.
+#[test]
+fn a_small_piece_gets_its_vias_at_opposite_corners() {
+    let m = model(&[]);
+    let items = square(0, 11, 11, 17, 15);
+    let g = 250_000;
+    let o = Options { grid_via_nm: [g, g], ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert_eq!(v.len(), 2, "{:?}", s.notes);
+    assert!(v.iter().all(|&p| on_grid(p, (0, 0), g)), "{v:?}");
+    let (a, b) = (v[0], v[1]);
+    // opposite corners: apart in x by most of the 6 mm and in y by most of the 4 mm
+    assert!((a.0 - b.0).abs() >= 2_500_000 && (a.1 - b.1).abs() >= 500_000, "{v:?}");
+    for p in &v {
+        let cx = (p.0 - 11 * MM).min(17 * MM - p.0);
+        let cy = (p.1 - 11 * MM).min(15 * MM - p.1);
+        assert!(cx <= 1_600_000 && cy <= 1_600_000, "not at a corner: {p:?}");
+    }
+    assert!(s.notes.iter().any(|n| n.starts_with("stitching vias placement: 0 on the board lattice, 2 at piece extremities (0 off the via grid)")), "{:?}", s.notes);
+}
+
+/// Round 5: a strip [4, 31] x [14, 17] mm (a dropped island) holding one lattice point (20, 15)
+/// of a 20 x 10 mm lattice from (0, 5) mm: fewer than stitch_min_vias, so both vias go to the strip's two ends
+/// (the minimum-via repair), not to the lattice point that happens to lie inside.
+#[test]
+fn a_strip_gets_its_vias_at_both_ends() {
+    let m = model(&[]);
+    let items = square(0, 4, 14, 31, 17);
+    let g = 250_000;
+    // lattice 20 x 10 mm from (0, 5) mm: rows y = 5, 15, 25; in the strip only (20, 15)
+    let o = Options { grid_via_nm: [g, g], grid_origin_nm: [0, 5 * MM], stitch_pitch_x_nm: 20 * MM, stitch_pitch_y_nm: 10 * MM, ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let mut v = vias(&s.items);
+    v.sort_unstable();
+    assert_eq!(v.len(), 2, "{:?}", s.notes);
+    assert!(v[0].0 < 7 * MM && v[1].0 > 28 * MM, "{v:?}");
+    assert!(!v.contains(&(20 * MM, 15 * MM)), "{v:?}");
+    assert!(v.iter().all(|&p| on_grid(p, (0, 5 * MM), g)), "{v:?}");
+}
+
+/// Round 5: a lattice point with no room (a short B.Cu signal track at (16, 20) mm under it) is
+/// dropped by default (stitch_nudge_mm = 0: the other 8 lattice points get vias, all on the
+/// lattice); with stitch_nudge_mm = 1.25 the via moves along the 0.25 mm via grid to a legal grid
+/// point at most 1.25 mm away, never to a raster point.
+#[test]
+fn a_blocked_lattice_point_is_dropped_or_moved_along_the_grid() {
+    let m = model(&[]);
+    let mut items = square(0, 8, 12, 22, 26);
+    items.push(seg(2, 31, (15_800_000, 20 * MM), (16_200_000, 20 * MM)));
+    let g = 250_000;
+    // 4 mm lattice: 9 points inside (x 12, 16, 20 x y 16, 20, 24); the area wants 11.
+    let o = Options { grid_via_nm: [g, g], stitch_pitch_x_nm: 4 * MM, stitch_pitch_y_nm: 4 * MM, ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert_eq!(v.len(), 8, "{:?}", s.notes);
+    assert!(v.iter().all(|&p| on_lattice(p, (0, 0), 4 * MM)), "{v:?}");
+    assert!(!v.contains(&(16 * MM, 20 * MM)), "{v:?}");
+    assert!(s.notes.iter().any(|n| n.contains("1 wanted lattice point(s) dropped")), "{:?}", s.notes);
+    let on = Options { stitch_nudge_nm: 1_250_000, ..o.clone() };
+    let s = stitch_regions(&m, &on, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert_eq!(v.len(), 9, "{:?}", s.notes);
+    let moved: Vec<_> = v.iter().copied().filter(|&p| !on_lattice(p, (0, 0), 4 * MM)).collect();
+    assert_eq!(moved.len(), 1, "{v:?}");
+    let q = moved[0];
+    assert!(on_grid(q, (0, 0), g), "{q:?}");
+    assert!((((q.0 - 16 * MM) as f64).hypot((q.1 - 20 * MM) as f64)) <= 1_250_001.0, "{q:?}");
+    assert!(s.notes.iter().any(|n| n.contains("1 moved along the via grid")), "{:?}", s.notes);
 }

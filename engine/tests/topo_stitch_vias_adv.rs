@@ -175,3 +175,55 @@ fn v2c_control_fallback_sites_outside_the_bga_are_legal() {
     eprintln!("V2c vias {v:?} notes {:?}", s.notes);
     assert!(!v.is_empty() && v.iter().all(|&p| !in_box(p, 12.0, 17.0, 18.0, 23.0)), "{v:?}");
 }
+
+// ---- verifier r2 (vfy-stitch-vias 2026-11-22): the two r4 mutant survivors ----
+
+/// priced_out_kept: a dropped island lying wholly under a BGA (balls 1.5 mm pitch around (15, 20);
+/// the island [12, 18] x [17, 23] is inside the ball box grown by half a pitch): every site
+/// costs 100 via prices, above the value of a via, so classes 2-4 give it no via (it stays
+/// dropped). A legal site between the balls exists (no_region_via_under_a_bga), so only the
+/// value test keeps it empty.
+#[test]
+fn vfy_dropped_island_wholly_under_a_bga_gets_no_via() {
+    let m = model(&bga(15.0, 20.0));
+    let items = square(0, 12, 17, 18, 23);
+    let o = Options { stitch_min_vias: 2, ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    eprintln!("bga-island vias {v:?} notes {:?}", s.notes);
+    assert!(s.dropped[0] >= 1, "{:?}", s.notes);
+    assert!(v.is_empty(), "via under a BGA in a dropped island: {v:?}");
+}
+
+/// k_always: class 1 (cut-off repair). A foreign B.Cu track (4,1)-(4,20)-(15,20)-(15,33) cuts off a
+/// piece: a narrow strip x in [2, 3.675] below y = 20 and a wide part x in [2, 14.675] above it.
+/// U1.1 (B.Cu, GND) at (2.85, 10) sits in the strip. Via grid 2 x 0.5 mm from (0, 0): the strip's
+/// grid columns x = 2 / 4 lie on its edges, so no grid point of the strip is legal; the strip's
+/// raster sites near the pad pay no k·d (no legal grid corner), only the wide part's sites
+/// stand on the grid. Expected: the via near its pad, in the strip (off the grid, noted).
+#[test]
+fn vfy_class1_via_near_its_pad_when_no_grid_point_there_is_legal() {
+    let mut m = model(&[r#"{ "uuid": "U1", "ref": "U1", "number": "1", "net": 1, "attr": "smd", "center": [2850000, 10000000], "layers": [31],
+        "shapes": { "31": { "kind": "circle", "d": 1000000 } } }"#.to_string()]);
+    m.pours[0].pads.push("U1.1".into());
+    let items = [
+        seg(2, 31, (4 * MM, MM), (4 * MM, 20 * MM)),
+        seg(2, 31, (4 * MM, 20 * MM), (15 * MM, 20 * MM)),
+        seg(2, 31, (15 * MM, 20 * MM), (15 * MM, 33 * MM)),
+    ];
+    let o = Options {
+        grid_via_nm: [2 * MM, MM / 2],
+        grid_origin_nm: [0, 0],
+        stitch_min_vias: 1,
+        stitch_per_area: false,
+        stitch_pitch_x_nm: 4 * MM,
+        stitch_pitch_y_nm: 5 * MM,
+        stitch_lattice: "straight".into(),
+        ..Options::default()
+    };
+    let s = stitch(&m, &o, &reg(), &items, &[], None);
+    let v = vias(&s.items.iter().filter(|i| matches!(i, Item::Via(_))).cloned().collect::<Vec<_>>());
+    eprintln!("k vias {v:?} notes {:?}", s.notes);
+    assert_eq!(v.len(), 1, "{:?}", s.notes);
+    assert!(v[0].1 < 20 * MM && v[0].0 < 4 * MM, "class-1 via left its pad's strip: {v:?}");
+}

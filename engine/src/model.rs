@@ -1097,6 +1097,13 @@ pub struct Options {
     /// `grid_track_nm`, from `grid_origin_nm`), the lattice pitch a multiple of it; independent of
     /// `grid_snap`. No grid known = as off (the plugin warns).
     pub stitch_on_grid: bool,
+    /// stitch-vias round 5 (`[planes] stitch_nudge_mm`, default 0; user 2026-11-22: "looks like
+    /// random placement"): how far a stitching via whose board-lattice point is blocked (no room,
+    /// or the checker refuses it) may move along the via grid, nm, priced 2 x the distance on top
+    /// of its site cost (graded, cheapest first). 0 = the blocked lattice point is dropped; a via
+    /// never moves to an arbitrary raster point. The minimum per piece (`stitch_min_vias`) is kept
+    /// at the piece's extremities either way.
+    pub stitch_nudge_nm: i64,
     /// stitch-vias class 2 (`[planes] stitch_dropped`, default true, lead 2026-11-21): an island
     /// of a pour that KiCad's island removal would drop (no pad, via or track of its net) and of
     /// at least pitch²/4 gets stitching vias into solid pour of its net on another layer, so its
@@ -1897,6 +1904,7 @@ impl Default for Options {
             stitch_pitch_y_nm: 5_000_000,
             stitch_lattice: "staggered".into(),
             stitch_on_grid: true,
+            stitch_nudge_nm: 0,
             stitch_dropped: true,
             stitch_thin_nm: 1_000_000,
             stitch_area: false,
