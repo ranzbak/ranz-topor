@@ -1,4 +1,4 @@
-"""PROPOSED test pattern for pad-pour-via (docs/dev/design/pad-pour-via.md): a GND pad of a pin row whose thermal
+"""APPROVED (user 2026-11-22) test pattern for pad-pour-via (docs/dev/design/pad-pour-via.md): a GND pad of a pin row whose thermal
 spokes are all cut once its neighbours' fanouts are routed, joined by a dog-bone to the B.Cu pour. NOT in the test
 suite: the user approves the PNG first (AGENT_RULES "New test patterns need user approval").
 
@@ -27,7 +27,7 @@ import pcbnew
 
 from harness import drc_patterns as D
 
-STATUS = "PROPOSED (awaiting approval)"
+STATUS = "APPROVED by user 2026-11-22"
 MM = D.MM
 ZONE_CLEAR, ZONE_MIN = 0.25, 0.25
 ROW_Y = 10.0

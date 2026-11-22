@@ -32,8 +32,8 @@ pat() { # kept copper: the locked S5 track stays, only the fanouts are routed (h
   python -m tools.stitchvias_measure "$R/pad_dogbone-topor/pad_dogbone.kicad_pcb" --out "$OUT/pat-measure.json" --work "$OUT/pat-measure-work" >> "$OUT/pat.log" 2>&1
   local res; res=$(ls "$R"/reports/*/*/result.json | tail -1)
   python -m tools.stitchvias_png --out "$OUT/pad_dogbone.png" \
-    --panel "PROPOSED pad_dogbone: topor (KiCad refill)" "$OUT/pat-measure-work/pad_dogbone.kicad_pcb" "$res" "$OUT/pat/pad_dogbone/expected.json" \
-    --panel "PROPOSED pad_dogbone: expected" "$OUT/pat/pad_dogbone/reference/pad_dogbone.kicad_pcb" - "$OUT/pat/pad_dogbone/expected.json" >> "$OUT/pat.log" 2>&1
+    --panel "APPROVED pad_dogbone: topor (KiCad refill)" "$OUT/pat-measure-work/pad_dogbone.kicad_pcb" "$res" "$OUT/pat/pad_dogbone/expected.json" \
+    --panel "APPROVED pad_dogbone: expected" "$OUT/pat/pad_dogbone/reference/pad_dogbone.kicad_pcb" - "$OUT/pat/pad_dogbone/expected.json" >> "$OUT/pat.log" 2>&1
   echo "pat png $?" >> "$OUT/rc.txt"
 }
 export -f arm unit pat; export OUT S G
