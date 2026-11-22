@@ -79,9 +79,11 @@ well".
   step). A changed pitch is named in the run log and in an engine note. The staggered shift is half the
   x pitch rounded to the grid. The origin is the grid origin, so every lattice site is a grid point.
 - **Fallback and stub sites (G3).** A raster fallback site offers the via-grid corners of its cell, each
-  through the same site tests. It stays itself at an off-grid price of (2 + LATTICE_OFFSET_WEIGHT)·d + off_grid·amount
-  (d = its distance to the nearest grid point). That is graded, but a legal grid point near it always
-  wins. A pad stub's via tries the nearest grid point before the ray point.
+  through the same site tests. It stays itself at an off-grid price of k·d + off_grid·amount
+  (d = its distance to the nearest grid point). k is above the steepest slope of every smooth price
+  term (distance, lattice offset, squeeze on two layers, foreign-pad proximity, plane neck), so no
+  smooth difference lets it beat a legal grid point near it; a step price (a BGA) still can. The
+  engine notes how many vias ended off the grid and why (no legal grid point near, or refused). A pad stub's via tries the nearest grid point before the ray point.
 - **`stitch_on_grid`** (default true). No grid found = a warning, and the behaviour before round 4.
 - **One graded site price (verifier V1/V2).** `place_spread` no longer ranks lattice sites first: a
   fallback site pays `LATTICE_OFFSET_WEIGHT` (2.0) times its distance to the lattice. Because the weight

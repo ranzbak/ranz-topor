@@ -22,8 +22,9 @@ arm() { # unit arm board-pcb extra-sets...
   python -m tools.stitchvias_measure "$routed" --out "$OUT/$a/$stem-measure.json" --work "$OUT/$a/$stem-measure-work" >> "$OUT/$u-$a.log" 2>&1
   echo "$u $a rc $rc measure $?" >> "$OUT/rc.txt"
 }
-unit() { # name board-pcb
+unit() { # name board-pcb   (a tag with "gonly": the g arm only, e.g. after a grid-only change)
   arm "$1" g "$2" $G
+  case "${HZ_TAG:-}" in *gonly*) return ;; esac
   arm "$1" ng "$2"
   arm "$1" off "$2" $OFF
 }

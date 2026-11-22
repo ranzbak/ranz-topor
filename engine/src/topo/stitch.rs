@@ -251,6 +251,9 @@ struct Site {
     p: Vec2,
     /// Graded price, nm (squeeze, foreign pads, BGA, plane neck, lattice offset, off-grid).
     price: f64,
+    /// stitch_on_grid: 0 = on the grid (or no grid), 1 = off it while a grid point of its cell
+    /// passed the site tests, 2 = off it with no grid point of its cell legal.
+    off: u8,
 }
 
 /// Band height of [`MaskHole`]'s edge buckets, nm.
@@ -433,6 +436,9 @@ struct Ctx<'a> {
     pad_buckets: std::collections::HashMap<(i64, i64), Vec<usize>>,
     /// Solder-mask openings and the nets they expose (F1).
     masks: Vec<MaskHole>,
+    /// Vias placed off the via grid: [a grid point of the cell was legal but refused or spaced
+    /// out, no grid point of the cell legal].
+    off_grid: [usize; 2],
 }
 
 /// Bucket size of [`Ctx::pad_buckets`], nm.
@@ -478,6 +484,7 @@ impl<'a> Ctx<'a> {
             thin: if opts.stitch_thin_nm > 0 { opts.stitch_thin_nm as f64 } else { 1.0e6 },
             pad_buckets,
             masks: mask_holes(model, items),
+            off_grid: [0, 0],
         }
     }
 
@@ -615,48 +622,28 @@ impl<'a> Ctx<'a> {
     fn sites(&self, reach: &PourReach, net: i32, sz: crate::vias::ViaSize, need: f64, islands: &[(usize, u32, u32)], keep: &dyn Fn(usize, Vec2) -> bool, fallback: bool) -> Vec<Site> {
         let r = 0.5 * sz.d as f64;
         let mut out: Vec<Site> = Vec::new();
-        let mut seen: std::collections::HashSet<(i64, i64, u32)> = std::collections::HashSet::new();
+        // per site (rounded nm, layer): its price, None when it fails the site tests
+        let mut memo: std::collections::HashMap<(i64, i64, u32), Option<f64>> = std::collections::HashMap::new();
         for (k, &(zi, l, isl)) in islands.iter().enumerate() {
             let Some(ras) = reach.raster(zi, l) else { continue };
             let lat = ras.lattice_sites(isl, need, self.px, self.py, self.shift, self.origin);
             let fb = if fallback { ras.island_sites(isl, need, STEP) } else { Vec::new() };
             // stitch_on_grid: a fallback site offers the via-grid points of its cell (each through
-            // the same tests) and stays itself at an off-grid price (2 + LATTICE_OFFSET_WEIGHT)·d +
-            // off_grid·amount (d = its distance to the nearest grid point; that point is at most d
-            // farther from any target, via or lattice point): graded, no cutoff, yet a legal grid
-            // point near it wins unless squeezed harder, so a via is off the grid only where no
-            // grid point near it passes.
-            let mut pts: Vec<(Vec2, bool, f64)> = lat.into_iter().map(|p| (p, true, 0.0)).collect();
-            for p in fb {
-                match self.grid.grid_at(p) {
-                    Some(g) => {
-                        let mut cell = g.cell(p);
-                        cell.sort_by(|a, b| (*a - p).len().total_cmp(&(*b - p).len()));
-                        for q in cell {
-                            if ras.island_at(q) == isl && ras.depth_at(q) >= need {
-                                pts.push((q, false, 0.0));
-                            }
-                        }
-                        if !g.on(p) {
-                            pts.push((p, false, (2.0 + LATTICE_OFFSET_WEIGHT) * g.off(p) + self.off_grid_nm * g.amount(p)));
-                        }
-                    }
-                    None => pts.push((p, false, 0.0)),
-                }
-            }
-            for (p, lattice, off_grid) in pts {
-                if !seen.insert(((p.x / 1.0).round() as i64, (p.y / 1.0).round() as i64, l)) {
-                    continue;
-                }
+            // the same tests) and stays itself at an off-grid price k·d + off_grid·amount (d = its
+            // distance to the nearest grid point). k is above the steepest slope of every smooth
+            // term of the price (distance and spread 1, lattice offset, squeeze on two layers,
+            // foreign-pad proximity, plane neck, each per nm moved), so no smooth difference lets
+            // the raster point beat a legal grid point near it; a step price (a BGA) still can.
+            // Graded in d, no cutoff: a via is off the grid only where no grid point near it is
+            // legal, or those are refused by the checker or spaced out.
+            let k_off = 1.0 + LATTICE_OFFSET_WEIGHT + 2.0 * self.squeeze(0.0, sz.d as f64) / (sz.d as f64).max(1.0) + 2.0 * PROX_PRICE_NM / PROX_REACH_NM + 2.0 * self.pitch / self.thin;
+            let site_price = |p: Vec2, lattice: bool| -> Option<f64> {
                 if !keep(k, p) {
-                    continue;
+                    return None;
                 }
-                let Some((_, _, d2)) = main_elsewhere(reach, self.model, net, Some(l), p, need) else { continue };
-                if !self.own_pad_ok(p, r, net) {
-                    continue;
-                }
-                if self.under_foreign_mask(p, r, net) {
-                    continue;
+                let (_, _, d2) = main_elsewhere(reach, self.model, net, Some(l), p, need)?;
+                if !self.own_pad_ok(p, r, net) || self.under_foreign_mask(p, r, net) {
+                    return None;
                 }
                 let d1 = ras.depth_at(p);
                 let mut price = self.squeeze(d1 - r, sz.d as f64) + self.squeeze(d2 - r, sz.d as f64) + self.prox(p, r, net);
@@ -668,8 +655,54 @@ impl<'a> Ctx<'a> {
                 if !lattice {
                     price += LATTICE_OFFSET_WEIGHT * self.lattice_offset(p);
                 }
-                price += off_grid;
-                out.push(Site { p, price });
+                Some(price)
+            };
+            let key = |p: Vec2| (p.x.round() as i64, p.y.round() as i64, l);
+            for p in lat {
+                if let std::collections::hash_map::Entry::Vacant(e) = memo.entry(key(p)) {
+                    let pr = site_price(p, true);
+                    e.insert(pr);
+                    if let Some(price) = pr {
+                        out.push(Site { p, price, off: 0 });
+                    }
+                }
+            }
+            for p in fb {
+                let grid = self.grid.grid_at(p).filter(|g| !g.on(p));
+                let mut best_corner = f64::INFINITY;
+                if let Some(g) = grid {
+                    for q in g.cell(p) {
+                        if ras.island_at(q) != isl || ras.depth_at(q) < need {
+                            continue;
+                        }
+                        let pr = match memo.get(&key(q)) {
+                            Some(&pr) => pr,
+                            None => {
+                                let pr = site_price(q, false);
+                                memo.insert(key(q), pr);
+                                if let Some(price) = pr {
+                                    out.push(Site { p: q, price, off: 0 });
+                                }
+                                pr
+                            }
+                        };
+                        if let Some(pr) = pr {
+                            best_corner = best_corner.min(pr);
+                        }
+                    }
+                }
+                if memo.contains_key(&key(p)) {
+                    continue;
+                }
+                let pr = site_price(p, false);
+                memo.insert(key(p), pr);
+                let Some(mut price) = pr else { continue };
+                let mut off = 0;
+                if let Some(g) = grid {
+                    price += k_off * g.off(p) + self.off_grid_nm * g.amount(p);
+                    off = if best_corner.is_finite() { 1 } else { 2 };
+                }
+                out.push(Site { p, price, off });
             }
         }
         out
@@ -753,6 +786,9 @@ impl<'a> Ctx<'a> {
                     self.add(&v);
                     self.new.push(v);
                     placed.push(p);
+                    if cands[i].off > 0 {
+                        self.off_grid[cands[i].off as usize - 1] += 1;
+                    }
                     near.push(p);
                     continue 'via;
                 }
@@ -988,6 +1024,15 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
         ));
     }
     out.notes.extend(unplaced.into_iter().map(|s| format!("no stitch site for {s}")));
+    if cx.off_grid != [0, 0] {
+        out.notes.push(format!(
+            "stitch vias (cut pieces) off the via grid: {} (no grid point near them legal: {}; their grid points refused by the checker or spaced out: {})",
+            cx.off_grid[0] + cx.off_grid[1],
+            cx.off_grid[1],
+            cx.off_grid[0]
+        ));
+    }
+
     if std::env::var_os("TOPO_FUSEDBG").is_some() {
         // Debug: the pieces left cut off, to compare the variants' stitchings.
         for c in &left {
@@ -1309,6 +1354,14 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
     );
     for (k, n) in lattice_grid_notes(opts).into_iter().enumerate() {
         out.notes.insert(1 + k, n);
+    }
+    if cx.off_grid != [0, 0] {
+        out.notes.push(format!(
+            "stitching vias off the via grid: {} (no grid point near them legal: {}; their grid points refused by the checker or spaced out: {})",
+            cx.off_grid[0] + cx.off_grid[1],
+            cx.off_grid[1],
+            cx.off_grid[0]
+        ));
     }
     out
 }
