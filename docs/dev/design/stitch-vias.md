@@ -82,7 +82,8 @@ well".
   through the same site tests. It stays itself at an off-grid price of k·d + off_grid·amount
   (d = its distance to the nearest grid point). k is above the steepest slope of every smooth price
   term (distance, lattice offset, squeeze on two layers, foreign-pad proximity, plane neck), so no
-  smooth difference lets it beat a legal grid point near it; a step price (a BGA) still can. The
+  smooth difference lets it beat a legal grid point near it; a step price (a BGA) still can. With no
+  legal grid point in its cell it pays off_grid·amount only, so the piece still gets its via. The
   engine notes how many vias ended off the grid and why (no legal grid point near, or refused). A pad stub's via tries the nearest grid point before the ray point.
 - **`stitch_on_grid`** (default true). No grid found = a warning, and the behaviour before round 4.
 - **One graded site price (verifier V1/V2).** `place_spread` no longer ranks lattice sites first: a

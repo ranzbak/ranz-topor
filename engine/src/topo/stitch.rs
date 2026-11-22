@@ -249,8 +249,13 @@ pub fn want_vias(area: f64, pitch: f64, min_vias: usize) -> usize {
 #[derive(Clone, Copy, Debug)]
 struct Site {
     p: Vec2,
-    /// Graded price, nm (squeeze, foreign pads, BGA, plane neck, lattice offset, off-grid).
+    /// Graded price, nm (squeeze, foreign pads, BGA, plane neck, lattice offset, off-grid): ranks
+    /// the sites.
     price: f64,
+    /// The site's own cost, nm (squeeze, foreign pads, BGA, plane neck): what classes 2-4 weigh
+    /// against the value of a via. The lattice offset and the off-grid price only rank sites, they
+    /// never make a piece's only sites "not worth a via".
+    cost: f64,
     /// stitch_on_grid: 0 = on the grid (or no grid), 1 = off it while a grid point of its cell
     /// passed the site tests, 2 = off it with no grid point of its cell legal.
     off: u8,
@@ -637,7 +642,7 @@ impl<'a> Ctx<'a> {
             // Graded in d, no cutoff: a via is off the grid only where no grid point near it is
             // legal, or those are refused by the checker or spaced out.
             let k_off = 1.0 + LATTICE_OFFSET_WEIGHT + 2.0 * self.squeeze(0.0, sz.d as f64) / (sz.d as f64).max(1.0) + 2.0 * PROX_PRICE_NM / PROX_REACH_NM + 2.0 * self.pitch / self.thin;
-            let site_price = |p: Vec2, lattice: bool| -> Option<f64> {
+            let site_price = |p: Vec2, lattice: bool| -> Option<(f64, f64)> {
                 if !keep(k, p) {
                     return None;
                 }
@@ -652,18 +657,16 @@ impl<'a> Ctx<'a> {
                     // Power-via rule (user 2026-11-13): under a BGA a via is a last resort.
                     price += self.via_price_nm * 100.0;
                 }
-                if !lattice {
-                    price += LATTICE_OFFSET_WEIGHT * self.lattice_offset(p);
-                }
-                Some(price)
+                let pref = if lattice { 0.0 } else { LATTICE_OFFSET_WEIGHT * self.lattice_offset(p) };
+                Some((price, pref))
             };
             let key = |p: Vec2| (p.x.round() as i64, p.y.round() as i64, l);
             for p in lat {
                 if let std::collections::hash_map::Entry::Vacant(e) = memo.entry(key(p)) {
                     let pr = site_price(p, true);
-                    e.insert(pr);
-                    if let Some(price) = pr {
-                        out.push(Site { p, price, off: 0 });
+                    e.insert(pr.map(|(c, f)| c + f));
+                    if let Some((cost, pref)) = pr {
+                        out.push(Site { p, price: cost + pref, cost, off: 0 });
                     }
                 }
             }
@@ -679,11 +682,11 @@ impl<'a> Ctx<'a> {
                             Some(&pr) => pr,
                             None => {
                                 let pr = site_price(q, false);
-                                memo.insert(key(q), pr);
-                                if let Some(price) = pr {
-                                    out.push(Site { p: q, price, off: 0 });
+                                memo.insert(key(q), pr.map(|(c, f)| c + f));
+                                if let Some((cost, pref)) = pr {
+                                    out.push(Site { p: q, price: cost + pref, cost, off: 0 });
                                 }
-                                pr
+                                pr.map(|(c, f)| c + f)
                             }
                         };
                         if let Some(pr) = pr {
@@ -695,14 +698,17 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
                 let pr = site_price(p, false);
-                memo.insert(key(p), pr);
-                let Some(mut price) = pr else { continue };
+                memo.insert(key(p), pr.map(|(c, f)| c + f));
+                let Some((cost, pref)) = pr else { continue };
+                let mut price = cost + pref;
                 let mut off = 0;
                 if let Some(g) = grid {
-                    price += k_off * g.off(p) + self.off_grid_nm * g.amount(p);
+                    // k only where a grid point near it is legal: with none, the raster point is
+                    // the site (off_grid alone), so the piece still gets its via.
+                    price += if best_corner.is_finite() { k_off * g.off(p) } else { 0.0 } + self.off_grid_nm * g.amount(p);
                     off = if best_corner.is_finite() { 1 } else { 2 };
                 }
-                out.push(Site { p, price, off });
+                out.push(Site { p, price, cost, off });
             }
         }
         out
@@ -735,9 +741,10 @@ impl<'a> Ctx<'a> {
     ) -> Vec<Vec2> {
         let r = 0.5 * sz.d as f64;
         let cands = self.sites(reach, net, sz, need, islands, keep, fallback);
-        // A site priced at or above the value of one via is not worth one (classes 2-4): it is
-        // left out, the cheaper sites stay (verifier V2: a priced-out lattice site ended the piece).
-        let mut dead: Vec<bool> = cands.iter().map(|c| value.is_some_and(|v| c.price >= v)).collect();
+        // A site whose own cost is at or above the value of one via is not worth one (classes
+        // 2-4): it is left out, the cheaper sites stay (verifier V2: a priced-out lattice site
+        // ended the piece). The lattice offset and off-grid price only rank (`Site::cost`).
+        let mut dead: Vec<bool> = cands.iter().map(|c| value.is_some_and(|v| c.cost >= v)).collect();
         let mut placed: Vec<Vec2> = Vec::new();
         let mut near: Vec<Vec2> = anchors.to_vec();
         let pitch = self.pitch;

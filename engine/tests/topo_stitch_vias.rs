@@ -461,3 +461,30 @@ fn the_lattice_offset_follows_the_staggered_rows() {
     assert!(a[0].0 > 15 * MM && a[0].1 > 22 * MM, "straight: towards (20, 20) {a:?}");
     assert!(b[0].0 < 15 * MM, "staggered: towards x = 10 {b:?}");
 }
+
+/// Round 4b (esp: squeezed grid points lost to the raster point): a dropped strip [8, 22] x
+/// [14, 17] mm where a via fits only in the band y in [14.88, 16.12]. On a 1.25 mm grid from
+/// (0, 1.15) mm the only grid row in the band is y = 14.90, at its edge (squeezed); the raster
+/// points in the band's middle are unsqueezed but up to ~0.6 mm off the grid. The off-grid price
+/// k·d outweighs the squeeze difference: the vias stand on the grid (at 4·d they did not).
+#[test]
+fn a_squeezed_grid_point_beats_the_raster_point_beside_it() {
+    let m = model(&[]);
+    let items = square(0, 8, 14, 22, 17);
+    let g = 1_250_000;
+    let org = (0, 1_150_000);
+    let o = Options {
+        stitch_min_vias: 2,
+        stitch_per_area: false,
+        stitch_pitch_x_nm: 10 * MM,
+        stitch_pitch_y_nm: 10 * MM,
+        grid_via_nm: [g, g],
+        grid_origin_nm: [org.0, org.1],
+        stitch_lattice: "straight".into(),
+        ..opts(true, 0.0, false)
+    };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert_eq!(v.len(), 2, "{:?}", s.notes);
+    assert!(v.iter().all(|&p| on_grid(p, org, g)), "{v:?} {:?}", s.notes);
+}
