@@ -1,6 +1,6 @@
 """BoardModel exporter over kicad-python (kipy 0.8): the IPC twin of ``harness.model.export_model`` (same
 schema: ``units, board, layers, nets, pads, vias, kept, copper_shapes, holes, outline, keepouts, net_ties,
-pours, dangling_ends, rules, grid_origin``; KiCad frame, Y down, integer nm). No pcbnew (M4-R1).
+pours, dangling_ends, rules, grid_origin, mask_openings``; KiCad frame, Y down, integer nm). No pcbnew (M4-R1).
 
 Everything that only reshapes data is a pure function over kipy wrappers (unit-tested with wrappers built from
 protos): ``pad_from_kipy``, ``shape_to_prims``, ``shape_to_polys``, ``zone_to_keepouts``, ``zone_to_pour``,
@@ -693,7 +693,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
 
     # copper graphics and the board outline
     shapes = [(s, None) for s in board.get_shapes()] + fp_shapes
-    copper_shapes, outline = [], []
+    copper_shapes, outline, mask_openings = [], [], []
     edge_stroke = 0  # widest Edge.Cuts stroke (informational: KiCad 10 measures copper-to-edge from its centre line)
     for s, owner in shapes:
         i = cu_id(s.layer)
@@ -701,6 +701,12 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
             for ring in shape_to_polys(s, max_err):
                 copper_shapes.append({"uuid": s.id.value, "net": codes.get(s.net.name, 0) if s.net.name else 0,
                                       "layer": i, "poly": ring, "owner_ref": owner})
+        elif s.layer in (BoardLayer.BL_F_Mask, BoardLayer.BL_B_Mask):
+            # a solder-mask opening drawn as a graphic (stitch-vias F1); polygon holes dropped (superset)
+            side = cu_id(BoardLayer.BL_F_Cu if s.layer == BoardLayer.BL_F_Mask else BoardLayer.BL_B_Cu)
+            if side is not None:
+                for ring in shape_to_polys(s, max_err):
+                    mask_openings.append({"uuid": s.id.value, "layer": side, "poly": ring, "owner_ref": owner})
         elif s.layer == BoardLayer.BL_Edge_Cuts:
             outline += shape_to_prims(s, max_err)
             edge_stroke = max(edge_stroke, _stroke_w(s))
@@ -752,6 +758,7 @@ def export_model_ipc(board, project, pcb_copy_text: str, rules: dict, *, name: s
         "dangling_ends": dangling,
         "rules": rules,
         "grid_origin": grid_origin_of(pcb_copy_text),
+        "mask_openings": mask_openings,
     }
     # custom rules: courtyard / rule-area clearance regions and pad clearance overrides (toporlib.custom_rules)
     return apply_to_model(model, dru, courtyards=courtyards)

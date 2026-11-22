@@ -439,10 +439,12 @@ def stub_board():
     edge = [seg_shape((0, 0), (50 * MM, 0), layer=BoardLayer.BL_Edge_Cuts, width=100_000),
             seg_shape((50 * MM, 0), (50 * MM, 30 * MM), layer=BoardLayer.BL_Edge_Cuts, width=100_000)]
     cu_line = seg_shape((0, 20 * MM), (10 * MM, 20 * MM), layer=FCU, width=200_000)
+    # a solder-mask opening drawn on F.Mask (stitch-vias F1): exported as a mask opening of F.Cu, not as copper
+    mask_line = seg_shape((0, 25 * MM), (10 * MM, 25 * MM), layer=BoardLayer.BL_F_Mask, width=500_000)
     ant = mk_zone(bt.ZoneType.ZT_RULE_AREA, [FCU, BCU], tracks=True, vias=True, name="ant", uid="ra")
     pour = mk_zone(bt.ZoneType.ZT_COPPER, [FCU], net="GND", uid="gnd-pour", filled={FCU: [mk_pwh(SQ)]})
     return StubBoard([FCU, BCU, BoardLayer.BL_F_SilkS], ["VCC", "GND", ""], fps, [Track(t)], [via],
-                     edge + [cu_line], [ant, pour])
+                     edge + [cu_line, mask_line], [ant, pour])
 
 
 def test_export_model_ipc_end_to_end_and_engine_loads_it(engine):
@@ -454,8 +456,11 @@ def test_export_model_ipc_end_to_end_and_engine_loads_it(engine):
         '(6 "In2.Cu" signal) ', "").replace('(4 "In1.Cu" signal) ', ""), rules, name="stub.kicad_pcb",
         layer_roles={}, dru_text=dru)
     assert list(m) == ["units", "board", "layers", "nets", "pads", "vias", "kept", "copper_shapes", "holes",
-                       "outline", "keepouts", "net_ties", "pours", "teardrops", "dangling_ends", "rules", "grid_origin"]
+                       "outline", "keepouts", "net_ties", "pours", "teardrops", "dangling_ends", "rules", "grid_origin",
+                       "mask_openings"]
     assert m["teardrops"] == []
+    assert [(o["layer"], o["owner_ref"]) for o in m["mask_openings"]] == [(0, None)]
+    assert all(c["layer"] == 0 and c["poly"][0][1] < 22 * MM for c in m["copper_shapes"])
     assert [(g["id"], g["name"], g["kind"], g["routable"]) for g in m["layers"]] == [
         (0, "F.Cu", "signal", True), (2, "B.Cu", "signal", True)]
     assert m["nets"] == [{"code": 1, "name": "GND"}, {"code": 2, "name": "VCC"}]

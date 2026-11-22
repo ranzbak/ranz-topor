@@ -38,6 +38,34 @@ def fill_areas(text: str) -> dict:
     return {k: round(v, 2) for k, v in sorted(out.items())}
 
 
+def fill_pieces(text: str, thin_nm: float = 1.0e6) -> dict:
+    """{"NET LAYER": [pieces, cores]}: KiCad's filled pieces per (net, layer) and the pieces left after eroding
+    the fill by `thin_nm`/2 (a neck thinner than `thin_nm` splits a piece into more cores; antipads that cut a
+    plane show up here). cores = -1 without shapely. O(fill points · log)."""
+    from toporlib import pcbfile
+    fills = pcbfile.parse_zone_fills(text)
+    nets: dict = {}
+    for m in re.finditer(r"\(zone\b(.{0,400}?)\(uuid \"([^\"]+)\"", text, re.S):
+        nm = re.search(r"\(net_name \"([^\"]*)\"\)", m.group(1)) or re.search(r"\(net \"([^\"]*)\"\)", m.group(1))
+        nets[m.group(2)] = nm.group(1) if nm else "?"
+    rings: dict = {}
+    for u, polys in fills.items():
+        for p in polys:
+            rings.setdefault(f"{nets.get(u, '?')} {p['layer']}", []).append(p["pts"])
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError:
+        return {k: [len(v), -1] for k, v in sorted(rings.items())}
+    out = {}
+    for k, rs in sorted(rings.items()):
+        u = unary_union([Polygon(r).buffer(0) for r in rs if len(r) >= 3])
+        core = u.buffer(-thin_nm / 2.0)
+        n = 0 if core.is_empty else len(getattr(core, "geoms", [core]))
+        out[k] = [len(rs), n]
+    return out
+
+
 def measure(pcb: Path, work: Path) -> dict:
     from harness.kicad_env import run_drc
     from toporlib import pcbfile
@@ -57,7 +85,8 @@ def measure(pcb: Path, work: Path) -> dict:
     text = cp.read_text()
     vias = len(pcbfile.find_items(text, ("via",)))
     return {"board": str(pcb), "unconnected": unc, "n_unconnected": len(unc), "isolated_copper": iso,
-            "types": dict(sorted(types.items())), "vias": vias, "fill_mm2": fill_areas(text)}
+            "types": dict(sorted(types.items())), "vias": vias, "fill_mm2": fill_areas(text),
+            "fill_pieces": fill_pieces(text)}
 
 
 def main(argv=None) -> int:

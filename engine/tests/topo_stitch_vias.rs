@@ -2,7 +2,7 @@
 //! lattice / spread rules shared with the cut-off repair (class 1). docs/dev/design/stitch-vias.md.
 
 use topor_engine::geom::quant::{IVec2, TrackPrim};
-use topor_engine::model::{BoardModel, Item, Options, TrackItem};
+use topor_engine::model::{BoardModel, Item, MaskOpening, Options, PourFill, Pt, TrackItem};
 use topor_engine::pourcheck::check_pour_reach;
 use topor_engine::topo::factors::{standard_factors, FactorConfig, Registry};
 use topor_engine::topo::stitch::{lattice_pitch, stitch, stitch_regions, want_vias};
@@ -259,4 +259,88 @@ fn cut_off_repair_spreads_its_vias() {
     let o = Options { stitch_min_vias: 1, stitch_pitch_nm: 40 * MM, ..Options::default() };
     let s = stitch(&m, &o, &reg(), &items, &[], None);
     assert_eq!(s.island_vias, 1, "{:?}", s.notes);
+}
+
+/// A solder-mask opening on `layer` over [x0, x1] x [y0, y1] mm (KiCad frame), pushed in the
+/// model's math frame.
+fn mask(m: &mut BoardModel, layer: u32, x0: i64, y0: i64, x1: i64, y1: i64) {
+    let poly = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].iter().map(|&(x, y)| Pt { x: x * MM, y: -y * MM }).collect();
+    m.mask_openings.push(MaskOpening { uuid: format!("mask{x0}{y0}"), layer, poly, owner_ref: None });
+}
+
+/// F1 (KiCad's solder_mask_bridge): an F.Cu mask opening that exposes the square's signal track
+/// (x = 22) and part of the dropped island: keeping the island would expose GND next to the
+/// signal in one opening, so the island gets no via and stays dropped (a note says why).
+#[test]
+fn no_stitch_of_an_island_under_a_foreign_mask_opening() {
+    let mut m = model(&[]);
+    mask(&mut m, 0, 19, 15, 24, 20);
+    let items = square(0, 8, 12, 22, 26);
+    let s = stitch_regions(&m, &opts(true, 0.0, false), &reg(), &items, &[], None, &|| false);
+    assert!(vias(&s.items).is_empty(), "{:?}", s.notes);
+    assert!(s.notes.iter().any(|n| n.contains("under a solder-mask opening that exposes another net")), "{:?}", s.notes);
+    // The same opening without foreign copper in it (track moved out): the island is stitched.
+    let mut m2 = model(&[]);
+    mask(&mut m2, 0, 14, 15, 19, 20);
+    let s2 = stitch_regions(&m2, &opts(true, 0.0, false), &reg(), &items, &[], None, &|| false);
+    assert!(!vias(&s2.items).is_empty(), "{:?}", s2.notes);
+}
+
+/// F1: a B.Cu mask opening [13, 17] x [17, 23] mm that exposes a short signal track on B.Cu: no
+/// stitching via inside it (a through via shows on B.Cu too), though the island's first via
+/// would otherwise stand at the lattice site (15, 20) nearest its centre.
+#[test]
+fn no_stitching_via_in_a_foreign_mask_opening() {
+    let mut m = model(&[]);
+    let mut items = square(0, 8, 12, 22, 26);
+    let free = stitch_regions(&m, &opts(true, 0.0, false), &reg(), &items, &[], None, &|| false);
+    assert!(vias(&free.items).contains(&(15 * MM, 20 * MM)), "{:?}", free.notes);
+    mask(&mut m, 31, 13, 17, 17, 23);
+    items.push(seg(2, 31, (13_500_000, 22_500_000), (14_000_000, 22_500_000)));
+    let s = stitch_regions(&m, &opts(true, 0.0, false), &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert!(!v.is_empty(), "{:?}", s.notes);
+    assert!(v.iter().all(|p| !(p.0 > 12_500_000 && p.0 < 17_500_000 && p.1 > 16_500_000 && p.1 < 23_500_000)), "{v:?}");
+}
+
+/// `stitch_per_area = false`: the dropped island of the first test gets `stitch_min_vias` vias,
+/// not one per pitch².
+#[test]
+fn without_area_scaling_a_piece_gets_min_vias() {
+    let m = model(&[]);
+    let items = square(0, 8, 12, 22, 26);
+    let o = Options { stitch_per_area: false, ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    assert_eq!(vias(&s.items).len(), 2, "{:?}", s.notes);
+}
+
+/// D2: a stitching via's antipad must not leave a neck narrower than `stitch_thin` in another
+/// net's pour. A signal-net plane on In1.Cu over [14.5, 30] x [19, 30] mm (KiCad frame): the
+/// lattice site (15, 20), the dropped island's first via otherwise, is 0.5 mm inside the plane's
+/// edge, so its antipad (via radius + clearance) would leave no copper there: no via at that
+/// site; deeper sites in the plane stay usable.
+#[test]
+fn no_stitching_via_that_leaves_a_thin_neck_in_another_plane() {
+    let mut m = model(&[]);
+    let mut l = m.layers[0].clone();
+    l.id = 4;
+    l.name = "In1.Cu".into();
+    m.layers.insert(1, l);
+    let mut z = m.pours[0].clone();
+    z.uuid = "plane".into();
+    z.net = 2;
+    z.layers = vec![4];
+    z.pads.clear();
+    let outer = [(14_500_000, 19_000_000), (30_000_000, 19_000_000), (30_000_000, 30_000_000), (14_500_000, 30_000_000)]
+        .iter()
+        .map(|&(x, y)| Pt { x, y: -y })
+        .collect();
+    z.fills = vec![PourFill { layer: 4, outer, holes: Vec::new() }];
+    m.pours.push(z);
+    let items = square(0, 8, 12, 22, 26);
+    let s = stitch_regions(&m, &opts(true, 0.0, false), &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    assert!(!v.is_empty(), "{:?}", s.notes);
+    assert!(!v.contains(&(15 * MM, 20 * MM)), "{v:?}");
+    assert!(v.contains(&(20 * MM, 25 * MM)), "{v:?}");
 }

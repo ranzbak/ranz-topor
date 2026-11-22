@@ -189,6 +189,20 @@ pub struct KeptItem {
     pub locked: bool,
 }
 
+/// A solder-mask opening drawn as a graphic on F.Mask / B.Mask (board or footprint; pads' own
+/// openings are not listed): copper under it is exposed, and exposed copper of two nets in one
+/// opening is KiCad's `solder_mask_bridge` (stitch-vias F1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaskOpening {
+    #[serde(default)]
+    pub uuid: String,
+    /// The copper layer the opening exposes (F.Mask -> F.Cu, B.Mask -> B.Cu).
+    pub layer: u32,
+    pub poly: Vec<Pt>,
+    #[serde(default)]
+    pub owner_ref: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CopperShape {
     #[serde(default)]
@@ -566,6 +580,8 @@ pub struct BoardModel {
     pub dangling_ends: Vec<DanglingEnd>,
     pub pours: Vec<Pour>,
     pub rules: Rules,
+    /// Solder-mask openings drawn as graphics ([`MaskOpening`]).
+    pub mask_openings: Vec<MaskOpening>,
     /// The board's grid origin (KiCad `(setup (grid_origin x y))`, KiCad frame, nm; math frame
     /// after [`BoardModel::from_json`]): the origin of the stitching lattice (stitch-vias).
     pub grid_origin: [i64; 2],
@@ -596,6 +612,9 @@ impl BoardModel {
         }
         for c in &mut self.copper_shapes {
             c.poly.iter_mut().for_each(Pt::flip);
+        }
+        for m in &mut self.mask_openings {
+            m.poly.iter_mut().for_each(Pt::flip);
         }
         for p in &mut self.pours {
             for f in &mut p.fills {
@@ -1064,6 +1083,9 @@ pub struct Options {
     /// the vias a cut-off pour piece (class 1), a dropped island (class 2) or a thinly connected
     /// core (class 3) gets at least, where room allows; more by area, one per `stitch_pitch_nm`².
     pub stitch_min_vias: usize,
+    /// stitch-vias (`[planes] stitch_per_area`, default true): a piece gets one via per
+    /// `stitch_pitch_nm`² of its area on top of `stitch_min_vias`; false = `stitch_min_vias` only.
+    pub stitch_per_area: bool,
     /// stitch-vias (`[planes] stitch_pitch_mm`, default 5 mm, about lambda_g/20 at 1.5 GHz in FR4):
     /// the stitching lattice pitch (rounded to 0.05 mm), from the board's grid origin; also the
     /// area per via (pitch²) and the value of a via of classes 2-4 against its site price.
@@ -1863,6 +1885,7 @@ impl Default for Options {
             stitch_islands: true,
             plane_join_islands: true,
             stitch_min_vias: 2,
+            stitch_per_area: true,
             stitch_pitch_nm: 5_000_000,
             stitch_dropped: true,
             stitch_thin_nm: 1_000_000,

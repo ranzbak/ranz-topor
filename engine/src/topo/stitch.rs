@@ -165,6 +165,151 @@ struct Site {
     lattice: bool,
 }
 
+/// Band height of [`MaskHole`]'s edge buckets, nm.
+const MASK_BAND_NM: f64 = 1.0e6;
+/// Sample step along a track when testing it against a mask opening, nm.
+const MASK_SAMPLE_NM: f64 = 2.5e5;
+/// Radius of a pad's exposed copper taken around its centre for the exposure test, nm (a pad
+/// has its own mask opening; this only tells whether the opening also exposes it).
+const MASK_PAD_R_NM: f64 = 2.0e5;
+
+/// A solder-mask opening ([`crate::model::MaskOpening`], math frame) with its edges bucketed by
+/// y-band, and the nets whose copper it exposes (stitch-vias F1: exposed copper of two nets in
+/// one opening is KiCad's `solder_mask_bridge`).
+struct MaskHole {
+    layer: u32,
+    poly: Vec<Vec2>,
+    bb: crate::geom::Aabb,
+    bands: Vec<Vec<usize>>,
+    nets: Vec<i32>,
+}
+
+impl MaskHole {
+    /// O(edges · bands an edge spans).
+    fn new(layer: u32, poly: Vec<Vec2>) -> Option<MaskHole> {
+        if poly.len() < 3 {
+            return None;
+        }
+        let mut bb = crate::geom::Aabb { min: poly[0], max: poly[0] };
+        for p in &poly {
+            bb.min = Vec2 { x: bb.min.x.min(p.x), y: bb.min.y.min(p.y) };
+            bb.max = Vec2 { x: bb.max.x.max(p.x), y: bb.max.y.max(p.y) };
+        }
+        let nb = (((bb.max.y - bb.min.y) / MASK_BAND_NM).floor() as usize) + 1;
+        let mut bands = vec![Vec::new(); nb];
+        for e in 0..poly.len() {
+            let (a, b) = (poly[e], poly[(e + 1) % poly.len()]);
+            let (j0, j1) = (Self::band_of(bb.min.y, a.y.min(b.y), nb), Self::band_of(bb.min.y, a.y.max(b.y), nb));
+            for band in &mut bands[j0..=j1] {
+                band.push(e);
+            }
+        }
+        Some(MaskHole { layer, poly, bb, bands, nets: Vec::new() })
+    }
+
+    fn band_of(y0: f64, y: f64, nb: usize) -> usize {
+        (((y - y0) / MASK_BAND_NM).floor().max(0.0) as usize).min(nb - 1)
+    }
+
+    /// Whether the disc of radius `r` at `p` overlaps the opening: centre inside (even-odd ray
+    /// cast) or an edge within `r`. O(edges in the bands of [p.y − r, p.y + r]).
+    fn hits(&self, p: Vec2, r: f64) -> bool {
+        let g = self.bb.grow(r);
+        if p.x < g.min.x || p.x > g.max.x || p.y < g.min.y || p.y > g.max.y {
+            return false;
+        }
+        let nb = self.bands.len();
+        let n = self.poly.len();
+        let mut inside = false;
+        for &e in &self.bands[Self::band_of(self.bb.min.y, p.y, nb)] {
+            let (a, b) = (self.poly[e], self.poly[(e + 1) % n]);
+            if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+                inside = !inside;
+            }
+        }
+        if inside {
+            return true;
+        }
+        if r <= 0.0 {
+            return false;
+        }
+        let (j0, j1) = (Self::band_of(self.bb.min.y, p.y - r, nb), Self::band_of(self.bb.min.y, p.y + r, nb));
+        (j0..=j1).any(|j| {
+            self.bands[j].iter().any(|&e| {
+                let (a, b) = (self.poly[e], self.poly[(e + 1) % n]);
+                let ab = b - a;
+                let t = if ab.len() > 0.0 { ((p - a).dot(ab) / ab.dot(ab)).clamp(0.0, 1.0) } else { 0.0 };
+                (a + ab * t - p).len() <= r
+            })
+        })
+    }
+
+    /// Whether `net`'s copper here would bridge to another net's exposed copper.
+    fn foreign_to(&self, net: i32) -> bool {
+        self.nets.iter().any(|&n| n > 0 && n != net)
+    }
+}
+
+/// The mask openings of `model` with the nets they expose: pads, kept tracks and vias of the board
+/// and the routed copper `items` (KiCad frame). Pours are not included (their fill changes with
+/// the stitching itself). O(openings · copper samples · edges per band).
+fn mask_holes(model: &BoardModel, items: &[Item]) -> Vec<MaskHole> {
+    let mut holes: Vec<MaskHole> = model.mask_openings.iter().filter_map(|m| MaskHole::new(m.layer, m.poly.iter().map(|p| p.to_vec2()).collect())).collect();
+    if holes.is_empty() {
+        return holes;
+    }
+    let kpt = |x: f64, y: f64| Vec2 { x, y: -y };
+    let mut mark = |net: i32, layer: Option<u32>, p: Vec2, r: f64| {
+        if net <= 0 {
+            return;
+        }
+        for h in holes.iter_mut() {
+            if layer.is_none_or(|l| l == h.layer) && !h.nets.contains(&net) && h.hits(p, r) {
+                h.nets.push(net);
+            }
+        }
+    };
+    let seg = |net: i32, layer: u32, a: Vec2, b: Vec2, w: f64, mark: &mut dyn FnMut(i32, Option<u32>, Vec2, f64)| {
+        let k = (((b - a).len() / MASK_SAMPLE_NM).ceil() as usize).max(1);
+        for i in 0..=k {
+            mark(net, Some(layer), a + (b - a) * (i as f64 / k as f64), 0.5 * w);
+        }
+    };
+    for pad in &model.pads {
+        for &l in &pad.layers {
+            mark(pad.net, Some(l), pad.center.to_vec2(), MASK_PAD_R_NM);
+        }
+    }
+    for v in &model.vias {
+        mark(v.net, None, v.at.to_vec2(), 0.5 * v.d as f64);
+    }
+    let prim_pts = |prim: &crate::geom::quant::TrackPrim, flip: bool| -> Vec<Vec2> {
+        let f = |q: crate::geom::IVec2| if flip { kpt(q.x as f64, q.y as f64) } else { Vec2 { x: q.x as f64, y: q.y as f64 } };
+        match *prim {
+            crate::geom::quant::TrackPrim::Seg { a, b } => vec![f(a), f(b)],
+            crate::geom::quant::TrackPrim::Arc { start, mid, end } => vec![f(start), f(mid), f(end)],
+        }
+    };
+    for k in &model.kept {
+        let pts = prim_pts(&k.prim, false);
+        for w in pts.windows(2) {
+            seg(k.net, k.layer, w[0], w[1], k.width as f64, &mut mark);
+        }
+    }
+    for it in items {
+        match it {
+            Item::Via(v) => mark(v.net, None, kpt(v.at.x as f64, v.at.y as f64), 0.5 * v.d as f64),
+            Item::Track(t) => {
+                let pts = prim_pts(&t.prim, true);
+                for w in pts.windows(2) {
+                    seg(t.net, t.layer, w[0], w[1], t.width as f64, &mut mark);
+                }
+            }
+        }
+    }
+    holes
+}
+
 /// What the stitching stages share: the checker and the copper placed so far, the via site
 /// prices (foreign-pad buckets, BGA areas) and the lattice.
 struct Ctx<'a> {
@@ -183,8 +328,14 @@ struct Ctx<'a> {
     pitch: f64,
     origin: Vec2,
     min_vias: usize,
+    per_area: bool,
+    /// `stitch_thin_nm` (nm; 1 mm when 0): the narrowest neck a stitching via's antipad may leave
+    /// in another net's pour without a price ([`Ctx::plane_neck`]).
+    thin: f64,
     /// Foreign-pad buckets: cell (i, j) of [`PAD_BUCKET_NM`] -> pad indices.
     pad_buckets: std::collections::HashMap<(i64, i64), Vec<usize>>,
+    /// Solder-mask openings and the nets they expose (F1).
+    masks: Vec<MaskHole>,
 }
 
 /// Bucket size of [`Ctx::pad_buckets`], nm.
@@ -219,12 +370,58 @@ impl<'a> Ctx<'a> {
             pitch: lattice_pitch(opts),
             origin: Vec2 { x: model.grid_origin[0] as f64, y: model.grid_origin[1] as f64 },
             min_vias: opts.stitch_min_vias,
+            per_area: opts.stitch_per_area,
+            // stitch_thin = 0 switches class 3 off, not the antipad-neck price: 1 mm then.
+            thin: if opts.stitch_thin_nm > 0 { opts.stitch_thin_nm as f64 } else { 1.0e6 },
             pad_buckets,
+            masks: mask_holes(model, items),
         }
     }
 
+    /// Price of the neck a via of `net` (radius `r`) at `p` leaves in another net's pour (D2: a
+    /// GND via's antipad in a 3V3 plane): on every pour layer of another net whose fill holds `p`,
+    /// the copper between the antipad (radius + the pour's clearance) and the nearest fill edge is
+    /// `neck`; below `stitch_thin` it costs `pitch · (1 − neck/thin)²` (graded, a via's value at a
+    /// zero neck, so classes 2-4 skip such a site and class 1 takes it last). O(pours · layers).
+    fn plane_neck(&self, reach: &PourReach, p: Vec2, r: f64, net: i32) -> f64 {
+        let mut price = 0.0;
+        for (zi, z) in self.model.pours.iter().enumerate() {
+            if z.net == net {
+                continue;
+            }
+            for &l in &z.layers {
+                let Some(ras) = reach.raster(zi, l) else { continue };
+                let d = ras.depth_at(p);
+                if d <= 0.0 {
+                    continue;
+                }
+                let clear = if z.clearance > 0 { z.clearance } else { self.model.rules.net_rule(z.net).clearance };
+                let neck = (d - r - clear.max(0) as f64).max(0.0);
+                if neck < self.thin {
+                    price += self.pitch * (1.0 - neck / self.thin).powi(2);
+                }
+            }
+        }
+        price
+    }
+
+    /// Whether a via of `net` (radius `r`) at `p` would lie in a solder-mask opening that exposes
+    /// another net's copper (F1: KiCad's `solder_mask_bridge`); a through via shows on both outer
+    /// layers. O(openings · edges per band).
+    fn under_foreign_mask(&self, p: Vec2, r: f64, net: i32) -> bool {
+        self.masks.iter().any(|h| h.foreign_to(net) && h.hits(p, r))
+    }
+
+    /// Whether island `isl` of `ras` (layer `layer`, net `net`) overlaps a mask opening on that
+    /// layer that exposes another net's copper: keeping it would expose `net` there too (F1).
+    /// O(island cells / 4 · openings).
+    fn island_under_foreign_mask(&self, ras: &crate::pourcheck::Raster, isl: u32, layer: u32, net: i32) -> bool {
+        let hs: Vec<&MaskHole> = self.masks.iter().filter(|h| h.layer == layer && h.foreign_to(net)).collect();
+        !hs.is_empty() && ras.island_sites(isl, 0.0, 2).into_iter().any(|p| hs.iter().any(|h| h.hits(p, 0.0)))
+    }
+
     fn want(&self, area: f64) -> usize {
-        want_vias(area, self.pitch, self.min_vias)
+        if self.per_area { want_vias(area, self.pitch, self.min_vias) } else { self.min_vias.max(1) }
     }
 
     fn ok(&self, its: &[Item]) -> bool {
@@ -323,8 +520,12 @@ impl<'a> Ctx<'a> {
                 if !self.own_pad_ok(p, r, net) {
                     continue;
                 }
+                if self.under_foreign_mask(p, r, net) {
+                    continue;
+                }
                 let d1 = ras.depth_at(p);
                 let mut price = self.squeeze(d1 - r, sz.d as f64) + self.squeeze(d2 - r, sz.d as f64) + self.prox(p, r, net);
+                price += self.plane_neck(reach, p, r, net);
                 if super::planes::in_bga(&self.bga, p) {
                     // Power-via rule (user 2026-11-13): under a BGA a via is a last resort.
                     price += self.via_price_nm * 100.0;
@@ -840,6 +1041,16 @@ pub fn stitch_regions(model: &BoardModel, opts: &Options, reg: &Registry, items:
             }
             let Some((sz, need)) = via_need(model, opts, d.net) else { continue };
             out.dropped[0] += 1;
+            if reach.raster(d.island.0, d.island.1).is_some_and(|ras| cx.island_under_foreign_mask(ras, d.island.2, d.island.1, d.net)) {
+                out.notes.push(format!(
+                    "stitch (dropped island): {} on {} {:.2} mm² near {}: 0 via(s), under a solder-mask opening that exposes another net (KiCad would report a solder mask bridge)",
+                    net_name(d.net),
+                    layer_name(d.island.1),
+                    d.area / 1e12,
+                    kicad_mm(d.at)
+                ));
+                continue;
+            }
             let want = cx.want(d.area);
             let placed = cx.place_spread(&reach, d.net, sz, need, std::slice::from_ref(&d.island), &|_, _| true, &[d.at], &[], want, Some(pitch), 0.0, true);
             out.dropped[1] += usize::from(!placed.is_empty());
