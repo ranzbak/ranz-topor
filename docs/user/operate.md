@@ -49,7 +49,7 @@ takes a reported fallback.
 | Via protection (filled + capped), needed for vias in pads | KiCad → File → Board Setup → Board Stackup → Board Finish → Via protection |
 | Locked tracks and vias | KiCad → item Properties → Locked |
 | What to route (scope) | KiCad → select footprints in the PCB editor before you click the button ([Scope by selection](#scope-by-selection)) |
-| Origin of the stitching-via lattice (`[planes] stitch_pitch_x_mm`, `stitch_pitch_y_mm`, `stitch_lattice`) and the grid the stitching vias stand on (`stitch_on_grid`) | KiCad → Place → Grid Origin; View → Grid Properties (grid, via grid override) |
+| Origin of the stitching-via lattice (`[planes] stitch_pitch_x_mm`, `stitch_pitch_y_mm`, `stitch_lattice`) and the grid the stitching vias stand on (`stitch_on_grid`) | KiCad → Place → Grid Origin; KiCad → View → Grid Properties (grid, via grid override) |
 | Priority marker `@1`..`@3` in a net name | the net label in the schematic (Eeschema), then Tools → Update PCB from Schematic |
 | Zones and their fill | Place → Add Filled Zone; Edit → Fill All Zones (B) |
 | Grid for the drawn copper (`[drawing] grid_snap`, `grid_mm`): grid sizes and the per-item track / via grid overrides; the grid origin | View → Grid Properties; Place → Grid Origin ([grid snap](#grid-snap-the-drawn-copper-on-your-kicad-grid)) |
@@ -258,7 +258,7 @@ Tick **Save these options to topor.toml** to keep them (only these `[run]` keys 
 | Existing copper | Keep as obstacles · Keep and smooth · Rip up and re-route | `[run] existing_copper` = `fixed` / `smooth` / `rip` |
 | Respect locked tracks and vias | on: locked copper is never ripped | `[run] respect_locked` |
 | Trace shape | *45° (octilinear)* (default: straight and 45° segments, 90° bends only where needed) or *Any angle (smooth)* | `[drawing] style` |
-| Snap to KiCad grid | Ticked = prefer, unticked = off (default); half-ticked = topor.toml has `"fallback"` (kept unless you click). A grey line below shows the grid the run will use: size in mm and where it comes from (KiCad settings or `grid_mm`), the origin from the board, or "no grid found" | `[drawing] grid_snap` |
+| Snap to KiCad grid | Ticked = prefer, unticked = off (default); half-ticked = topor.toml has `"fallback"` (kept unless you click). A grey line below shows the grid the run will use: size in mm and where it comes from (KiCad settings or `grid_mm`), the origin from the board, or "no grid found". The stitching vias use this grid whatever the tick says (`[planes] stitch_on_grid`, on by default); the tick only moves the drawn tracks | `[drawing] grid_snap` |
 | Time limit | seconds of router time, default 600 (an emergency stop: the topological core ends at *Routes stable* or your Accept / Cancel); `0` = no limit; KiCad's DRC, the refill and the preview export are not counted | `[run] timeout_s` |
 | Time limit clock | *wall* (default, seconds on the clock: what you wait) or *cpu* (CPU seconds of router work summed over all threads; comparable across machine load and thread count) | `[run] timeout_clock` |
 
@@ -981,13 +981,18 @@ Measured on six snapshot boards (offline tests against KiCad's own polygons); th
   topor estimates the refill (the copy's fill minus the new copper of other nets grown by the clearance,
   minus features thinner than the zone's minimum width, islands dropped or kept as KiCad → zone properties →
   Remove islands says). A piece of a pour net that is no longer joined to the rest of its pour gets
-  stitching vias inside it, the first near its pad (or a short stub from the pad), into the pour on another
-  layer: at least `[planes] stitch_min_vias`, one per `stitch_pitch_x_mm` x `stitch_pitch_y_mm` of its area, on a straight or staggered (`stitch_lattice`) lattice of
-  that pitch from KiCad → Place → Grid Origin where legal, on your KiCad via grid (`stitch_on_grid`: the
-  pitch becomes the nearest multiple of the grid, named in the run log; a via goes off the grid only where
-  no grid point near it is legal). After the run's result is picked, islands KiCad
+  stitching vias inside it (or a short stub from the pad), into the pour on another layer. The placement
+  is deliberate: one straight or staggered (`stitch_lattice`) lattice of `stitch_pitch_x_mm` x
+  `stitch_pitch_y_mm` for the whole board, from KiCad → Place → Grid Origin, on your KiCad via grid
+  (`stitch_on_grid`: the pitch becomes the nearest multiple of the grid, named in the run log), so rows
+  and columns line up across pieces. A piece that holds at least `[planes] stitch_min_vias` legal lattice
+  points gets its vias on lattice points only (at most one per lattice cell of its area); a lattice point
+  without room is left out, or with `stitch_nudge_mm` > 0 moved along the via grid by at most that much.
+  A smaller piece gets `stitch_min_vias` at its extremities: its corners, the two ends of a strip, on the
+  via grid (off it only where no grid point of the piece is legal). With `stitch_min_vias` = 1 a one-via
+  piece gets its via near its pad, as before stitching vias. After the run's result is picked, islands KiCad
   would drop (`stitch_dropped`), pour parts behind necks thinner than `stitch_thin_mm` and, as an option, the
-  whole pour area (`stitch_area`) get lattice vias too, only where the pour is solid on another layer of the
+  whole pour area (`stitch_area`) get vias by the same rule, only where the pour is solid on another layer of the
   net and never under a BGA (`STITCH_VIAS`). The report lists each piece and each stitch, and the pieces it
   could not join. A kept island that holds no pad
   (KiCad: isolated copper, e.g. Remove islands = never) and that no stitching via reaches is joined to the
