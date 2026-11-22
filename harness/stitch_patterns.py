@@ -1,4 +1,4 @@
-"""PROPOSED test pattern for stitch-vias (docs/dev/design/stitch-vias.md): one 2-layer board, GND poured on F.Cu and
+"""APPROVED (user 2026-11-22) test pattern for stitch-vias (docs/dev/design/stitch-vias.md): one 2-layer board, GND poured on F.Cu and
 B.Cu ("remove islands: always"), kept signal copper on F.Cu cutting the F.Cu pour into the four kinds of piece the
 stitching handles. NOT in the test suite: the user approves the PNG first (AGENT_RULES "New test patterns need user
 approval").
@@ -33,7 +33,7 @@ import pcbnew
 
 from harness import drc_patterns as D
 
-STATUS = "PROPOSED (awaiting approval)"
+STATUS = "APPROVED by user 2026-11-22"
 MM = D.MM
 ZONE_CLEAR, ZONE_MIN = 0.15, 0.25
 

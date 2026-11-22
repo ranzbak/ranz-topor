@@ -54,7 +54,7 @@ P=$OUT/png; mkdir -p "$P"
 B=r5-before
 python -m tools.stitchvias_png --out "$P/pattern-compare.png" \
   --panel "stitching off (min 1 via, no region classes), r5 tip" "$OUT/off/stitch_pieces-measure-work/stitch_pieces.kicad_pcb" "$(res $OUT/off/stitch_pieces)" "$B/pattern-boards/stitch_pieces/expected.json" "$L0" \
-  --panel "PROPOSED r5 (awaiting approval): board lattice + piece corners, 10 mil grid" "$OUT/g/stitch_pieces-measure-work/stitch_pieces.kicad_pcb" "$(res $OUT/g/stitch_pieces)" "$B/pattern-boards/stitch_pieces/expected.json" "$L5" \
+  --panel "APPROVED r5: board lattice + piece corners, 10 mil grid" "$OUT/g/stitch_pieces-measure-work/stitch_pieces.kicad_pcb" "$(res $OUT/g/stitch_pieces)" "$B/pattern-boards/stitch_pieces/expected.json" "$L5" \
   > "$P/png.log" 2>&1
 python -m tools.stitchvias_png --out "$P/wiccon-g-before-after.png" \
   --panel "before (r4 c513c70c): 10 mil grid, lattice 5.08 staggered" "$B/wic-g/2023.kicad_pcb" "$B/wic-g/result.json" - "$L5" \
