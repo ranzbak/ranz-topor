@@ -958,6 +958,58 @@ pub fn viol_key(vs: &[Viol]) -> (f64, f64) {
     (vs.iter().filter(|v| v.kind == "short").map(Viol::amount).sum(), vs.iter().map(Viol::amount).sum())
 }
 
+/// The DRC class of checker violation `v` of a via (`via`) or track item, as KiCad names it:
+/// `edge_clearance`; a via's drill check or a via against a hole (`hole:`, `viahole:`):
+/// `hole_clearance`; copper overlap: `short`; else `clearance`. grid-snap r3: by the checker's
+/// `drill` flag, not by the rule value (with the hole clearance equal to the copper clearance a
+/// via's copper deficit read as `hole_clearance`). O(1).
+pub fn viol_kind(v: &Violation, via: bool) -> &'static str {
+    if v.against == "edge" {
+        "edge_clearance"
+    } else if via && (v.drill || v.against.starts_with("hole") || v.against.starts_with("viahole")) {
+        "hole_clearance"
+    } else if v.gap < 0 {
+        "short"
+    } else {
+        "clearance"
+    }
+}
+
+/// The choice key of a forced via site ([`Drawer::force_via`]) with violations `vs`, the further
+/// price `extra` (wrong chord side, reach) and the run's safety margin `margin` (nm):
+/// `[short amount, hole amount, violation amounts + extra]`, compared in that order
+/// ([`force_via_better`]).
+/// - Shorts first, as for a forced run ([`viol_key`]): a via on a foreign track (KiCad:
+///   `shorting_items` and the drill's `hole_clearance`) never wins over a site with clearance
+///   deficits only (grid-snap r2, esp IO8_SCL over +3V3).
+/// - Then the drill (grid-snap r3): the `hole_clearance` amount as KiCad measures it, the drill's
+///   edge against foreign copper below the board's hole clearance (the checker's depth less the
+///   margin, which KiCad does not know; a site below the margin only is no KiCad violation). A
+///   drill too close to copper is its own DRC class, above plain clearance: a site with copper
+///   clearance deficits only wins over one whose drill is too close (esp r2: IO8_SCL 0.007 mm).
+pub fn force_via_key(vs: &[Viol], extra: f64, margin: f64) -> [f64; 3] {
+    let hole: f64 = vs
+        .iter()
+        .filter(|v| v.kind == "hole_clearance" && v.depth_nm > margin)
+        .map(|v| super::factors::violation_amount(v.depth_nm - margin, v.len_nm))
+        .sum();
+    [viol_key(vs).0, hole, vs.iter().map(Viol::amount).sum::<f64>() + extra]
+}
+
+/// `a` is strictly better than `b` on [`force_via_key`] (lexicographic, 1e-9 ties).
+pub fn force_via_better(a: [f64; 3], b: [f64; 3]) -> bool {
+    for k in 0..3 {
+        if a[k] < b[k] - 1e-9 {
+            return true;
+        }
+        if a[k] > b[k] + 1e-9 {
+            return false;
+        }
+    }
+    false
+}
+
+
 /// forced-draw (docs/dev/design/forced-draw.md): the graded choice key of one form of a forced
 /// run (never drop), its taut candidate or that candidate's octilinear form: `(short amount,
 /// price nm)`, the price = `violation` x the violation amounts + `any_angle` x the amounts of its
@@ -2328,9 +2380,12 @@ impl<'a> Drawer<'a> {
 
     /// Via `i` of wire `w` by force (M-B1 never drop): of every candidate site in its interval
     /// `ka..=kb` (the legal search's sites, then every triangle's site points, obstacles or not)
-    /// and every via size, the one with the least `violation` price (a site on the wrong side of
-    /// another wire's chord counts one violation more: its run would cross that wire), ties by
-    /// the most room. Its violations go with it. O(sites x sizes x checker query).
+    /// and every via size, the one with the least short amount (via copper over foreign copper,
+    /// KiCad's `shorting_items`, plus its drill there, `hole_clearance`: no graded judgement call,
+    /// [`viol_key`]; grid-snap r2: a site on a foreign track won over a clearance-only site), then
+    /// the least `violation` price (a site on the wrong side of another wire's chord counts one
+    /// violation more: its run would cross that wire), ties by the most room. Its violations go
+    /// with it. O(sites x sizes x checker query).
     /// `class`: the plan's crossings of `w` ([`Drawer::class_crossings`]); `Some` = only sites in the
     /// plan's class ([`Drawer::via_reach`]), their reach violations added to the price with
     /// `[vias] reach_price`; `None` = every site.
@@ -2339,7 +2394,8 @@ impl<'a> Drawer<'a> {
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let turn_at = |k: usize| wi.turns.iter().find(|x| x.0 == k).map(|x| pr.pos[x.1]);
-        let mut best: Option<(f64, f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
+        #[allow(clippy::type_complexity)]
+        let mut best: Option<([f64; 3], f64, usize, Vec2, ViaSize, Vec<Viol>)> = None;
         // pad-snap r2b debug (`TOPO_VIADBG`): every forced candidate site with its price
         let fdbg = std::env::var_os("TOPO_VIADBG").is_some();
         let mut cands: Vec<(f64, usize, Vec2, i64, String)> = Vec::new();
@@ -2383,16 +2439,16 @@ impl<'a> Drawer<'a> {
                     },
                     None => 0.0,
                 };
-                let price = vs.iter().map(Viol::amount).sum::<f64>() + side + reach;
+                let key = force_via_key(&vs, side + reach, self.opts.margin_nm.max(0) as f64);
                 if dbg {
-                    seen.push((price, viol_key(&vs).0, k, p, sz.d));
+                    seen.push((key[2], viol_key(&vs).0, k, p, sz.d));
                 }
                 let room = self.via_room(w, k, p, sz.d as f64);
                 if fdbg {
-                    cands.push((price, k, p, sz.d, vs.iter().map(|v| format!("{} {} d{:.0} l{:.0}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3)).collect::<Vec<_>>().join("; ")));
+                    cands.push((key[2], k, p, sz.d, vs.iter().map(|v| format!("{} {} d{:.0} l{:.0}", v.kind, v.against, v.depth_nm / 1e3, v.len_nm / 1e3)).collect::<Vec<_>>().join("; ")));
                 }
-                if best.as_ref().is_none_or(|b| price < b.0 - 1e-9 || (price - b.0).abs() <= 1e-9 && room > b.1 + 1.0) {
-                    best = Some((price, room, k, p, sz, vs));
+                if best.as_ref().is_none_or(|b| force_via_better(key, b.0) || !force_via_better(b.0, key) && room > b.1 + 1.0) {
+                    best = Some((key, room, k, p, sz, vs));
                 }
             }
         }
@@ -2740,9 +2796,8 @@ pub fn viols_with(model: &BoardModel, opts: &Options, checker: &Checker, idx: &I
 /// [`viol_key`] (and the price) of the floor violations is at most the measured one, also in
 /// floating point (the same terms in the same order, each no larger). O(violations) without
 /// probes; with them see [`Drawer::viols_of`].
-pub fn viols_measured(model: &BoardModel, opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport, probe: bool) -> Vec<Viol> {
+pub fn viols_measured(model: &BoardModel, _opts: &Options, checker: &Checker, idx: &ItemIndex, items: &[Item], rep: &CheckReport, probe: bool) -> Vec<Viol> {
     {
-        let r = &model.rules;
         // Routed copper (`item:N`) is named by its net: "track of SIG (item:12)".
         let name = |against: &str| -> String {
             let Some(id) = against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()) else { return against.to_string() };
@@ -2755,22 +2810,11 @@ pub fn viols_measured(model: &BoardModel, opts: &Options, checker: &Checker, idx
                 None => against.to_string(),
             }
         };
-        let hole_reqs = [r.hole_to_hole + opts.margin_nm, r.via_hole_clear() + opts.margin_nm];
         let mut out = Vec::new();
         for v in &rep.violations {
             let Some(item) = items.get(v.item) else { continue };
             let depth = (v.required - v.gap).max(1) as f64;
-            let kind = |via: bool| -> &'static str {
-                if v.against == "edge" {
-                    "edge_clearance"
-                } else if via && (v.against.starts_with("hole") || hole_reqs.contains(&v.required)) {
-                    "hole_clearance"
-                } else if v.gap < 0 {
-                    "short"
-                } else {
-                    "clearance"
-                }
-            };
+            let kind = |via: bool| viol_kind(v, via);
             match item {
                 Item::Via(x) => out.push(Viol {
                     kind: kind(true),
@@ -4950,6 +4994,48 @@ mod tests {
         Vec2 { x, y }
     }
 
+    /// grid-snap r3: the DRC class by the checker's drill flag: a via's copper deficit at a rule
+    /// equal to the hole clearance is `clearance` (or `short`), its drill's is `hole_clearance`.
+    #[test]
+    fn viol_kind_reads_the_drill_flag() {
+        let v = |against: &str, gap: i64, drill: bool| Violation { item: 0, against: against.into(), layer: 0, gap, required: 127_000, drill };
+        assert_eq!(viol_kind(&v("item:3", 20_000, false), true), "clearance");
+        assert_eq!(viol_kind(&v("item:3", -5_000, false), true), "short");
+        assert_eq!(viol_kind(&v("item:3", 120_000, true), true), "hole_clearance");
+        assert_eq!(viol_kind(&v("viahole:u", 120_000, false), true), "hole_clearance");
+        assert_eq!(viol_kind(&v("item:3", 120_000, true), false), "clearance");
+        assert_eq!(viol_kind(&v("edge", 0, false), true), "edge_clearance");
+    }
+
+    /// grid-snap r2: a forced via site on foreign copper (a short, here with its drill's hole
+    /// clearance) loses to a site with deep clearance deficits only; between shorts the smaller
+    /// short wins; the extra price adds to the second term only.
+    #[test]
+    fn force_via_key_puts_shorts_first() {
+        const MM: f64 = 1e6;
+        let viol = |kind: &'static str, depth_mm: f64| Viol { kind, at: v(0.0, 0.0), layer: 0, depth_nm: depth_mm * MM, len_nm: 0.6 * MM, against: "x".into(), via: true };
+        let on_track = [viol("short", 0.05), viol("hole_clearance", 0.02)];
+        let tight = [viol("clearance", 0.12), viol("clearance", 0.12), viol("hole_clearance", 0.1)];
+        let (a, b) = (force_via_key(&on_track, 0.0, 0.0), force_via_key(&tight, 0.0, 0.0));
+        assert!(a[2] < b[2], "the short site is cheaper on amounts alone: {a:?} {b:?}");
+        assert!(force_via_better(b, a) && !force_via_better(a, b), "{a:?} {b:?}");
+        let deeper = [viol("short", 0.3)];
+        assert!(force_via_better(force_via_key(&on_track, 5.0, 0.0), force_via_key(&deeper, 0.0, 0.0)));
+        assert_eq!(force_via_key(&tight, 1.0, 0.0)[2], b[2] + 1.0);
+        assert_eq!(force_via_key(&tight, 1.0, 0.0)[0], 0.0);
+        // r3: the drill tier: a shallow drill deficit (KiCad's 0.007 mm) loses to deep copper
+        // clearance deficits only; with the margin subtracted a drill deficit inside the margin is
+        // no KiCad violation (tier 0)
+        let drill = [viol("hole_clearance", 0.007)];
+        let copper = [viol("clearance", 0.1), viol("clearance", 0.1)];
+        let (d, c) = (force_via_key(&drill, 0.0, 0.0), force_via_key(&copper, 0.0, 0.0));
+        assert!(d[2] < c[2] && d[1] > 0.0 && c[1] == 0.0, "{d:?} {c:?}");
+        assert!(force_via_better(c, d) && !force_via_better(d, c));
+        assert_eq!(force_via_key(&[viol("hole_clearance", 0.05)], 0.0, 0.05e6)[1], 0.0);
+        assert!(force_via_key(&[viol("hole_clearance", 0.15)], 0.0, 0.05e6)[1] > 0.0);
+        assert!(!force_via_better(c, c));
+    }
+
     /// forced-draw (T4): the graded choice of a forced run's form ([`forced_form_key`],
     /// [`forced_form_better`]): every term on one mm scale, shorts first, ties keep the taut form.
     #[test]
@@ -5624,6 +5710,16 @@ mod tests {
     /// A 40 x 30 mm board, F.Cu only (B.Cu a keepout), 1 mm square SMD pads `(net, x, y)` in the
     /// KiCad frame; clearance 0.2 mm, width 0.25 mm.
     fn fx_model(pads: &[(i32, f64, f64)]) -> BoardModel {
+        fx_model_with(pads, true)
+    }
+
+    /// [`fx_model`]; `keepout` false: B.Cu open for vias (the forced via fixture).
+    fn fx_model_with(pads: &[(i32, f64, f64)], keepout: bool) -> BoardModel {
+        BoardModel::from_json(&fx_json(pads, keepout).to_string()).unwrap()
+    }
+
+    /// The board JSON of [`fx_model_with`] (a fixture edits it before it is read).
+    fn fx_json(pads: &[(i32, f64, f64)], keepout: bool) -> serde_json::Value {
         let n = |v: f64| (v * FMM).round() as i64;
         let (w, h) = (n(40.0), n(30.0));
         let pj: Vec<serde_json::Value> = pads
@@ -5642,11 +5738,63 @@ mod tests {
             "nets": [{"code": 1, "name": "N"}, {"code": 2, "name": "M"}], "pads": pj,
             "vias": [], "kept": [], "copper_shapes": [], "holes": [],
             "outline": [{"kind": "seg", "a": [0, 0], "b": [w, 0]}, {"kind": "seg", "a": [w, 0], "b": [w, h]}, {"kind": "seg", "a": [w, h], "b": [0, h]}, {"kind": "seg", "a": [0, h], "b": [0, 0]}],
-            "keepouts": [{"name": "", "layers": [2], "poly": [[0, 0], [w, 0], [w, h], [0, h]], "no_tracks": true, "no_vias": true, "no_pour": false, "no_pads": false, "no_footprints": false}],
+            "keepouts": if keepout { serde_json::json!([{"name": "", "layers": [2], "poly": [[0, 0], [w, 0], [w, h], [0, h]], "no_tracks": true, "no_vias": true, "no_pour": false, "no_pads": false, "no_footprints": false}]) } else { serde_json::json!([]) },
             "net_ties": [], "pours": [], "teardrops": [], "dangling_ends": [],
             "rules": {"min_clearance": 200000, "min_track_width": 250000, "min_via_diameter": 400000, "min_via_drill": 300000, "min_annular": 50000, "hole_clearance": 250000, "via_hole_clearance": 250000, "hole_to_hole": 250000, "edge_clearance": 500000, "max_error": 5000, "min_connection": 0, "profile": "board", "predefined_vias": [], "default": cls, "per_net": {"1": cls, "2": cls}, "floors_applied": [], "fallbacks": [], "warnings": [], "ignored_checks": [], "clearance_regions": [], "outline_half_stroke": 25000}
         });
-        BoardModel::from_json(&j.to_string()).unwrap()
+        j
+    }
+
+    /// grid-snap r4 (verifier F7, mutant V3): [`Drawer::force_via`] ranks its sites by
+    /// [`force_via_key`] (shorts first, then the drill, then the rest), not by one sum of amounts.
+    /// Fixture: wire A (5, 15) - B (35, 15) of net 1, no passes; its sites are the chord's
+    /// (fractions 0, 0.1, ..., 1 of A-B, [`Drawer::chord_sites`]) and those of A's triangle. A thin
+    /// net-3 track grazes the chord's middle (20, 15): a short and a drill deficit, about 22 units.
+    /// Two net-2 tracks 1.5 mm off the chord cover every other site with net 2's clearance (set to
+    /// 2 mm): one deep clearance deficit each, about 52 units, no short. The forced via takes a
+    /// clearance-only site; by one sum it would take the short.
+    #[test]
+    fn force_via_takes_a_clearance_site_over_a_cheaper_short() {
+        let mut j = fx_json(&[(1, 5.0, 15.0), (1, 35.0, 15.0)], false);
+        j["nets"] = serde_json::json!([{"code": 1, "name": "N"}, {"code": 2, "name": "M"}, {"code": 3, "name": "S"}]);
+        j["rules"]["per_net"]["2"]["clearance"] = serde_json::json!(2_000_000);
+        let m = BoardModel::from_json(&j.to_string()).unwrap();
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let pr = &b.proj;
+        let o = Options::default();
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..pr.obstacles.len()).find(|&i| (pr.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(5.0, 15.0), obs(35.0, 15.0));
+        let sz = ViaSize { d: 600_000, drill: 300_000 };
+        let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+        let s0 = fp(20.0, 15.0);
+        // The short: a 0.1 mm net-3 track 0.02 mm into the via's copper (0.3 + 0.05 - 0.02 off s0).
+        dr.commit(&track_item(3, 0, 0.1 * FMM, fp(20.33, 14.8), fp(20.33, 15.2), None));
+        // Net 2, 1.5 mm below the chord, clear of s0 by more than its 2 mm clearance.
+        dr.commit(&track_item(2, 0, 0.1 * FMM, fp(2.0, 16.5), fp(16.0, 16.5), None));
+        dr.commit(&track_item(2, 0, 0.1 * FMM, fp(24.0, 16.5), fp(38.0, 16.5), None));
+        let sites: Vec<Vec2> = dr.chord_sites(w, 0).into_iter().chain(dr.via_candidates(w, 0, 0, 0.0, Some(0))).map(|x| x.1).collect();
+        let t = st.wires[w].tris[0];
+        let [ta, tb, tc] = pr.tris[t].map(|v| pr.pos[v]);
+        let sites: Vec<Vec2> = sites.into_iter().chain(super::super::pack::tri_site_points(ta, tb, tc)).collect();
+        assert!(sites.iter().any(|p| (*p - s0).len() < 1.0), "the chord's middle is a site: {sites:?}");
+        let viols_at = |p: Vec2| {
+            let item = via_item(1, p, sz, Some(w));
+            let rep = dr.checker.check_against(&dr.idx, std::slice::from_ref(&item), &[]);
+            dr.viols_of(std::slice::from_ref(&item), &rep)
+        };
+        // Precondition: the short site has a lower sum than every other site, none of which shorts.
+        let sum = |vs: &[Viol]| vs.iter().map(Viol::amount).sum::<f64>();
+        let v0 = viols_at(s0);
+        assert!(v0.iter().any(|v| v.kind == "short"), "{v0:?}");
+        for &p in sites.iter().filter(|p| (**p - s0).len() > 1.0) {
+            let vs = viols_at(p);
+            assert!(!vs.iter().any(|v| v.kind == "short") && sum(&vs) > sum(&v0) + 2.0, "site {p:?}: {vs:?} vs {v0:?}");
+        }
+        let plan = Plan { layers: vec![0, 1], vias: vec![(0, 0)], at: vec![0] };
+        let (_, p, _, vs) = dr.force_via(w, &plan, 0, 0, 0, &[sz], None).expect("a forced site");
+        assert!((p - s0).len() > 1.0 && !vs.is_empty() && !vs.iter().any(|v| v.kind == "short"), "took {p:?}: {vs:?}");
     }
 
     /// Math-frame point of the KiCad-frame mm coordinates.

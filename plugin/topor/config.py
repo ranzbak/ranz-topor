@@ -70,6 +70,10 @@ def coerce(s: Setting, raw):
         if word in ("auto", "none"):
             return ("auto" if word == "auto" else 0.0), None
         return s.default, 'must be a number of seconds, "auto" or "none"'
+    if s.key == "grid_mm" and isinstance(raw, str):  # grid-snap: "auto" (the default) or a step in mm
+        if raw.strip().lower() == "auto":
+            return "auto", None
+        return s.default, 'must be a grid step in mm (0.001 .. 10) or "auto"'
     if s.key in ("refine_lanes", "draw_lanes") and isinstance(raw, str):  # par-refine / par-draw: "auto" (the default) or a lane count
         if raw.strip().lower() == "auto":
             return "auto", None

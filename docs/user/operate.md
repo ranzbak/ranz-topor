@@ -48,6 +48,7 @@ takes a reported fallback.
 | What to route (scope) | KiCad → select footprints in the PCB editor before you click the button ([Scope by selection](#scope-by-selection)) |
 | Priority marker `@1`..`@3` in a net name | the net label in the schematic (Eeschema), then Tools → Update PCB from Schematic |
 | Zones and their fill | Place → Add Filled Zone; Edit → Fill All Zones (B) |
+| Grid for the drawn copper (`[drawing] grid_snap`, `grid_mm`): grid sizes and the per-item track / via grid overrides; the grid origin | View → Grid Properties; Place → Grid Origin ([grid snap](#grid-snap-the-drawn-copper-on-your-kicad-grid)) |
 
 Everything is read from a copy of the board as it is in the editor **right now**, including unsaved
 edits (topor saves that copy itself; your file on disk is not touched).
@@ -581,6 +582,37 @@ you can review it (`[drawing] any_angle = "forbidden"` sends such a trace back t
 sharper than 90 degrees costs *acute_bend* and is a warning too (`[drawing] acute`). The style never leaves a
 connection open or adds a violation: a trace drawn by force (never drop) keeps its least violating shape, which is
 usually not octilinear.
+
+#### Grid snap: the drawn copper on your KiCad grid
+
+`[drawing] grid_snap = "prefer"` (opt-in; default `"off"`) moves bends and vias onto your KiCad grid where that
+costs little, so the copper is easier to edit by hand with grid snap on; `"fallback"` uses the grid only where the
+45 degree drawing would otherwise leave a stretch at any angle. The pad snap wins, as in KiCad: a trace still ends
+at the pad centre, and it leaves the grid wherever clearance, the room planned for other traces, the 45 degree form
+or a packed bundle needs it (the *off_grid* factor, a price, never a rule). The run log names the grid and where it
+came from.
+
+**Known costs: leave it `"off"` unless you need the grid.** Measured with deterministic runs (seed 0) on the
+current engine: on dense boards `"prefer"` adds DRC violations and forced runs (esp-rust-board 42 -> 50 new
+violations; qmtech-minimig 113 -> 118, shorts 3 -> 5), can cut pour pieces (islands to stitch), and costs up to about
+twice the drawing CPU; simple boards (eprom-to-kernal, wiccon) are close to unchanged. `"fallback"` has the same
+kind of cost on a smaller scale (a worse form, e.g. a hole clearance on esp-rust-board). The grid never takes room
+the plan keeps for another trace, but moving bends and vias still moves copper. With `"off"` the copper is
+unchanged.
+
+- **Grid size:** `[drawing] grid_mm` (a number), else (`"auto"`) KiCad's grid from View → Grid Properties: the
+  current grid, or with the per-item grid overrides on, the track and via overrides.
+- **Grid origin:** Place → Grid Origin, read from the board (as it is in the editor now).
+- **Limit: the grid size is KiCad's last *saved* setting.** The KiCad API gives the grid origin but not the
+  grid size, so topor reads KiCad's own settings file `pcbnew.json` (read only, never written). KiCad writes it
+  when it saves its settings: on exit, or OK in Preferences. A grid you picked in the running session is seen
+  only after that; every run that reads it warns about this. To be sure, set `[drawing] grid_mm`, or close and
+  reopen KiCad after changing the grid.
+- **Where KiCad keeps it** (KiCad's own rule): `$KICAD_CONFIG_HOME/<version>/` when that variable is set, else
+  `~/.config/kicad/<version>/` on Linux (`$XDG_CONFIG_HOME/kicad/<version>/` when set),
+  `~/Library/Preferences/kicad/<version>/` on macOS and `%APPDATA%\kicad\<version>\` on Windows; `<version>` is
+  KiCad's major.minor (`9.0`, `10.0`, a nightly `9.99`).
+- No grid found, or a grid above 0.5 mm: a warning (no grid = the copper is drawn without it).
 
 ## Findings after routing
 

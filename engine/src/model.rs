@@ -1571,6 +1571,19 @@ pub struct Options {
     /// path, and up to 2 pitches past its clearance as before). 0 = no limit beyond those (the
     /// behaviour before this key).
     pub bundle_pull_range_mm: f64,
+    /// grid-snap (`topor.toml [drawing] grid_snap`): `"off"` (default until measured; the copper
+    /// without the feature), `"fallback"` (grid nodes only in a second octilinear pass where the
+    /// first leaves an any-angle stretch or a forced violation) or `"prefer"` (every octilinear
+    /// pass: grid nodes plus the `off_grid` price of every bend; vias prefer the via grid).
+    /// [`crate::topo::gridsnap`].
+    pub grid_snap: String,
+    /// grid-snap: the track grid step `[x, y]` (nm, KiCad frame; 0 = none), from `[drawing]
+    /// grid_mm` or KiCad's wire grid (pcbnew.json, resolved by the plugin).
+    pub grid_track_nm: [i64; 2],
+    /// grid-snap: the via grid step `[x, y]` (nm; 0 = the track grid), KiCad's via grid override.
+    pub grid_via_nm: [i64; 2],
+    /// grid-snap: the board's grid origin (nm, KiCad frame: `.kicad_pcb (setup (grid_origin x y))`).
+    pub grid_origin_nm: [i64; 2],
     /// Inflated sketch U0 (`topor.toml [capacity] mixed_clearance`): how the per-layer cut test
     /// (`topo::sheet`, `topo::cutflow`) spaces neighbours of different nets on a cut:
     /// `"conservative"` (default; every gap at the largest clearance of the cut's items, the
@@ -1928,6 +1941,10 @@ impl Default for Options {
             erbs_margin: 0.05,
             bundle_pull: 0.3,
             bundle_pull_range_mm: 0.0,
+            grid_snap: "off".into(),
+            grid_track_nm: [0, 0],
+            grid_via_nm: [0, 0],
+            grid_origin_nm: [0, 0],
             reserve_via_sites: true,
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,

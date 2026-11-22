@@ -285,6 +285,8 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(neck_depth::NeckDepth),
         // TW6 part B: after the last, so the draws of every factor before it stay as they were.
         Box::new(via_site_social::ViaSiteSocial),
+        // grid-snap: after the last, so the draws of every factor before it stay as they were.
+        Box::new(style::OffGrid),
     ]
 }
 
@@ -578,10 +580,15 @@ mod tests {
         assert_eq!(w(&[("necking", 12.0)]), Some(12.0), "follows the necking setting");
         assert_eq!(w(&[("necking", 12.0), ("shrinkage", 4.0)]), Some(4.0), "its own setting wins");
         // It prices no P2 event (the cut model reads the weight); factors after it are appended
-        // (exist-term: dangling_turn; tw4: neck_depth; TW6: via_site_social), so the earlier factors'
-        // fluctuation draws stay the same.
+        // (exist-term: dangling_turn; tw4: neck_depth; TW6: via_site_social; grid-snap: off_grid),
+        // so the earlier factors' fluctuation draws stay the same. Pinned by name lookup, so a
+        // later append does not break it: shrinkage directly follows the last diff-pair factor,
+        // and the appended ones follow it in their append order.
         assert_eq!(Registry::standard().price(&ev_cross(), &WireCtx::default()), 20.0);
         let names: Vec<&str> = standard_factors().iter().map(|f| f.name()).collect();
-        assert_eq!(&names[names.len() - 4..], ["shrinkage", "dangling_turn", "neck_depth", "via_site_social"]);
+        let at = |n: &str| names.iter().position(|x| *x == n).unwrap_or_else(|| panic!("no factor {n}: {names:?}"));
+        assert_eq!(at("shrinkage"), at("dp_polarity_cross") + 1, "{names:?}");
+        let appended = ["shrinkage", "dangling_turn", "neck_depth", "via_site_social", "off_grid"];
+        assert!(appended.windows(2).all(|w| at(w[0]) < at(w[1])), "append order: {names:?}");
     }
 }

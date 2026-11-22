@@ -420,6 +420,24 @@ class IpcBoard:
             notes.append(f"Items were not grouped ({type(e).__name__}: {e}); select them by net instead.")
             return False
 
+    def kicad_settings_dir(self) -> Path | None:
+        """grid-snap: the running KiCad's settings folder (its pcbnew.json holds the grid sizes; read only), by
+        KiCad's own path rule (topor/grid.py ``kicad_settings_dirs``: ``KICAD_CONFIG_HOME`` or the platform
+        config folder, plus ``<major>.<minor>`` of the version KiCad reports over IPC; the plugin process inherits
+        KiCad's environment). Version unknown: the newest settings folder there. None when there is none."""
+        import os  # noqa: PLC0415
+
+        from . import grid  # noqa: PLC0415
+
+        try:
+            v = self._kicad.get_version()
+            version: tuple[int, int] | None = (int(getattr(v, "major", 0)), int(getattr(v, "minor", 0)))
+        except Exception:  # noqa: BLE001 - an older kipy / KiCad: fall back to the newest settings folder
+            version = None
+        if version is not None and version[0] <= 0:
+            version = None
+        return grid.pick_settings_dir(grid.kicad_settings_dirs(version, os.environ))
+
     def refill_zones(self) -> None:
         self.board.refill_zones()
 

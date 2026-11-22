@@ -428,3 +428,31 @@ def test_ipcboard_netclasses_uses_kicads_effective_class(tmp_path):
     classes, of = ipc.IpcBoard(_StubKiCad(), B(tmp_path, ["A1", "OE"], classed=set())).netclasses()
     assert of == {"A1": "Signal,Default", "OE": "Signal"}
     assert classes["Signal,Default"].clearance == 250_000 and "Effective for net: A1" not in classes
+
+
+class _Ver:
+    def __init__(self, major, minor):
+        self.major, self.minor = major, minor
+
+
+class _KiCad:
+    def __init__(self, version):
+        self.version = version
+
+    def get_version(self):
+        if self.version is None:
+            raise RuntimeError("no GetVersion")
+        return self.version
+
+
+def test_kicad_settings_dir_uses_the_reported_version(tmp_path, monkeypatch):
+    """grid-snap F3: KICAD_CONFIG_HOME keeps KiCad's <major>.<minor> folder under it; an unknown version takes
+    the newest settings folder there that holds a pcbnew.json."""
+    monkeypatch.setenv("KICAD_CONFIG_HOME", str(tmp_path))
+    assert ipc.IpcBoard(_KiCad(_Ver(10, 0)), board=object()).kicad_settings_dir() == tmp_path / "10.0"
+    assert ipc.IpcBoard(_KiCad(_Ver(9, 99)), board=object()).kicad_settings_dir() == tmp_path / "9.99"
+    for v in ("9.0", "10.0"):
+        (tmp_path / v).mkdir()
+    (tmp_path / "9.0" / "pcbnew.json").write_text("{}")
+    assert ipc.IpcBoard(_KiCad(None), board=object()).kicad_settings_dir() == tmp_path / "9.0"
+    assert ipc.IpcBoard(_KiCad(_Ver(0, 0)), board=object()).kicad_settings_dir() == tmp_path / "9.0"

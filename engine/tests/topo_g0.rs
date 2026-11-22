@@ -319,6 +319,7 @@ fn the_factor_reference_matches_the_schema_text() {
         ("dangling_turn", 0.0),
         ("neck_depth", 0.0),
         ("via_site_social", 0.0),
+        ("off_grid", 0.15),
     ];
     assert_eq!(got, want);
 }

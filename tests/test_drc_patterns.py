@@ -142,3 +142,12 @@ def test_power_class_in_project(tmp_path):
     ns = json.loads(pro.read_text())["net_settings"]
     assert {c["name"]: c["track_width"] for c in ns["classes"]}["Power"] == 0.5
     assert ns["netclass_patterns"] == [{"netclass": "Power", "pattern": "P5V"}]
+
+
+def test_png_title_says_approved_for_the_approved_grid_pattern():
+    """F13: ROUND says "APPROVED by user" in capitals; the title check is case-insensitive."""
+    from harness.drc_patterns import ROUND, STATUS
+    from harness.drc_patterns_png import status_line
+    assert "APPROVED" in ROUND["grid_snap_bends"]
+    assert status_line("grid_snap_bends").startswith("APPROVED")
+    assert status_line("no_such_pattern") == STATUS
