@@ -301,8 +301,9 @@ fn a_coarse_stub_never_reaches_the_fine_lattice() {
 
 /// Round 5b (user 2026-11-22: stitching vias off the via grid NEVER): the boxed pad's stub via
 /// stands on the via grid. On a 0.05 mm grid the column x = 10.05 lies in the 0.03..0.10 mm window:
-/// the stub is found there. On a 0.25 mm grid no column lies in it (10.00 / 10.25): no stub, no
-/// via off the grid, and the piece stays reported.
+/// the stub is found there. On a 0.25 mm grid no column lies in it (10.00 / 10.25): r5c (user:
+/// connection copper goes off the grid where it does not fit, as in KiCad) the stub, the pad's only
+/// connection, stands off the grid, named in a warning.
 #[test]
 fn a_pad_stub_via_stands_on_the_via_grid() {
     let m = boxed_model();
@@ -312,11 +313,28 @@ fn a_pad_stub_via_stands_on_the_via_grid() {
     assert_eq!((s.after, s.pad_stubs), (0, 1), "{:?}", s.notes);
     let v = s.items.iter().find_map(|it| if let Item::Via(v) = it { Some(v) } else { None }).expect("a stub via");
     assert!(v.at.x % 50_000 == 0 && v.at.y % 50_000 == 0, "stub via off the 0.05 mm grid: {:?}", v.at);
+    // nearest legal grid point first: about 0.6 mm above the pad, not anywhere out to 3 mm
+    let d = ((v.at.x - 10 * MM) as f64).hypot((v.at.y - 15 * MM) as f64);
+    assert!(d < 1.0e6, "stub via {:.3} mm from its pad: {:?}", d / 1e6, v.at);
     let coarse = Options { grid_via_nm: [250_000, 250_000], ..Options::default() };
     let s = stitch(&m, &coarse, &reg(), &items, &[], None);
-    for it in &s.items {
-        if let Item::Via(v) = it {
-            assert!(v.at.x % 250_000 == 0 && v.at.y % 250_000 == 0, "via off the 0.25 mm grid: {:?} {:?}", v.at, s.notes);
-        }
-    }
+    assert_eq!((s.after, s.pad_stubs), (0, 1), "{:?}", s.notes);
+    let v = s.items.iter().find_map(|it| if let Item::Via(v) = it { Some(v) } else { None }).expect("a stub via");
+    assert!(v.at.x % 250_000 != 0 || v.at.y % 250_000 != 0, "{:?}", v.at);
+    assert!(s.notes.iter().any(|n| n.starts_with("pad stub C1.1 off the via grid at ") && n.contains("the pad's only connection")), "{:?}", s.notes);
+}
+
+/// r5c: the coarse lattice's off-grid pass. The boxed pad with its pocket widened to the left
+/// (-0.65 mm): a via fits with its centre 9.975..10.10 mm, so the coarse ray straight up (x 10.00)
+/// reaches it; the 0.25 mm via grid from x 0.125 mm has columns 9.875 / 10.125, both outside. The
+/// coarse lattice finds the stub off the grid itself (after every grid point failed), not the fine one.
+#[test]
+fn the_coarse_lattice_falls_back_off_the_grid_for_a_pad_stub() {
+    let m = boxed_model();
+    let (l, r, t, b) = (10 * MM - 650_000, 10 * MM + 725_000, 13 * MM, 16_200_000);
+    let items = vec![seg(2, 0, (l, t), (r, t)), seg(2, 0, (r, t), (r, b)), seg(2, 0, (r, b), (l, b)), seg(2, 0, (l, b), (l, t))];
+    let o = Options { grid_via_nm: [250_000, 250_000], grid_origin_nm: [125_000, 0], ..Options::default() };
+    let s = stitch(&m, &o, &reg(), &items, &[], None);
+    assert_eq!((s.after, s.pad_stubs, s.fine_stubs), (0, 1, 0), "{:?}", s.notes);
+    assert!(s.notes.iter().any(|n| n.starts_with("pad stub C1.1 off the via grid at ")), "{:?}", s.notes);
 }

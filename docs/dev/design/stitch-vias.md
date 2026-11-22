@@ -144,6 +144,14 @@ raster point is the site, as before. `stitch_area` (user: "the option to put the
 uses the same lattice-only rule (`Ctx::place_lattice`, value = pitch so a BGA site is never worth a via,
 blocked points dropped).
 
+**r5c (user, via the lead 2026-11-22)**: "never off-grid" means the extra stitching vias (the minimum
+top-up, extremities, the lattice), not a via that is the only connection of a pad or piece; for connection
+copper the user's grid rule holds: "when it doesn't fit wires can be pushed off grid, same like in KiCAD".
+So a cut piece whose `place_piece` found no grid site gets its first via with `Ctx::off_ok`: `sites` then
+also offers legal raster points off the grid at cost + off_grid · amount (the gridsnap price, graded);
+a pad stub's coarse lattice tries every grid point of every pad first, then the ray points off the grid;
+the fine lattice uses ray points only. Each such via has a warning naming the pad or piece.
+
 **Tests**: pattern fixture extended (PROPOSED) with a small piece (no lattice point: 2 corner vias) and a strip
 (two ends); engine tests: corners of a rectangle, two ends of a strip, lattice-only fill with a blocked point
 dropped / nudged ≤ stitch_nudge_mm on the grid, D4 single via unchanged; mutants on each.

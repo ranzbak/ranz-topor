@@ -229,4 +229,13 @@ fn vfy_class1_via_stays_on_the_grid_when_no_grid_point_near_its_pad_is_legal() {
     assert_eq!(v.len(), 1, "{:?}", s.notes);
     assert!(v[0].0 % (2 * MM) == 0 && v[0].1 % (MM / 2) == 0, "class-1 via off the via grid: {v:?}");
     assert!(v[0].1 > 20 * MM, "no grid point of the strip is legal: {v:?}");
+    // r5c (user: connection copper goes off the grid where it does not fit, as in KiCad): with
+    // grid columns only at x = 0 / 20 mm no grid point of the piece is legal; its first via, its
+    // only connection, stands off the grid near its pad (graded off_grid price), named in a warning.
+    let o2 = Options { grid_via_nm: [20 * MM, MM / 2], ..o.clone() };
+    let s = stitch(&m, &o2, &reg(), &items, &[], None);
+    let v = vias(&s.items.iter().filter(|i| matches!(i, Item::Via(_))).cloned().collect::<Vec<_>>());
+    assert_eq!(v.len(), 1, "{:?}", s.notes);
+    assert!(v[0].1 < 20 * MM && v[0].0 < 4 * MM, "the off-grid connection via near its pad: {v:?}");
+    assert!(s.notes.iter().any(|n| n.starts_with("stitch via off the via grid at ") && n.contains("pads [U1.1]") && n.contains("the piece's only connection")), "{:?}", s.notes);
 }

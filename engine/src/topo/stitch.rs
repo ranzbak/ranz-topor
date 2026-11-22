@@ -433,6 +433,11 @@ struct Ctx<'a> {
     off_grid_legal: std::cell::Cell<usize>,
     /// Why the last [`Ctx::place_piece`] placed fewer vias than wanted ("" = it did not).
     why: String,
+    /// r5c: [`Ctx::sites`] also offers legal raster points off the via grid, priced cost +
+    /// `off_grid_nm` · amount (graded): only for a cut piece's first via, its only connection.
+    off_ok: bool,
+    /// The `off_grid` price (nm per site fully off the grid, [`super::gridsnap::price_nm`]).
+    off_grid_nm: f64,
     /// `stitch_nudge_nm` (nm; 0 = a blocked lattice point is dropped).
     nudge: f64,
     /// Round 5: how the vias were placed.
@@ -483,6 +488,8 @@ impl<'a> Ctx<'a> {
             masks: mask_holes(model, items),
             off_grid_legal: std::cell::Cell::new(0),
             why: String::new(),
+            off_ok: false,
+            off_grid_nm: super::gridsnap::price_nm(opts),
             nudge: opts.stitch_nudge_nm.max(0) as f64,
             kinds: Kinds::default(),
         }
@@ -681,8 +688,20 @@ impl<'a> Ctx<'a> {
                         };
                         any |= pr.is_some();
                     }
-                    if !any && !g.on(p) && site_price(p).is_some() {
-                        self.off_grid_legal.set(self.off_grid_legal.get() + 1);
+                    if !g.on(p) && (self.off_ok || !any) && !memo.contains_key(&key(p)) {
+                        let pr = site_price(p);
+                        memo.insert(key(p), pr);
+                        if let Some(cost) = pr {
+                            if !any {
+                                self.off_grid_legal.set(self.off_grid_legal.get() + 1);
+                            }
+                            if self.off_ok {
+                                // r5c: a connection via may stand off the grid, at the graded
+                                // off_grid price (the gridsnap factor), never ahead of a legal
+                                // grid point of the same score.
+                                out.push(Site { p, cost: cost + self.off_grid_nm * g.amount(p) });
+                            }
+                        }
                     }
                     continue;
                 }
@@ -1198,14 +1217,49 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 continue;
             }
             if fine {
-                // With a via grid the coarse pass already tried every grid point out to
-                // STUB_MAX_NM; the fine lattice has nothing new to offer.
-                if !fine_on || out.fine_points >= FINE_POINTS_MAX || c.pads.is_empty() || fine_failed.contains(&c.pads[0]) || cx.grid.base().is_some() {
+                if !fine_on || out.fine_points >= FINE_POINTS_MAX || c.pads.is_empty() || fine_failed.contains(&c.pads[0]) {
                     break;
                 }
                 out.fine_cuts += 1;
             }
             let t_fine = std::time::Instant::now();
+            // r5c (user 2026-11-22: "when it doesn't fit wires can be pushed off grid, same like in
+            // KiCAD"): a pad stub is the pad's only connection, so with a via grid the coarse lattice
+            // first tries every grid point of every pad, then (off_pass) the ray points off the grid,
+            // nearest first, each named in a warning; the fine lattice (after the coarse passes, every
+            // grid point already tried) uses only the ray points. Stitching extras stay on the grid.
+            let has_grid = cx.grid.base().is_some();
+            for off_pass in [false, true] {
+            if off_pass && (fine || !has_grid) {
+                break;
+            }
+            // r5c (user 2026-11-22: connection copper goes off the grid where it does not fit, as in
+            // KiCad): after every grid point (island vias and pad stubs) failed, the piece's first
+            // via, its only connection, may stand off the grid (graded off_grid price, warned), before
+            // an off-grid pad stub; further vias stay on the grid.
+            if off_pass && !c.islands.is_empty() {
+                cx.off_ok = true;
+                let first = cx.place_spread(&reach, c.net, sz, need, &c.islands, &|_, _| true, &targets, &[], 1, None, 0.0, true);
+                cx.off_ok = false;
+                for p in &first {
+                    out.notes.push(format!("stitch via {} mm at {} for {}", sz.d as f64 / 1e6, kicad_mm(*p), cut_text(model, c)));
+                    if cx.grid.grid_at(*p).is_some_and(|g| !g.on(*p)) {
+                        out.notes.push(format!(
+                            "stitch via off the via grid at {} for {}: the piece's only connection, no legal via-grid point in it nor for a pad stub (connection copper goes off the grid where it does not fit, as in KiCad; stitching extras never do)",
+                            kicad_mm(*p),
+                            cut_text(model, c)
+                        ));
+                    }
+                }
+                if !first.is_empty() {
+                    out.island_vias += first.len();
+                    out.items.extend(cx.take_new());
+                    done = true;
+                    break 'lat;
+                }
+            }
+            let use_grid = has_grid && !fine && !off_pass;
+            let off_grid = has_grid && !use_grid;
             for &pi in &c.pads {
                 let pad = &model.pads[pi];
                 let cpos = pad.center.to_vec2();
@@ -1216,7 +1270,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 // point out to d_max, nearest the pad first (ties by x, y), ring by ring; snapping
                 // the ray points instead stepped over grid points between two rays (qmtech C6.2,
                 // C32.1). Without a grid the ray points, as before.
-                let grid_pts: Option<Vec<(f64, Vec2)>> = cx.grid.grid_at(cpos).map(|g| {
+                let grid_pts: Option<Vec<(f64, Vec2)>> = cx.grid.grid_at(cpos).filter(|_| use_grid).map(|g| {
                     let base = g.nearest(cpos);
                     let m = (d_max / g.g[0].min(g.g[1]).max(1.0)).ceil() as i64 + 1;
                     let mut v: Vec<(f64, Vec2)> = Vec::new();
@@ -1278,6 +1332,15 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                                         if via_ok { ", via" } else { "" },
                                         cut_text(model, c)
                                     ));
+                                    if off_grid && cx.grid.grid_at(p).is_some_and(|g| !g.on(p)) {
+                                        out.notes.push(format!(
+                                            "pad stub {}.{} off the via grid at {}: the pad's only connection, no legal via-grid point within {:.0} mm of the pad (connection copper goes off the grid where it does not fit, as in KiCad; stitching extras never do)",
+                                            pad.ref_,
+                                            pad.number,
+                                            kicad_mm(p),
+                                            STUB_MAX_NM / 1e6
+                                        ));
+                                    }
                                     for it in its {
                                         cx.add(&it);
                                         out.items.push(it);
@@ -1295,6 +1358,7 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                     }
                     d += d_step;
                 }
+            }
             }
             if fine {
                 out.fine_s += t_fine.elapsed().as_secs_f64();
