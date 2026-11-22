@@ -987,7 +987,8 @@ def run(a) -> int:
                     f"{result['cancel_reaction_s']} s after Cancel; {stray}")
             e.shot("after-cancel")
             e.check("Cancel leaves the copper unchanged", e.counts() == counts_run_start, f"{counts_run_start} -> {e.counts()}")
-            return 0 if all(c["ok"] for c in e.checks) else 1
+            ok = all(c["ok"] for c in e.checks)
+            return 0 if ok else 1
         if state["cancelled"]:
             result["cancel_reaction_s"] = round(time.monotonic() - t_route - state["cancel_t"], 1)
             e.check("Accept ends the routing (best result or nothing, no error)", bool(nxt) and not nxt[0].startswith("Topor — Error"), f"{result['cancel_reaction_s']} s after Accept")
