@@ -51,6 +51,20 @@ on the picked result** in `stitch_pours` before the hand-off, so the plugin's re
 them. They count in the result's via total under the class "pour stitching". They do not
 change which variant is picked.
 
+## Round 2 additions (lead 2026-11-22)
+
+- **Solder-mask openings (F1, KiCad DRC is the spec).** Both exporters list graphics on F.Mask / B.Mask as
+  `mask_openings` (copper layer exposed, polygon; pads' own openings are not graphics). Per opening the stage
+  collects the nets whose copper it exposes (pads, kept tracks, vias, routed copper). A site whose via disc
+  overlaps an opening that exposes another net is skipped (a through via shows on both outer layers), and a
+  dropped island that overlaps such an opening on its layer is not stitched (keeping it would expose the net
+  next to the other one: `solder_mask_bridge`). wiccon: solder_mask_bridge back to the base 3.
+- **Antipad necks in other nets' pours (D2).** A site inside another net's pour fill pays
+  `pitch · (1 − neck/thin)²` per such pour layer, neck = fill depth − via radius − the pour's clearance,
+  thin = `stitch_thin_mm` (1 mm when 0). Graded: classes 2-4 skip a site whose neck goes to zero (price = the
+  value of a via), class 1 takes it last.
+- **`stitch_per_area`** (default true): false = every piece gets `stitch_min_vias` only (the D1 arm).
+
 ## Options (`[planes]`, documented in schema.py + docs/user/configuration.md)
 - `stitch_islands` (exists) = class 1;
 - `stitch_min_vias` = 2;
