@@ -650,15 +650,15 @@ impl Drawer<'_> {
                 // keeps for undrawn neighbours than the plain pass's form ([`grid_keeps_room`]):
                 // the off_grid price never buys a neighbour's planned room (esp IO7 moved onto the
                 // grid column by the left edge, IO8_SCL drawn later found no legal form there).
-                let mut pg = [f64::INFINITY, 0.0];
+                let mut pg = [f64::INFINITY, 0.0, 0.0];
                 let g = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true, &mut pg);
                 if g.is_some() && pg[1] <= 0.0 {
                     g
                 } else {
-                    let mut p0 = [f64::INFINITY, 0.0];
+                    let mut p0 = [f64::INFINITY, 0.0, 0.0];
                     let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut p0);
                     match g {
-                        Some(o) if r.is_none() || grid_keeps_room(p0[1], pg[1]) => Some(o),
+                        Some(o) if prefer_takes(r.is_some(), &p0, &pg) => Some(o),
                         _ => r,
                     }
                 }
@@ -669,20 +669,20 @@ impl Drawer<'_> {
                 // (length, bends, room, any_angle, violations, off_grid) is lower than the plain
                 // pass's ([`fallback_takes`]; ties: the plain one) and it takes no more planned
                 // room ([`grid_keeps_room`]).
-                let mut p0 = [f64::INFINITY, 0.0];
+                let mut p0 = [f64::INFINITY, 0.0, 0.0];
                 let r = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut p0);
                 if !breaks(r.as_ref().map_or(pts, |o| &o.pts[..])).0.is_empty() {
-                    let mut pg = [f64::INFINITY, 0.0];
+                    let mut pg = [f64::INFINITY, 0.0, 0.0];
                     let g = self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, true, &mut pg);
                     match g {
-                        Some(o) if fallback_takes(p0[0], pg[0]) && grid_keeps_room(p0[1], pg[1]) => Some(o),
+                        Some(o) if fallback_picks(r.is_some(), &p0, &pg) => Some(o),
                         _ => r,
                     }
                 } else {
                     r
                 }
             }
-            _ => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut [0.0; 2]),
+            _ => self.octilinear_dp(w, k0, k1, layer, pts, neck, exits, forced, false, &mut [0.0; 3]),
         };
         // first-draw-45 r9 debug (`TOPO_REDUCEDBG`, copper-neutral): an octilinear call over 0.5 s.
         if std::env::var_os("TOPO_REDUCEDBG").is_some() && t.elapsed().as_secs_f64() > 0.5 {
@@ -706,7 +706,7 @@ impl Drawer<'_> {
     #[allow(clippy::too_many_arguments)]
     /// `price`: set to the DP's price of its best form (INFINITY when the DP does not run or finds
     /// no form; the taut path kept then).
-    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, grid: bool, price: &mut [f64; 2]) -> Option<OctiOut> {
+    fn octilinear_dp(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: &[Vec2], neck: Option<Neck>, exits: [Option<Exit>; 2], forced: Option<f64>, grid: bool, price: &mut [f64; 3]) -> Option<OctiOut> {
         let cfg = self.octi;
         // grid-snap: the track grid of this pass (None: the plain pass, no grid node, no price).
         let lat = if grid { cfg.grid } else { None };
@@ -1661,6 +1661,12 @@ impl Drawer<'_> {
         // grid-snap r6: the planned-room price of the chosen form (its legs in undrawn
         // neighbours' planned room, the DP's `room` term).
         price[1] = 0.0;
+        // grid-snap r7 (F9): the taut path's own room, the plain pass's form when it returns None
+        // (all-octilinear early return, or the taut path as the best form). Grid pass only.
+        price[2] = 0.0;
+        if grid && !room_none {
+            price[2] = taut.windows(2).map(|x| room_f(x[0], x[1])).sum();
+        }
         if !room_none {
             let mut from = taut[0];
             for s in &chain {
@@ -2443,6 +2449,29 @@ pub fn grid_keeps_room(plain: f64, grid: f64) -> bool {
     grid <= plain + 1.0
 }
 
+/// grid-snap r7 (F9): the planned room (nm) of the plain pass's form: its own price when it
+/// returned a form (`p0[1]`), else the taut path's (`pg[2]`, set by the grid pass; the plain pass
+/// keeps the taut path then and has no price of its own).
+pub fn plain_room(plain_form: bool, p0: &[f64; 3], pg: &[f64; 3]) -> f64 {
+    if plain_form {
+        p0[1]
+    } else {
+        pg[2]
+    }
+}
+
+/// grid-snap r7 (F9): prefer takes the grid pass's form (`pg`) over the plain pass's (`p0`;
+/// `plain_form` false: it returned none, the taut path stays) when it takes no more planned room.
+pub fn prefer_takes(plain_form: bool, p0: &[f64; 3], pg: &[f64; 3]) -> bool {
+    grid_keeps_room(plain_room(plain_form, p0, pg), pg[1])
+}
+
+/// grid-snap r7 (F9): fallback takes the grid form when its price is lower ([`fallback_takes`])
+/// and it takes no more planned room ([`prefer_takes`]).
+pub fn fallback_picks(plain_form: bool, p0: &[f64; 3], pg: &[f64; 3]) -> bool {
+    fallback_takes(p0[0], pg[0]) && prefer_takes(plain_form, p0, pg)
+}
+
 /// grid-snap: per interior taut vertex off the grid, at most this many points of its grid cell become
 /// extra nodes of the octilinear DP.
 const GRID_PER_NODE: usize = 2;
@@ -2912,6 +2941,25 @@ mod tests {
     fn grid_keeps_room_refuses_more_planned_room() {
         assert!(grid_keeps_room(0.0, 0.0) && grid_keeps_room(5.0e5, 5.0e5 + 0.5) && grid_keeps_room(5.0e5, 1.0e5));
         assert!(!grid_keeps_room(0.0, 2.0) && !grid_keeps_room(5.0e5, 5.0e5 + 2.0));
+    }
+
+    /// grid-snap r7 (F9, mutants W1-W4): the room rule's wiring. The plain pass's room is its
+    /// form's price, or the taut path's own (`pg[2]`) when it returned no form.
+    #[test]
+    fn grid_pick_compares_against_the_kept_taut_room() {
+        let inf = f64::INFINITY;
+        // plain returned no form: the taut room (pg[2]) is the bar
+        assert!(!prefer_takes(false, &[inf, 0.0, 0.0], &[1.0e6, 3.0e5, 0.0]), "grid room over a roomless taut path");
+        assert!(prefer_takes(false, &[inf, 0.0, 0.0], &[1.0e6, 3.0e5, 4.0e5]), "grid room under the taut room");
+        assert!(prefer_takes(false, &[inf, 0.0, 0.0], &[1.0e6, 0.0, 0.0]));
+        // plain returned a form: its own room (p0[1]) is the bar, pg[2] is not read
+        assert!(!prefer_takes(true, &[1.0e6, 0.0, 9.0e9], &[1.0e6, 3.0e5, 9.0e9]));
+        assert!(prefer_takes(true, &[1.0e6, 5.0e5, 0.0], &[1.0e6, 3.0e5, 0.0]));
+        // fallback: the lower price AND the room rule (W2)
+        assert!(fallback_picks(true, &[2.0e6, 0.0, 0.0], &[1.0e6, 0.0, 0.0]));
+        assert!(!fallback_picks(true, &[2.0e6, 0.0, 0.0], &[1.0e6, 3.0e5, 0.0]), "cheaper but more room");
+        assert!(!fallback_picks(false, &[inf, 0.0, 0.0], &[1.0e6, 3.0e5, 0.0]), "no plain form, more room than the taut path");
+        assert!(!fallback_picks(true, &[1.0e6, 0.0, 0.0], &[1.0e6, 0.0, 0.0]), "a tie keeps the plain form");
     }
 
     #[test]

@@ -2637,4 +2637,54 @@ mod tests {
         let z = dr.octilinear(0, 0, k1, 0, &taut, None, [None, None], None).map_or(taut.clone(), |o| o.pts);
         assert!(len(&z) <= len(&plain) + 1.0, "price 0: no longer than plain ({} vs {})", len(&z), len(&plain));
     }
+
+    /// grid-snap r7 (F9, mutants W1, W3, W4): an all-octilinear run (the plain pass returns no
+    /// form, the taut path stays) with its bends off the grid. Free, prefer moves the bends onto
+    /// the grid; with an undrawn neighbour's planned room (a corridor) only where the grid form
+    /// would go, and not on the run itself, the grid form takes more room than the kept path and
+    /// is refused, whatever the grid price (the run is kept).
+    #[test]
+    fn grid_prefer_keeps_a_roomless_taut_path_off_a_neighbours_room() {
+        use crate::topo::gridsnap::{Lattice, Mode};
+        use crate::topo::octi::{corridor_room, Corridor};
+        let m = BoardModel::from_json(&grid_json()).unwrap();
+        let bd = board::build(&m, &BuildOpts::default()).unwrap();
+        let conns = bd.connections(&m);
+        let mut st = State::new(&bd.proj);
+        let cn = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("a net-1 connection");
+        st.route_conn(cn, &InitWeights::default(), (cn.w + cn.s) / 400_000.0).expect("routes");
+        let opts = Options::default();
+        let checker = Checker::new(&m, &opts);
+        let mut dr = Drawer::new(&m, &opts, &bd, &st, &checker);
+        let k1 = dr.st.wires[0].passes.len();
+        let (a, b) = (Vec2 { x: 2.032 * MM, y: -12.192 * MM }, Vec2 { x: 20.066 * MM, y: -12.192 * MM });
+        let r = 1.01 * (0.5 * dr.st.wires[0].w + dr.st.wires[0].s);
+        let taut = vec![a, Vec2 { x: 10.5 * MM, y: -(11.6 * MM - r) }, Vec2 { x: 11.5 * MM, y: -(11.6 * MM - r) }, b];
+        let lat = Lattice::new([254_000, 254_000], [0, 0]).unwrap();
+        dr.octi = crate::topo::octi::OctiCfg { on: true, ..dr.octi };
+        let plain = dr.octilinear(0, 0, k1, 0, &taut, None, [None, None], None).map_or(taut.clone(), |o| o.pts);
+        dr.octi = crate::topo::octi::OctiCfg { grid: Some(lat), grid_mode: Mode::Prefer, grid_nm: 5.0 * MM, ..dr.octi };
+        // plain is all octilinear: the plain pass returns none for it
+        let free = dr.octilinear(0, 0, k1, 0, &plain, None, [None, None], None).expect("free: onto the grid").pts;
+        // a band (room only) on a grid-form bend that the plain run does not touch
+        let v = free[1..free.len() - 1].iter().copied().max_by(|p, q| {
+            let d = |x: &Vec2| plain.windows(2).map(|s| crate::topo::draw::seg_dist(*x, s[0], s[1])).fold(f64::INFINITY, f64::min);
+            d(p).total_cmp(&d(q))
+        }).expect("a bend");
+        let dist = plain.windows(2).map(|s| crate::topo::draw::seg_dist(v, s[0], s[1])).fold(f64::INFINITY, f64::min);
+        assert!(dist > 0.02 * MM, "the grid bend {v:?} is {dist} nm off the plain run");
+        let reach = 0.5 * dist;
+        let path = vec![v, v + Vec2 { x: 0.01 * MM, y: 0.0 }];
+        let band = Corridor { bb: bbox_of(&path).grow(reach), path, reach, pitch: reach, viol_nm: 0.0, wire: 0 };
+        let pitch = 0.5 * MM;
+        let room = |p: &[Vec2]| p.windows(2).map(|s| corridor_room(std::slice::from_ref(&band), pitch, s[0], s[1])).sum::<f64>();
+        assert!(room(&plain) <= 0.0 && room(&free) > 0.0, "the band is on the grid form only: plain {} grid {}", room(&plain), room(&free));
+        crate::topo::octi::OCTI_TEST_BANDS.with(|x| *x.borrow_mut() = vec![band.clone()]);
+        let kept = dr.octilinear(0, 0, k1, 0, &plain, None, [None, None], None);
+        crate::topo::octi::OCTI_TEST_BANDS.with(|x| x.borrow_mut().clear());
+        match kept {
+            None => {}
+            Some(o) => assert!(room(&o.pts) <= 0.0, "a grid form took the neighbour's room: {:?} (plain {plain:?})", o.pts),
+        }
+    }
 }

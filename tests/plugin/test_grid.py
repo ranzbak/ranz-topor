@@ -120,3 +120,38 @@ def test_grid_settings_values():
     for v in ("off", "fallback", "prefer"):
         assert coerce(gs, v) == (v, None)
     assert coerce(gs, "on")[1] is not None
+
+
+class _Cfg:
+    def __init__(self, snap="prefer", mm="auto"):
+        self.v = {("drawing", "grid_snap"): snap, ("drawing", "grid_mm"): mm}
+
+    def get(self, section, key):
+        return self.v[(section, key)]
+
+
+class _Port:
+    def __init__(self, d):
+        self.d = d
+
+    def kicad_settings_dir(self):
+        return self.d
+
+
+def test_run_options_wiring_reads_the_ports_settings_dir(tmp_path):
+    """F12 (plugin/topor/run.py grid_run_options, mutant P12): the port's KiCad settings dir reaches
+    grid.resolve; off or an engine without the option adds nothing; a port without the method = no grid."""
+    from topor.run import grid_run_options
+    d = _settings(tmp_path, {"sizes": SIZES, "last_size": 3, "overrides_enabled": False})
+    known = {"grid_track_nm": [0, 0]}
+    opts, lines = grid_run_options(_Cfg(), known, _Port(d), PCB)
+    assert opts["grid_track_nm"] == [254_000, 127_000] and opts["grid_origin_nm"] == [75_927_000, 45_000_000], opts
+    assert any(str(d) in x for x in lines), lines
+    # a number needs no settings dir
+    assert grid_run_options(_Cfg(mm=0.5), known, object(), PCB)[0]["grid_track_nm"] == [500_000, 500_000]
+    # no method on the port: no grid found, a warning
+    o2, l2 = grid_run_options(_Cfg(), known, object(), PCB)
+    assert o2["grid_track_nm"] == [0, 0] and any(x.startswith("warning") for x in l2)
+    # off, or the engine lacks the option: nothing
+    assert grid_run_options(_Cfg("off"), known, _Port(d), PCB) == ({}, None)
+    assert grid_run_options(_Cfg(), {}, _Port(d), PCB) == ({}, None)

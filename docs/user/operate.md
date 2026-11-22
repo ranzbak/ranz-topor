@@ -592,6 +592,14 @@ at the pad centre, and it leaves the grid wherever clearance, the room planned f
 or a packed bundle needs it (the *off_grid* factor, a price, never a rule). The run log names the grid and where it
 came from.
 
+**Known costs: leave it `"off"` unless you need the grid.** Measured with deterministic runs (seed 0) on the
+current engine: on dense boards `"prefer"` adds DRC violations and forced runs (esp-rust-board 42 -> 50 new
+violations; qmtech-minimig 113 -> 118, shorts 3 -> 5), can cut pour pieces (islands to stitch), and costs up to about
+twice the drawing CPU; simple boards (eprom-to-kernal, wiccon) are close to unchanged. `"fallback"` has the same
+kind of cost on a smaller scale (a worse form, e.g. a hole clearance on esp-rust-board). The grid never takes room
+the plan keeps for another trace, but moving bends and vias still moves copper. With `"off"` the copper is
+unchanged.
+
 - **Grid size:** `[drawing] grid_mm` (a number), else (`"auto"`) KiCad's grid from View → Grid Properties: the
   current grid, or with the per-item grid overrides on, the track and via overrides.
 - **Grid origin:** Place → Grid Origin, read from the board (as it is in the editor now).

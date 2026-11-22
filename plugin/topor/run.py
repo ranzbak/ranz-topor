@@ -709,6 +709,16 @@ def post_commit_finding(step: str, e: BaseException) -> Finding:
                    messages.fix_for("POST_COMMIT_STEP_FAILED"), (step,))
 
 
+
+def grid_run_options(cfg, known: dict, port, copy_text: str) -> tuple[dict, list[str] | None]:
+    """grid-snap: the engine options for the user's KiCad grid and the log lines, or ``(dict(), None)`` when
+    ``[drawing] grid_snap`` is off or the engine lacks the option. The settings directory comes from the port
+    (``kicad_settings_dir()``, KiCad's own config dir, read only); a port without it gives None (no grid found)."""
+    if cfg.get("drawing", "grid_snap") == "off" or "grid_track_nm" not in known:
+        return {}, None
+    settings = getattr(port, "kicad_settings_dir", None)
+    return grid_mod.resolve(cfg.get("drawing", "grid_mm"), copy_text, settings() if callable(settings) else None)
+
 def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, board_name, ts, t0) -> RunOutcome:
     findings = out.findings
     report_dir = out.report_dir
@@ -944,9 +954,8 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
     known = json.loads(engine.default_options())
     # grid-snap: the user's KiCad grid (topor.toml [drawing] grid_mm, else KiCad's pcbnew.json, read only) and the
     # board's grid origin, for the drawn copper's bends and vias (docs/dev/design/grid-snap.md)
-    if cfg.get("drawing", "grid_snap") != "off" and "grid_track_nm" in known:
-        settings = getattr(port, "kicad_settings_dir", None)
-        gopts, glines = grid_mod.resolve(cfg.get("drawing", "grid_mm"), copy_text, settings() if callable(settings) else None)
+    gopts, glines = grid_run_options(cfg, known, port, copy_text)
+    if glines is not None:
         opts.update(gopts)
         for line in glines:
             log.line(line)

@@ -255,6 +255,11 @@ def judge(pat: Pat, segs, vias, m: dict, drc: list[dict]) -> dict:
     return r
 
 
+def status_line(name: str) -> str:
+    """The PNG title's status: APPROVED for a pattern whose ROUND note says approved (any case, F13), else STATUS."""
+    return "APPROVED (expected answer in tests/test_drc_patterns_e2e.py)" if "approved" in ROUND.get(name, "").lower() else STATUS
+
+
 def main(argv: list[str] | None = None) -> int:
     a = list(sys.argv[1:] if argv is None else argv)
     runs, out = Path(a[0]), Path(a[1])
@@ -301,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
                     ax[k].plot([x], [y], marker="x", ms=5, mew=1.2, color="#e07000", zorder=11)
                 ax[k].set_title(ax[k].get_title() + f"\nbends off the grid: {len(r.get('off_grid_bends', []))} (orange x)", fontsize=8)
         tag = f" [{ROUND[name]}]" if name in ROUND else ""
-        fig.suptitle(f"{pat.cluster} {name}{tag}: {pat.title}\n[{"APPROVED (expected answer in tests/test_drc_patterns_e2e.py)" if "approved" in ROUND.get(name, "") else STATUS}]  F.Cu red, B.Cu blue, hatched = kept hand copper, "
+        fig.suptitle(f"{pat.cluster} {name}{tag}: {pat.title}\n[{status_line(name)}]  F.Cu red, B.Cu blue, hatched = kept hand copper, "
                      "grey = PTH, dashed frame = copper-to-edge line, yellow ring = KiCad DRC of the routed copy", fontsize=9)
         fig.tight_layout()
         fig.savefig(out / f"{name}.png", dpi=120)
