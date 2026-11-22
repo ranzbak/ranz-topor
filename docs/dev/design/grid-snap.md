@@ -115,3 +115,30 @@ r2 changes the mechanisms. There are no board special cases.
     2. if it still cuts off more, every move goes back.
 - **CPU.** Grid companion nodes are added at taut vertices only, at most 48 per run. The octagon
   extras get the grid through the grid Z connectors.
+
+## r3 (isolation of the r2 forced-copper halves)
+
+One qmtech run (`grid_snap = off`, det seed 0) per half, against main (143 KiCad DRC items, `drc_digest`):
+
+| arm | KiCad violations |
+|---|---|
+| both halves (r2) | 151 (+8) |
+| forced via site only (`TOPOR_DIAG_NO_DRILL_PRICE`) | 143 (+0) |
+| forced run drill price only (`TOPOR_DIAG_NO_SHORT_FIRST`) | 151 (+8) |
+
+- **The forced run drill price is dropped.** It alone made the qmtech up (FPGA_SD_SW over VIN5V near
+  SW2 is the one new cluster; by type clearance 68 -> 73, `hole_clearance` 43 -> 46). It was also wrong by KiCad's
+  count: a short over a via is `shorting_items` + `hole_clearance`, a short over a track is
+  `shorting_items` + `tracks_crossing`, so both cost two items and a drill extra prefers nothing
+  KiCad prefers. `ent_deficit` is back to main.
+- **The forced via site keeps the short-first order and adds a drill tier.**
+  `force_via_key = [shorts, drill, rest]`. The drill tier sums the via drill's `hole_clearance`
+  deficits as KiCad measures them (drill edge to foreign copper, the hole rule, less the checker
+  margin), above the plain clearance sum.
+- **The checker keeps a via's drill violation apart from its copper violation.** `Violation.drill`
+  marks a drill check. Before, both were merged when their rules had the same value, and the
+  drill's gap was lost under the copper's (esp IO8_SCL: KiCad 0.007 mm below the hole rule, the
+  engine reported 0.107 mm and called it clearance). `draw.rs viol_kind` names the DRC class from
+  the flag, not from the rule value.
+- Diagnosis switches for the isolation (removed again): `TOPOR_DIAG_NO_SHORT_FIRST`,
+  `TOPOR_DIAG_NO_DRILL_PRICE`.
