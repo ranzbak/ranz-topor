@@ -27,6 +27,9 @@ M = {
     # r3
     "G15": ("engine/src/topo/draw.rs", "    } else if via && (v.drill || v.against", "    } else if via && (v.against"),
     "G16": ("engine/src/check.rs", "required: r, drill: is_via }),", "required: r, drill: false }),"),
+    # r4 (verifier V3): force_via's call site back to one sum of amounts
+    "G17": ("engine/src/topo/draw.rs", "let key = force_via_key(&vs, side + reach, self.opts.margin_nm.max(0) as f64);",
+            "let key = [0.0, 0.0, vs.iter().map(Viol::amount).sum::<f64>() + side + reach];"),
 }
 TESTS = ["grid", "octilinear", "fallback", "force_via", "deficit", "pour", "viol_kind"]
 

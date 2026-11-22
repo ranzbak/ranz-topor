@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 COARSE_MM = 0.5
@@ -81,6 +83,45 @@ def kicad_grids(pcbnew_json: dict) -> tuple[tuple[float, float] | None, tuple[fl
     return track, via, how
 
 
+_VERSION_DIR = re.compile(r"^(\d+)\.(\d+)$")
+
+
+def kicad_settings_dirs(version: tuple[int, int] | None, env: Mapping[str, str], platform: str | None = None,
+                        home: Path | None = None) -> list[Path]:
+    """The folders KiCad keeps its user settings (pcbnew.json) in, best first, by KiCad's own rule
+    (common/paths.cpp ``PATHS::CalculateUserSettingsPath``): the base is ``$KICAD_CONFIG_HOME`` when set and
+    not empty, else the platform's user config folder (libs/kiplatform ``KIPLATFORM::ENV::GetUserConfigPath``)
+    plus ``kicad``; then the settings version ``<major>.<minor>`` (``SETTINGS_MANAGER::GetSettingsVersion``:
+    "9.0", "10.0", a nightly "9.99"). The user config folder: Linux ``g_get_user_config_dir()`` =
+    ``$XDG_CONFIG_HOME`` when set and not empty, else ``$HOME/.config``; macOS ``~/Library/Preferences``;
+    Windows ``%APPDATA%`` (wx ``GetUserConfigDir``). `version` None (KiCad did not say): every
+    ``<major>.<minor>`` folder under the base, newest first. Pure: the file system is not read for a known
+    version; for an unknown one only the base folder is listed."""
+    platform = platform or sys.platform
+    home = home or Path(env.get("HOME") or Path.home())
+    if env.get("KICAD_CONFIG_HOME"):
+        base = Path(env["KICAD_CONFIG_HOME"])
+    elif platform == "darwin":
+        base = home / "Library" / "Preferences" / "kicad"
+    elif platform.startswith("win"):
+        base = Path(env.get("APPDATA") or home / "AppData" / "Roaming") / "kicad"
+    else:
+        base = Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "kicad"
+    if version is not None:
+        return [base / f"{version[0]}.{version[1]}"]
+    try:
+        found = [(tuple(map(int, m.groups())), d) for d in base.iterdir() if (m := _VERSION_DIR.match(d.name))]
+    except OSError:
+        return []
+    return [d for _, d in sorted(found, reverse=True)]
+
+
+def pick_settings_dir(dirs: list[Path]) -> Path | None:
+    """The first of `dirs` that holds a pcbnew.json, else the first (so the warning names where KiCad keeps it),
+    None for none."""
+    return next((d for d in dirs if (d / "pcbnew.json").is_file()), dirs[0] if dirs else None)
+
+
 def resolve(grid_mm, pcb_text: str, settings_dir: Path | None) -> tuple[dict, list[str]]:
     """Engine options ``grid_track_nm`` / ``grid_via_nm`` / ``grid_origin_nm`` and the log lines (``warning:``
     lines for a missing or coarse grid). `grid_mm`: the ``[drawing] grid_mm`` value (a number or "auto");
@@ -102,13 +143,20 @@ def resolve(grid_mm, pcb_text: str, settings_dir: Path | None) -> tuple[dict, li
             src = f"KiCad {p} ({how})"
     origin = grid_origin_nm(pcb_text)
     if track is None:
-        lines.append("warning: grid snap: no grid found (neither [drawing] grid_mm nor KiCad's grid settings); "
-                     "the copper is drawn without the grid")
+        where = f" (looked in {Path(settings_dir) / 'pcbnew.json'})" if settings_dir is not None else ""
+        lines.append("warning: grid snap: no grid found (neither [drawing] grid_mm nor KiCad's grid settings"
+                     f"{where}); the copper is drawn without the grid")
         return {"grid_track_nm": [0, 0], "grid_via_nm": [0, 0], "grid_origin_nm": list(origin)}, lines
     via = via or track
     nm = lambda g: [int(round(g[0] * 1e6)), int(round(g[1] * 1e6))]  # noqa: E731
     lines.append(f"grid snap: track grid {track[0]:g} x {track[1]:g} mm, via grid {via[0]:g} x {via[1]:g} mm, "
                  f"origin ({origin[0] / 1e6:g}, {origin[1] / 1e6:g}) mm, from {src}")
+    if src.startswith("KiCad "):
+        # The IPC API (kipy 0.8) has the grid origin but not the grid size; KiCad writes pcbnew.json when it saves
+        # its settings (on exit, or OK in Preferences), so a grid picked in the running session is not seen yet.
+        lines.append("warning: grid snap: the grid is KiCad's last saved setting (pcbnew.json); a grid changed "
+                     "since KiCad last saved its settings is not seen: set [drawing] grid_mm, or close and reopen "
+                     "KiCad after changing the grid")
     if max(track + via) > COARSE_MM:
         lines.append(f"warning: grid snap: the grid ({max(track + via):g} mm) is coarser than {COARSE_MM:g} mm; "
                      "bends and vias prefer it where room allows, the rest stays off it")

@@ -142,3 +142,19 @@ One qmtech run (`grid_snap = off`, det seed 0) per half, against main (143 KiCad
   the flag, not from the rule value.
 - Diagnosis switches for the isolation (removed again): `TOPOR_DIAG_NO_SHORT_FIRST`,
   `TOPOR_DIAG_NO_DRILL_PRICE`.
+
+## r4 (verifier findings)
+
+- **Settings folder** (`grid.kicad_settings_dirs`, `IpcBoard.kicad_settings_dir`), by KiCad's own rule
+  (common/paths.cpp `PATHS::CalculateUserSettingsPath`):
+  - the base is `$KICAD_CONFIG_HOME` (set and not empty), else the platform config folder plus `kicad`.
+    The platform folder is GLib's `g_get_user_config_dir()` (`$XDG_CONFIG_HOME`, else `$HOME/.config`) on
+    Linux, `~/Library/Preferences` on macOS, `%APPDATA%` on Windows;
+  - then `<major>.<minor>` from the IPC version (`SETTINGS_MANAGER::GetSettingsVersion`: 9.0, 10.0,
+    nightly 9.99);
+  - version unknown: the newest `<major>.<minor>` folder that holds a pcbnew.json.
+  - Before r4, a `KICAD_CONFIG_HOME` dropped the version folder, and without it the version lookup called
+    a missing attribute (`self.kicad`), so `auto` found no grid in a live KiCad.
+- **Saved setting only.** The IPC API (kipy 0.8) has the grid origin but not the grid size. pcbnew.json is
+  KiCad's last saved setting: a warning each run, and a note in operate.md.
+- **force_via tiers** pinned on a Drawer fixture (`force_via_takes_a_clearance_site_over_a_cheaper_short`).

@@ -421,23 +421,22 @@ class IpcBoard:
             return False
 
     def kicad_settings_dir(self) -> Path | None:
-        """grid-snap: the running KiCad's settings folder (its pcbnew.json holds the grid sizes; read only):
-        ``KICAD_CONFIG_HOME`` (KiCad's own override, inherited by the plugin process), else
-        ``~/.config/kicad/<major>.0`` of the version KiCad reports over IPC. None when unknown."""
+        """grid-snap: the running KiCad's settings folder (its pcbnew.json holds the grid sizes; read only), by
+        KiCad's own path rule (topor/grid.py ``kicad_settings_dirs``: ``KICAD_CONFIG_HOME`` or the platform
+        config folder, plus ``<major>.<minor>`` of the version KiCad reports over IPC; the plugin process inherits
+        KiCad's environment). Version unknown: the newest settings folder there. None when there is none."""
         import os  # noqa: PLC0415
 
-        env = os.environ.get("KICAD_CONFIG_HOME")
-        if env:
-            return Path(env)
+        from . import grid  # noqa: PLC0415
+
         try:
-            v = self.kicad.get_version()
-            major = int(getattr(v, "major", 0))
-        except Exception:  # noqa: BLE001 - an older kipy / KiCad: no grid from the settings
-            return None
-        if major <= 0:
-            return None
-        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-        return base / "kicad" / f"{major}.0"
+            v = self._kicad.get_version()
+            version: tuple[int, int] | None = (int(getattr(v, "major", 0)), int(getattr(v, "minor", 0)))
+        except Exception:  # noqa: BLE001 - an older kipy / KiCad: fall back to the newest settings folder
+            version = None
+        if version is not None and version[0] <= 0:
+            version = None
+        return grid.pick_settings_dir(grid.kicad_settings_dirs(version, os.environ))
 
     def refill_zones(self) -> None:
         self.board.refill_zones()

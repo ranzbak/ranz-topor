@@ -5710,6 +5710,16 @@ mod tests {
     /// A 40 x 30 mm board, F.Cu only (B.Cu a keepout), 1 mm square SMD pads `(net, x, y)` in the
     /// KiCad frame; clearance 0.2 mm, width 0.25 mm.
     fn fx_model(pads: &[(i32, f64, f64)]) -> BoardModel {
+        fx_model_with(pads, true)
+    }
+
+    /// [`fx_model`]; `keepout` false: B.Cu open for vias (the forced via fixture).
+    fn fx_model_with(pads: &[(i32, f64, f64)], keepout: bool) -> BoardModel {
+        BoardModel::from_json(&fx_json(pads, keepout).to_string()).unwrap()
+    }
+
+    /// The board JSON of [`fx_model_with`] (a fixture edits it before it is read).
+    fn fx_json(pads: &[(i32, f64, f64)], keepout: bool) -> serde_json::Value {
         let n = |v: f64| (v * FMM).round() as i64;
         let (w, h) = (n(40.0), n(30.0));
         let pj: Vec<serde_json::Value> = pads
@@ -5728,11 +5738,63 @@ mod tests {
             "nets": [{"code": 1, "name": "N"}, {"code": 2, "name": "M"}], "pads": pj,
             "vias": [], "kept": [], "copper_shapes": [], "holes": [],
             "outline": [{"kind": "seg", "a": [0, 0], "b": [w, 0]}, {"kind": "seg", "a": [w, 0], "b": [w, h]}, {"kind": "seg", "a": [w, h], "b": [0, h]}, {"kind": "seg", "a": [0, h], "b": [0, 0]}],
-            "keepouts": [{"name": "", "layers": [2], "poly": [[0, 0], [w, 0], [w, h], [0, h]], "no_tracks": true, "no_vias": true, "no_pour": false, "no_pads": false, "no_footprints": false}],
+            "keepouts": if keepout { serde_json::json!([{"name": "", "layers": [2], "poly": [[0, 0], [w, 0], [w, h], [0, h]], "no_tracks": true, "no_vias": true, "no_pour": false, "no_pads": false, "no_footprints": false}]) } else { serde_json::json!([]) },
             "net_ties": [], "pours": [], "teardrops": [], "dangling_ends": [],
             "rules": {"min_clearance": 200000, "min_track_width": 250000, "min_via_diameter": 400000, "min_via_drill": 300000, "min_annular": 50000, "hole_clearance": 250000, "via_hole_clearance": 250000, "hole_to_hole": 250000, "edge_clearance": 500000, "max_error": 5000, "min_connection": 0, "profile": "board", "predefined_vias": [], "default": cls, "per_net": {"1": cls, "2": cls}, "floors_applied": [], "fallbacks": [], "warnings": [], "ignored_checks": [], "clearance_regions": [], "outline_half_stroke": 25000}
         });
-        BoardModel::from_json(&j.to_string()).unwrap()
+        j
+    }
+
+    /// grid-snap r4 (verifier F7, mutant V3): [`Drawer::force_via`] ranks its sites by
+    /// [`force_via_key`] (shorts first, then the drill, then the rest), not by one sum of amounts.
+    /// Fixture: wire A (5, 15) - B (35, 15) of net 1, no passes; its sites are the chord's
+    /// (fractions 0, 0.1, ..., 1 of A-B, [`Drawer::chord_sites`]) and those of A's triangle. A thin
+    /// net-3 track grazes the chord's middle (20, 15): a short and a drill deficit, about 22 units.
+    /// Two net-2 tracks 1.5 mm off the chord cover every other site with net 2's clearance (set to
+    /// 2 mm): one deep clearance deficit each, about 52 units, no short. The forced via takes a
+    /// clearance-only site; by one sum it would take the short.
+    #[test]
+    fn force_via_takes_a_clearance_site_over_a_cheaper_short() {
+        let mut j = fx_json(&[(1, 5.0, 15.0), (1, 35.0, 15.0)], false);
+        j["nets"] = serde_json::json!([{"code": 1, "name": "N"}, {"code": 2, "name": "M"}, {"code": 3, "name": "S"}]);
+        j["rules"]["per_net"]["2"]["clearance"] = serde_json::json!(2_000_000);
+        let m = BoardModel::from_json(&j.to_string()).unwrap();
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let pr = &b.proj;
+        let o = Options::default();
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..pr.obstacles.len()).find(|&i| (pr.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(5.0, 15.0), obs(35.0, 15.0));
+        let sz = ViaSize { d: 600_000, drill: 300_000 };
+        let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+        let s0 = fp(20.0, 15.0);
+        // The short: a 0.1 mm net-3 track 0.02 mm into the via's copper (0.3 + 0.05 - 0.02 off s0).
+        dr.commit(&track_item(3, 0, 0.1 * FMM, fp(20.33, 14.8), fp(20.33, 15.2), None));
+        // Net 2, 1.5 mm below the chord, clear of s0 by more than its 2 mm clearance.
+        dr.commit(&track_item(2, 0, 0.1 * FMM, fp(2.0, 16.5), fp(16.0, 16.5), None));
+        dr.commit(&track_item(2, 0, 0.1 * FMM, fp(24.0, 16.5), fp(38.0, 16.5), None));
+        let sites: Vec<Vec2> = dr.chord_sites(w, 0).into_iter().chain(dr.via_candidates(w, 0, 0, 0.0, Some(0))).map(|x| x.1).collect();
+        let t = st.wires[w].tris[0];
+        let [ta, tb, tc] = pr.tris[t].map(|v| pr.pos[v]);
+        let sites: Vec<Vec2> = sites.into_iter().chain(super::super::pack::tri_site_points(ta, tb, tc)).collect();
+        assert!(sites.iter().any(|p| (*p - s0).len() < 1.0), "the chord's middle is a site: {sites:?}");
+        let viols_at = |p: Vec2| {
+            let item = via_item(1, p, sz, Some(w));
+            let rep = dr.checker.check_against(&dr.idx, std::slice::from_ref(&item), &[]);
+            dr.viols_of(std::slice::from_ref(&item), &rep)
+        };
+        // Precondition: the short site has a lower sum than every other site, none of which shorts.
+        let sum = |vs: &[Viol]| vs.iter().map(Viol::amount).sum::<f64>();
+        let v0 = viols_at(s0);
+        assert!(v0.iter().any(|v| v.kind == "short"), "{v0:?}");
+        for &p in sites.iter().filter(|p| (**p - s0).len() > 1.0) {
+            let vs = viols_at(p);
+            assert!(!vs.iter().any(|v| v.kind == "short") && sum(&vs) > sum(&v0) + 2.0, "site {p:?}: {vs:?} vs {v0:?}");
+        }
+        let plan = Plan { layers: vec![0, 1], vias: vec![(0, 0)], at: vec![0] };
+        let (_, p, _, vs) = dr.force_via(w, &plan, 0, 0, 0, &[sz], None).expect("a forced site");
+        assert!((p - s0).len() > 1.0 && !vs.is_empty() && !vs.iter().any(|v| v.kind == "short"), "took {p:?}: {vs:?}");
     }
 
     /// Math-frame point of the KiCad-frame mm coordinates.
