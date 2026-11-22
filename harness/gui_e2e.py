@@ -900,6 +900,10 @@ def run(a) -> int:
         e.key(pre[1], "Return")
         fills_before = e.zone_fills()
         counts_run_start = e.counts()
+        editor_titles = lambda: sorted(t for t in e.windows() if t.endswith("PCB Editor"))  # "*name — PCB Editor" = modified
+        title_run_start = editor_titles()
+        text_run_start = live.read_bytes()
+        e.log(f"editor title before the run: {title_run_start} (dirty flag already set here = not ours)")
         e.log(f"zones before the run: {len(fills_before)}")
         t_route = time.monotonic()
         state = {"last": -10.0, "cancelled": False, "img_t": -10.0, "imgs": []}
@@ -987,6 +991,16 @@ def run(a) -> int:
                     f"{result['cancel_reaction_s']} s after Cancel; {stray}")
             e.shot("after-cancel")
             e.check("Cancel leaves the copper unchanged", e.counts() == counts_run_start, f"{counts_run_start} -> {e.counts()}")
+            # no dirty flag and no undo entry of ours: the editor title is what it was before the run (a '*' only if it
+            # was there before), the plugin committed nothing, refilled nothing, ran no action, the file on disk is untouched
+            e.check("Cancel: editor title (dirty flag) unchanged by the run", editor_titles() == title_run_start,
+                    f"{title_run_start} -> {editor_titles()}")
+            e.check("Cancel: board file on disk untouched", live.read_bytes() == text_run_start)
+            rds = sorted((e.home / ".cache/kicad/10.0/topor").glob(f"{live.stem}/*/log.txt"))
+            lg = rds[-1].read_text() if rds else ""
+            e.check("Cancel: the run log shows no commit / refill / cleanup (no undo entry)",
+                    bool(lg) and "committed:" not in lg and "zone refill" not in lg and "cancelled by the user" in lg,
+                    str(rds[-1]) if rds else "no log.txt")
             ok = all(c["ok"] for c in e.checks)
             return 0 if ok else 1
         if state["cancelled"]:
