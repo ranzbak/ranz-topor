@@ -29,7 +29,7 @@ def _items(board) -> tuple[list, list]:
     import pcbnew
     tracks, vias = [], []
     for t in board.GetTracks():
-        net = int(t.GetNetCode())
+        net = t.GetNetname()  # by name: the model numbers its nets itself (see `_renet`)
         if t.GetClass() == "PCB_VIA":
             p = t.GetPosition()
             vias.append({"kind": "via", "net": net, "at": [int(p.x), int(p.y)], "d": int(t.GetWidth(pcbnew.F_Cu)),
@@ -44,6 +44,12 @@ def _items(board) -> tuple[list, list]:
             tracks.append({"net": net, "layer": int(t.GetLayer()), "width": int(t.GetWidth()),
                            "prim": {"kind": "seg", "a": [int(a.x), int(a.y)], "b": [int(b.x), int(b.y)]}, "group": None})
     return tracks, vias
+
+
+def _renet(items: list, model: dict) -> list:
+    """Net names -> the model's net codes (pcbnew's codes of the routed copy differ from the model's)."""
+    code = {n["name"]: n["code"] for n in model["nets"]}
+    return [dict(x, net=code.get(x["net"], 0)) for x in items]
 
 
 def project_copy(pcb: Path):
@@ -158,7 +164,7 @@ def main(argv=None) -> int:
             for t in (c["from"], c["to"]) if t.get("kind") == "pad"]
     (out / "model.json").write_text(json.dumps(model))
     (out / "options.json").write_text(json.dumps(cfg.engine_options()))
-    (out / "items.json").write_text(json.dumps(items))
+    (out / "items.json").write_text(json.dumps(_renet(items, model)))
     (out / "routed_pads.json").write_text(json.dumps(pads))
     print(f"{name}: {len(items)} routed items, {len(pads)} routed pad ends; dropped stitch items {dropped} "
           f"(notes: {len(svias)} via points, {len(stubs)} stub ends) -> {out}")

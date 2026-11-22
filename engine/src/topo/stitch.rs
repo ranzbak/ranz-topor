@@ -80,6 +80,9 @@ pub struct StitchOut {
     pub pad_stubs: usize,
     /// Pad-less islands joined to a connected pad of their net by a track (`[planes] join_islands`).
     pub island_joins: usize,
+    /// pad-pour-via: dog-bone pad vias placed ([`dogbone`]), and the pads none fitted.
+    pub dogbones: usize,
+    pub dogbone_failed: usize,
     /// Fine stub lattice ([`STUB_LATTICES`]): cut pieces that needed it, the stubs it found, the
     /// candidate points it looked at (capped by [`FINE_POINTS_MAX`]) and its time (s).
     pub fine_cuts: usize,
@@ -1157,6 +1160,9 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
     // pass placed nothing, so its reach and every coarse search would come out the same.
     let (mut fine_on, mut fine_passes) = (false, 0usize);
     let mut fine_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // pad-pour-via: pieces (by their first pad) no dog-bone fitted, and why per pad.
+    let mut dog_failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut dog_why: std::collections::BTreeMap<usize, Vec<String>> = std::collections::BTreeMap::new();
     let mut kept: Option<PourReach> = None;
     let mut left: Vec<Cut> = Vec::new();
     for pass in 0..PASSES + FINE_PASSES {
@@ -1365,6 +1371,30 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
                 fine_failed.insert(c.pads[0]);
             }
             }
+            // pad-pour-via: a dog-bone for a pad whose spokes are all cut and that no straight stub
+            // reaches, once the fine passes are on (every coarse and fine stub is placed first).
+            if !done && fine_on && opts.stitch_dogbone && !c.pads.is_empty() && !dog_failed.contains(&c.pads[0]) {
+                let mut why: Vec<String> = Vec::new();
+                for &pi in &c.pads {
+                    match dogbone(&mut cx, &reach, c.net, pi, sz, need) {
+                        Ok((its, note)) => {
+                            out.notes.push(format!("{note} for {}", cut_text(model, c)));
+                            for it in its {
+                                cx.add(&it);
+                                out.items.push(it);
+                            }
+                            out.dogbones += 1;
+                            done = true;
+                            break;
+                        }
+                        Err(w) => why.push(w),
+                    }
+                }
+                if !done {
+                    dog_failed.insert(c.pads[0]);
+                    dog_why.insert(c.pads[0], why);
+                }
+            }
             // Island join (`[planes] join_islands`, user 2026-11-12): a piece holding no pad that no
             // via reaches is joined to the nearest pad of its net that is connected to the rest of
             // the net, by a track from the pad into the island (shortest first).
@@ -1450,6 +1480,16 @@ pub fn stitch_until(model: &BoardModel, opts: &Options, reg: &Registry, items: &
     if let Some(n) = cx.kinds.note("stitch vias (cut pieces)") {
         out.notes.push(n);
     }
+    // pad-pour-via: the pads still cut off that no dog-bone fitted, by name (prevention is a
+    // separate item: the routing must leave the spoke room).
+    for c in &left {
+        if let Some(why) = c.pads.first().and_then(|p| dog_why.get(p)) {
+            out.dogbone_failed += 1;
+            for w in why {
+                out.notes.push(format!("no dog-bone via fits for {w}"));
+            }
+        }
+    }
     if std::env::var_os("TOPO_FUSEDBG").is_some() {
         // Debug: the pieces left cut off, to compare the variants' stitchings.
         for c in &left {
@@ -1485,6 +1525,299 @@ pub fn routed_pour_pads(model: &BoardModel, conns: &[crate::route::ConnReport]) 
     routed_pads.sort_unstable();
     routed_pads.dedup();
     routed_pads
+}
+
+/// pad-pour-via: longest first leg of a dog-bone past the pad's edge, nm.
+pub const DOG_LEG1_NM: f64 = 3.0e6;
+/// pad-pour-via: longest second (45 or 90 degree) leg, nm.
+pub const DOG_LEG2_NM: f64 = 2.0e6;
+/// pad-pour-via: length lattice of both legs, nm.
+pub const DOG_STEP_NM: f64 = 0.05e6;
+/// pad-pour-via: price of one 45 degree bend, nm (the `[drawing] bend_mm` default; a 90 degree
+/// bend costs two).
+pub const DOG_BEND_NM: f64 = 0.25e6;
+/// pad-pour-via: most checker queries per pad (legs and via sites are tested apart and remembered,
+/// so each query looks at new geometry).
+pub const DOG_TRIES: usize = 128 * MAX_TRIES;
+/// pad-pour-via: price of necking a dog-bone stub from the net width down to nothing, nm (linear:
+/// half the net width costs half of it).
+pub const DOG_NECK_NM: f64 = 0.5e6;
+/// pad-pour-via: an existing via of the net farther than this from the pad centre is no dog-bone
+/// end, nm.
+const DOG_SHARE_NM: f64 = DOG_LEG1_NM + DOG_LEG2_NM + 1.0e6;
+
+/// The two legs `(a, b)` of a dog-bone from `c` along `u`, then along `d`, that end at `g`
+/// (`a u + b d = g - c`); for `d = u` only when `g` lies on the axis. O(1).
+fn dog_legs(c: Vec2, u: Vec2, d: Vec2, g: Vec2) -> Option<(f64, f64)> {
+    let q = g - c;
+    let det = u.x * d.y - u.y * d.x;
+    if det.abs() < 1e-9 {
+        let off = u.x * q.y - u.y * q.x;
+        return (off.abs() <= 1.0).then(|| (q.dot(u), 0.0));
+    }
+    let a = (q.x * d.y - q.y * d.x) / det;
+    let b = (u.x * q.y - u.y * q.x) / det;
+    Some((a, b))
+}
+
+/// The nets of the copper a checker report says a candidate hit, by name. O(violations).
+fn blocker_nets(cx: &Ctx, rep: &crate::check::CheckReport, out: &mut std::collections::BTreeSet<String>) {
+    let model = cx.model;
+    let name = |net: i32| model.nets.iter().find(|n| n.code == net).map(|n| n.name.clone());
+    for v in &rep.violations {
+        let a = v.against.as_str();
+        let net = if let Some(rest) = a.strip_prefix("pad:") {
+            let (r, n) = rest.split_once(':').unwrap_or((rest, ""));
+            model.pads.iter().find(|p| p.ref_ == r && p.number == n).map(|p| p.net)
+        } else if let Some(id) = a.strip_prefix("item:") {
+            id.parse::<usize>().ok().and_then(|i| cx.all.get(i)).map(|it| match it {
+                Item::Via(v) => v.net,
+                Item::Track(t) => t.net,
+            })
+        } else if let Some(u) = a.strip_prefix("kept:") {
+            model.kept.iter().find(|k| k.uuid == u).map(|k| k.net)
+        } else if let Some(u) = a.strip_prefix("via:") {
+            model.vias.iter().find(|k| k.uuid == u).map(|k| k.net)
+        } else {
+            None
+        };
+        match net.and_then(name) {
+            Some(n) => {
+                out.insert(n);
+            }
+            None if a == "edge" => {
+                out.insert("the board edge".into());
+            }
+            None if a.starts_with("hole:") => {
+                out.insert("a hole".into());
+            }
+            None => {}
+        }
+    }
+}
+
+/// pad-pour-via: a dog-bone for pad `pi` of net `net`, whose thermal spokes are all cut and that
+/// no straight pad stub reached (user 2026-11-22; the user's own qmtech fix: GND pad vias, memory
+/// "qmtech hand-fix lessons"; TopoR joins plane-net pads by fanouts, TopoR 6.3 manual p. 65).
+/// A stub leaves the pad centre along one of its four axes (pad frame) to past its edge, then runs
+/// straight on or turns by ±45 or ±90 degrees, and ends in a via of the net class that stands in
+/// solid main fill of the net on another layer, or on an existing via of the net that does (a
+/// shared via). Its width is the net width (at most the pad's minor size), necked in steps down to
+/// the board minimum where the pad's neighbours leave less room ([`DOG_NECK_NM`]). Candidates: legs
+/// on a [`DOG_STEP_NM`] lattice up to [`DOG_LEG1_NM`] past the edge and [`DOG_LEG2_NM`], plus the
+/// exact legs to every shared via and, with a via grid, to every grid point in reach. Graded price
+/// (nm): the length past the pad edge, [`DOG_BEND_NM`] per 45 degrees of bend, the neck, and for a
+/// new via the `via_squeeze` of its other layer, the foreign-pad proximity, the antipad-neck price
+/// in other nets' pours, the off-grid price, and under a BGA 100 via prices (power-via rule, user
+/// 2026-11-13: a last resort; shared vias too). Cheapest first; legal = each part (leg 1, the via,
+/// leg 2) checker-clean against all copper so far, off the net's own pads and copper (sliver
+/// rules), no via under a mask opening exposing another net. A leg that fails fails for every
+/// longer leg on its ray (it contains the shorter one) and a via site fails for every leg that
+/// ends there: both are remembered, so the [`DOG_TRIES`] checker queries go to new geometry.
+/// Ok: the items (KiCad frame) and a note; Err: the pad's name with the nets the refused
+/// candidates hit. O(candidates log candidates + DOG_TRIES checker queries).
+fn dogbone(cx: &mut Ctx, reach: &PourReach, net: i32, pi: usize, sz: crate::vias::ViaSize, need: f64) -> Result<(Vec<Item>, String), String> {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    let model = cx.model;
+    let pad = &model.pads[pi];
+    let label = format!("{}.{}", pad.ref_, pad.number);
+    let c0 = pad.center.to_vec2();
+    let r = 0.5 * sz.d as f64;
+    let rot = pad.rotation_deg.to_radians();
+    let layers: Vec<u32> = pad.layers.iter().copied().filter(|l| model.layers.iter().any(|x| x.id == *l && x.routable)).collect();
+    // Existing vias of the net in reach (shared-via ends; model vias math frame, items KiCad frame).
+    let mut shared: Vec<Vec2> = model.vias.iter().filter(|v| v.net == net).map(|v| v.at.to_vec2()).collect();
+    shared.extend(cx.all.iter().filter_map(|it| match it {
+        Item::Via(v) if v.net == net => Some(Vec2 { x: v.at.x as f64, y: -(v.at.y as f64) }),
+        _ => None,
+    }));
+    shared.retain(|v| (*v - c0).len() <= DOG_SHARE_NM);
+    let turns = [0i32, 45, -45, 90, -90];
+    let mut blockers: BTreeSet<String> = BTreeSet::new();
+    let mut tried = 0usize;
+    for &sl in &layers {
+        let sk = model.skeleton(pad, sl);
+        let e = [Vec2 { x: rot.cos(), y: rot.sin() }, Vec2 { x: -rot.sin(), y: rot.cos() }];
+        let half = |u: Vec2| support_of(&sk, c0, u);
+        let minor = 2.0 * half(e[0]).min(half(e[1]));
+        let wn = model.rules.net_rule(net).width.max(1) as f64;
+        // The neck floor: the board's minimum track width (half the net width when the board sets none).
+        let min_w = if model.rules.min_track_width > 0 { model.rules.min_track_width as f64 } else { 0.5 * wn };
+        let w0 = wn.min(minor).max(min_w);
+        let mut widths: Vec<f64> = vec![w0];
+        for f in [0.75, 0.5] {
+            widths.push((w0 * f).max(min_w));
+        }
+        widths.push(min_w);
+        widths.dedup_by(|a, b| (*a - *b).abs() < 1_000.0);
+        let axes: Vec<(Vec2, f64)> = (0..4).map(|k| if k < 2 { e[k] } else { e[k - 2] * -1.0 }).map(|u| (u, half(u))).collect();
+        // Geometry first (a, b per axis and turn), widths after: the via filters are width-free.
+        let mut geo: Vec<(f64, usize, usize, f64, f64, bool)> = Vec::new(); // (price, axis, turn, a, b, share)
+        for (k, &(u, h)) in axes.iter().enumerate() {
+            for (ti, &turn) in turns.iter().enumerate() {
+                let t = (turn as f64).to_radians();
+                let d = Vec2 { x: u.x * t.cos() - u.y * t.sin(), y: u.x * t.sin() + u.y * t.cos() };
+                let bend = DOG_BEND_NM * (turn.abs() / 45) as f64;
+                let mut push = |a: f64, b: f64, share: bool| {
+                    if a <= h || a > h + DOG_LEG1_NM + 1.0 || b < 0.0 || b > DOG_LEG2_NM + 1.0 || (turn != 0) != (b > 1.0) {
+                        return;
+                    }
+                    let v = c0 + u * a + d * b;
+                    let mut price = (a - h) + b + bend;
+                    if super::planes::in_bga(&cx.bga, v) {
+                        price += cx.via_price_nm * 100.0;
+                    }
+                    if !share {
+                        let Some((_, _, d2)) = main_elsewhere(reach, model, net, Some(sl), v, need) else { return };
+                        if !cx.own_pad_ok(v, r, net) || cx.under_foreign_mask(v, r, net) || !cx.own_copper_ok(v, r, net) {
+                            return;
+                        }
+                        price += cx.squeeze(d2 - r, sz.d as f64) + cx.prox(v, r, net) + cx.plane_neck(reach, v, r, net);
+                        if let Some(lat) = cx.grid.grid_at(v) {
+                            price += cx.off_grid_nm * lat.amount(v);
+                        }
+                    }
+                    geo.push((price, k, ti, a, b, share));
+                };
+                let n1 = (DOG_LEG1_NM / DOG_STEP_NM).round() as usize;
+                let n2 = (DOG_LEG2_NM / DOG_STEP_NM).round() as usize;
+                for i in 1..=n1 {
+                    let a = h + i as f64 * DOG_STEP_NM;
+                    if turn == 0 {
+                        push(a, 0.0, false);
+                    } else {
+                        for j in 1..=n2 {
+                            push(a, j as f64 * DOG_STEP_NM, false);
+                        }
+                    }
+                }
+                for &g in &shared {
+                    // A shared via needs the fill of another layer under it, as a new one does.
+                    if main_elsewhere(reach, model, net, Some(sl), g, r).is_none() {
+                        continue;
+                    }
+                    if let Some((a, b)) = dog_legs(c0, u, d, g) {
+                        push(a, b, true);
+                    }
+                }
+                if let Some(lat) = cx.grid.grid_at(c0) {
+                    let span = h + DOG_LEG1_NM + DOG_LEG2_NM;
+                    let lo = lat.nearest(c0 - Vec2 { x: span, y: span });
+                    let (nx, ny) = (((2.0 * span) / lat.g[0]).ceil() as i64 + 1, ((2.0 * span) / lat.g[1]).ceil() as i64 + 1);
+                    for jy in 0..ny {
+                        for ix in 0..nx {
+                            let g = Vec2 { x: lo.x + ix as f64 * lat.g[0], y: lo.y + jy as f64 * lat.g[1] };
+                            if let Some((a, b)) = dog_legs(c0, u, d, g) {
+                                push(a, b, false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut cands: Vec<(f64, usize, usize, f64, f64, bool, usize)> = Vec::with_capacity(geo.len() * widths.len());
+        for g in &geo {
+            for (wi, &w) in widths.iter().enumerate() {
+                cands.push((g.0 + DOG_NECK_NM * (1.0 - w / w0), g.1, g.2, g.3, g.4, g.5, wi));
+            }
+        }
+        cands.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)).then(x.3.total_cmp(&y.3)).then(x.4.total_cmp(&y.4)).then(x.6.cmp(&y.6)));
+        // Monotone caches: leg 1 of axis k and width wi is legal up to `ok1`, illegal from `bad1`;
+        // leg 2 likewise per (axis, a, turn, width); via sites by position.
+        let mut ok1: HashMap<(usize, usize), f64> = HashMap::new();
+        let mut bad1: HashMap<(usize, usize), f64> = HashMap::new();
+        let mut ok2: HashMap<(usize, i64, usize, usize), f64> = HashMap::new();
+        let mut bad2: HashMap<(usize, i64, usize, usize), f64> = HashMap::new();
+        let mut via_ok: HashSet<(i64, i64)> = HashSet::new();
+        let mut via_bad: HashSet<(i64, i64)> = HashSet::new();
+        for &(_, k, ti, a, b, share, wi) in &cands {
+            if tried >= DOG_TRIES {
+                break;
+            }
+            let (u, _) = axes[k];
+            let t = (turns[ti] as f64).to_radians();
+            let d = Vec2 { x: u.x * t.cos() - u.y * t.sin(), y: u.x * t.sin() + u.y * t.cos() };
+            let (m, v, w) = (c0 + u * a, c0 + u * a + d * b, widths[wi]);
+            let key2 = (k, a.round() as i64, ti, wi);
+            if bad1.get(&(k, wi)).is_some_and(|&x| a >= x) || (b > 1.0 && bad2.get(&key2).is_some_and(|&x| b >= x)) {
+                continue;
+            }
+            let vk = (v.x.round() as i64, v.y.round() as i64);
+            if !share && via_bad.contains(&vk) {
+                continue;
+            }
+            let leg1 = track_item(net, sl, w, c0, m, None);
+            if !ok1.get(&(k, wi)).is_some_and(|&x| a <= x) {
+                tried += 1;
+                let rep = cx.checker.check_against(&cx.idx, std::slice::from_ref(&leg1), &[]);
+                if !rep.violations.is_empty() {
+                    blocker_nets(cx, &rep, &mut blockers);
+                    let e = bad1.entry((k, wi)).or_insert(f64::INFINITY);
+                    *e = e.min(a);
+                    continue;
+                }
+                let e = ok1.entry((k, wi)).or_insert(0.0);
+                *e = e.max(a);
+            }
+            let mut its = vec![leg1];
+            if b > 1.0 {
+                let leg2 = track_item(net, sl, w, m, v, None);
+                if !ok2.get(&key2).is_some_and(|&x| b <= x) {
+                    tried += 1;
+                    let rep = cx.checker.check_against(&cx.idx, std::slice::from_ref(&leg2), &[]);
+                    if !rep.violations.is_empty() {
+                        blocker_nets(cx, &rep, &mut blockers);
+                        let e = bad2.entry(key2).or_insert(f64::INFINITY);
+                        *e = e.min(b);
+                        continue;
+                    }
+                    let e = ok2.entry(key2).or_insert(0.0);
+                    *e = e.max(b);
+                }
+                its.push(leg2);
+            }
+            let via = via_item(net, v, sz, None);
+            if !share && !via_ok.contains(&vk) {
+                tried += 1;
+                let rep = cx.checker.check_against(&cx.idx, std::slice::from_ref(&via), &[]);
+                if !rep.violations.is_empty() {
+                    blocker_nets(cx, &rep, &mut blockers);
+                    via_bad.insert(vk);
+                    continue;
+                }
+                via_ok.insert(vk);
+            }
+            if !share {
+                its.push(via);
+            }
+            let note = format!(
+                "dog-bone {label} -> {} ({:.3} mm{}{}, {:.3} mm wide)",
+                kicad_mm(v),
+                (a + b) / 1e6,
+                if b > 1.0 { format!(", {} degree bend", turns[ti].abs()) } else { String::new() },
+                if share { ", shared via" } else { ", via" },
+                w / 1e6
+            );
+            return Ok((its, note));
+        }
+    }
+    let nets: Vec<String> = blockers.into_iter().take(6).collect();
+    Err(format!(
+        "pad {label} near {} (all thermal spokes cut; {} checker queries{})",
+        kicad_mm(c0),
+        tried,
+        if nets.is_empty() { String::new() } else { format!(", boxed in by {}", nets.join(", ")) }
+    ))
+}
+
+/// The extent of `sk` from `c` along unit `u`, nm (its support). O(vertices).
+fn support_of(sk: &crate::geom::Skeleton, c: Vec2, u: Vec2) -> f64 {
+    use crate::geom::Skeleton;
+    match sk {
+        Skeleton::Point { p, r } => (*p - c).dot(u) + r,
+        Skeleton::Seg { s, r } => (s.a - c).dot(u).max((s.b - c).dot(u)) + r,
+        Skeleton::Poly { pts, r } => pts.iter().map(|p| (*p - c).dot(u)).fold(f64::NEG_INFINITY, f64::max) + r,
+    }
 }
 
 /// Price of an island join of length `len` that runs `edge` from the pad's edge (nm): the length,
