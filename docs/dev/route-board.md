@@ -64,7 +64,8 @@ and the feedback counts. Environment variables of the engine (debugging only, no
   connection, taut points, the layering's stretches and events, its passes (edge ends, room per layer, need)
   and crossings, in KiCad mm. Compare with `TOPO_DUMP` to tell a plan error from a drawing error. Note: the
   `[optimize] runs` seeded runs write the same files (the last one wins), so set `--set optimize.runs=1`
-  to read one run's plan and drawing together; join wires by net and end points.
+  to read one run's plan and drawing together; join wires by net and end points. The plan of the row a run actually drew is kept without any variable in the report
+  folder as `plan.json.gz` (`[output] plan_report`, debug.md).
 - `TOPO_LANEDBG=1`: per pass of every octilinear redraw, the edge, the S2 interval, the tight span,
   the bounds used, the planned-room bounds of the undrawn neighbours (`planned_room` factor) and the
   lane (wires, spacing, drawn crossings).

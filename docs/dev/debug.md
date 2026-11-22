@@ -132,9 +132,38 @@ rule resolver and the priorities. `tools/route_board.sh` passes KiCad's net clas
 pcbnew, `harness.route_board.board_netclasses`), as the plugin reads them over IPC, so its priorities match a
 plugin run.
 
+## The plan of the drawn row (`plan.json.gz`, `[output] plan_report`)
+
+A plugin run (and every `route_board` run, which uses the plugin flow) writes `plan.json.gz` into its report
+folder: the plan the topological core handed to the drawing of the row it drew (`RouteResult::plan`,
+`engine/src/topo/plandump.rs`, format `topor-plan` v1, documented in `toporlib/plandump.py`). It is built
+after the compass of the same round, so it is exactly the plan of the result handed back, also with
+`[optimize] runs` > 1, table restarts and a wall-clock stop that cannot be replayed; `result.json` keeps only
+`plan_file` (file, row line, bytes). Contents, in KiCad mm: `row` (variant-table label and roles, round,
+the drawing run's seed, loop), signal `layers`, the compass's `predicted` counts, per connection (`conns`)
+planned vias, taut length, necks and predicted items by class, and per wire: net / net_name / conn, width and
+clearance, taut points, the layering's stretches and events, `layers_now` (layer bit mask per triangle
+traversal), passes (triangulation edge, its ends, `pos` = place in the edge's order across all layers =
+the homotopy and crossing order, room per layer, need, wires on the edge), crossings in order along the wire
+(`k`, the other wire, `layers` / `other_layers` at the crossing) and planned vias (`iv` interval, traversal
+`k`, place `at`, `site` by the build's own test, `deficit` = static room missing for the disc).
+
+```
+python3 -m toporlib.plandump <report folder | plan.json.gz> [--conn ID ...] [--net NAME ...]
+```
+
+prints the row and one block per wire; in Python `toporlib.plandump.load(dir)` gives the dict. To tell a
+plan error from a drawing error, compare it with the drawn copper (`result.json` `route.violations`,
+`route.connections`) or with a `TOPO_DUMP` of a headless rerun. Size: qmtech about 2.3 MB of JSON, a few
+hundred kB gzipped. Building it is measurement only (its time goes back to the time limit like the
+compass cut test) and changes no copper (`engine/tests/topo_plan_report.rs`). The environment variable
+`TOPO_PLANDUMP=<file>` (route-board.md) writes the same per-wire fields for every drawn round, before the
+unlayerable drops.
+
 ## Reproducing a plugin run
 
-A plugin run leaves `log.txt`, `result.json`, `report.md` and `drc.json` in its report folder. The board
+A plugin run leaves `log.txt`, `result.json`, `report.md`, `drc.json` and `plan.json.gz` (the plan of the
+drawn row, [above](#the-plan-of-the-drawn-row-planjsongz-output-plan_report)) in its report folder. The board
 copy topor routed (the `save_as` copy in a temporary folder) is deleted when the run ends, so the board
 has to come from the user:
 
@@ -259,7 +288,7 @@ Include:
 - what you did and what you expected (one or two sentences);
 - the **Copy details** text of the error dialog (code, message, fix, items, log path, versions of engine,
   plugin, kipy, KiCad), or the versions from `report.md` §Versions;
-- from the report folder: `log.txt`, `result.json`, `report.md`, `drc.json`, `preview.png`;
+- from the report folder: `log.txt`, `result.json`, `report.md`, `drc.json`, `preview.png`, `plan.json.gz`;
 - the last entry of `~/.cache/kicad/10.0/topor/topor-crash.log` if the process crashed;
 - the board: a copy of the project folder saved as in [Reproducing a plugin run](#reproducing-a-plugin-run),
   step 1 (only if you may share it), and its `topor.toml`;

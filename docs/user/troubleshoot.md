@@ -168,6 +168,31 @@ and compare with `drc.json` in the report folder. A new error at a place the rep
 expected (fix it by hand, or set `[optimize] allow_violations = false` for legal copper only). If the router's
 copper violates a rule anywhere else, file a bug.
 
+### A connection was drawn differently from what the plan intended
+
+**Cause.** The topological core plans every connection first (its crossings, layers, vias and room) and
+then draws that plan once. When a drawn trace has a short, a clearance error or an extra via, it helps to
+know whether the plan already intended it (a planner problem) or the drawing could not realise the plan (a
+drawing problem). Runs with `[optimize] runs` > 1 and a time limit cannot be repeated exactly, so the plan
+of *your* run is kept for you.
+
+**Fix.** Look in the report folder (`Report:` line of the summary) for `plan.json.gz`, the plan of the row
+that was drawn (`[output] plan_report`, on by default; `result.json` → `plan_file` names the row, e.g.
+"run 14 cycle 9 (gen 8)", its round and seed). Show one connection's plan with
+
+```
+python3 -m toporlib.plandump <report folder> --conn <id>     # id from result.json route.connections[].id
+python3 -m toporlib.plandump <report folder> --net VIN5V
+```
+
+(run it from the topor source folder, or with the plugin's Python). It prints the layers along the trace,
+each planned via (where, and whether it had a site: `NO SITE` = the plan already lacked room for it), the
+crossings in order with the layer of both traces, and the predicted problems of that connection. If the
+plan already shows the problem (a via without a site, a crossing on one layer, a predicted item), it is a
+planner problem; if the plan is clean and the drawing is not, it is a drawing problem. Attach
+`plan.json.gz` together with `result.json`, `log.txt` and `report.md` when you [file a
+bug](../dev/debug.md#filing-a-bug). `[output] plan_report = false` stops writing it.
+
 ## Findings
 
 ### BOARD_CHANGED_DURING_RUN
