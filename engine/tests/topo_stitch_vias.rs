@@ -503,6 +503,9 @@ fn a_small_piece_gets_its_vias_at_opposite_corners() {
         let cx = (p.0 - 11 * MM).min(17 * MM - p.0);
         let cy = (p.1 - 11 * MM).min(15 * MM - p.1);
         assert!(cx <= 1_600_000 && cy <= 1_600_000, "not at a corner: {p:?}");
+        // graded room price (via_squeeze): the extremity steps in from the very edge of the legal
+        // area (1.0 mm) to where the squeeze price is gone (1.25 mm), not onto the edge
+        assert!(cx >= 1_200_000 && cy >= 1_200_000, "on the edge of the legal area: {p:?}");
     }
     assert!(s.notes.iter().any(|n| n.starts_with("stitching vias placement: 0 on the board lattice, 2 at piece extremities (0 off the via grid)")), "{:?}", s.notes);
 }
@@ -559,4 +562,38 @@ fn a_blocked_lattice_point_is_dropped_or_moved_along_the_grid() {
     let short = Options { stitch_nudge_nm: 500_000, ..o.clone() };
     let s = stitch_regions(&m, &short, &reg(), &items, &[], None, &|| false);
     assert_eq!(vias(&s.items).len(), 8, "{:?}", s.notes);
+    // ... and it is a radius, not the search box: with 0.75 mm the box corner (15.25, 20.75)
+    // (1.06 mm away) is legal, the nearest legal point inside the radius, (16, 21), is 1 mm away
+    let short = Options { stitch_nudge_nm: 750_000, ..o.clone() };
+    let s = stitch_regions(&m, &short, &reg(), &items, &[], None, &|| false);
+    assert_eq!(vias(&s.items).len(), 8, "{:?}", s.notes);
+}
+
+/// Round 5: the lattice fill weighs a point's own site cost against the via value: a lattice point
+/// under a BGA (legal between the balls, priced out by the BGA price) gets no via, the other lattice
+/// points of the piece do.
+#[test]
+fn a_priced_out_lattice_point_gets_no_via() {
+    let mut balls = Vec::new();
+    for j in 0..4 {
+        for i in 0..4 {
+            let (x, y) = (12_750_000 + i * 1_500_000, 17_750_000 + j * 1_500_000);
+            balls.push(format!(
+                r#"{{ "uuid": "B{i}{j}", "ref": "U9", "number": "{}", "net": 2, "attr": "smd", "center": [{x}, {y}], "layers": [0],
+                    "shapes": {{ "0": {{ "kind": "circle", "d": 300000 }} }} }}"#,
+                j * 4 + i + 1
+            ));
+        }
+    }
+    let m = model(&balls);
+    let items = square(0, 8, 12, 22, 26);
+    let g = 250_000;
+    let o = Options { grid_via_nm: [g, g], stitch_pitch_x_nm: 4 * MM, stitch_pitch_y_nm: 4 * MM, ..opts(true, 0.0, false) };
+    let s = stitch_regions(&m, &o, &reg(), &items, &[], None, &|| false);
+    let v = vias(&s.items);
+    // 9 lattice points; (16, 20) and (12, 20) lie in the BGA's area (legal between the balls: the
+    // mutant without the value test places both)
+    assert_eq!(v.len(), 7, "{:?}", s.notes);
+    assert!(v.iter().all(|&p| on_lattice(p, (0, 0), 4 * MM)), "{v:?}");
+    assert!(v.iter().all(|p| !(p.0 > 12_000_000 && p.0 < 18_000_000 && p.1 > 17_000_000 && p.1 < 23_000_000)), "via under the BGA: {v:?}");
 }
