@@ -462,3 +462,40 @@ fn thick_dive_grouping_taut_window_draws_clean() {
     let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!("taut"))]);
     assert!(r.violations.is_empty(), "{:?}", r.violations);
 }
+
+/// Fixture for the drawn half of `[vias] site_window` (r5 F2): F4 at x 10.3, B2 at 11.0, B3 at 11.6.
+/// F4's taut track is a way west of where "farthest" puts the window's end for P's via 2; the
+/// plan's site and the via relocation both read the flag.
+fn window_fixture() -> BoardModel {
+    thick_dive_grouping_with(&[("F1", 3.0, 0), ("F2", 4.0, 0), ("B1", 8.0, 2), ("F3", 9.0, 0), ("F4", 10.3, 0), ("B2", 11.0, 2), ("B3", 11.6, 2)])
+}
+
+/// The drawn vias and the planned via x of P (both sorted by x), under a window mode.
+fn window_vias(m: &BoardModel, win: &str) -> (Vec<f64>, Vec<f64>) {
+    let r = route(m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!(win))]);
+    let p = plan(&r);
+    let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
+    let mut planned: Vec<f64> = w["vias"].as_array().unwrap().iter().map(|v| v["at"][0].as_f64().unwrap()).collect();
+    planned.sort_by(|a, b| a.total_cmp(b));
+    let mut drawn: Vec<f64> = r.items.iter().map(|it| serde_json::to_value(it).unwrap()).filter(|v| v.get("d").is_some()).map(|v| v["at"][0].as_f64().unwrap() / MM).collect();
+    drawn.sort_by(|a, b| a.total_cmp(b));
+    (drawn, planned)
+}
+
+/// r5 F2 (verifier mutants rl_win_far, rl_win_taut, pl_alt_taut): both modes of `site_window`
+/// reach the drawing's via relocation (`viaopt::relocate_vias`) and the plan's site search
+/// (`refine::Frame` window). "taut": the plan keeps via 2 on the near side of F4's taut track
+/// (x < 10.6) and the drawn via 2 stays there too (x 10.3). "farthest": the window ends at the
+/// crossing farthest out and the drawing puts via 2 past B3 (x > 12.5: the unrealised site the
+/// option exists for). A relocation that read the other mode's window, or a plan that took the
+/// shifted lanes in "taut" (planned x 10.97), fails one of these.
+#[test]
+fn thick_dive_grouping_site_window_reaches_the_drawing() {
+    let m = window_fixture();
+    let (drawn_t, plan_t) = window_vias(&m, "taut");
+    let (drawn_f, _) = window_vias(&m, "farthest");
+    assert_eq!((drawn_t.len(), drawn_f.len(), plan_t.len()), (3, 3, 3), "taut {drawn_t:?} farthest {drawn_f:?} plan {plan_t:?}");
+    assert!(plan_t[2] > 10.0 && plan_t[2] < 10.6, "taut plan: via 2 west of F4's taut track (10.6): {plan_t:?}");
+    assert!(drawn_t[2] > 10.0 && drawn_t[2] < 10.6, "taut drawing: via 2 stays at F4's side: {drawn_t:?}");
+    assert!(drawn_f[2] > 12.5, "farthest drawing: via 2 past the crossers: {drawn_f:?}");
+}
