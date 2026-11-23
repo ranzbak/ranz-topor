@@ -69,7 +69,15 @@ price it). The drawing never drops anything. Copper is identical for any thread 
 | via_interval_sliver | via below the column, X untouched (lead: Q2's cause) | **does not reproduce**: the planned site is missed (tight), VIAPICK takes free room below the column; no thin copper, DRC 0 |
 | pad_side_approach | axis leg, then 45 deg to J1 (lead: Q3's hook) | **does not reproduce**: today's exit is on the axis (5.739 vs 5.614 mm) |
 
-Neither lead variant reproduces Q2/Q3 on today's build: in a small layout the plan does not end up with a sliver-only
-via interval or a side-triangle pad entry. Q2/Q3 need the dense surroundings; a qmtech crop of each neighbourhood
-(public board) is the next candidate repro, if wanted. via_jam_shift, pad_axis_entry and the two variants stay as
-regression guards.
+Neither small variant reproduces Q2/Q3 on today's build: in a small layout the plan does not end up with a sliver-only
+via interval or a side-triangle pad entry. They stay as regression guards with via_jam_shift and pad_axis_entry.
+
+**Reproducing crops** (lead 2026-11-23; harness.abstract_crop of the public qmtech board, routed with tw-on c7f8bc8f
+defaults, det seed 0; PNGs reports/dvn_crop_q{2,3}-PROPOSED.png; room = widest track that fits, measured per sample):
+
+| crop | today | expected |
+|---|---|---|
+| dvn_crop_q2 (U9 fan-out) | **B**: CTS 0.09 for 3.98 mm. Only the ~0.9 mm beside the column needs it; 0.21 then 0.5-1.6 mm fits after. **A**: USB_C_D+/- vias jammed at U9.5, U1.1 and a GND via, 47 DRC errors incl. 5 shorts | neck only through the choke, 0.25 after; vias in free room, no shorts |
+| dvn_crop_q3 (ADV7511 row) | **C+B**: ADV_AVDD bar under the row hooks diagonally into the x 134.72 pad side, necked 0.112 (0.29 fits on the bar); 0.09 at the terminal where 0.27 fits | bar ends straight on the pad's axis leg below the tip at 0.28 |
+
+Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals (q2); 1 GND pour piece (q3).
