@@ -292,6 +292,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         coord = coord.with_table(super::table::SharedTable::new(n, opts.variants, obj, window).with_lag(opts.table_lag));
     }
     let (mut outs, skipped) = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
+    if ctl.is_discarded() {
+        return discarded(model, opts, t0);
+    }
     if outs.is_empty() {
         // M2.TL (fail fast): Cancel / OK before any run kept a plan: nothing to draw, said loudly
         // (never a quiet empty result). Without a Cancel this cannot happen (the first run to begin
@@ -509,6 +512,23 @@ pub const PLAN_KEPT_STOP: &str = "initial plan: Cancel / OK came during the laye
 
 /// limit-p3p4: the round's warning when the soft limit plus its grace ended P3/P4.
 pub const PLAN_KEPT_LIMIT: &str = "initial plan: the time limit plus its grace passed during the layer assignment, rip-up and reroute (P3/P4); its refinement and moves stopped at their next check and the plan so far is kept and drawn";
+
+/// limit-p3p4 (lead 2026-11-23, user rule "Cancel stops there and then and takes no results"):
+/// the call's result after the dialog's Cancel ([`RunControl::request_discard`]): the job is
+/// abandoned, so nothing is drawn, judged or stitched.
+pub const DISCARDED: &str = "Cancel: the run was discarded (the dialog's Cancel takes no results); nothing is drawn";
+
+/// [`DISCARDED`] as the call's result: every connection unrouted with it, no copper, stop reason
+/// "cancel". O(connections).
+fn discarded(model: &BoardModel, opts: &Options, t0: Instant) -> RouteResult {
+    let mut r = unrouted(model, opts, DISCARDED);
+    r.warnings.insert(0, DISCARDED.to_string());
+    r.stop_reason = "cancel".into();
+    r.timed_out = false;
+    r.converged = false;
+    r.runtime_s = t0.elapsed().as_secs_f64();
+    r
+}
 
 /// M2.TL (fail fast): the call's result when no plan was kept (`why` starts with
 /// [`NOTHING_TO_DRAW`]): every connection unrouted with `why`, an `ERROR:` line first, no copper.
@@ -3470,7 +3490,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // runs to its end). Read only after the limit passed: without it nothing changes.
     let plan_span = std::cell::Cell::new(false);
     let plan_over = || plan_span.get() && soft() && ctl.limit.grace_over();
-    let expired = || (!draw_through.get() && stop_now()) || limit_cut() || plan_over();
+    // The dialog's Cancel (request_discard) ends every step, the drawing too: nothing is taken.
+    let expired = || (!draw_through.get() && stop_now()) || limit_cut() || plan_over() || ctl.is_discarded();
     // The reason of a connection the drawing did not reach: a Cancel / OK's or the limit's (a
     // Cancel wins when both hold; verify-m2c 4: a Cancel wrote the limit's reason before).
     let draw_cut_reason = || if !draw_through.get() && stop_now() { DRAW_CANCEL } else { DRAW_CUT };
@@ -7785,6 +7806,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ));
     }
     ctl.update("route", 2, 0, nconn, lr.vias, t0.elapsed().as_secs_f64());
+    if ctl.is_discarded() {
+        // limit-p3p4: the dialog's Cancel: the job is abandoned, its plan is never drawn.
+        return (RoundOut::not_drawn(model, opts, None, Some(DISCARDED.to_string()), None), Vec::new(), Memory::default());
+    }
     ctl.stage(rnd, rnds, "drawing the traces");
     let _ = &t_draw;
     // ---- Drawing ----
@@ -8964,6 +8989,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let causes_before = causes(&plans, &drawn);
     tlog("drawing + feedback", t_draw);
+    if ctl.is_discarded() {
+        // limit-p3p4: the dialog's Cancel came while the traces were drawn: no via reduction,
+        // polish or stitching for a job that is abandoned.
+        return (RoundOut::not_drawn(model, opts, None, Some(DISCARDED.to_string()), None), Vec::new(), Memory::default());
+    }
     if super::par::meter::on() {
         eprintln!("[topo round {round}] {}", super::par::meter::report());
     }

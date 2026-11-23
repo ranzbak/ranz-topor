@@ -465,6 +465,45 @@ def test_run_cancel_while_the_engine_runs_takes_nothing_and_does_not_wait(app, e
         _drain(eng)
 
 
+class _DiscardJob(_LateJob):
+    """A job of an engine with ``discard()`` (limit-p3p4): the dialog's Cancel must use it (the engine then stops now
+    and draws nothing), not ``cancel()`` (which keeps and draws the plan so far, Accept's meaning)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.discarded = 0
+
+    def discard(self):
+        self.discarded += 1
+        self.cancelled = True  # recorded only, as cancel (the real job finishes for a deterministic test)
+
+
+class _DiscardEngine(ProxyEngine):
+    def route_async(self, m, o):
+        j = _DiscardJob(topor_engine.route_async(m, o), self.hold, self.patch)
+        self.jobs.append(j)
+        return j
+
+
+def test_run_cancel_discards_the_engine_job(app, eprom, tmp_path, reports):
+    """Lead 2026-11-23 (user rule: Cancel stops there and then and takes no results): with an engine that has
+    ``RouteJob.discard`` the dialog's Cancel calls it (the engine draws nothing and frees its threads within
+    seconds) and never ``cancel()``; the job is abandoned as before."""
+    eng = _DiscardEngine(hold=1)
+    board = make_board(eprom)
+    before = board.text
+    ui = ScriptedUi(accept=True, discard_at_iteration=1)
+    try:
+        board, ui, out = do_run(eprom, tmp_path, ui=ui, engine=eng, board=board)
+        job = eng.jobs[0]
+        assert job.discarded == 1 and job.ok is None, (job.discarded, job.ok)  # discard, not cancel(ok=...)
+        assert job.waited == 0
+        assert out.status == "cancelled" and out.items == [] and out.commit is None
+        _untouched(board, before, ui)
+    finally:
+        _drain(eng)
+
+
 def test_run_late_result_after_cancel_is_never_applied(app, eprom, tmp_path, reports):
     """The engine already finished with a full result when Cancel is pressed (here at the DRC of that result): the
     result is discarded, nothing is previewed or written, even though the user's Accept answer would say yes."""

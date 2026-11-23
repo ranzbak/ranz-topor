@@ -294,3 +294,80 @@ fn whole_route_cycles_keep_the_first_plan_and_drop_a_later_cut_one() {
     kept_all_placed(&r2, "cycles, stop in cycle 2");
     assert!(r2.warnings.iter().any(|w| w.contains("of a later whole-route cycle; the earlier cycles' variants are kept")), "{:?}", r2.warnings);
 }
+
+/// Debug builds are several times slower: the bound for a discarded run to end.
+const DISCARD_S: f64 = if cfg!(debug_assertions) { 30.0 } else { 3.0 };
+
+/// Run `m` and press the dialog's Cancel (`RunControl::request_discard`) at the `nth` call of the
+/// test point `at`: the result and the seconds from the Cancel to the end of the call.
+fn discard_at(m: &BoardModel, o: &Options, at: &'static str, nth: usize) -> (RouteResult, f64) {
+    let mut ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let c2 = ctl.clone();
+    let (calls, when) = (Arc::new(AtomicUsize::new(0)), Arc::new(std::sync::Mutex::new(None::<Instant>)));
+    let (calls2, when2) = (calls.clone(), when.clone());
+    ctl.set_test_hook(move |p| {
+        if p == at && calls2.fetch_add(1, Ordering::SeqCst) + 1 == nth {
+            *when2.lock().unwrap() = Some(Instant::now());
+            c2.request_discard();
+        }
+        false
+    });
+    let r = route_with(m, o, &ctl);
+    let t = when.lock().unwrap().unwrap_or_else(|| panic!("the test point {at:?} was asked only {} times (wanted {nth})", calls.load(Ordering::SeqCst)));
+    (r, t.elapsed().as_secs_f64())
+}
+
+fn nothing_taken(r: &RouteResult, what: &str) {
+    assert!(r.items.is_empty(), "{what}: Cancel takes no results, yet {} items were drawn", r.items.len());
+    assert_eq!(r.routed, 0, "{what}: nothing is drawn");
+    assert!(r.warnings.first().is_some_and(|w| w.starts_with("Cancel: the run was discarded")), "{what}: {:?}", &r.warnings[..r.warnings.len().min(4)]);
+    assert!(!r.warnings.iter().any(|w| w.starts_with("ERROR:")), "{what}: a discard is no error: {:?}", &r.warnings[..r.warnings.len().min(4)]);
+    assert_eq!(r.stop_reason, "cancel");
+}
+
+#[test]
+fn cancel_in_mid_refinement_ends_the_engine_at_once_and_draws_nothing() {
+    // Lead 2026-11-23 (user rule: "Cancel stops there and then and takes no results"): the
+    // dialog's Cancel in the middle of a capacity refinement (P3) ends the call within seconds,
+    // with no drawing (Accept there draws the plan so far, the test above).
+    let m = dense(90, 1);
+    let (r, after) = discard_at(&m, &opts(30.0, 0.0), "refine move", 20);
+    nothing_taken(&r, "Cancel in P3");
+    assert!(after < DISCARD_S, "the engine ran {after:.2} s after the Cancel (bound {DISCARD_S} s)");
+    eprintln!("Cancel in P3: the call ended {after:.2} s after it");
+}
+
+#[test]
+fn cancel_while_the_traces_are_drawn_ends_the_drawing_and_takes_nothing() {
+    // The dialog's Cancel once the drawing began ("no sequential run" is asked as it begins):
+    // the drawing stops at its next check, no via reduction or stitching follows, nothing is taken.
+    let m = dense(90, 1);
+    let o = opts(30.0, 0.0);
+    let mut ctl = RunControl::new();
+    ctl.limit.init(0.0);
+    let c2 = ctl.clone();
+    let when = Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let when2 = when.clone();
+    ctl.set_test_hook(move |p| {
+        match p {
+            // end the TopoR loop at once (no stop at stable): Accept at the first plan
+            "plan ready" => c2.request_stop(Some(false)),
+            "no sequential run" => {
+                let mut w = when2.lock().unwrap();
+                if w.is_none() {
+                    *w = Some(Instant::now());
+                    c2.request_discard();
+                }
+            }
+            _ => {}
+        }
+        false
+    });
+    let r = route_with(&m, &o, &ctl);
+    let t = when.lock().unwrap().expect("the drawing began");
+    let after = t.elapsed().as_secs_f64();
+    nothing_taken(&r, "Cancel in the drawing");
+    assert!(after < DISCARD_S, "the engine ran {after:.2} s after the Cancel (bound {DISCARD_S} s)");
+    eprintln!("Cancel in the drawing: the call ended {after:.2} s after it");
+}

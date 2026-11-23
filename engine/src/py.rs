@@ -146,6 +146,14 @@ impl RouteJob {
         self.ctl.request_stop(ok);
     }
 
+    /// The dialog's Cancel (limit-p3p4, user rule: "Cancel stops there and then and takes no
+    /// results"): the job is abandoned; the engine stops every step at its next check, draws
+    /// nothing and frees its threads within seconds (`RunControl::request_discard`). Accept is
+    /// `cancel(ok)`, which keeps and draws the best so far. O(1).
+    fn discard(&self) {
+        self.ctl.request_discard();
+    }
+
     /// Change the wall-clock limit while the job runs: seconds since the job started (`0` = no
     /// limit; below the time spent = stop at the next check, keeping the best result, with the
     /// stop reason of the time limit). The interactive plugin's progress window only.

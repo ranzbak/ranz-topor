@@ -1004,6 +1004,10 @@ pub struct RunControl {
     pub test_hook: TestHook,
     /// last-preview: the sketches for the caller's board image, shared by every run of the call.
     pub sketches: Arc<Sketches>,
+    /// limit-p3p4 (lead 2026-11-23, user rule: "Cancel stops there and then and takes no
+    /// results"): the dialog's Cancel ([`RunControl::request_discard`]): the job is abandoned, so
+    /// every step stops at its next check and nothing is drawn. Accept / the limit never set it.
+    pub discard: Arc<AtomicBool>,
 }
 
 /// A test-only hook: the engine asks it at a few named points (`RunControl::test_point`); a test
@@ -1055,6 +1059,23 @@ impl RunControl {
         let ok = ok.unwrap_or_else(|| self.progress.lock().is_ok_and(|p| p.stable));
         let _ = self.stop_kind.compare_exchange(0, if ok { STOP_OK } else { STOP_CANCEL }, Ordering::SeqCst, Ordering::SeqCst);
         self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// The dialog's Cancel (limit-p3p4, user rule: Cancel takes no results): the caller abandons
+    /// the job, so the run stops now and draws nothing. A stop request (Cancel kind) whose time
+    /// limit acts as the hard one at once ([`TimeLimit::reach`] + [`TimeLimit::harden`]): every
+    /// planning step and every drawing pass stops at its next check; the topological core then
+    /// skips the drawing ([`RunControl::is_discarded`]). O(1).
+    pub fn request_discard(&self) {
+        self.discard.store(true, Ordering::SeqCst);
+        self.request_stop(Some(false));
+        self.limit.reach();
+        self.limit.harden();
+    }
+
+    /// [`RunControl::request_discard`] was called: nothing is to be drawn or judged. O(1).
+    pub fn is_discarded(&self) -> bool {
+        self.discard.load(Ordering::SeqCst)
     }
 
     /// The run was stopped by OK at "Routes stable" (the first stop request, latched by
@@ -1172,7 +1193,7 @@ impl RunControl {
 
     /// The same cancel flag and progress, as run `run` (1-based) of a best-of-N call. O(1).
     pub(crate) fn for_run(&self, run: u32) -> RunControl {
-        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), stop_kind: self.stop_kind.clone(), run, test_hook: self.test_hook.clone(), sketches: self.sketches.clone() }
+        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), stop_kind: self.stop_kind.clone(), run, test_hook: self.test_hook.clone(), sketches: self.sketches.clone(), discard: self.discard.clone() }
     }
 
     /// sync-wait: a TopoR loop cycle's line for the run log ([`Progress::push_cycle_line`]). O(CYCLE_LINES).

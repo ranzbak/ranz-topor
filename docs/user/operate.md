@@ -477,9 +477,9 @@ spare a drawing that has begun is an open question.
 
 With `timeout_clock = "cpu"` the plugin reaches the engine's limit when the CPU seconds pass it (polled every
 0.25 s); with `hard` it then acts as above, the same path as on the wall clock (not a Cancel). What 2026-11-13
-changed holds in both modes (with limit-p3p4, 2026-11-23): Cancel / Accept during the topological search keeps no
+changed holds in both modes (with limit-p3p4, 2026-11-23): Accept during the topological search keeps no
 plan ([`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)), during the layer assignment and rip-up after it the plan
-so far is drawn, and only the picked variant is drawn (below).
+so far is drawn (Cancel draws nothing, anywhere), and only the picked variant is drawn (below).
 
 **Only the picked variant is drawn** (`[drawing] candidates = 1`, the default since 2026-11-13, with `[optimize]
 loop = "topor"`). Every run judges its plans on the topology, by their predicted violations, vias, length and
@@ -558,7 +558,8 @@ time-limit field, never on Cancel).
   with nothing changed) and the DRC rounds / preview export (the DRC and the preview of the best result still finish).
 - **Cancel** stops at once and takes no result: the board stays exactly as it was (no tracks, vias or zone changes, no preview, no
   error window). The engine is told to stop and is not waited for: the dialog closes within one poll (about 0.25 s) even in the middle of a stage, and whatever the
-  engine still returns is thrown away, never judged or written. It also works after an Accept (before the run has ended) and during the pre-flight and DRC
+  engine still returns is thrown away, never judged or written. The engine itself (`RouteJob.discard`, 2026-11-23) stops
+  every step at its next check, the drawing included, draws nothing and frees its threads within seconds. It also works after an Accept (before the run has ended) and during the pre-flight and DRC
   rounds (the running `kicad-cli` is killed). The report and log say *cancelled by the user (Cancel)*; the run's outcome is
   *cancelled*. A Cancel pressed after the commit has nothing left to undo (use Edit → Undo).
 

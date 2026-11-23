@@ -1191,10 +1191,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                     # by itself) and the job is abandoned: job.wait() is never called, so a result that is ready
                     # later is never read, judged or written.
                     log.line("Cancel: the run is dropped, nothing is taken; the engine job is stopped and not waited for")
-                    try:
-                        job.cancel(ok=False)
-                    except TypeError:  # an engine older than the plugin (no ok)
-                        job.cancel()
+                    discard = getattr(job, "discard", None)
+                    if callable(discard):
+                        # limit-p3p4 (lead 2026-11-23): the engine stops every step at its next check and draws
+                        # nothing, so its threads are free within seconds (cancel() would draw the plan so far)
+                        discard()
+                    else:
+                        try:
+                            job.cancel(ok=False)
+                        except TypeError:  # an engine older than the plugin (no ok)
+                            job.cancel()
                     check_discard()
                 if sketching:
                     try:
