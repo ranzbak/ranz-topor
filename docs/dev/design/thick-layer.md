@@ -245,6 +245,6 @@ TopoR loop's reroutes (`layers_now`).
 The default comes from the det s0 A/B per connection. The target test is `wide_one_side`:
 86.00 mm with no detour, P 0 vias, S6 2 vias.
 
-Literature: Polubasov 2010 («Оптимизация разводки»): stretches are assigned layers before
-rerouting, and a crossing is priced by the via it implies. Dayan 1997 p. 55: a crossing of two
-nets that can take different layers needs no via.
+Literature: Polubasov 2010 («Оптимизация разводки», as cited in `init.rs` `held_layers`):
+stretches are assigned layers before rerouting, and a crossing is priced by the via it implies.
+No page was checked for the layer-free case itself.
