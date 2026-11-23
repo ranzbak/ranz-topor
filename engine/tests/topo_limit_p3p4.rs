@@ -78,6 +78,14 @@ fn opts(grace: f64, limit_s: f64) -> Options {
     .expect("options parse")
 }
 
+/// [`opts`] with the capacity refinement on one lane (`[optimize] refine_lanes = 1`): all its
+/// candidates are checked on the run's thread, so its checks per refinement repeat run to run.
+fn opts_one_lane(grace: f64, limit_s: f64) -> Options {
+    let mut o = opts(grace, limit_s);
+    o.refine_lanes = 1;
+    o
+}
+
 /// Debug builds are several times slower (scale bounds with the build profile).
 const SLACK_S: f64 = if cfg!(debug_assertions) { 20.0 } else { 1.5 };
 
@@ -138,17 +146,71 @@ fn the_soft_limit_in_p3_p4_is_kept_and_the_plan_so_far_is_drawn() {
     assert!(r.timed_out && r.stop_reason.starts_with("timeout"), "{} {}", r.timed_out, r.stop_reason);
 }
 
+/// The move checks of each capacity refinement of P3/P4 (from "plan ready" to the TopoR loop's
+/// first check; a refinement = its "refine start" and its "refine move" checks) of a run of `m`;
+/// with `reach = Some((k, j))` the soft limit is reached at the `j`th check of the `k`th of them,
+/// else when the TopoR loop begins (it then ends at once: `opts(0.0, ..)`, no stop at stable).
+/// Returns the result and the checks per refinement.
+fn refinements(m: &BoardModel, o: &Options, reach: Option<(usize, usize)>) -> (RouteResult, Vec<usize>) {
+    let mut ctl = RunControl::new();
+    ctl.limit.init(o.wall_clock_s);
+    let c2 = ctl.clone();
+    // (in P3/P4 now, the refinement that runs counts, checks per refinement)
+    let seen = Arc::new(std::sync::Mutex::new((false, false, Vec::<usize>::new())));
+    let seen2 = seen.clone();
+    ctl.set_test_hook(move |p| {
+        let mut g = seen2.lock().unwrap();
+        let (plan, counts, v) = &mut *g;
+        match p {
+            "plan ready" => *plan = true,
+            "loop move" | "loop stage 1 check" | "loop ended" => {
+                // P3/P4 are over: end the run (no stop at stable; the loop stops at the limit)
+                *plan = false;
+                c2.limit.reach();
+            }
+            "refine start" => {
+                *counts = *plan;
+                if *plan {
+                    v.push(0);
+                }
+            }
+            "refine move" if *counts => {
+                let k = v.len().checked_sub(1).expect("a refinement began");
+                v[k] += 1;
+                if reach == Some((k, v[k])) {
+                    c2.limit.reach();
+                }
+            }
+            _ => {}
+        }
+        false
+    });
+    let r = route_with(m, o, &ctl);
+    let v = seen.lock().unwrap().2.clone();
+    (r, v)
+}
+
 #[test]
 fn the_soft_limit_inside_a_capacity_refinement_keeps_its_layering_so_far() {
-    // The limit is reached at the 20th move check of the first capacity refinement (P3): with
-    // limit_grace_s = 0 the refinement stops at its next check, its moves so far are kept and the
-    // run draws that plan; the later layerings stop at their first check (a few more asks).
+    // The limit is reached in the middle of the longest capacity refinement of P3/P4:
+    // with limit_grace_s = 0 that refinement stops at its next check (its moves so far are kept),
+    // every later refinement at its first check, and the run draws that plan in full.
+    // One lane: the checks per refinement repeat between the free run and the cut run (on
+    // several lanes the run thread's share of the candidates varies with timing).
     let m = dense(90, 1);
-    let (r, calls) = run_at(&m, &opts(0.0, 86400.0), "refine move", 20, Act::Reach);
+    let o = opts_one_lane(0.0, 86400.0);
+    let (_, free) = refinements(&m, &o, None);
+    let (k, &long) = free.iter().enumerate().max_by_key(|&(i, c)| (*c, std::cmp::Reverse(i))).expect("the run refines");
+    assert!(long >= 10, "a refinement with enough checks to stop in its middle: {free:?}");
+    let at = long / 2;
+    let (r, cut) = refinements(&m, &o, Some((k, at)));
+    assert_eq!(cut[..k], free[..k], "the run up to the cut refinement repeats");
     kept_all_placed(&r, "limit in a refinement");
-    assert!(calls < 20 + 50, "the refinements stopped after the limit: {calls} move checks in all");
+    assert!(cut.len() > k && cut[k] <= at + 2, "the refinement went on past the limit: {} checks of {long}, limit at {at} ({cut:?})", cut[k]);
+    assert!(cut[k + 1..].iter().all(|&c| c <= 2), "a later refinement went on past the limit: {cut:?} (free {free:?})");
     assert!(optimize_overrun(&r) < SLACK_S, "P3/P4 ended {:.2} s past the limit", optimize_overrun(&r));
     assert!(r.warnings.iter().any(|w| w.starts_with("initial plan: the time limit plus its grace passed")), "{:?}", r.warnings);
+    eprintln!("refinement checks: free {free:?}, limit at check {at} of refinement {k}: {cut:?}");
 }
 
 #[test]

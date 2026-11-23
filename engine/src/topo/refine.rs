@@ -2721,6 +2721,7 @@ pub fn refine_only(
         stats.after = stats.before;
         return stats;
     }
+    crate::control::test_mark("refine start");
     // The cut model may add vias when its setting says so (`[capacity] cut_vias`).
     let add_vias = p.add_vias || (cm.cut.is_some() && packer.cuts.as_ref().is_some_and(|c| c.add_vias));
     let ctx = Around { st, mask, partner, bottom, trans, unary, add_vias, max_evals: p.max_evals };

@@ -1306,11 +1306,18 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
 /// tests only) is asked first, so a test can stop or delay the run at an exact check (limit-p3p4:
 /// "refine move", the capacity refinement's per-move check). Without a hook: [`stop_requested`]. O(1).
 pub fn stop_point(point: &str) -> bool {
+    test_mark(point);
+    stop_requested()
+}
+
+/// Tell the run's test hook ([`RunControl::set_test_hook`], tests only) that this thread reached
+/// the named point (limit-p3p4: "refine start", the begin of a capacity refinement); no stop test.
+/// Without a hook: nothing. O(1).
+pub fn test_mark(point: &str) {
     let hooked = STOP.with(|c| c.borrow().as_ref().and_then(|s| s.3 .0.clone()));
     if let Some(h) = hooked {
         h(point);
     }
-    stop_requested()
 }
 
 /// The run of this thread ([`with_control`]) was cancelled or its time limit passed (the latter
