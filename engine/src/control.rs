@@ -468,11 +468,13 @@ impl SoftStep {
 
 /// The progress stages of the topological core and the soft step each belongs to (prefixes of
 /// the stage texts; a test checks every `ctl.stage` literal of core.rs is here).
-pub const SOFT_STAGES: [(&str, SoftStep); 9] = [
+pub const SOFT_STAGES: [(&str, SoftStep); 10] = [
     ("plane stubs", SoftStep::Initial),
     ("projection", SoftStep::Initial),
     ("topological search", SoftStep::Initial),
     ("layer assignment", SoftStep::Initial),
+    // limit-p3p4: the layer assignment once the first plan exists (`topo::core::PLAN_READY_STAGE`)
+    ("first plan ready", SoftStep::Initial),
     ("TopoR loop", SoftStep::Loop),
     ("picking the variant to draw", SoftStep::Drawing),
     ("drawing the traces", SoftStep::Drawing),
@@ -1842,6 +1844,7 @@ mod tests {
         assert_eq!(soft_step_of("TopoR loop on the topology"), Some(SoftStep::Loop));
         assert_eq!(soft_step_of("via reduction and fuse"), Some(SoftStep::Drawing));
         assert_eq!(soft_step_of("routing"), None);
+        assert_eq!(soft_step_of(crate::topo::core::PLAN_READY_STAGE), Some(SoftStep::Initial));
     }
 
     #[test]

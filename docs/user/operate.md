@@ -390,7 +390,8 @@ best of 5 runs) may hit it and keep the best result so far. `0` = no limit.
 progress dialog says *Time limit reached, waiting for the current step to finish (<step>); press Accept to stop
 now and keep the best*. The step that runs finishes and its plan is kept as a variant: the topological search of the initial routing (the
 first plan), the layer assignment and rip-up after it and the TopoR loop cycle that runs (both at most
-`limit_grace_s` past the limit, below), or (with `[optimize] loop = "cycles"`) the whole-route cycle that runs. No new step
+`limit_grace_s` past the limit, below), or (with `[optimize] loop = "cycles"`) the whole-route cycle that runs (its layer
+assignment, rip-up and moves are cut at limit + `limit_grace_s` too, and its plan so far is drawn). No new step
 begins, and the best kept variant is drawn to its end, so a limit never leaves half-drawn copper. **Accept** stops
 at once and draws the best variant kept so far (**Cancel** stops at once and takes nothing); when none is kept yet (Accept before the topological search of
 any run placed every connection) the run ends with the error [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw) and writes no copper. How far

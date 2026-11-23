@@ -540,7 +540,9 @@ pub const STITCH_ONLY: &str = "nothing to route: every connection in scope is al
 
 /// limit-p3p4: the progress stage once P2 gave every connection its place (the first plan): the
 /// layer assignment, rip-up and moves (P3/P4) run, and Accept draws the plan so far.
-pub const PLAN_READY_STAGE: &str = "layer assignment, rip-up and reroute - first plan ready, Accept will draw it";
+/// The words come first (verify r1 F2): the narrow progress dialog's phase label ends in "..."
+/// past its width, so the part the user acts on must not be the tail.
+pub const PLAN_READY_STAGE: &str = "first plan ready, Accept will draw it - layer assignment, rip-up and reroute";
 
 /// limit-p3p4: the round's warning when Cancel / OK came during P3/P4.
 pub const PLAN_KEPT_STOP: &str = "initial plan: Cancel / OK came during the layer assignment, rip-up and reroute (P3/P4), after every connection had its place; the plan so far (its layering as far as the refinement got) is kept and drawn";
@@ -736,7 +738,11 @@ pub(crate) fn wait_line(w: &WaitFacts) -> String {
     let in_drawing = soft == Some(crate::control::SoftStep::Drawing);
     // limit-p3p4: the layer assignment, rip-up and moves of the initial plan (P3/P4) are bounded by
     // `[run] limit_grace_s` like the TopoR loop step; the plan so far is kept.
-    let in_plan = soft == Some(crate::control::SoftStep::Initial) && first.starts_with("layer assignment") && !w.whole_cycle;
+    // With `[optimize] loop = "cycles"` (verify r1 F1) the bound holds too: the cycle that runs has
+    // its P3/P4 cut at limit + grace; only the texts of a step that finished differ (the cycle is
+    // the soft step there).
+    let plan_step = soft == Some(crate::control::SoftStep::Initial) && (first.starts_with("layer assignment") || first.starts_with("first plan ready"));
+    let in_plan = plan_step && !w.whole_cycle;
     let part = if w.whole_cycle && soft.is_some() { " (part of its whole-route cycle, [optimize] loop = \"cycles\")".to_string() } else { soft.map_or(String::new(), |s| format!(" (part of {})", s.words())) };
     let as_hard = w.hard || w.cap_hit;
     let who = if w.hard { "[run] timeout_mode = hard" } else { "the overrun cap ([run] timeout_overrun_s, or the plugin's CPU-clock cap)" };
@@ -756,8 +762,12 @@ pub(crate) fn wait_line(w: &WaitFacts) -> String {
     };
     let why = if in_loop && w.grace_hit && w.grace_s.is_some() {
         format!("[run] limit_grace_s = {} s ran out: the step was stopped at its next check, {dropped}; raise limit_grace_s to let a cycle finish", secs_text(w.grace_s.unwrap_or(0.0)))
-    } else if in_plan && w.grace_hit && w.grace_s.is_some() && !as_hard {
-        format!("[run] limit_grace_s = {} s ran out: the layer assignment, rip-up and moves (P3/P4) stopped at their next check, the plan so far (every connection placed) was kept and drawn; raise limit_grace_s to let them run longer", secs_text(w.grace_s.unwrap_or(0.0)))
+    } else if plan_step && w.grace_hit && w.grace_s.is_some() && !as_hard {
+        format!(
+            "[run] limit_grace_s = {} s ran out: the layer assignment, rip-up and moves (P3/P4){} stopped at their next check, the plan so far (every connection placed) was kept and drawn; raise limit_grace_s to let them run longer",
+            secs_text(w.grace_s.unwrap_or(0.0)),
+            if w.whole_cycle { " of the whole-route cycle that ran" } else { "" }
+        )
     } else if w.cycle_dropped && as_hard {
         format!("{who}: the step was cut at its next check, {dropped}{}", draw_note("; "))
     } else if w.cycle_dropped {
@@ -11020,6 +11030,15 @@ mod tests {
         assert!(phard.contains("timeout_mode = hard: the limit cut this step") && !phard.contains("ran out"), "{phard}");
         let pcyc = wait_line(&WaitFacts { whole_cycle: true, ..plan.clone() });
         assert!(pcyc.contains("whole-route cycle") && pcyc.contains("run to its end"), "{pcyc}");
+        // verify r1 F1: loop = "cycles" with the grace run out in P3/P4: the cycle's P3/P4 were cut
+        let pcyc_hit = wait_line(&WaitFacts { whole_cycle: true, wait_s: 30.2, grace_hit: true, ..plan.clone() });
+        assert!(
+            pcyc_hit.contains("limit_grace_s = 30 s ran out") && pcyc_hit.contains("(P3/P4) of the whole-route cycle that ran stopped at their next check") && !pcyc_hit.contains("run to its end"),
+            "{pcyc_hit}"
+        );
+        // the stage before the plan-ready words came first counts the same
+        let old = wait_line(&WaitFacts { step: "layer assignment, rip-up and reroute".into(), grace_hit: true, ..plan.clone() });
+        assert!(old.contains("(P3/P4) stopped at their next check"), "{old}");
         // the drawing: its bound
         let draw = WaitFacts { step: "drawing the traces".into(), ..loop_.clone() };
         let d = wait_line(&draw);
