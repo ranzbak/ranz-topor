@@ -1062,15 +1062,14 @@ impl RunControl {
     }
 
     /// The dialog's Cancel (limit-p3p4, user rule: Cancel takes no results): the caller abandons
-    /// the job, so the run stops now and draws nothing. A stop request (Cancel kind) whose time
-    /// limit acts as the hard one at once ([`TimeLimit::reach`] + [`TimeLimit::harden`]): every
-    /// planning step and every drawing pass stops at its next check; the topological core then
-    /// skips the drawing ([`RunControl::is_discarded`]). O(1).
+    /// the job, so the run stops now and draws nothing. A stop request (Cancel kind: every
+    /// planning step stops at its next check) plus the discard flag
+    /// ([`RunControl::is_discarded`]), which the topological core reads in its drawing's stop
+    /// test and before and after the drawing: nothing is drawn, reduced or stitched. The time
+    /// limit is left as it is (the drawing is off its clock). O(1).
     pub fn request_discard(&self) {
         self.discard.store(true, Ordering::SeqCst);
         self.request_stop(Some(false));
-        self.limit.reach();
-        self.limit.harden();
     }
 
     /// [`RunControl::request_discard`] was called: nothing is to be drawn or judged. O(1).

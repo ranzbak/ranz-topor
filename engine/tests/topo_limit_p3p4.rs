@@ -299,23 +299,36 @@ fn whole_route_cycles_keep_the_first_plan_and_drop_a_later_cut_one() {
 const DISCARD_S: f64 = if cfg!(debug_assertions) { 30.0 } else { 3.0 };
 
 /// Run `m` and press the dialog's Cancel (`RunControl::request_discard`) at the `nth` call of the
-/// test point `at`: the result and the seconds from the Cancel to the end of the call.
-fn discard_at(m: &BoardModel, o: &Options, at: &'static str, nth: usize) -> (RouteResult, f64) {
+/// test point `at`: the result, the seconds from the Cancel to the end of the call and the test
+/// points asked after it.
+fn discard_at(m: &BoardModel, o: &Options, at: &'static str, nth: usize) -> (RouteResult, f64, Vec<String>) {
     let mut ctl = RunControl::new();
     ctl.limit.init(o.wall_clock_s);
     let c2 = ctl.clone();
     let (calls, when) = (Arc::new(AtomicUsize::new(0)), Arc::new(std::sync::Mutex::new(None::<Instant>)));
     let (calls2, when2) = (calls.clone(), when.clone());
+    let after = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let after2 = after.clone();
     ctl.set_test_hook(move |p| {
-        if p == at && calls2.fetch_add(1, Ordering::SeqCst) + 1 == nth {
-            *when2.lock().unwrap() = Some(Instant::now());
+        let mut w = when2.lock().unwrap();
+        if w.is_some() {
+            after2.lock().unwrap().push(p.to_string());
+        } else if p == at && calls2.fetch_add(1, Ordering::SeqCst) + 1 == nth {
+            *w = Some(Instant::now());
             c2.request_discard();
         }
         false
     });
     let r = route_with(m, o, &ctl);
     let t = when.lock().unwrap().unwrap_or_else(|| panic!("the test point {at:?} was asked only {} times (wanted {nth})", calls.load(Ordering::SeqCst)));
-    (r, t.elapsed().as_secs_f64())
+    let asked = after.lock().unwrap().clone();
+    (r, t.elapsed().as_secs_f64(), asked)
+}
+
+/// The steps a discarded run must not begin after its Cancel: the drawing (its first test point)
+/// and the via reduction after it.
+fn began_after(asked: &[String]) -> Vec<&String> {
+    asked.iter().filter(|p| *p == "no sequential run" || *p == "via reduction begin").collect()
 }
 
 fn nothing_taken(r: &RouteResult, what: &str) {
@@ -332,8 +345,9 @@ fn cancel_in_mid_refinement_ends_the_engine_at_once_and_draws_nothing() {
     // dialog's Cancel in the middle of a capacity refinement (P3) ends the call within seconds,
     // with no drawing (Accept there draws the plan so far, the test above).
     let m = dense(90, 1);
-    let (r, after) = discard_at(&m, &opts(30.0, 0.0), "refine move", 20);
+    let (r, after, asked) = discard_at(&m, &opts(30.0, 0.0), "refine move", 20);
     nothing_taken(&r, "Cancel in P3");
+    assert!(began_after(&asked).is_empty(), "after the Cancel the run began {:?}", began_after(&asked));
     assert!(after < DISCARD_S, "the engine ran {after:.2} s after the Cancel (bound {DISCARD_S} s)");
     eprintln!("Cancel in P3: the call ended {after:.2} s after it");
 }
@@ -349,16 +363,19 @@ fn cancel_while_the_traces_are_drawn_ends_the_drawing_and_takes_nothing() {
     let c2 = ctl.clone();
     let when = Arc::new(std::sync::Mutex::new(None::<Instant>));
     let when2 = when.clone();
+    let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let asked2 = asked.clone();
     ctl.set_test_hook(move |p| {
+        let mut w = when2.lock().unwrap();
+        if w.is_some() {
+            asked2.lock().unwrap().push(p.to_string());
+        }
         match p {
             // end the TopoR loop at once (no stop at stable): Accept at the first plan
             "plan ready" => c2.request_stop(Some(false)),
-            "no sequential run" => {
-                let mut w = when2.lock().unwrap();
-                if w.is_none() {
-                    *w = Some(Instant::now());
-                    c2.request_discard();
-                }
+            "no sequential run" if w.is_none() => {
+                *w = Some(Instant::now());
+                c2.request_discard();
             }
             _ => {}
         }
@@ -368,6 +385,8 @@ fn cancel_while_the_traces_are_drawn_ends_the_drawing_and_takes_nothing() {
     let t = when.lock().unwrap().expect("the drawing began");
     let after = t.elapsed().as_secs_f64();
     nothing_taken(&r, "Cancel in the drawing");
+    let asked = asked.lock().unwrap().clone();
+    assert!(!asked.iter().any(|p| p == "via reduction begin"), "after the Cancel the via reduction began: {asked:?}");
     assert!(after < DISCARD_S, "the engine ran {after:.2} s after the Cancel (bound {DISCARD_S} s)");
     eprintln!("Cancel in the drawing: the call ended {after:.2} s after it");
 }
