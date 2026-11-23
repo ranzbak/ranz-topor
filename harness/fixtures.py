@@ -260,6 +260,67 @@ def make_fixture_board(
     return path
 
 
+def make_dense_board(path: Path, *, n_pairs: int = 90, seed: int = 1, pitch_mm: float = 1.0, reach: float = 5.0) -> Path:
+    """limit-p3p4: a dense 2-layer board whose layer assignment and rip-up (P3/P4) take far longer than its
+    topological search (P2): `n_pairs` two-pad nets N1.. on a `pitch_mm` grid of 0.6 mm round SMD pads, each pad paired
+    with a seeded random free cell within `reach` cells; every second net ends on a B.Cu pad (a via each). The pairs
+    cross a lot (the same model as engine/tests/topo_limit_p3p4.rs `dense`). Outline: the pad bbox plus 2 mm.
+    No zones, no other copper. Pair with ``write_project_file(rules={}, classes=DENSE_CLASSES)``."""
+    import math
+    import random
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    b = pcbnew.CreateEmptyBoard()
+    b.SetCopperLayerCount(2)
+    cols = int(math.sqrt(2 * n_pairs)) + 1
+    cells = [(i % cols, i // cols) for i in range(2 * n_pairs)]
+    rng = random.Random(seed)
+    order = list(range(len(cells)))
+    rng.shuffle(order)
+    free, pairs = set(order), []
+    for i in order:
+        if i not in free:
+            continue
+        free.discard(i)
+        near = sorted(j for j in free if math.hypot(cells[i][0] - cells[j][0], cells[i][1] - cells[j][1]) <= reach)
+        if not near:
+            continue
+        j = rng.choice(near)
+        free.discard(j)
+        pairs.append((i, j))
+    for k, (i, j) in enumerate(pairs, start=1):
+        net = pcbnew.NETINFO_ITEM(b, f"N{k}")
+        b.Add(net)
+        fp = pcbnew.FOOTPRINT(b)
+        fp.SetReference(f"P{k}")
+        fp.SetValue(f"P{k}")
+        fp.SetPosition(_v(0, 0))
+        b.Add(fp)
+        for num, c in (("1", i), ("2", j)):
+            _add_pad(fp, num, pcbnew.PAD_SHAPE_CIRCLE, (0.6, 0.6), (5 + cells[c][0] * pitch_mm, 5 + cells[c][1] * pitch_mm), net,
+                     back=(num == "2" and k % 2 == 0))
+    w = 5 + (cols - 1) * pitch_mm + 3
+    h = 5 + (len(cells) // cols) * pitch_mm + 3
+    for a, c in (((2, 2), (w, 2)), ((w, 2), (w, h)), ((w, h), (2, h)), ((2, h), (2, 2))):
+        e = pcbnew.PCB_SHAPE(b)
+        e.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        e.SetLayer(pcbnew.Edge_Cuts)
+        e.SetWidth(int(0.1 * MM))
+        e.SetStart(_v(*a))
+        e.SetEnd(_v(*c))
+        b.Add(e)
+    pcbnew.SaveBoard(str(path), b)
+    return path
+
+
+#: limit-p3p4: the dense board's net class (thin tracks, small vias: the grid is tight on purpose).
+DENSE_CLASSES = [
+    {"name": "Default", "clearance": 0.15, "track_width": 0.15, "via_diameter": 0.5,
+     "via_drill": 0.25, "priority": 2147483647}
+]
+
+
 def add_teardrop_zone(pcb: Path, net: str, layer: str, poly_mm) -> None:
     """Append a KiCad-style teardrop zone (attr teardrop padvia) to a saved board file (text edit:
     pcbnew's python API does not expose the teardrop type enum)."""

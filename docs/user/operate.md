@@ -20,7 +20,8 @@ Contents: [Quick start](#quick-start) · [Where the settings come from](#where-t
 4. Read the findings, set the [Options](#options) (on a board that is already routed choose
    *Existing copper: Rip up and re-route*, otherwise there is nothing to route), press **Route**.
 5. Watch the progress. The dialog has two buttons for the whole run: **Accept** stops the run and takes the best result so far
-   (KiCad's DRC and the preview follow, see the next step; during the initial routing there is none yet:
+   (KiCad's DRC and the preview follow, see the next step; once the dialog says *first plan ready, Accept will
+   draw it* there always is one; before that, during the topological search, there is none yet:
    [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)); **Cancel** (or Esc) stops at once and takes nothing: the board stays
    exactly as it was.
 6. Compare *Current board* and *Result* in the preview, then **Accept** (applied to the board; Edit → Undo reverts it) or
@@ -387,11 +388,13 @@ best of 5 runs) may hit it and keep the best result so far. `0` = no limit.
 
 **The limit is soft** (`[run] timeout_mode = "soft"`, the default since 2026-11-13). When it is reached, the
 progress dialog says *Time limit reached, waiting for the current step to finish (<step>); press Accept to stop
-now and keep the best*. The step that runs finishes and its plan is kept as a variant: the initial routing up to its rip-up rounds,
-the TopoR loop cycle that runs, or (with `[optimize] loop = "cycles"`) the whole-route cycle that runs. No new step
+now and keep the best*. The step that runs finishes and its plan is kept as a variant: the topological search of the initial routing (the
+first plan), the layer assignment and rip-up after it and the TopoR loop cycle that runs (both at most
+`limit_grace_s` past the limit, below), or (with `[optimize] loop = "cycles"`) the whole-route cycle that runs (its layer
+assignment, rip-up and moves are cut at limit + `limit_grace_s` too, and its plan so far is drawn). No new step
 begins, and the best kept variant is drawn to its end, so a limit never leaves half-drawn copper. **Accept** stops
-at once and draws the best variant kept so far (**Cancel** stops at once and takes nothing); when none is kept yet (Accept during the initial routing of every
-run) the run ends with the error [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw) and writes no copper. How far
+at once and draws the best variant kept so far (**Cancel** stops at once and takes nothing); when none is kept yet (Accept before the topological search of
+any run placed every connection) the run ends with the error [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw) and writes no copper. How far
 the run went past the limit, and in which step it was reached, is in log.txt, report.md (*Time limit* line) and
 `result.json` (`time_limit.reached`, `step`, `overrun_s` on the run's clock; measurements outside the limit, such as
 `[capacity] compass_cut_check`, are left out as they are left out of the limit; the engine's own report line gives
@@ -401,7 +404,13 @@ TopoR loop cycle plus the drawing can take minutes (qmtech, 2026-11-13: about 4 
 press Accept to stop at once and keep the best, or Cancel to drop the run.
 
 **The wait for the TopoR loop is bounded** (`[run] limit_grace_s`, default 30 s): the loop checks its stop
-between rerouted connections, layer re-optimisations, label moves and crossing passes, not only between cycles. After the
+between rerouted connections, layer re-optimisations, label moves and crossing passes, not only between cycles.
+The layer assignment, rip-up and moves of the initial plan (after the topological search placed every connection)
+are bounded the same way (limit-p3p4, 2026-11-23: on a large board from scratch one capacity refinement took minutes
+and the limit was not kept): past the grace they stop at their next check (the refinement checks between label
+moves) and the plan so far, with its layering as far as the refinement got, is the variant that is drawn. Accept
+there draws that plan too. TopoR does the same: its first variant is saved after the first optimisation cycle or 20 s
+after the start (TopoR 6.3 manual p. 73). After the
 limit the step that runs may go on for at most `limit_grace_s` seconds (`0` = stop at the next check, any negative
 value = no bound); then it stops at the next check, the cycle it was in is dropped (a cycle cut short is never kept) and
 the best variant kept so far is drawn. This holds in the KiCad dialog too, where the overrun cap is off.
@@ -469,8 +478,9 @@ spare a drawing that has begun is an open question.
 
 With `timeout_clock = "cpu"` the plugin reaches the engine's limit when the CPU seconds pass it (polled every
 0.25 s); with `hard` it then acts as above, the same path as on the wall clock (not a Cancel). What 2026-11-13
-changed holds in both modes: Cancel during the initial routing (up to its rip-up rounds) keeps no plan
-([`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)), and only the picked variant is drawn (below).
+changed holds in both modes (with limit-p3p4, 2026-11-23): Accept during the topological search keeps no
+plan ([`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)), during the layer assignment and rip-up after it the plan
+so far is drawn (Cancel draws nothing, anywhere), and only the picked variant is drawn (below).
 
 **Only the picked variant is drawn** (`[drawing] candidates = 1`, the default since 2026-11-13, with `[optimize]
 loop = "topor"`). Every run judges its plans on the topology, by their predicted violations, vias, length and
@@ -544,12 +554,13 @@ time-limit field, never on Cancel).
   stage…* (with the seconds since the press); the engine finishes the stage it is in and returns its best result so far:
   normally within a second or two, on a large board sometimes longer. That result then goes on to KiCad DRC and the preview, where
   you still choose *Accept* or *Reject*; topor waits for the engine and never drops the result it is finishing. If nothing was
-  routed yet the run ends with *Cancelled — nothing was changed on the board.* (or the error `NOTHING_TO_DRAW` during the initial
-  routing). topor polls the running `kicad-cli` every 0.25 s, so Accept also works during the pre-flight DRC (the run then ends
+  routed yet the run ends with *Cancelled — nothing was changed on the board.* (or the error `NOTHING_TO_DRAW` before the first
+  plan, during the topological search). topor polls the running `kicad-cli` every 0.25 s, so Accept also works during the pre-flight DRC (the run then ends
   with nothing changed) and the DRC rounds / preview export (the DRC and the preview of the best result still finish).
 - **Cancel** stops at once and takes no result: the board stays exactly as it was (no tracks, vias or zone changes, no preview, no
   error window). The engine is told to stop and is not waited for: the dialog closes within one poll (about 0.25 s) even in the middle of a stage, and whatever the
-  engine still returns is thrown away, never judged or written. It also works after an Accept (before the run has ended) and during the pre-flight and DRC
+  engine still returns is thrown away, never judged or written. The engine itself (`RouteJob.discard`, 2026-11-23) stops
+  every step at its next check, the drawing included, draws nothing and frees its threads within seconds. It also works after an Accept (before the run has ended) and during the pre-flight and DRC
   rounds (the running `kicad-cli` is killed). The report and log say *cancelled by the user (Cancel)*; the run's outcome is
   *cancelled*. A Cancel pressed after the commit has nothing left to undo (use Edit → Undo).
 

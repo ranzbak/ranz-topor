@@ -319,6 +319,9 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
         coord = coord.with_table(super::table::SharedTable::new(n, opts.variants, obj, window).with_lag(opts.table_lag));
     }
     let (mut outs, skipped) = run_all(model, opts, ctl, &coord, &stubs, &fx, t0, n);
+    if ctl.is_discarded() {
+        return discarded(model, opts, t0);
+    }
     if outs.is_empty() {
         // M2.TL (fail fast): Cancel / OK before any run kept a plan: nothing to draw, said loudly
         // (never a quiet empty result). Without a Cancel this cannot happen (the first run to begin
@@ -535,6 +538,35 @@ pub const NOTHING_TO_ROUTE: &str = "nothing to route: every connection in scope 
 /// needed stitching vias ([`route_topo`]: stop reason `stitch_only`; the vias are the call's items).
 pub const STITCH_ONLY: &str = "nothing to route: every connection in scope is already made (pads, tracks, vias and pour fills joined as KiCad's connectivity has them); only the pours' stitching ran ([planes] stitch_dropped / stitch_thin_mm / stitch_area), no plane stub, projection or TopoR loop";
 
+/// limit-p3p4: the progress stage once P2 gave every connection its place (the first plan): the
+/// layer assignment, rip-up and moves (P3/P4) run, and Accept draws the plan so far.
+/// The words come first (verify r1 F2): the narrow progress dialog's phase label ends in "..."
+/// past its width, so the part the user acts on must not be the tail.
+pub const PLAN_READY_STAGE: &str = "first plan ready, Accept will draw it - layer assignment, rip-up and reroute";
+
+/// limit-p3p4: the round's warning when Cancel / OK came during P3/P4.
+pub const PLAN_KEPT_STOP: &str = "initial plan: Cancel / OK came during the layer assignment, rip-up and reroute (P3/P4), after every connection had its place; the plan so far (its layering as far as the refinement got) is kept and drawn";
+
+/// limit-p3p4: the round's warning when the soft limit plus its grace ended P3/P4.
+pub const PLAN_KEPT_LIMIT: &str = "initial plan: the time limit plus its grace passed during the layer assignment, rip-up and reroute (P3/P4); its refinement and moves stopped at their next check and the plan so far is kept and drawn";
+
+/// limit-p3p4 (lead 2026-11-23, user rule "Cancel stops there and then and takes no results"):
+/// the call's result after the dialog's Cancel ([`RunControl::request_discard`]): the job is
+/// abandoned, so nothing is drawn, judged or stitched.
+pub const DISCARDED: &str = "Cancel: the run was discarded (the dialog's Cancel takes no results); nothing is drawn";
+
+/// [`DISCARDED`] as the call's result: every connection unrouted with it, no copper, stop reason
+/// "cancel". O(connections).
+fn discarded(model: &BoardModel, opts: &Options, t0: Instant) -> RouteResult {
+    let mut r = unrouted(model, opts, DISCARDED);
+    r.warnings.insert(0, DISCARDED.to_string());
+    r.stop_reason = "cancel".into();
+    r.timed_out = false;
+    r.converged = false;
+    r.runtime_s = t0.elapsed().as_secs_f64();
+    r
+}
+
 /// M2.TL (fail fast): the call's result when no plan was kept (`why` starts with
 /// [`NOTHING_TO_DRAW`]): every connection unrouted with `why`, an `ERROR:` line first, no copper.
 /// O(connections).
@@ -704,6 +736,13 @@ pub(crate) fn wait_line(w: &WaitFacts) -> String {
     let soft = crate::control::soft_step_of(first);
     let in_loop = soft == Some(crate::control::SoftStep::Loop) || w.step.contains("TopoR loop");
     let in_drawing = soft == Some(crate::control::SoftStep::Drawing);
+    // limit-p3p4: the layer assignment, rip-up and moves of the initial plan (P3/P4) are bounded by
+    // `[run] limit_grace_s` like the TopoR loop step; the plan so far is kept.
+    // With `[optimize] loop = "cycles"` (verify r1 F1) the bound holds too: the cycle that runs has
+    // its P3/P4 cut at limit + grace; only the texts of a step that finished differ (the cycle is
+    // the soft step there).
+    let plan_step = soft == Some(crate::control::SoftStep::Initial) && (first.starts_with("layer assignment") || first.starts_with("first plan ready"));
+    let in_plan = plan_step && !w.whole_cycle;
     let part = if w.whole_cycle && soft.is_some() { " (part of its whole-route cycle, [optimize] loop = \"cycles\")".to_string() } else { soft.map_or(String::new(), |s| format!(" (part of {})", s.words())) };
     let as_hard = w.hard || w.cap_hit;
     let who = if w.hard { "[run] timeout_mode = hard" } else { "the overrun cap ([run] timeout_overrun_s, or the plugin's CPU-clock cap)" };
@@ -723,6 +762,12 @@ pub(crate) fn wait_line(w: &WaitFacts) -> String {
     };
     let why = if in_loop && w.grace_hit && w.grace_s.is_some() {
         format!("[run] limit_grace_s = {} s ran out: the step was stopped at its next check, {dropped}; raise limit_grace_s to let a cycle finish", secs_text(w.grace_s.unwrap_or(0.0)))
+    } else if plan_step && w.grace_hit && w.grace_s.is_some() && !as_hard {
+        format!(
+            "[run] limit_grace_s = {} s ran out: the layer assignment, rip-up and moves (P3/P4){} stopped at their next check, the plan so far (every connection placed) was kept and drawn; raise limit_grace_s to let them run longer",
+            secs_text(w.grace_s.unwrap_or(0.0)),
+            if w.whole_cycle { " of the whole-route cycle that ran" } else { "" }
+        )
     } else if w.cycle_dropped && as_hard {
         format!("{who}: the step was cut at its next check, {dropped}{}", draw_note("; "))
     } else if w.cycle_dropped {
@@ -737,6 +782,12 @@ pub(crate) fn wait_line(w: &WaitFacts) -> String {
             Some(g) => format!("the step ran past [run] limit_grace_s = {} s because it was between two checks or finishing its last cycle; no cycle was dropped", secs_text(g)),
             None => "[run] limit_grace_s is unbounded (negative): the step ran to the end of its cycle".to_string(),
         }
+    } else if in_plan {
+        match w.grace_s {
+            Some(g) if w.wait_s <= g => format!("the layer assignment, rip-up and moves (P3/P4) finished within [run] limit_grace_s = {} s", secs_text(g)),
+            Some(g) => format!("the layer assignment, rip-up and moves (P3/P4) ran past [run] limit_grace_s = {} s because they were between two checks", secs_text(g)),
+            None => "[run] limit_grace_s is unbounded (negative): the layer assignment, rip-up and moves (P3/P4) ran to their end".to_string(),
+        }
     } else if in_drawing && !w.whole_cycle {
         let d = draw_note("");
         if !d.is_empty() {
@@ -748,7 +799,7 @@ pub(crate) fn wait_line(w: &WaitFacts) -> String {
             }
         }
     } else {
-        "the soft limit lets this step run to its end ([run] limit_grace_s bounds only the TopoR loop step, drawing_grace_s only the drawing's optional passes)".to_string()
+        "the soft limit lets this step run to its end ([run] limit_grace_s bounds only the layer assignment and rip-up after the topological search and the TopoR loop step, drawing_grace_s only the drawing's optional passes)".to_string()
     };
     let tail = if in_drawing && !w.whole_cycle { String::new() } else { draw_note("; then the drawing: ") };
     format!(
@@ -3477,7 +3528,15 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let cut_step = std::cell::Cell::new(CutStep::Plan);
     let stop_now = || cancelled() || ctl.is_cancelled();
     let limit_cut = || !draw_exempt.get() && !soft() && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor)) && ctl.limit.note_cut_in(cut_step.get());
-    let expired = || (!draw_through.get() && stop_now()) || limit_cut();
+    // limit-p3p4 (F10): the layer assignment, rip-up and moves of the initial plan (P3/P4, from the
+    // first layering until the TopoR loop) are bounded like the TopoR loop step: with the soft
+    // limit, past the limit plus `[run] limit_grace_s` their stop checks end them and the plan so
+    // far is kept (P2, the topological search that places every connection, is the first plan and
+    // runs to its end). Read only after the limit passed: without it nothing changes.
+    let plan_span = std::cell::Cell::new(false);
+    let plan_over = || plan_span.get() && soft() && ctl.limit.grace_over();
+    // The dialog's Cancel (request_discard) ends every step, the drawing too: nothing is taken.
+    let expired = || (!draw_through.get() && stop_now()) || limit_cut() || plan_over() || ctl.is_discarded();
     // The reason of a connection the drawing did not reach: a Cancel / OK's or the limit's (a
     // Cancel wins when both hold; verify-m2c 4: a Cancel wrote the limit's reason before).
     let draw_cut_reason = || if !draw_through.get() && stop_now() { DRAW_CANCEL } else { DRAW_CUT };
@@ -4042,8 +4101,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     debug_assert!(st.check().is_ok(), "{:?}", st.check());
     ctl.update("route", 1, 0, nconn, 0, t0.elapsed().as_secs_f64());
-    ctl.stage(rnd, rnds, "layer assignment, rip-up and reroute");
+    // limit-p3p4: every connection has its place now (the first plan): a stop from here on keeps
+    // the plan so far and draws it, so the dialog says that Accept is useful.
+    ctl.stage(rnd, rnds, if plan_cut.get() { "layer assignment, rip-up and reroute" } else { PLAN_READY_STAGE });
+    plan_span.set(true);
+    let plan_scope = crate::control::step_scope();
+    ctl.test_point("plan ready");
     let p2_s = t_p2.elapsed().as_secs_f64();
+    tlog("P2 initial routing", t_p2);
     // ---- P3 ----
     let lp = LayerParams {
         via_mm: reg.price(&Event::Via { wire: 0, count: 1, at: None }, &WireCtx::default()),
@@ -4576,9 +4641,34 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // M0's stop checks end within a move): the step did not end, so it kept no variant (the user's
     // rule: the plan counts once P4 ends); the run keeps what it had (nothing, or the earlier
     // cycles' variants), never half a step.
-    if plan_cut.get() || stop_now() {
-        let why = if plan_cut.get() { "Cancel / OK came during the initial routing, before every connection had its place in the plan" } else { "Cancel / OK came during the initial routing (layer assignment, rip-up and reroute), before its plan was complete" };
+    // limit-p3p4 (F10, user 2026-11-23: "Accept takes the best result so far, and must always have
+    // something to draw once the first plan exists"): a Cancel / OK during P3/P4 (after P2 gave
+    // every connection its place) keeps the plan so far: P2's topology with the best layering
+    // found (a refinement the stop cut keeps every move it made: each one lowered the price; the
+    // crossing pass and the rip-up rounds restore their best). The TopoR loop below ends at once
+    // and draws it. Cancel / OK during P2 keeps nothing (there is no first plan yet).
+    drop(plan_scope);
+    let plan_bounded = plan_over();
+    plan_span.set(false);
+    if plan_cut.get() {
+        let why = "Cancel / OK came during the initial routing, before every connection had its place in the plan";
         return (RoundOut::not_drawn(model, opts, None, Some(why.to_string()), None), Vec::new(), Memory::default());
+    }
+    if stop_now() && opts.opt_loop != "topor" && round > 1 {
+        // `[optimize] loop = "cycles"`: the earlier cycles' drawn variants are the best so far; this
+        // cycle's plan is not complete and is dropped (as before limit-p3p4).
+        let why = "Cancel / OK came during the initial routing (layer assignment, rip-up and reroute) of a later whole-route cycle; the earlier cycles' variants are kept";
+        return (RoundOut::not_drawn(model, opts, None, Some(why.to_string()), None), Vec::new(), Memory::default());
+    }
+    if stop_now() {
+        warnings.push(PLAN_KEPT_STOP.to_string());
+        if opts.opt_loop != "topor" {
+            // No loop follows: the kept plan is drawn in full (the TopoR loop sets this for its pick).
+            draw_through.set(true);
+        }
+    } else if plan_bounded {
+        timed_out = true;
+        warnings.push(format!("{PLAN_KEPT_LIMIT} ([run] limit_grace_s = {} s)", ctl.limit.grace_s().map_or("unbounded".to_string(), secs_text)));
     }
     let topor = opts.opt_loop == "topor";
     if topor {
@@ -7761,6 +7851,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ));
     }
     ctl.update("route", 2, 0, nconn, lr.vias, t0.elapsed().as_secs_f64());
+    if ctl.is_discarded() {
+        // limit-p3p4: the dialog's Cancel: the job is abandoned, its plan is never drawn.
+        return (RoundOut::not_drawn(model, opts, None, Some(DISCARDED.to_string()), None), Vec::new(), Memory::default());
+    }
     ctl.stage(rnd, rnds, "drawing the traces");
     let _ = &t_draw;
     // ---- Drawing ----
@@ -8940,6 +9034,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let causes_before = causes(&plans, &drawn);
     tlog("drawing + feedback", t_draw);
+    if ctl.is_discarded() {
+        // limit-p3p4: the dialog's Cancel came while the traces were drawn: no via reduction,
+        // polish or stitching for a job that is abandoned.
+        return (RoundOut::not_drawn(model, opts, None, Some(DISCARDED.to_string()), None), Vec::new(), Memory::default());
+    }
     if super::par::meter::on() {
         eprintln!("[topo round {round}] {}", super::par::meter::report());
     }
@@ -10914,6 +11013,32 @@ mod tests {
         // soft, the initial routing: runs to its end
         let init = wait_line(&WaitFacts { step: "topological search".into(), ..loop_.clone() });
         assert!(init.contains("(part of the initial routing)") && init.contains("soft limit lets this step run to its end"), "{init}");
+        // limit-p3p4: the layer assignment after the topological search, bounded by limit_grace_s
+        let plan = WaitFacts { step: super::PLAN_READY_STAGE.into(), ..loop_.clone() };
+        let p = wait_line(&plan);
+        assert!(p.contains("(part of the initial routing)") && p.contains("(P3/P4) finished within [run] limit_grace_s = 30 s"), "{p}");
+        let pp = wait_line(&WaitFacts { wait_s: 31.5, ..plan.clone() });
+        assert!(pp.contains("(P3/P4) ran past [run] limit_grace_s = 30 s"), "{pp}");
+        let ph = wait_line(&WaitFacts { wait_s: 30.2, grace_hit: true, ..plan.clone() });
+        assert!(ph.contains("limit_grace_s = 30 s ran out") && ph.contains("the plan so far (every connection placed) was kept and drawn") && !ph.contains("dropped"), "{ph}");
+        let pu = wait_line(&WaitFacts { grace_s: None, ..plan.clone() });
+        assert!(pu.contains("unbounded") && pu.contains("(P3/P4) ran to their end"), "{pu}");
+        let pm = wait_line(&WaitFacts { step: format!("run 2: {}; run 3: topological search", super::PLAN_READY_STAGE), grace_hit: true, ..plan.clone() });
+        assert!(pm.contains("(P3/P4) stopped at their next check"), "{pm}");
+        // hard mode and whole-route cycles keep their own texts
+        let phard = wait_line(&WaitFacts { hard: true, step_cut: true, grace_hit: true, ..plan.clone() });
+        assert!(phard.contains("timeout_mode = hard: the limit cut this step") && !phard.contains("ran out"), "{phard}");
+        let pcyc = wait_line(&WaitFacts { whole_cycle: true, ..plan.clone() });
+        assert!(pcyc.contains("whole-route cycle") && pcyc.contains("run to its end"), "{pcyc}");
+        // verify r1 F1: loop = "cycles" with the grace run out in P3/P4: the cycle's P3/P4 were cut
+        let pcyc_hit = wait_line(&WaitFacts { whole_cycle: true, wait_s: 30.2, grace_hit: true, ..plan.clone() });
+        assert!(
+            pcyc_hit.contains("limit_grace_s = 30 s ran out") && pcyc_hit.contains("(P3/P4) of the whole-route cycle that ran stopped at their next check") && !pcyc_hit.contains("run to its end"),
+            "{pcyc_hit}"
+        );
+        // the stage before the plan-ready words came first counts the same
+        let old = wait_line(&WaitFacts { step: "layer assignment, rip-up and reroute".into(), grace_hit: true, ..plan.clone() });
+        assert!(old.contains("(P3/P4) stopped at their next check"), "{old}");
         // the drawing: its bound
         let draw = WaitFacts { step: "drawing the traces".into(), ..loop_.clone() };
         let d = wait_line(&draw);

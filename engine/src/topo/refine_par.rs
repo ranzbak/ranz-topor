@@ -559,7 +559,7 @@ pub mod test_cancel {
 fn lane(fx: &Frame, base: &Arrays, evl: &[Vec<LEv>], ctx: &Around, ep: &Mutex<Epoch>, min_keep: &AtomicUsize, stopping: &AtomicBool, ov: &mut Overlay, run_thread: bool) {
     let lock = || ep.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     loop {
-        if run_thread && crate::control::stop_requested() {
+        if run_thread && crate::control::stop_point("refine move") {
             stopping.store(true, Ordering::Relaxed);
         }
         let (seq, mv, window) = {

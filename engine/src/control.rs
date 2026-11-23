@@ -468,11 +468,13 @@ impl SoftStep {
 
 /// The progress stages of the topological core and the soft step each belongs to (prefixes of
 /// the stage texts; a test checks every `ctl.stage` literal of core.rs is here).
-pub const SOFT_STAGES: [(&str, SoftStep); 9] = [
+pub const SOFT_STAGES: [(&str, SoftStep); 10] = [
     ("plane stubs", SoftStep::Initial),
     ("projection", SoftStep::Initial),
     ("topological search", SoftStep::Initial),
     ("layer assignment", SoftStep::Initial),
+    // limit-p3p4: the layer assignment once the first plan exists (`topo::core::PLAN_READY_STAGE`)
+    ("first plan ready", SoftStep::Initial),
     ("TopoR loop", SoftStep::Loop),
     ("picking the variant to draw", SoftStep::Drawing),
     ("drawing the traces", SoftStep::Drawing),
@@ -1004,6 +1006,10 @@ pub struct RunControl {
     pub test_hook: TestHook,
     /// last-preview: the sketches for the caller's board image, shared by every run of the call.
     pub sketches: Arc<Sketches>,
+    /// limit-p3p4 (lead 2026-11-23, user rule: "Cancel stops there and then and takes no
+    /// results"): the dialog's Cancel ([`RunControl::request_discard`]): the job is abandoned, so
+    /// every step stops at its next check and nothing is drawn. Accept / the limit never set it.
+    pub discard: Arc<AtomicBool>,
 }
 
 /// A test-only hook: the engine asks it at a few named points (`RunControl::test_point`); a test
@@ -1055,6 +1061,22 @@ impl RunControl {
         let ok = ok.unwrap_or_else(|| self.progress.lock().is_ok_and(|p| p.stable));
         let _ = self.stop_kind.compare_exchange(0, if ok { STOP_OK } else { STOP_CANCEL }, Ordering::SeqCst, Ordering::SeqCst);
         self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// The dialog's Cancel (limit-p3p4, user rule: Cancel takes no results): the caller abandons
+    /// the job, so the run stops now and draws nothing. A stop request (Cancel kind: every
+    /// planning step stops at its next check) plus the discard flag
+    /// ([`RunControl::is_discarded`]), which the topological core reads in its drawing's stop
+    /// test and before and after the drawing: nothing is drawn, reduced or stitched. The time
+    /// limit is left as it is (the drawing is off its clock). O(1).
+    pub fn request_discard(&self) {
+        self.discard.store(true, Ordering::SeqCst);
+        self.request_stop(Some(false));
+    }
+
+    /// [`RunControl::request_discard`] was called: nothing is to be drawn or judged. O(1).
+    pub fn is_discarded(&self) -> bool {
+        self.discard.load(Ordering::SeqCst)
     }
 
     /// The run was stopped by OK at "Routes stable" (the first stop request, latched by
@@ -1172,7 +1194,7 @@ impl RunControl {
 
     /// The same cancel flag and progress, as run `run` (1-based) of a best-of-N call. O(1).
     pub(crate) fn for_run(&self, run: u32) -> RunControl {
-        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), stop_kind: self.stop_kind.clone(), run, test_hook: self.test_hook.clone(), sketches: self.sketches.clone() }
+        RunControl { cancel: self.cancel.clone(), progress: self.progress.clone(), limit: self.limit.clone(), stop_kind: self.stop_kind.clone(), run, test_hook: self.test_hook.clone(), sketches: self.sketches.clone(), discard: self.discard.clone() }
     }
 
     /// sync-wait: a TopoR loop cycle's line for the run log ([`Progress::push_cycle_line`]). O(CYCLE_LINES).
@@ -1280,7 +1302,7 @@ thread_local! {
 
 /// What [`stop_requested`] reads: the cancel flag, the time limit and whether it always stops the
 /// steps (`hard`; else only once it acts as hard, [`TimeLimit::is_hard`]: the overrun cap, F3).
-type StopState = (Arc<AtomicBool>, Arc<TimeLimit>, bool);
+type StopState = (Arc<AtomicBool>, Arc<TimeLimit>, bool, TestHook);
 
 /// Runs `f` with `ctl`'s cancel flag and time limit as what [`stop_requested`] reads on this
 /// thread; the state before comes back after `f`, also when it panics. O(1) + `f`.
@@ -1298,8 +1320,26 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
             STOP.with(|c| *c.borrow_mut() = prev);
         }
     }
-    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone(), limit_stops)))));
+    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone(), limit_stops, TestHook(ctl.test_hook.0.clone()))))));
     f()
+}
+
+/// [`stop_requested`] at a named stop check: the run's test hook ([`RunControl::set_test_hook`],
+/// tests only) is asked first, so a test can stop or delay the run at an exact check (limit-p3p4:
+/// "refine move", the capacity refinement's per-move check). Without a hook: [`stop_requested`]. O(1).
+pub fn stop_point(point: &str) -> bool {
+    test_mark(point);
+    stop_requested()
+}
+
+/// Tell the run's test hook ([`RunControl::set_test_hook`], tests only) that this thread reached
+/// the named point (limit-p3p4: "refine start", the begin of a capacity refinement); no stop test.
+/// Without a hook: nothing. O(1).
+pub fn test_mark(point: &str) {
+    let hooked = STOP.with(|c| c.borrow().as_ref().and_then(|s| s.3 .0.clone()));
+    if let Some(h) = hooked {
+        h(point);
+    }
 }
 
 /// The run of this thread ([`with_control`]) was cancelled or its time limit passed (the latter
@@ -1307,7 +1347,7 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
 /// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
 /// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut()) || (LOOP_SCOPE.with(|s| s.get()) && l.grace_over())))
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always, _)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut()) || (LOOP_SCOPE.with(|s| s.get()) && l.grace_over())))
 }
 
 thread_local! {
@@ -1327,6 +1367,30 @@ pub fn in_loop_scope<R>(f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(LOOP_SCOPE.with(|s| s.replace(true)));
     f()
+}
+
+/// limit-p3p4 (F10): [`in_loop_scope`] as a guard for a span of straight-line code: while it
+/// lives, [`stop_requested`] on this thread also answers true once the time limit and its grace
+/// (`[run] limit_grace_s`) have passed. The topological core holds one over the layer assignment,
+/// rip-up and moves of the initial plan (P3/P4, from the first layering until the TopoR loop), so
+/// their refinement and move loops stop at their next check and the plan so far is kept (TopoR 6.3
+/// manual p. 73: the first variant is saved after the first cycle "or 20 seconds after the start").
+/// The flag before comes back when the guard drops, also on a panic. Not `Send`: it must drop on the
+/// thread that made it. O(1).
+pub struct StepScope {
+    before: bool,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+/// Open a [`StepScope`] on this thread. O(1).
+pub fn step_scope() -> StepScope {
+    StepScope { before: LOOP_SCOPE.with(|s| s.replace(true)), _not_send: std::marker::PhantomData }
+}
+
+impl Drop for StepScope {
+    fn drop(&mut self) {
+        LOOP_SCOPE.with(|s| s.set(self.before));
+    }
 }
 
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).
@@ -1780,6 +1844,7 @@ mod tests {
         assert_eq!(soft_step_of("TopoR loop on the topology"), Some(SoftStep::Loop));
         assert_eq!(soft_step_of("via reduction and fuse"), Some(SoftStep::Drawing));
         assert_eq!(soft_step_of("routing"), None);
+        assert_eq!(soft_step_of(crate::topo::core::PLAN_READY_STAGE), Some(SoftStep::Initial));
     }
 
     #[test]

@@ -584,9 +584,9 @@ bug](../dev/debug.md#filing-a-bug). `[output] plan_report = false` stops writing
 
 *Severity: error.*
 
-**Cause.** Cancel / OK came before the router had kept any plan (before the initial routing of any run had ended: its topology search, layer assignment and rip-up rounds), so there was nothing to draw: no copper was written and the board was not changed. A Cancel later in the run draws the best plan kept so far.
+**Cause.** Cancel / OK came before the router had a first plan (before the topological search of any run had placed every connection), so there was nothing to draw: no copper was written and the board was not changed. From the first plan on (the progress dialog then says "first plan ready, Accept will draw it"), Accept draws the best plan so far, also during the layer assignment and rip-up that follow the search.
 
-**Fix.** Route again and let the initial routing finish (the progress dialog names the step; on a large board it can take a minute or more), then press Accept (or Cancel); or let the time limit end the run (run.timeout_s, [run] timeout_mode = soft: the step that runs then finishes and its plan is drawn).
+**Fix.** Route again and wait until the progress dialog says "first plan ready, Accept will draw it" (on a large board the topological search can take a minute or more), then press Accept; or let the time limit end the run (run.timeout_s: with timeout_mode = soft the layer assignment and rip-up stop at run.limit_grace_s past it and the plan so far is drawn).
 
 ### NOTHING_TO_ROUTE
 

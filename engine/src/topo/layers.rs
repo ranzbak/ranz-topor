@@ -26,6 +26,12 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// TOPO_TIMES=1 (debug): phase times of the layer assignment on stderr; never part of the result.
+fn ttimes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("TOPO_TIMES").is_some())
+}
+
 const EPS: f64 = 1e-9;
 const MM: f64 = 1e6;
 
@@ -1692,6 +1698,8 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
     let nl = pr.n_layers;
     let full: u64 = if nl >= 64 { u64::MAX } else { (1u64 << nl) - 1 };
     let mut rep = LayerReport::default();
+    let t_an = std::time::Instant::now();
+    let tt = ttimes() && held.is_none();
     let polys: Vec<Vec<Vec2>> = (0..st.wires.len()).map(|w| if st.wires[w].alive { st.polyline(w) } else { Vec::new() }).collect();
     let mut ev: Vec<NEv> = Vec::new();
     let mut wev: Vec<Vec<usize>> = vec![Vec::new(); st.wires.len()];
@@ -1829,6 +1837,9 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             hold[e] = (t.clamp(0, 63) as u8, h);
         }
     }
+    if tt {
+        eprintln!("[layers n] events {} of {} wires, {} layers: {:.2} s", ev.len(), st.wires.iter().filter(|w| w.alive).count(), nl, t_an.elapsed().as_secs_f64());
+    }
     let costs = Costs { site, via: p.via_mm, plane_from: if p.n_signal == 0 { nl } else { p.n_signal }, plane_mm: p.plane_mm, cut: p.plane_cut, share, om, hold };
     // 1. Greedy colouring in wire order.
     const NONE: u8 = u8::MAX;
@@ -1873,6 +1884,9 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                 l = back[i][l];
             }
         }
+    }
+    if tt {
+        eprintln!("[layers n] greedy colouring: {:.2} s", t_an.elapsed().as_secs_f64());
     }
     // 2./3. Alpha-beta swaps. `solve_pair` re-solves the events labelled a or b exactly (the
     // others fixed); with `walk` > 0 the result is moved by the plateau walk (TW5 b) to a random
@@ -2033,6 +2047,9 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
         finish_local(st, &polys, h, lp, p, cache, true, &mut rep, &refine_fn);
         return rep;
     }
+    if tt {
+        eprintln!("[layers n] swaps done: {:.2} s", t_an.elapsed().as_secs_f64());
+    }
     let h_in = super::rtrace::on().then(|| super::rtrace::hash(&evl));
     let rs = packer
         .map(|pk| {
@@ -2052,6 +2069,9 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
         .unwrap_or_default();
     if let Some(h) = h_in {
         super::rtrace::note("b", h, &evl, &rs);
+    }
+    if tt {
+        eprintln!("[layers n] capacity refinement: {} evals, {} moves, over-full {} -> {}: {:.2} s", rs.evals, rs.moves, rs.before, rs.after, t_an.elapsed().as_secs_f64());
     }
     rep.overfull_before = rs.before;
     rep.overfull_after = rs.after;
@@ -2087,7 +2107,13 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
         pairs.entry((w, o)).or_insert(p);
     }
     (rep.unlayerable_pairs, rep.unlayerable_at) = pairs.into_iter().unzip();
+    if tt {
+        eprintln!("[layers n] unlayerable {}: {:.2} s", rep.unlayerable.len(), t_an.elapsed().as_secs_f64());
+    }
     stretches_and_vias(st, &polys, &evl, p, &mut rep, cache);
+    if tt {
+        eprintln!("[layers n] stretches and vias ({} vias): {:.2} s", rep.vias, t_an.elapsed().as_secs_f64());
+    }
     rep
 }
 
