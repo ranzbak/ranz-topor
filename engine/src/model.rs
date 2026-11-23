@@ -1680,8 +1680,8 @@ pub struct Options {
     pub compass_cut_check: bool,
     /// thick-layer F4 (`[output] plan_report`): keep the plan handed to the drawing of the drawn
     /// row in the result (`RouteResult::plan`, [`crate::topo::plandump`]), so a user's run can be
-    /// traced plan vs drawing without a re-route. On by default; measurement only (its time goes
-    /// back to the time limit), never changes the routing.
+    /// traced plan vs drawing without a re-route. On by default; measurement only (its time,
+    /// well under a second on qmtech, counts as router time), never changes the routing.
     pub plan_report: bool,
     /// M0 (`[capacity] edges_test`, `capacity_model = "edges"` only): how the per-edge model's
     /// over-full edge-layers enter P4. `"price"` (default) = as the method prices everything

@@ -155,8 +155,8 @@ python3 -m toporlib.plandump <report folder | plan.json.gz> [--conn ID ...] [--n
 prints the row and one block per wire; in Python `toporlib.plandump.load(dir)` gives the dict. To tell a
 plan error from a drawing error, compare it with the drawn copper (`result.json` `route.violations`,
 `route.connections`) or with a `TOPO_DUMP` of a headless rerun. Size: qmtech about 2.3 MB of JSON, a few
-hundred kB gzipped. Building it is measurement only (its time goes back to the time limit like the
-compass cut test) and changes no copper (`engine/tests/topo_plan_report.rs`). The environment variable
+hundred kB gzipped. Building it is measurement only (well under a second on qmtech, counted as router
+time) and changes no copper (`engine/tests/topo_plan_report.rs`). The environment variable
 `TOPO_PLANDUMP=<file>` (route-board.md) writes the same per-wire fields for every drawn round, before the
 unlayerable drops.
 

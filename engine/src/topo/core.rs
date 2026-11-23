@@ -7712,10 +7712,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
             // thick-layer F4 (`[output] plan_report`): the plan of this row as the drawing gets
             // it, carried with the round's result (the result handed back is a drawn row's, so it
-            // carries that row's plan). Measurement only, outside the time limit (as the compass
-            // cut test: `RunControl::measured`).
+            // carries that row's plan). Measurement only; its time (well under a second on qmtech)
+            // is router time: moving the limit by it (`RunControl::measured`) would make the
+            // result's `limit.limit_s` differ between two equal runs.
             if opts.plan_report {
-                let t_plan = Instant::now();
                 let names: Vec<String> = (0..b.n_signal).map(lname).collect();
                 let net_name = |code: i32| model.nets.iter().find(|n| n.code == code).map_or(String::new(), |n| n.name.clone());
                 let row = super::plandump::Row {
@@ -7726,7 +7726,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     opt_loop: &opts.opt_loop,
                 };
                 plan_dump = Some(super::refine::meter::suspended(|| super::plandump::plan_json(&st, &lr, bottom, &cm_plan, Some(&cp), &wc, &net_name, &names, fc_plan.0, &row)).to_string());
-                ctl.measured(t_plan.elapsed().as_secs_f64());
             }
             compass_plan = Some(cp);
         }
