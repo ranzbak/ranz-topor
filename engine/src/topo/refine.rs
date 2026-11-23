@@ -3073,4 +3073,63 @@ mod tests {
         assert_eq!(pass_layers(5, &ev, 0), vec![1, 1, 0, 0, 0]);
         assert_eq!(pass_layers(3, &[], 1), vec![1, 1, 1]);
     }
+
+    /// Tiny deterministic generator for the fuzz tests (xorshift64*).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> f64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn pt(&mut self) -> Vec2 {
+            Vec2 { x: (self.next() * 20.0 - 10.0) * 1e6, y: (self.next() * 20.0 - 10.0) * 1e6 }
+        }
+    }
+
+    /// Distance from `p` to the segment `a-b` by dense sampling (an exact-enough slow reference).
+    fn sampled_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
+        (0..=4000).map(|i| (p - (a + (b - a) * (i as f64 / 4000.0))).len()).fold(f64::INFINITY, f64::min)
+    }
+
+    /// thick-layer r5 L6 (rule 2): `poly_side` against a slow reference (the nearest segment found
+    /// by dense sampling, the sign of the cross product with it), where the nearest segment is
+    /// unambiguous (the runner-up is 5 um farther), and its symmetries: reversing the polyline or
+    /// mirroring plane and point flips the side, translating changes nothing.
+    #[test]
+    fn poly_side_fuzz_against_the_sampled_nearest_segment() {
+        let mut rng = Rng(0x9E3779B97F4A7C15);
+        let (mut checked, mut skipped) = (0, 0);
+        for _ in 0..3000 {
+            let n = 2 + (rng.next() * 5.0) as usize;
+            let pts: Vec<Vec2> = (0..n).map(|_| rng.pt()).collect();
+            let p = rng.pt();
+            let mut d: Vec<(f64, f64)> = pts.windows(2).map(|x| (sampled_dist(p, x[0], x[1]), (x[1] - x[0]).cross(p - x[0]))).collect();
+            let side = poly_side(&pts, p);
+            d.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if d.len() > 1 && d[1].0 - d[0].0 < 5e3 {
+                skipped += 1;
+                continue;
+            }
+            // symmetries (where the nearest segment is not a tie: at a shared vertex the order picks) (exact up to float rounding)
+            let rev: Vec<Vec2> = pts.iter().rev().copied().collect();
+            assert_eq!(poly_side(&rev, p), -side, "reversed {pts:?} {p:?}");
+            let mir = |q: Vec2| Vec2 { x: -q.x, y: q.y };
+            let pm: Vec<Vec2> = pts.iter().map(|&q| mir(q)).collect();
+            assert_eq!(poly_side(&pm, mir(p)), -side, "mirrored {pts:?} {p:?}");
+            let t = Vec2 { x: 3.0e6, y: -2.0e6 };
+            let pt: Vec<Vec2> = pts.iter().map(|&q| q + t).collect();
+            assert_eq!(poly_side(&pt, p + t), side, "translated {pts:?} {p:?}");
+            let want = if d[0].1 == 0.0 { 0.0 } else { d[0].1.signum() };
+            assert_eq!(side, want, "{pts:?} {p:?}");
+            checked += 1;
+        }
+        assert!(checked > 2000, "checked {checked}, skipped {skipped}");
+        // degenerate: no segment, a zero-length segment, the point on the line
+        assert_eq!(poly_side(&[], Vec2 { x: 1.0, y: 1.0 }), 0.0);
+        let z = Vec2 { x: 5.0, y: 5.0 };
+        assert_eq!(poly_side(&[z, z], Vec2 { x: 1.0, y: 1.0 }), 0.0);
+        assert_eq!(poly_side(&[Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 4.0, y: 0.0 }], Vec2 { x: 2.0, y: 0.0 }), 0.0);
+    }
 }

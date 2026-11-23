@@ -1303,4 +1303,88 @@ mod tests {
         let ev = [(1, 0.5, 0), (3, 0.2, 1), (5, 0.1, 1), (7, 0.9, 0)];
         assert_eq!(intervals(&ev), vec![(1, 0.5, 3, 0.2), (5, 0.1, 7, 0.9)]);
     }
+
+    /// Tiny deterministic generator for the fuzz tests (xorshift64*).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> f64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn pt(&mut self) -> Vec2 {
+            Vec2 { x: (self.next() * 20.0 - 10.0) * 1e6, y: (self.next() * 20.0 - 10.0) * 1e6 }
+        }
+    }
+
+    /// Distance from `p` to the segment `a-b` by dense sampling (slow reference, error <= len / 8000).
+    fn sampled_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
+        (0..=4000).map(|i| (p - (a + (b - a) * (i as f64 / 4000.0))).len()).fold(f64::INFINITY, f64::min)
+    }
+
+    /// thick-layer r5 L6 (rule 2): `seg_seg` (the test of `Drawer::taut_between`: `<= 0` = the taut
+    /// track crosses the segment) against exact integer arithmetic for the proper crossing and a
+    /// sampled distance otherwise.
+    #[test]
+    fn seg_seg_fuzz_against_exact_crossing_and_sampled_distance() {
+        let mut rng = Rng(0xD1B54A32D192ED03);
+        let (mut crossing, mut apart) = (0, 0);
+        for _ in 0..3000 {
+            let (a, b, c, d) = (rng.pt(), rng.pt(), rng.pt(), rng.pt());
+            // exact: coordinates are whole nm after rounding, products fit i128
+            let r = |q: Vec2| (q.x.round() as i128, q.y.round() as i128);
+            let (ra, rb, rc, rd) = (r(a), r(b), r(c), r(d));
+            let cr = |o: (i128, i128), p: (i128, i128), q: (i128, i128)| (p.0 - o.0) * (q.1 - o.1) - (p.1 - o.1) * (q.0 - o.0);
+            let sg = |v: i128| v.signum();
+            let proper = sg(cr(rc, rd, ra)) * sg(cr(rc, rd, rb)) < 0 && sg(cr(ra, rb, rc)) * sg(cr(ra, rb, rd)) < 0;
+            let (a, b, c, d) = (Vec2 { x: ra.0 as f64, y: ra.1 as f64 }, Vec2 { x: rb.0 as f64, y: rb.1 as f64 }, Vec2 { x: rc.0 as f64, y: rc.1 as f64 }, Vec2 { x: rd.0 as f64, y: rd.1 as f64 });
+            let got = seg_seg(a, b, c, d);
+            assert_eq!(seg_seg(c, d, a, b) <= 0.0, got <= 0.0, "symmetric {a:?} {b:?} {c:?} {d:?}");
+            assert_eq!(seg_seg(b, a, d, c) <= 0.0, got <= 0.0, "reversed {a:?} {b:?} {c:?} {d:?}");
+            if proper {
+                assert!(got <= 0.0, "proper crossing missed {a:?} {b:?} {c:?} {d:?}: {got}");
+                crossing += 1;
+            } else {
+                let want = [sampled_dist(a, c, d), sampled_dist(b, c, d), sampled_dist(c, a, b), sampled_dist(d, a, b)].into_iter().fold(f64::INFINITY, f64::min);
+                assert!((got - want).abs() <= 0.002e6 + 1e-9, "{a:?} {b:?} {c:?} {d:?}: {got} against {want}");
+                assert!(got > 0.0 || want < 0.002e6, "{a:?} {b:?} {c:?} {d:?}");
+                apart += 1;
+            }
+        }
+        assert!(crossing > 300 && apart > 300, "crossing {crossing}, apart {apart}");
+    }
+
+    /// thick-layer r5 L6: `Near::dist` against a slow reference: the taut track alone, or with M3
+    /// slack the largest sampled distance over the allowed positions (the track and its shifted
+    /// lanes whose side of `p` is the side of the reference point `r`), the taut track when none
+    /// is allowed.
+    #[test]
+    fn near_dist_fuzz_against_the_sampled_lane_distance() {
+        let mut rng = Rng(0x2545F4914F6CDD1D);
+        let poly_dist = |p: Vec2, l: &[Vec2]| l.windows(2).map(|x| sampled_dist(p, x[0], x[1])).fold(f64::INFINITY, f64::min);
+        let (mut with_lanes, mut taut_only) = (0, 0);
+        for _ in 0..400 {
+            let line = |rng: &mut Rng| -> Vec<Vec2> { (0..3 + (rng.next() * 2.0) as usize).map(|_| rng.pt()).collect() };
+            let tr = line(&mut rng);
+            let tracks = vec![Track { pts: tr.clone(), cum: Vec::new(), sig: Vec::new() }];
+            let (p, rf) = (rng.pt(), rng.pt());
+            let sh: Vec<Vec<Vec2>> = vec![line(&mut rng), line(&mut rng)];
+            let have = rng.next() < 0.7;
+            let near = Near { obs: Vec::new(), wires: vec![0], lanes: if have { vec![(0, rf, sh.clone())] } else { Vec::new() } };
+            let got = near.dist(&tracks, 0, p);
+            let taut = poly_dist(p, &tr);
+            let ok = |l: &Vec<Vec2>| super::super::refine::poly_side(l, p) * super::super::refine::poly_side(l, rf) >= 0.0;
+            let want = if have {
+                let ds: Vec<f64> = std::iter::once(&tr).chain(sh.iter()).filter(|l| ok(l)).map(|l| poly_dist(p, l)).collect();
+                with_lanes += 1;
+                ds.into_iter().fold(None, |a: Option<f64>, d| Some(a.map_or(d, |a| a.max(d)))).unwrap_or(taut)
+            } else {
+                taut_only += 1;
+                taut
+            };
+            assert!((got - want).abs() <= 0.003e6, "{tr:?} {sh:?} p {p:?} r {rf:?}: {got} against {want}");
+        }
+        assert!(with_lanes > 200 && taut_only > 50, "{with_lanes} {taut_only}");
+    }
 }
