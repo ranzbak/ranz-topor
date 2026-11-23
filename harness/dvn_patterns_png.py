@@ -61,7 +61,7 @@ def _reach(pat, segs, vias) -> dict:
         ys = [y for net, _, p in thin if net == "PWR" for _, y in p]
         out["neck_to_y"] = round(max(ys), 3) if ys else None
         ok = ok and out["neck_to_y"] is not None and abs(out["neck_to_y"] - e["neck_to_y"]) <= 0.1
-    if pat.name == "pad_axis_entry":
+    if pat.name in ("pad_axis_entry", "pad_side_approach"):
         x0, y0 = e["turn_at"]
         near = [pt for _, net, _, p in segs if net == "SIG" for pt in p if pt[1] <= e["row_tip_y"] + 0.1]
         out["side_leg"] = any(abs(x - x0) > 0.02 for x, _ in near)

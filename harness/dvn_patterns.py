@@ -277,7 +277,48 @@ def pad_axis_entry() -> Pattern:
                                      "2026-11-23 (straight out ~1 trace radius, then turn; SMD-FANOUT-STAIRCASE)"}})
 
 
-PATTERNS = {f.__name__: f for f in (via_jam_shift, via_interval_sliver, neck_in_pad_row, neck_shared_channel, pad_axis_entry)}
+def pad_side_approach() -> Pattern:
+    """4b (lead 2026-11-23, Q3's hook): pad_axis_entry's row, SIG from J1 to the RIGHT at tip height: the taut path wraps
+    pin 5's tip corner and reaches pin 4's centre through its side (the own pad's side triangle, as ADV_AVDD in Q3). The
+    answer is still the axis leg out of the tip, the turn once clear of pin 5's corner, then straight to J1."""
+    W, H = 13.0, 8.0
+    yr, pl, pw = 3.5, 1.6, 0.3
+    xs = [5.0 + 0.5 * i for i in range(7)]
+    xp = 6.5
+    u1 = _row("U1", {4: "SIG"}, xs, yr, (pw, pl))
+    tip = yr + pl / 2
+    need = W_SIG / 2 + CLEAR + EPS
+    c = (xp + 0.5 - pw / 2, tip)  # pin 5's tip corner (6.85, 4.3)
+    yt = _r(c[1] - c[0] + need * SQ2 + xp)  # the diagonal x - y = xp - yt keeps `need` from it
+    ye = 4.9
+    j1c = (11.0, ye)
+    xd = _r(xp + ye - yt)
+    sig = [(xp, yr), (xp, yt), (xd, ye), j1c]
+    j1 = Fp("J1", [Pad("1", "SIG", j1c, (1.0, 1.0))], "terminal")
+    return Pattern(
+        name="pad_side_approach", title="From the side at tip height into a long pad of a row: still along its axis, no hook",
+        kind="solvable",
+        gap_classes=["draw-via-neck (3), Q3: the plan reaches the pad centre through the pad's own side triangle; the drawing "
+                     "re-anchors the stretch at the tip (pad tip anchor) and leaves along the axis"],
+        purpose=f"Two layers, B.Cu closed. pad_axis_entry's row (0.3 x 1.6 pads, 0.5 mm pitch, tips y {tip}); SIG (0.25) from J1 "
+                f"(11, {ye}) to the right, at tip height, to pin 4: the straight approach runs under pins 7..5 and wraps pin 5's tip "
+                "corner; going on straight to the centre would enter pin 4 through its side, in the 0.2 mm gap to pin 5.",
+        answer=f"SIG straight down the pad axis to y {yt}, 45 deg down-right to ({xd}, {ye}), then straight to J1 ({_len(sig):.3f} mm). "
+               "Full width, no leg along the pad's side.",
+        why="Solvable by construction: the axis leg and the diagonal are tangent to the clearance round pin 5's tip corner; "
+            "any shorter path enters the 0.2 mm side gap (no room for a 0.25 wire beside pin 5).",
+        size=(W, H), layers=2, nets=["SIG"], fps=[u1, j1], connections=[("SIG", "U1.4", "J1.1")], cuts=[],
+        keepouts=[Keepout(["B.Cu"], [(0.0, 0.0), (W, 0.0), (W, H), (0.0, H)])],
+        classes=[dict(DEFAULT_CLASS)], ref_tracks=[Track("SIG", "F.Cu", W_SIG, sig)], ref_vias=[],
+        witness={"SIG": ("F.Cu", sig)},
+        extra={"dvn": {"ref_len": _r(_len(sig)), "vias": 0, "turn_at": [xp, yt], "row_tip_y": tip,
+                       "straight_past_tip": _r(yt - tip),
+                       "literature": "TopoR 6.3 manual p. 71; qmtech Q3 plan dump wire 409 (passes 51-53 over the own pad's "
+                                     "spokes)"}})
+
+
+PATTERNS = {f.__name__: f for f in (via_jam_shift, via_interval_sliver, neck_in_pad_row, neck_shared_channel, pad_axis_entry,
+                                    pad_side_approach)}
 
 
 def generate(name: str, out: Path, *, drc: bool = False) -> dict:
