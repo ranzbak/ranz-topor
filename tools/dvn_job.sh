@@ -17,6 +17,7 @@ case ${1:-} in
     done
     python -m harness.dvn_patterns_png $R/dvnp/runs $R/dvnp/png > $R/dvnp-png.log 2>&1; note "png rc $?"
     note "all done" ;;
+  repng) python -m harness.dvn_patterns_png /root/runs/$2/dvnp/runs $R/dvnp/png > $R/dvnp-png.log 2>&1; note "png rc $?"; note "all done" ;;
   job) hzq run --threads 2 --name dvnp-pats -- bash $ROOT/tools/dvn_job.sh pats > $R/u-pats.log 2>&1; note "unit pats rc $?" ;;
   *) echo "usage: $0 pats | job"; exit 2 ;;
 esac

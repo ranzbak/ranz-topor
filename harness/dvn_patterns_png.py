@@ -78,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
     table = {}
     for name in names:
         pat = PATTERNS[name]()
+        W0, H0 = pat.size
+        # a rule area over the whole board (B.Cu closed) is said in the title, not hatched over everything
+        full = [k for k in pat.keepouts if Polygon(k.poly).get_extents().width * Polygon(k.poly).get_extents().height >= 0.9 * W0 * H0]
+        pat.keepouts = [k for k in pat.keepouts if k not in full]
         pcbs = sorted(glob.glob(str(runs / "*" / name / name / "s0" / f"{name}-topor" / f"{name}.kicad_pcb")))
         rows = {}
         for pcb in pcbs:
@@ -99,10 +103,10 @@ def main(argv: list[str] | None = None) -> int:
         _panel(ax[0], pat, ref_segs, ref_vias, "expected", view)
         _marks(ax[0], pat)
         for k, (c, (r, segs, vias)) in enumerate(sorted(rows.items()), start=1):
-            _panel(ax[k], pat, segs, vias, f"topor main, cfg {c}: DRC new {r.get('drc_new', '?')}, unconnected "
+            _panel(ax[k], pat, segs, vias, f"today (tw-on c7f8bc8f, defaults): DRC new {r.get('drc_new', '?')}, unconnected "
                                          f"{r.get('unconnected', '?')}; matches expected: {'yes' if r['matches_expected'] else 'no'}", view)
             _marks(ax[k], pat)
-        fig.suptitle(f"{name}: {pat.title}\n[{STATUS}]  x = jammed via site (today on qmtech Q2); dotted = rule area; dashed = row tip; 'matches expected' = see expected.json", fontsize=11)
+        fig.suptitle(f"{name}: {pat.title}\n[{STATUS}]{'  B.Cu closed.' if full else ''}  x = jammed via site (today on qmtech Q2); dotted = rule area; dashed = row tip; 'matches expected' = see expected.json", fontsize=11)
         fig.tight_layout()
         fig.savefig(out / f"{name}.png", dpi=110)
         plt.close(fig)
