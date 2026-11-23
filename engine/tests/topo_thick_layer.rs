@@ -171,7 +171,8 @@ fn plan(r: &RouteResult) -> serde_json::Value {
 #[ignore]
 fn diag_thick_dive_grouping() {
     let m = thick_dive_grouping();
-    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+    let sp = std::env::var("DIAG_SITE_PLANNED").is_ok();
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(sp))]);
     let p = plan(&r);
     for w in p["wires"].as_array().unwrap().iter().filter(|w| w["net_name"] == "P") {
         println!("P wire: layers_now {} vias {} crossings {}", w["layers_now"], w["vias"], w["crossings"]);
@@ -186,6 +187,9 @@ fn diag_thick_dive_grouping() {
     for it in &r.items {
         println!("item {}", serde_json::to_string(it).unwrap());
     }
+    for w in r.warnings.iter().filter(|w| w.contains("ERBS") || w.contains("relocat") || w.contains("via site")) {
+        println!("warning: {w}");
+    }
 }
 
 /// S1 target (design M3, F1; failed on 7513b3db, passes with `[vias] site_planned`): what the plan hands the drawing predicts the
@@ -198,16 +202,18 @@ fn diag_thick_dive_grouping() {
 #[test]
 fn thick_dive_grouping_predicts_what_it_draws() {
     let m = thick_dive_grouping();
-    // ω off (P weaves, as main) and the end-site test alone (`site_lanes` off).
-    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true))]);
+    // ω off (P weaves, as main) and the end-site test alone (`site_lanes` off), the crossers'
+    // taut tracks as walls (`site_slack` 0): the drawing does not yet realise their slack, see
+    // `thick_dive_grouping_predicts_what_it_draws_with_slack`.
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_slack", serde_json::json!(0.0))]);
     let p = plan(&r);
     let drawn = r.violations.iter().filter(|v| v.conn == 0).count();
     let pred: u64 = p["conns"]["0"]["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum();
     assert!(drawn == 0 || pred > 0, "P: drawn {drawn} violations, predicted {pred}: {}", p["conns"]["0"]);
 }
 
-/// M3 (`[vias] site_planned`): P's vias between B1 / F3 and between F4 / B2 sit in 1.0 mm gaps
-/// between the crossers' taut lines, too narrow for the 0.9 mm via with clearances (1.4 mm): with
+/// M3 (`[vias] site_planned`, `site_slack` 0 = taut tracks as walls): P's vias between B1 / F3
+/// and between F4 / B2 sit in 1.0 mm gaps between the crossers' taut lines, too narrow for the 0.9 mm via with clearances (1.4 mm): with
 /// the option both are vias without a site, deficit = (1.4 - 1.0) / 2 = 0.2 mm each (the
 /// lane room, not the static room, which has space); without it (the static room alone, main)
 /// every via has a site and the plan predicts nothing. ω off (`priority_weight [0, 0]`), so P
@@ -216,7 +222,7 @@ fn thick_dive_grouping_predicts_what_it_draws() {
 fn thick_dive_grouping_lane_sites() {
     let m = thick_dive_grouping();
     let sites = |on: bool| {
-        let r = route(&m, &[("via_site_planned", serde_json::json!(on)), ("via_site_lanes", serde_json::json!(on)), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+        let r = route(&m, &[("via_site_planned", serde_json::json!(on)), ("via_site_lanes", serde_json::json!(on)), ("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_slack", serde_json::json!(0.0))]);
         let p = plan(&r);
         let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
         w["vias"].as_array().unwrap().iter().map(|v| (v["site"].as_bool().unwrap(), v["deficit"].as_f64().unwrap())).collect::<Vec<_>>()
@@ -283,16 +289,48 @@ fn thick_dive_grouping_one_side_move() {
     assert_eq!(on.violations.len(), 0, "{:?}", on.violations);
 }
 
-/// M3 end sites (`site_planned` on, `site_lanes` off) and ω off: only the end site (via 3, between F4 and B2
+/// M3 end sites (`site_planned` on, `site_lanes` off, `site_slack` 0) and ω off: only the end site (via 3, between F4 and B2
 /// in one traversal) is measured on the taut tracks; it has no room there (predicted), so the
 /// TopoR loop reroutes P (its via 3 moves above the crossers' ends of room): 1 drawn clearance
 /// item (B2 against P, 0.05 mm) instead of main's 6 (2 shorts). Without the option: main's 6.
 #[test]
 fn thick_dive_grouping_end_sites_only() {
     let m = thick_dive_grouping();
-    let o = |on: bool| route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(on))]);
+    let o = |on: bool| route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(on)), ("via_site_slack", serde_json::json!(0.0))]);
     let (on, off) = (o(true), o(false));
     let shorts = |r: &RouteResult| r.violations.iter().filter(|v| v.kind == "short").count();
     assert_eq!((off.violations.len(), shorts(&off)), (6, 2), "main: {:?}", off.violations);
     assert!(on.violations.len() < off.violations.len() && shorts(&on) == 0, "{:?}", on.violations);
+}
+
+/// M3 slack (`[vias] site_slack`, default 1): each crosser of P's 1 mm gaps has 1 mm to its
+/// planned neighbour (0.65 mm of room past the spacing), and the via needs 0.2 mm on each side:
+/// with the slack every via of P has a site and no deficit.
+#[test]
+fn thick_dive_grouping_lane_sites_with_slack() {
+    let m = thick_dive_grouping();
+    let r = route(&m, &[("via_site_planned", serde_json::json!(true)), ("via_site_lanes", serde_json::json!(true)), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+    let p = plan(&r);
+    let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
+    let v: Vec<(bool, f64)> = w["vias"].as_array().unwrap().iter().map(|v| (v["site"].as_bool().unwrap(), v["deficit"].as_f64().unwrap())).collect();
+    assert!(!v.is_empty() && v.iter().all(|x| x.0 && x.1 == 0.0), "{v:?}");
+}
+
+/// M3 slack, drawn half. TARGET, FAILS (ignored): with the slack the plan predicts every via of P
+/// a site (the crossers move 0.2 mm aside), but the drawing does not realise the shift: the via
+/// relocation ([`viaopt::relocate_vias`]) bounds each via by the crossers' taut crossings and
+/// measures its gap against their taut tracks, so it marks the sites tight; the drawing then takes
+/// them only when free of the crossers already drawn (`TOPO_VIADBG`: "VIAMISS ... tight true
+/// check [item:0 F3 -0.049 mm]"), searches other sites (one past B2 / B3: 2 shorts) and the
+/// crossers stay straight. Next: the relocation's window and gap with the same slack, so ERBS
+/// bends the crossers round the placed vias (memory reserve-planned-room).
+#[test]
+#[ignore = "drawing: via relocation and ERBS keep the crossers on their taut tracks (no slack realised); round 3 report"]
+fn thick_dive_grouping_predicts_what_it_draws_with_slack() {
+    let m = thick_dive_grouping();
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true))]);
+    let p = plan(&r);
+    let drawn = r.violations.iter().filter(|v| v.conn == 0).count();
+    let pred: u64 = p["conns"]["0"]["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum();
+    assert!(drawn == 0 || pred > 0, "P: drawn {drawn} violations, predicted {pred}: {}", p["conns"]["0"]);
 }

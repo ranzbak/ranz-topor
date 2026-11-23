@@ -1241,6 +1241,7 @@ impl<'p> State<'p> {
         let pr = self.proj;
         let wi = &self.wires[w];
         let n = wi.passes.len();
+        let pp = self.pass_ports(w);
         let mut ports: Vec<(Vec2, Vec2)> = Vec::with_capacity(n + wi.turns.len() + 2);
         let (pa, pb) = (pr.pos[wi.a], pr.pos[wi.b]);
         ports.push((pa, pa));
@@ -1254,20 +1255,34 @@ impl<'p> State<'p> {
             if k == n {
                 break;
             }
-            let p = wi.passes[k];
-            let e = self.passes[p].edge;
-            let (t1, t2) = (wi.tris[k], wi.tris[k + 1]);
-            let both = pr.allowed(t1, wi.net).map_or(0, |m| m.0) & pr.allowed(t2, wi.net).map_or(0, |m| m.0);
-            let (x, y) = self.pass_span(p, both);
-            // Left and right as seen coming from the triangle of traversal `k`.
-            let [vp, vq] = pr.edges[e];
-            let t = pr.tris[t1];
-            let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
-            let left_is_q = (pr.pos[vq] - pr.pos[vp]).cross(c - pr.pos[vp]) > 0.0;
-            ports.push(if left_is_q { (y, x) } else { (x, y) });
+            ports.push(pp[k]);
         }
         ports.push((pb, pb));
         super::pack::funnel(&ports).into_iter().map(|c| c.0).collect()
+    }
+
+    /// The span of each pass of `w` ([`State::pass_span`] on the layers both its triangles allow)
+    /// as `(left, right)` seen coming from the triangle before the pass: the ports of
+    /// [`State::taut_points`]' funnel, and the passage a pass can shift in (thick-layer M3 slack).
+    /// O(passes · edge load²).
+    pub fn pass_ports(&self, w: WireId) -> Vec<(Vec2, Vec2)> {
+        let pr = self.proj;
+        let wi = &self.wires[w];
+        (0..wi.passes.len())
+            .map(|k| {
+                let p = wi.passes[k];
+                let e = self.passes[p].edge;
+                let (t1, t2) = (wi.tris[k], wi.tris[k + 1]);
+                let both = pr.allowed(t1, wi.net).map_or(0, |m| m.0) & pr.allowed(t2, wi.net).map_or(0, |m| m.0);
+                let (x, y) = self.pass_span(p, both);
+                // Left and right as seen coming from the triangle of traversal `k`.
+                let [vp, vq] = pr.edges[e];
+                let t = pr.tris[t1];
+                let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
+                let left_is_q = (pr.pos[vq] - pr.pos[vp]).cross(c - pr.pos[vp]) > 0.0;
+                if left_is_q { (y, x) } else { (x, y) }
+            })
+            .collect()
     }
 
     fn order_index(&self, p: PassId) -> usize {

@@ -1543,6 +1543,11 @@ pub struct Options {
     /// its events is tested against the other nets' planned lanes (taut tracks) around its
     /// triangle, not only the static room. False = only the end sites ([`Options::via_site_planned`]).
     pub via_site_lanes: bool,
+    /// thick-layer M3 slack (`topor.toml [vias] site_slack`): with `via_site_planned`, the share
+    /// (0..1) of a crossing trace's passage (the room between its neighbours on each edge it
+    /// crosses near the via) by which it may move aside for the via; 1 (default) = the whole
+    /// passage, 0 = the planned tight paths are walls.
+    pub via_site_slack: f64,
     /// thick-layer M1 (`topor.toml [vias] priority_weight`): `[a_w, a_t]` of the priority weight
     /// of a wide wire's own vias, ω = 1 + a_w · max(0, width / Default width − 1) + a_t when wider
     /// than the Default netclass width ([`crate::topo::layers::Omega`]); multiplies only the
@@ -2044,6 +2049,7 @@ impl Default for Options {
             // thick-layer A/B tl3/tl4 (det s0): off; reasons in reports/thick-layer-20261123-0215.md.
             via_site_planned: false,
             via_site_lanes: false,
+            via_site_slack: 1.0,
             via_priority_weight: vec![0.0, 0.0],
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,

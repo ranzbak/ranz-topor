@@ -402,6 +402,10 @@ pub struct Packer<'a> {
     /// ([`super::refine`] `Frame::rank`) is tested against every other net's planned lane near
     /// its triangle as well (`Frame::lane_room_k`).
     pub site_lanes: bool,
+    /// thick-layer M3 slack (`[vias] site_slack`): the share (0..1) of a planned crosser's
+    /// passage room its lane may shift in when a via site is measured against it
+    /// ([`super::refine`] `Frame::shifted_lanes`); 0 = the taut tracks are walls.
+    pub site_slack: f64,
     /// 5.4 `[vias] between_crossings`: via intervals exclude the triangles of their events
     /// ([`super::refine::via_ranges`]).
     pub via_between: bool,
@@ -496,6 +500,7 @@ impl<'a> Packer<'a> {
             reserve_sites: false,
             site_planned: false,
             site_lanes: false,
+            site_slack: 1.0,
             via_between: false,
             via_cuts: None,
             via_best: false,
@@ -599,6 +604,7 @@ impl<'a> Packer<'a> {
         p.reserve_sites = opts.reserve_via_sites;
         p.site_planned = opts.via_site_planned;
         p.site_lanes = opts.via_site_lanes;
+        p.site_slack = opts.via_site_slack.clamp(0.0, 1.0);
         p.via_between = opts.via_between;
         p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.via_best = opts.via_best_point;

@@ -92,6 +92,35 @@ fn planned_crossing_window_predicts_no_via_without_a_site() {
     }
 }
 
+/// thick-layer M3 slack: the same with the via-site test against the planned crossers
+/// (`[vias] site_planned`). SDA's taut track runs left of the B.Cu window, but SDA can still
+/// shift inside its passage to pass between VCC's two vias, so it is not a wall
+/// (`[vias] site_slack`, default 1). With `site_slack = 0` the taut tracks are walls and the
+/// plan has VCC vias without a site (round 2, reports/thick-layer-20261123-0215.md).
+#[test]
+fn planned_crossing_window_predicts_no_via_without_a_site_with_planned_sites() {
+    let m = pcw();
+    for cap in ["cuts", "edges"] {
+        let r = route_with(&m, &Options { capacity_model: cap.into(), via_site_planned: true, ..loop_opts() }, &RunControl::new());
+        assert_eq!(r.failed, 0, "{cap}: {:?}", r.warnings);
+        let metrics = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics");
+        assert!(metrics.contains("\"vias_without_site\":0"), "{cap}: {metrics}");
+        let lp = r.warnings.iter().find(|w| w.starts_with("TopoR loop (")).expect("loop line");
+        assert!(lp.contains("predicted 0 violations"), "{cap}: {lp}");
+    }
+}
+
+/// The walls variant of the test above: with `site_slack = 0` the measure of round 2 returns
+/// (a mutant check that the slack is what makes the site).
+#[test]
+fn planned_crossing_window_without_slack_has_a_via_without_a_site() {
+    let m = pcw();
+    let r = route_with(&m, &Options { capacity_model: "edges".into(), via_site_planned: true, via_site_slack: 0.0, ..loop_opts() }, &RunControl::new());
+    let metrics = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics");
+    let lp = r.warnings.iter().find(|w| w.starts_with("TopoR loop (")).expect("loop line");
+    assert!(!metrics.contains("\"vias_without_site\":0") || !lp.contains("predicted 0 violations"), "{metrics} {lp}");
+}
+
 /// The drawn half under the per-edge model (the default since 2026-11-13). Expected to fail until
 /// M3 (radii / spokes / octilinear drawing geometry); shopping list PK-TW.
 ///
