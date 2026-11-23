@@ -3,6 +3,9 @@
 //! draw_grace_erbs, the erbs_timeout text (it names what stopped ERBS first, `erbs::ErbsStop`) and the engine's wait
 //! line. The tiny 2-layer board routes in well under 1 s, so the round's 1 s floor (core.rs `floor`) is still ahead
 //! when ERBS runs in the cases without a nap.
+//! time-limit-fix r2: these tests check the time limit inside the final drawing, which only
+//! `[run] timeout_scope = "all"` counts (the default "optimizing" keeps it off the clock), so
+//! their options set it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -102,7 +105,7 @@ fn apply(l: &RunControl, acts: &[Act]) {
 
 fn run(c: &Case) -> RouteResult {
     let o = Options::from_json(&format!(
-        r#"{{"wall_clock_s": {}, "timeout_mode": "{}", "timeout_overrun_s": {}, "opt_loop": "{}", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": {}, "via_reduce": false, "realise": "erbs"}}"#,
+        r#"{{"timeout_scope": "all", "wall_clock_s": {}, "timeout_mode": "{}", "timeout_overrun_s": {}, "opt_loop": "{}", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": {}, "via_reduce": false, "realise": "erbs"}}"#,
         c.wall,
         if c.hard { "hard" } else { "soft" },
         c.cap,

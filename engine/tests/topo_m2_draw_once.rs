@@ -7,6 +7,9 @@
 //! * On the TopoR-loop path the drawing never changes the plan (`drawing_feedback` has no effect).
 //! * Soft limit: a limit reached during the initial routing (P2-P4) still draws its plan; Cancel
 //!   before any plan was kept is a loud "nothing to draw yet" (fail fast), never a quiet empty run.
+//! time-limit-fix r2: these tests check the time limit inside the final drawing, which only
+//! `[run] timeout_scope = "all"` counts (the default "optimizing" keeps it off the clock), so
+//! their options set it.
 
 use std::time::{Duration, Instant};
 use topor_engine::control::RunControl;
@@ -37,7 +40,7 @@ fn crop(name: &str) -> BoardModel {
 /// times slower than release, so a 600 s limit fired on its own there (verify-m2d). The product
 /// default (`[run] timeout_s` 600) is untouched.
 fn topor(extra: &str) -> Options {
-    let mut o: serde_json::Map<String, serde_json::Value> = serde_json::from_str(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut"}"#).expect("base");
+    let mut o: serde_json::Map<String, serde_json::Value> = serde_json::from_str(r#"{"timeout_scope": "all", "wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut"}"#).expect("base");
     let more: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&format!("{{{}}}", extra.trim_start_matches(','))).expect("extra options");
     o.extend(more);
     Options::from_json(&serde_json::Value::Object(o).to_string()).expect("options parse")

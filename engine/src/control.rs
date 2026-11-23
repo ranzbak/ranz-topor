@@ -53,6 +53,16 @@ pub struct Progress {
     /// Seconds spent on measurements outside the time limit so far ([`RunControl::measured`]).
     #[serde(default)]
     pub measure_s: f64,
+    /// time-limit-fix r2: seconds on the limit's clock, optimizing time ([`TimeLimit::elapsed_s`]):
+    /// stands still once the final drawing began off the clock.
+    #[serde(default)]
+    pub optimize_s: f64,
+    /// time-limit-fix r2: seconds of the final drawing so far (0 before it; not counted by the limit).
+    #[serde(default)]
+    pub draw_s: f64,
+    /// time-limit-fix r2: the final drawing runs off the clock (`[run] timeout_scope = "optimizing"`).
+    #[serde(default)]
+    pub drawing: bool,
     /// M-B0: gain (%) of the best result over the last `stable_window` cycles (the largest over
     /// the runs still going); `None` before a full window.
     #[serde(default)]
@@ -425,6 +435,12 @@ pub struct TimeLimit {
     /// Nanoseconds since `start` at which [`TimeLimit::harden`] was first called (the plugin's CPU-clock
     /// cap); `LIMIT_NONE` = never. The instant the wall-clock cap rules use (with the round's 1 s floor).
     harden_ns: AtomicU64,
+    /// time-limit-fix r2 (user 2026-11-22: "3600 s = 3600 s optimizing, the drawing afterwards is
+    /// constant for a board so doesn't count"): nanoseconds since `start` at which the final
+    /// drawing began ([`TimeLimit::enter_drawing`], `[run] timeout_scope = "optimizing"`);
+    /// `LIMIT_NONE` = not (yet). From then on the limit's clock stands still and the limit no
+    /// longer applies: no deadline, never passed, nothing cut.
+    draw_ns: AtomicU64,
 }
 
 /// What the soft time limit lets finish (operate.md, `timeout_mode`): with `[optimize] loop =
@@ -553,7 +569,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0), harden_ns: AtomicU64::new(LIMIT_NONE) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0), harden_ns: AtomicU64::new(LIMIT_NONE), draw_ns: AtomicU64::new(LIMIT_NONE) }
     }
 }
 
@@ -878,21 +894,60 @@ impl TimeLimit {
         }
     }
 
-    /// The limit as an instant (a snapshot: a later change does not move it). O(1).
+    /// The limit as an instant (a snapshot: a later change does not move it); `None` also once the
+    /// final drawing began off the clock ([`TimeLimit::enter_drawing`]). O(1).
     pub fn deadline(&self) -> Option<Instant> {
+        if self.in_drawing() {
+            return None;
+        }
         match self.ns.load(Ordering::Relaxed) {
             LIMIT_UNSET | LIMIT_NONE => None,
             ns => Some(self.start + Duration::from_nanos(ns)),
         }
     }
 
-    /// Seconds spent since the start. O(1).
+    /// Seconds on the limit's clock: optimizing time, since the start up to the final drawing's
+    /// start when it began off the clock ([`TimeLimit::enter_drawing`]), else since the start. O(1).
     pub fn elapsed_s(&self) -> f64 {
+        match self.draw_ns.load(Ordering::Relaxed) {
+            LIMIT_NONE => self.start.elapsed().as_secs_f64(),
+            ns => ns as f64 * 1e-9,
+        }
+    }
+
+    /// Wall seconds since the start, the drawing included. O(1).
+    pub fn wall_s(&self) -> f64 {
         self.start.elapsed().as_secs_f64()
     }
 
-    /// Seconds left before the limit (0 when it passed); `None` = no limit. O(1).
+    /// time-limit-fix r2: the optimizing phase has ended and the final drawing begins now (the
+    /// TopoR loop's draw gate opened: every run has ended its loop). The limit's clock stops and
+    /// the limit no longer applies to what follows (the drawing of the picked variants, their via
+    /// reduction and pour stitching): the drawing is not counted. The first call counts. O(1).
+    pub fn enter_drawing(&self) {
+        let ns = (self.start.elapsed().as_nanos() as u64).clamp(1, LIMIT_NONE - 1);
+        let _ = self.draw_ns.compare_exchange(LIMIT_NONE, ns, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// The final drawing runs (or ran) off the clock. O(1).
+    pub fn in_drawing(&self) -> bool {
+        self.draw_ns.load(Ordering::Relaxed) != LIMIT_NONE
+    }
+
+    /// Seconds of the final drawing so far (0 before it began). O(1).
+    pub fn drawing_s(&self) -> f64 {
+        match self.draw_ns.load(Ordering::Relaxed) {
+            LIMIT_NONE => 0.0,
+            ns => (self.wall_s() - ns as f64 * 1e-9).max(0.0),
+        }
+    }
+
+    /// Seconds left before the limit (0 when it passed); `None` = no limit, also in the final drawing
+    /// off the clock ([`TimeLimit::enter_drawing`]: the limit does not apply there). O(1).
     pub fn remaining_s(&self) -> Option<f64> {
+        if self.in_drawing() {
+            return None;
+        }
         self.seconds().map(|l| (l - self.elapsed_s()).max(0.0))
     }
 
@@ -900,6 +955,9 @@ impl TimeLimit {
     /// the M1 compass's read-only cut test); not a change by the caller ([`TimeLimit::changed`]).
     /// No limit: nothing. O(1).
     pub fn extend(&self, seconds: f64) {
+        if self.in_drawing() {
+            return; // the limit does not apply in the final drawing: a measurement there must not move a stopped limit (F-T1)
+        }
         if seconds > 0.0 && seconds.is_finite() {
             let add = (seconds * 1e9) as u64;
             let _ = self.ns.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ns| (ns < LIMIT_NONE).then(|| ns.saturating_add(add).min(LIMIT_NONE - 1)));
@@ -913,8 +971,12 @@ impl TimeLimit {
 
     /// The limit is reached now (M2.TL, the plugin's CPU clock: it reached its own limit and the
     /// engine's soft limit follows): the limit becomes the time spent, not a change by the caller
-    /// ([`TimeLimit::changed`]); a limit already passed stays. O(1).
+    /// ([`TimeLimit::changed`]); a limit already passed stays. In the final drawing off the clock
+    /// ([`TimeLimit::enter_drawing`]) it does nothing: the limit does not apply there. O(1).
     pub fn reach(&self) {
+        if self.in_drawing() {
+            return;
+        }
         let now = ((self.elapsed_s() * 1e9) as u64).clamp(1, LIMIT_NONE - 1);
         let _ = self.ns.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ns| (ns == LIMIT_UNSET || ns == LIMIT_NONE || ns > now).then_some(now));
     }
@@ -1048,6 +1110,8 @@ impl RunControl {
     pub fn snapshot(&self) -> Progress {
         let mut p = self.progress.lock().map(|p| p.clone()).unwrap_or_default();
         p.limit_reached = self.limit.passed() && !self.is_cancelled() && p.phase != "done";
+        // time-limit-fix r2: the limit's clock (optimizing time) and the final drawing apart
+        (p.optimize_s, p.draw_s, p.drawing) = (self.limit.elapsed_s(), self.limit.drawing_s(), self.limit.in_drawing());
         if p.limit_reached {
             let open = p.open_steps();
             if p.limit_step.is_empty() {
@@ -1125,7 +1189,7 @@ impl RunControl {
 
     /// Seconds since the job started (the time limit's clock). O(1).
     pub fn since_start_s(&self) -> f64 {
-        self.limit.elapsed_s()
+        self.limit.wall_s()
     }
 
     /// last-preview: publish `sk` (its `seq` and `at_s` are set here) to the slots `to` (the best
@@ -1366,6 +1430,38 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// time-limit-fix r2: the final drawing off the clock. Before it the limit counts and passes as
+    /// ever; `enter_drawing` stops the clock (elapsed stands still, idempotent), the limit no longer
+    /// applies (no deadline, never passed, `reach` does nothing, a cut never comes in), the drawing's
+    /// own seconds and the wall seconds run on, and the progress says so.
+    #[test]
+    fn the_final_drawing_runs_off_the_clock() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.02);
+        ctl.limit.set_hard(true);
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(ctl.limit.passed() && ctl.limit.deadline().is_some() && !ctl.limit.in_drawing());
+        assert_eq!(ctl.limit.drawing_s(), 0.0);
+        let p = ctl.snapshot();
+        assert!(!p.drawing && p.draw_s == 0.0 && p.optimize_s >= 0.04);
+        ctl.limit.enter_drawing();
+        let at = ctl.limit.elapsed_s();
+        std::thread::sleep(Duration::from_millis(30));
+        ctl.limit.enter_drawing(); // the second run at the gate: no new start
+        assert_eq!(ctl.limit.elapsed_s(), at, "the clock stands still");
+        assert!(ctl.limit.wall_s() >= at + 0.03 && ctl.limit.drawing_s() >= 0.03);
+        assert!(!ctl.limit.passed() && ctl.limit.deadline().is_none(), "the limit does not apply in the drawing");
+        assert!(!ctl.limit.cuts_in(CutStep::Drawing), "nothing is cut in the drawing");
+        ctl.limit.set(at + 1.0);
+        ctl.limit.reach();
+        assert!((ctl.limit.seconds().unwrap_or(0.0) - (at + 1.0)).abs() < 1e-6, "reach does nothing in the drawing");
+        ctl.measured(5.0); // F-T1: the compass measurement after the drawing leaves the limit alone
+        assert!((ctl.limit.seconds().unwrap_or(0.0) - (at + 1.0)).abs() < 1e-6, "measured does not extend the limit in the drawing");
+        let p = ctl.snapshot();
+        assert!(p.drawing && p.optimize_s == at && p.draw_s >= 0.03 && !p.limit_reached, "{p:?}");
+        assert!(ctl.since_start_s() >= at + 0.03, "the run's own wall seconds");
+    }
 
     /// sync-wait: the cycle lines keep the last CYCLE_LINES, numbered by `cycles_logged`.
     #[test]

@@ -272,3 +272,113 @@ def test_bests_table_md_rows_predicted_drawn_and_applied():
     assert rows[3] == ("| shortest |  | cycle 27 (gen 6) | n/a | 0 errors / 41 vias / 865.6 mm | "
                        "n/a errors / n/a vias / n/a mm | n/a | n/a |  |"), rows[3]
     assert len(rows) == 4 and bests_table_md([]) == rows[:2]
+
+
+# ------------------------------------------------------------------ time-limit-fix: the Stopped line, one clock
+TL_WALL = {"clock": "wall", "start_s": 3600.0, "final_s": 3600.0, "changes": [], "reached": False}
+
+
+def _stopped(**facts):
+    from topor.report import stopped_line
+    return stopped_line(facts)
+
+
+def test_stopped_line_names_the_share_and_the_limit_not_reached():
+    """User 2026-11-22 (qmtech, 3600 s): the TopoR loop's share ended the run at 2357.5 s router time; the line said
+    "Stopped: timeout_wall after 1 iterations, 2357.5 s, 1 threads ... limit 3600 s wall". Now: the share as the stop
+    reason in words, the picked run's cycles, the optimizing time (the limit's clock) and the drawing apart, router
+    time = both, the engine's threads, the limit as not reached with the seconds left, and the whole run apart."""
+    line = _stopped(stop_reason="loop_time_share", iterations=9, elapsed_s=2357.5, optimize_s=1999.0, draw_s=358.5,
+                    threads=8, router_cpu_s=11480.1, time_limit=TL_WALL, run_s=2400.8)
+    assert line == ("Stopped: loop_time_share (the TopoR loop's own time share ended it, the limit was not reached) "
+                    "after 9 cycles, optimizing 1999.0 s, drawing 358.5 s (after the limit, not counted), router time "
+                    "2357.5 s, 8 threads, CPU 11480.1 s · limit 3600 s wall, not reached (1601 s left) · whole run "
+                    "2400.8 s to the result (pre-flight and KiCad's DRC not counted)")
+
+
+@pytest.mark.parametrize("stop,words", [
+    ("timeout_wall", "the optimizing time limit was reached"),
+    ("timeout_cpu", "the optimizing time limit was reached, CPU clock"),
+    ("stable", "the routes were stable"),
+    ("round cap", "the rounds safety cap ([optimize] rounds)"),
+    ("cancel", "Accept / Cancel stopped it"),
+    ("re-lay budget", "the re-lay work cap"),
+])
+def test_stopped_line_says_why_in_words_and_not_reached_only_for_the_share(stop, words):
+    """Rule 13: every stop reason, in words (time-limit-fix r2: the limit reached versus the other stops); only the
+    share's stop adds "not reached" (the limit fired, or nothing timed)."""
+    line = _stopped(stop_reason=stop, iterations=3, elapsed_s=10.0, optimize_s=8.0, draw_s=2.0, threads=4,
+                    time_limit=TL_WALL)
+    assert line.startswith(f"Stopped: {stop} ({words}) after 3 cycles, optimizing 8.0 s, drawing 2.0 s (after the "
+                           "limit, not counted), router time 10.0 s, 4 threads · limit 3600 s wall")
+    assert "not reached" not in line and "whole run" not in line and "CPU" not in line.replace(words, "")
+
+
+def test_stopped_line_on_the_cpu_clock_names_the_optimizing_cpu_seconds():
+    line = _stopped(stop_reason="timeout_cpu", iterations=3, elapsed_s=700.0, optimize_s=600.0, optimize_cpu_s=2400.0,
+                    draw_s=100.0, threads=4, router_cpu_s=2700.0, time_limit={**TL_WALL, "clock": "cpu"})
+    assert "optimizing 600.0 s (CPU 2400.0 s, the limit's clock), drawing 100.0 s" in line
+    assert ", CPU 2700.0 s · limit 3600 s cpu" in line
+
+
+def test_stopped_line_without_a_limit_or_facts():
+    # no limit (0 = none): the share's stop names no limit as not reached; no drawing figure: none shown
+    assert _stopped(stop_reason="loop_time_share", iterations=2, elapsed_s=5.0, threads=1,
+                    time_limit={**TL_WALL, "final_s": 0.0}) == (
+        "Stopped: loop_time_share (the TopoR loop's own time share ended it, the limit was not reached) after 2 "
+        "cycles, optimizing 5.0 s, router time 5.0 s, 1 threads · no time limit")
+    # the limit reached (timeout_scope = all: a soft limit passed while the drawing ran after the share): no "not reached"
+    assert "not reached (" not in _stopped(stop_reason="loop_time_share", iterations=2, elapsed_s=3700.0, threads=1,
+                                           time_limit={**TL_WALL, "reached": True, "overrun_s": 100.0})
+    # nothing known: n/a, never a crash
+    assert _stopped() == "Stopped: n/a after n/a cycles, optimizing n/a s, router time n/a s, n/a threads"
+
+
+def test_stopped_line_shows_measurements_apart_and_counts_them_out_of_the_left_time():
+    """[capacity] compass_cut_check: its time moves the engine's limit later (not optimizing time): shown apart, and
+    the seconds left of the limit are those of the optimizing time without it."""
+    line = _stopped(stop_reason="loop_time_share", iterations=4, elapsed_s=150.0, optimize_s=130.0, draw_s=20.0,
+                    threads=2, measure_s=30.0, time_limit={**TL_WALL, "final_s": 600.0})
+    assert "optimizing 130.0 s (+30.0 s measurements, not counted), drawing 20.0 s" in line
+    assert line.endswith("limit 600 s wall, not reached (500 s left)")
+
+
+@pytest.mark.parametrize("share", [0.5, 0.05, 1.0, None])
+def test_time_budget_line_for_the_share_names_it_not_the_limit(share):
+    from topor.report import time_budget_line
+    line = time_budget_line({"stop_reason": "loop_time_share", "loop_time_share": share, "time_limit": TL_WALL})
+    want = 1.0 if share is None else share
+    assert f"[optimize] loop_time_share = {want:g} of the time left when the loop began" in line
+    assert "the optimizing time limit of 3600 s wall was not reached" in line and "stopped the topological core" not in line
+    assert "default 1.0 = the loop runs to the limit" in line
+    assert "the optimizing time limit was not reached" in time_budget_line({"stop_reason": "loop_time_share"})
+    # the limit passed later (timeout_scope = all, in the drawing after the share): never called unreached
+    late = time_budget_line({"stop_reason": "loop_time_share", "time_limit": {**TL_WALL, "reached": True}})
+    assert "the optimizing time limit of 3600 s wall passed only later" in late and "not reached" not in late
+
+
+@pytest.mark.parametrize("stop,clock", [("timeout_wall", "wall"), ("timeout_cpu", "cpu")])
+def test_time_budget_line_for_the_limit_names_optimizing_time(stop, clock):
+    from topor.report import time_budget_line
+    line = time_budget_line({"stop_reason": stop, "timeout_clock": clock, "time_limit": {**TL_WALL, "clock": clock}})
+    assert line == ("Warning: time budget hit: result may differ between runs (optimizing time limit 3600 s, "
+                    f"run.timeout_s, clock {clock}, stopped the topological core before its [optimize] work caps; the "
+                    "final drawing after it is not counted)")
+
+
+def test_build_report_carries_the_separate_times_and_the_share(tmp_path):
+    res = {**_result(), "stop_reason": "loop_time_share", "iterations": 9, "threads_used": 8,
+           "warnings": ["time budget hit: result may differ between runs (the TopoR loop's own time share ...)"]}
+    rep = build_report(res, DRC, Config.defaults(), [], "whole board", None,
+                       {"router_s": 2357.46, "router_cpu_s": 11480.1, "measure_s": 0.0, "run_s": 2400.83,
+                        "optimize_s": 1999.04, "optimize_cpu_s": 9800.0, "draw_s": 358.42},
+                       dir=tmp_path, facts={"time_limit": TL_WALL})
+    f = rep.facts
+    assert (f["elapsed_s"], f["run_s"], f["threads"], f["iterations"], f["loop_time_share"]) == (2357.5, 2400.8, 8, 9, 1.0)
+    assert (f["optimize_s"], f["optimize_cpu_s"], f["draw_s"]) == (1999.0, 9800.0, 358.4)
+    assert "measure_s" not in f  # 0 = none: not shown
+    lines = rep.summary_lines()
+    assert any(ln.startswith("Stopped: loop_time_share (") and "after 9 cycles, optimizing 1999.0 s, drawing 358.4 s"
+               in ln and "router time 2357.5 s, 8 threads" in ln for ln in lines)
+    assert any("loop_time_share = 1 of the time left" in ln for ln in lines if ln.startswith("Warning: time budget"))
+    assert len(lines) <= SUMMARY_MAX_LINES

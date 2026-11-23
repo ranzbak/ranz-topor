@@ -2,6 +2,9 @@
 //! reaches the limit at the loop's first stop check inside its first cycle; with the grace at 0 the
 //! cycle is cut at the next check and dropped, with no bound it finishes and is offered. Without a
 //! limit the grace changes nothing (same plan, same copper).
+//! time-limit-fix r2: these tests check the time limit inside the final drawing, which only
+//! `[run] timeout_scope = "all"` counts (the default "optimizing" keeps it off the clock), so
+//! their options set it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -17,7 +20,7 @@ fn crop() -> BoardModel {
 }
 
 fn topor(grace: f64) -> Options {
-    Options::from_json(&format!(r#"{{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "runs": 1, "topo_rounds": 3, "limit_grace_s": {grace}}}"#)).expect("options parse")
+    Options::from_json(&format!(r#"{{"timeout_scope": "all", "wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "runs": 1, "topo_rounds": 3, "limit_grace_s": {grace}}}"#)).expect("options parse")
 }
 
 /// Runs with the limit reached at the loop's first move check (`reach` = false: no limit at all).
@@ -215,7 +218,7 @@ fn a_cancel_in_the_loop_is_no_dropped_cycle() {
 }
 
 fn hard() -> Options {
-    Options::from_json(r#"{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "runs": 1, "topo_rounds": 3, "timeout_mode": "hard"}"#).expect("options parse")
+    Options::from_json(r#"{"timeout_scope": "all", "wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "runs": 1, "topo_rounds": 3, "timeout_mode": "hard"}"#).expect("options parse")
 }
 
 /// Hard mode: the line is there too, and says the step was cut (not that it ran to its end).

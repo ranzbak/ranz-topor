@@ -179,3 +179,15 @@ def test_route_eprom_summary(eprom_copy, monkeypatch):
     rep = tools.report(r["run_id"])
     assert rep["routed"] == 27 and rep["failures_by_reason"] == []
     assert [p.name for p in eprom_copy.parent.glob("*.kicad_pcb")] == [eprom_copy.name]
+
+
+def test_run_timeout_derives_from_timeout_s():
+    """F-T2: the hard kill of the route subprocess follows timeout_s (plus a drawing margin), never below 3600 s."""
+    from mcp_server import tools
+    f = tools._run_timeout_s
+    assert f({}, {}) == 3600.0 and f({"timeout_s": 600}, {}) == 3600.0
+    assert f({"timeout_s": 3000}, {}) == 2 * 3000 + tools.DRAWING_MARGIN_S > 3000 + tools.DRAWING_MARGIN_S
+    assert f({}, {"run.timeout_s": 5000}) == 2 * 5000 + tools.DRAWING_MARGIN_S  # from topor.toml / set
+    assert f({"timeout_s": 3000}, {"run.timeout_s": 10}) == 2 * 3000 + tools.DRAWING_MARGIN_S  # the option wins
+    assert f({"timeout_s": 3000, "run_timeout_s": 99}, {}) == 99.0  # an explicit value is kept
+    assert f({"timeout_s": "none"}, {}) == 3600.0

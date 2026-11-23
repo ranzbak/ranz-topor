@@ -135,6 +135,19 @@ def test_dog_bone_is_a_stitch_and_a_miss_is_named():
     assert any("boxed in by S5" in x for x in fs["POUR_ISLANDS"].items)
 
 
+def test_off_grid_dog_bone_warning_is_not_listed_as_a_stitched_item():
+    """L3: the off-grid warning starts with "dog-bone " too; it belongs to STITCH_OFF_GRID, not twice to POUR_STITCHED."""
+    off = ("dog-bone U1.3 off the via grid at (10.000, 7.000): the pad's only connection, no legal via-grid point for its via "
+           "(connection copper goes off the grid where it does not fit, as in KiCad; stitching extras never do)")
+    res = {"connections": [_c("GND", "routed")], "warnings": [
+        "pour stitching: 1 pour pieces cut off by the routed copper before, 0 after; 0 island vias, 0 pad stubs, "
+        "0 island joins, 1 dog-bones (0.01 s)",
+        "dog-bone U1.3 -> (10.000, 7.000) (3.000 mm, via, 0.250 mm wide) for GND", off]}
+    fs = {f.code: f for f in postrun.route_findings(res)}
+    assert not any("off the via grid" in x for x in fs["POUR_STITCHED"].items), fs["POUR_STITCHED"].items
+    assert any(x.startswith("dog-bone U1.3 ->") for x in fs["POUR_STITCHED"].items)
+
+
 def test_stitch_vias_finding_lists_the_pieces():
     """stitch-vias: the region stitching summary (engine/tests/topo_stitch_vias.rs pins its words) becomes
     STITCH_VIAS with one item per piece that got a via; none when it placed no via."""

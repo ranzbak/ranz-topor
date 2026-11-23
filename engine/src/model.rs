@@ -911,6 +911,15 @@ pub struct Options {
     /// connections it had not reached unrouted, a TopoR loop cycle cut there is not kept (close to
     /// the behaviour before M2, not the same: Cancel in P2-P4 and draw once hold in both modes).
     pub timeout_mode: String,
+    /// time-limit-fix r2 (`[run] timeout_scope`, user 2026-11-22: "3600 s = 3600 s optimizing, the
+    /// drawing afterwards is constant for a board so doesn't count"): what the time limit counts.
+    /// `"optimizing"` (default): the optimizing phase only, the initial routing and the TopoR loop
+    /// of every run (drawing rounds inside the loop count); the final drawing of the picked
+    /// variants after the loop is not counted and the limit no longer applies to it (nothing cut,
+    /// `drawing_grace_s` and `timeout_overrun_s` do not act there). `"all"`: the limit also counts
+    /// the final drawing, as before 2026-11-22 (the hard limit, the overrun cap and
+    /// `drawing_grace_s` act there). With `opt_loop = "cycles"` every cycle draws, so all counts.
+    pub timeout_scope: String,
     /// F3 `[run] timeout_overrun_s` (user 2026-11-13): seconds past `wall_clock_s` after which the
     /// soft limit acts as the hard one (the step that runs is cut, the kept plan is drawn in full,
     /// a loud warning). JSON: `"auto"` (default) = equal to `wall_clock_s`, so a direct engine
@@ -1236,8 +1245,11 @@ pub struct Options {
     /// graded in between (Luzin & Polubasov 2006 p. 75: length first, vias later in each cycle).
     pub loop_via_start: f64,
     pub loop_via_end: f64,
-    /// `[optimize] loop_time_share` (`loop = "topor"`): the share of the time left that the loop may
-    /// use at most (an emergency stop, like the time limit; the rest is the drawing's).
+    /// `[optimize] loop_time_share` (`loop = "topor"`): the share of the time left when the loop
+    /// began that the loop may use at most, an extra stop before the time limit. Default 1.0 = no
+    /// extra stop: the loop runs to the time limit (time-limit-fix r2: the final drawing is not
+    /// counted, so it needs no share kept for it). Below 1 the loop ends earlier, stop reason
+    /// `loop_time_share`.
     pub loop_time_share: f64,
     /// `[optimize] refine_lanes` (par-refine, docs/design/47-parallel-refine.md): how many lanes
     /// evaluate the layer refinement's candidate moves at once. JSON `"auto"` (default; 0 in Rust)
@@ -1868,6 +1880,7 @@ impl Default for Options {
             margin_nm: 0,
             wall_clock_s: 60.0,
             timeout_mode: "soft".into(),
+            timeout_scope: "optimizing".into(),
             timeout_overrun_s: OVERRUN_AUTO,
             limit_grace_s: 30.0,
             drawing_grace_s: 60.0,
@@ -1935,7 +1948,7 @@ impl Default for Options {
             loop_stable_window: 8,
             loop_via_start: 0.5,
             loop_via_end: 1.5,
-            loop_time_share: 0.5,
+            loop_time_share: 1.0,
             refine_lanes: 0,
             refine_reference: false,
             measure_reuse: true,

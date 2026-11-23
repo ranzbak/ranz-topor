@@ -415,6 +415,13 @@ pub struct LimitReport {
     pub draw_grace_hit: bool,
     /// Wires drawn the sequential way because the drawing bound cut their ERBS (`realise = "erbs"`).
     pub draw_grace_erbs: usize,
+    /// time-limit-fix r2: seconds on the limit's clock (optimizing time; with `scope = "all"` the
+    /// whole call).
+    pub optimize_s: f64,
+    /// time-limit-fix r2: seconds of the final drawing, off the clock (0 with `scope = "all"`).
+    pub draw_s: f64,
+    /// `[run] timeout_scope`: `"optimizing"` (default: the final drawing is not counted) or `"all"`.
+    pub scope: String,
 }
 
 /// A routed differential-pair connection (D7), nm. `from` / `to` are the P connection's pads.

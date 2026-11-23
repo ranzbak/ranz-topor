@@ -221,7 +221,7 @@ fn a_soft_limit_passed_before_the_run_places_every_plane_stub() {
     ctl.limit.init(1e-6);
     let late = route_with(&m, &Options::default(), &ctl);
     assert!(late.limit.as_ref().is_some_and(|l| l.reached && l.mode == "soft" && l.cut == "none"), "{:?}", late.limit);
-    assert_eq!(planes(&late), planes(&free), "the soft limit cut the plane stubs");
+    assert_eq!(planes(&late), planes(&free), "the soft limit cut the plane stubs; late warnings {:?}, limit {:?}", late.warnings, late.limit);
     assert_eq!((late.routed, vias(&late.items)), (free.routed, vias(&free.items)));
 }
 

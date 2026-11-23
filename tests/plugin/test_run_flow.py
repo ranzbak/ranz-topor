@@ -135,6 +135,12 @@ class ProxyJob:
         d = json.loads(self.real.progress())
         self.last = dict(d)
         d["iteration"] = max(d.get("iteration", 0), 1)
+        if self.polls < self.hold:
+            # time-limit-fix r2: the held polls stand for a long optimizing phase (the real job may be done and
+            # drawn already): not drawing, the optimizing time = the job's wall time (no engine figure)
+            d["drawing"] = False
+            for k in ("optimize_s", "draw_s"):
+                d.pop(k, None)
         return json.dumps(d)
 
     def done(self):

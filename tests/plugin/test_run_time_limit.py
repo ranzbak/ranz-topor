@@ -114,7 +114,9 @@ def test_without_a_change_the_limit_is_fixed_and_reported(app, eprom, tmp_path, 
                                        # limit_grace_s (default 30 s): the loop step's wait past the limit
                                        "wait_s": 0.0, "cycle_dropped": False, "grace_s": 30.0, "grace_hit": False,
                                        # drawing_grace_s (default 60 s): the drawing's optional passes
-                                       "draw_grace_s": 60.0, "draw_grace_hit": False, "draw_grace_erbs": 0}
+                                       "draw_grace_s": 60.0, "draw_grace_hit": False, "draw_grace_erbs": 0,
+                                           # time-limit-fix r2: the limit counts optimizing time, not the drawing
+                                           "scope": "optimizing"}
     assert "limit 60 s wall" in "\n".join(out.report.summary_lines())
 
 

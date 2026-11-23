@@ -3,6 +3,9 @@
 //! the later of the limit and its own start. Every wire is still drawn and the pour stitching is
 //! never cut by it (never drop). Synthetic board: three crossing two-pin nets on two layers (vias for
 //! the reduction) and a GND pour on F.Cu the top-layer copper cuts (pieces for the stitching).
+//! time-limit-fix r2: these tests check the time limit inside the final drawing, which only
+//! `[run] timeout_scope = "all"` counts (the default "optimizing" keeps it off the clock), so
+//! their options set it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -58,7 +61,7 @@ fn board() -> BoardModel {
 
 fn opts(grace: f64, reduce: bool, realise: &str) -> Options {
     Options::from_json(&format!(
-        r#"{{"wall_clock_s": 86400.0, "timeout_overrun_s": "none", "opt_loop": "topor", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": {grace}, "via_reduce": {reduce}, "realise": "{realise}"}}"#
+        r#"{{"timeout_scope": "all", "wall_clock_s": 86400.0, "timeout_overrun_s": "none", "opt_loop": "topor", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": {grace}, "via_reduce": {reduce}, "realise": "{realise}"}}"#
     ))
     .expect("options parse")
 }
@@ -168,7 +171,7 @@ fn erbs_stretches_past_the_bound_are_drawn_the_sequential_way() {
 #[test]
 fn an_overrun_cap_that_fires_during_erbs_stops_it() {
     let o = Options::from_json(
-        r#"{"wall_clock_s": 86400.0, "timeout_overrun_s": 1.5, "opt_loop": "topor", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": -1.0, "via_reduce": false, "realise": "erbs"}"#,
+        r#"{"timeout_scope": "all", "wall_clock_s": 86400.0, "timeout_overrun_s": 1.5, "opt_loop": "topor", "initial": "once", "runs": 1, "topo_rounds": 1, "drawing_grace_s": -1.0, "via_reduce": false, "realise": "erbs"}"#,
     )
     .expect("options parse");
     let mut ctl = RunControl::new();

@@ -186,6 +186,8 @@ def test_direct_engine_calls_have_the_overrun_cap_by_default(engine):
 def _strip(r):
     r = dict(r)
     r.pop("runtime_s")
+    if isinstance(r.get("limit"), dict):  # wall-clock seconds of the optimizing / drawing phases differ per run
+        r["limit"] = {k: v for k, v in r["limit"].items() if k not in ("optimize_s", "draw_s")}
     r.pop("warnings")  # the "plan metrics" line carries wall-time shares (layer_share_pct, loop_s) that differ per run
     return r
 
