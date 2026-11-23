@@ -278,6 +278,7 @@ WORDING: dict[str, dict[str, str]] = {
     },
     "error": {
         "title": "Topor — Error",
+        "title_notice": "Topor — Notice",  # pour-pad-join: an info finding (NOTHING_TO_ROUTE); never a warning or error
         "code": "{code}",
         "message": "{message}",
         "fix_label": "Fix",
@@ -2100,7 +2101,11 @@ class ErrorDialog(_Base):
     TAB_ORDER = ("details", "copy_details", "open_report_folder", "close")
 
     def __init__(self, finding: Finding, ctx: UiContext | None = None):
-        super().__init__(WORDING["error"]["title"], resizable=True)
+        # pour-pad-join (lead 2026-11-23): an info finding (a fully connected board: NOTHING_TO_ROUTE) gets the same
+        # window as a notice with the information icon. A warning or error that comes here stays loud (fail fast,
+        # run.py: "a loud error dialog, never a quiet notice"): the "Topor — Error" title and the red error icon.
+        notice = finding.severity == "info"
+        super().__init__(WORDING["error"]["title_notice" if notice else "title"], resizable=True)
         ctx = ctx or UiContext()
         W = WORDING["error"]
         self.finding = finding
@@ -2108,8 +2113,9 @@ class ErrorDialog(_Base):
         self.details_text = self._details(finding, ctx)
 
         icon = wx.StaticBitmap(self, bitmap=wx.ArtProvider.GetBitmap(
-            wx.ART_ERROR, wx.ART_LIST, self.FromDIP(wx.Size(16, 16))), name="icon")
-        icon.SetToolTip("Error")
+            wx.ART_INFORMATION if notice else wx.ART_ERROR, wx.ART_LIST, self.FromDIP(wx.Size(16, 16))), name="icon")
+        icon.SetToolTip("Notice" if notice else "Error")
+        self.notice = notice
         head = self.text(self, "error", "code", text=finding.code, bold=True)
         hr = wx.BoxSizer(wx.HORIZONTAL)
         hr.Add(icon, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)

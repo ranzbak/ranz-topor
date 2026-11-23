@@ -421,17 +421,39 @@ pub fn decompose_with(model: &BoardModel, opts: &Options, layers: &[u32], signal
             }
         }
         // Pours join the pads and vias they list that have copper on one of the pour's layers
-        // (a pour is a node of its own).
-        for (zn, (_, z)) in pours.iter().enumerate() {
+        // (a pour is a node of its own). pour-pad-join: a label `REF.NUM` names every pad of that
+        // reference and number; a footprint can have several (connector shields `SH`, mounting
+        // pads `MP`), each its own terminal. One such pad is joined by its label; of several, the
+        // fill decides (the pour check's KiCad spoke rule, `pourcheck::pour_joined_pads`): a pad
+        // this pour reaches (joined to one of its own islands, also when the pour is not in the
+        // net's main component) is joined to it, one it does not reach keeps its connection. (The
+        // first match alone left the others out: phantom pad-to-pour connections on a complete
+        // board.)
+        let named = |r: &PadRef, z: &Pour| -> Vec<usize> {
+            (0..np)
+                .filter(|&a| {
+                    let p = &model.pads[pads[a]];
+                    p.ref_ == r.ref_ && p.number == r.number && p.layers.iter().any(|l| z.layers.contains(l))
+                })
+                .collect()
+        };
+        let shared_label = pours.iter().any(|(_, z)| z.pads.iter().any(|s| parse_pour_pad(s).is_some_and(|r| named(&r, z).len() > 1)));
+        let joined = shared_label.then(|| crate::pourcheck::pour_joined_pads(model, &BTreeSet::from([net])));
+        for (zn, (zi, z)) in pours.iter().enumerate() {
             let pn = np + nv + nk + zn;
             for s in &z.pads {
                 let Some(r) = parse_pour_pad(s) else { continue };
-                if let Some(a) = pads.iter().position(|&pi| {
-                    model.pads[pi].ref_ == r.ref_
-                        && model.pads[pi].number == r.number
-                        && model.pads[pi].layers.iter().any(|l| z.layers.contains(l))
-                }) {
-                    dsu.union(a, pn);
+                match named(&r, z).as_slice() {
+                    [] => {}
+                    [a] => dsu.union(*a, pn),
+                    many => {
+                        let reached = joined.as_ref().and_then(|j| j.get(zi));
+                        for &a in many {
+                            if reached.is_some_and(|v| v.contains(&pads[a])) {
+                                dsu.union(a, pn);
+                            }
+                        }
+                    }
                 }
             }
             for u in &z.vias {

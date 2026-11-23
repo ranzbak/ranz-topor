@@ -58,11 +58,14 @@ def make_fixture_board(
     dangling_trace=False,
     fp_clearance_mm=None,
     pad_clearance_mm=None,
+    shield_pads=0,
 ) -> Path:
     """Synthetic board. `b_pads`: SIG pads "2"/"3" are SMD on B.Cu (SIG then needs a via to reach
     the F.Cu pads). `pour_gap_pad`: GND SMD pad "9" on F.Cu at (10, 30) that the B.Cu GND pour
     cannot reach. `dangling_trace`: a hand-started SIG track from pad "5" (20, 28) up and to the right,
-    ending at (22, 26.5) in the open (a dangling end heading ~37 degrees up; pad "2" is further up)."""
+    ending at (22, 26.5) in the open (a dangling end heading ~37 degrees up; pad "2" is further up).
+    `shield_pads` (pour-pad-join): a connector J1 with that many THT GND pads all numbered "SH" (shield /
+    mounting pads), 1.6 mm round, 0.8 mm drill, at (8 + 8 k, 34) mm, inside the B.Cu GND pour (`zone`)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     b = pcbnew.CreateEmptyBoard()
@@ -146,6 +149,15 @@ def make_fixture_board(
             p.SetLayerSet(p.UnplatedHoleMask())
             p.SetPosition(_v(45, 35))
             fp.Add(p)
+
+    if shield_pads:
+        jf = pcbnew.FOOTPRINT(b)
+        jf.SetReference("J1")
+        jf.SetValue("J1")
+        jf.SetPosition(_v(0, 0))
+        b.Add(jf)
+        for k in range(shield_pads):
+            _add_pad(jf, "SH", pcbnew.PAD_SHAPE_CIRCLE, (1.6, 1.6), (8 + 8 * k, 34), nets["GND"], drill=(0.8, 0.8))
 
     if net_tie:
         nt = pcbnew.FOOTPRINT(b)
