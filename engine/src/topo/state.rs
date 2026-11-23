@@ -1257,16 +1257,18 @@ impl<'p> State<'p> {
         let (pa, pb) = (pr.pos[wi.a], pr.pos[wi.b]);
         ports.push((pa, pa));
         let mut ti = 0;
-        for k in 0..=n {
+        for (k, &port) in pp.iter().enumerate().take(n) {
             while ti < wi.turns.len() && wi.turns[ti].0 == k {
                 let v = pr.pos[wi.turns[ti].1];
                 ports.push((v, v));
                 ti += 1;
             }
-            if k == n {
-                break;
-            }
-            ports.push(pp[k]);
+            ports.push(port);
+        }
+        while ti < wi.turns.len() && wi.turns[ti].0 == n {
+            let v = pr.pos[wi.turns[ti].1];
+            ports.push((v, v));
+            ti += 1;
         }
         ports.push((pb, pb));
         super::pack::funnel(&ports).into_iter().map(|c| c.0).collect()

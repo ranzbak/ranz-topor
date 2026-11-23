@@ -625,8 +625,11 @@ pub struct Frame<'a> {
     lane_k: std::sync::Mutex<crate::fxhash::FxHashMap<(WireId, usize), f64>>,
     /// M3 slack (`[vias] site_slack`): per wire the `(left, right)` span ends of its passes
     /// ([`State::pass_ports`]), the passage each pass can shift in. Memo.
-    ports: Vec<std::sync::OnceLock<std::sync::Arc<Vec<(Vec2, Vec2)>>>>,
+    ports: Vec<std::sync::OnceLock<std::sync::Arc<PassPorts>>>,
 }
+
+/// The `(left, right)` span ends of a wire's passes ([`State::pass_ports`]).
+type PassPorts = Vec<(Vec2, Vec2)>;
 
 /// CM1: the neighbourhood of a wire's path ([`Frame::nstar`]).
 struct NStar {
