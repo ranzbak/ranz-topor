@@ -1079,6 +1079,12 @@ pub struct Options {
     /// the vias a cut-off pour piece (class 1), a dropped island (class 2) or a thinly connected
     /// core (class 3) gets at least, where room allows; more by area, one per `stitch_pitch_x_nm` · `stitch_pitch_y_nm`.
     pub stitch_min_vias: usize,
+    /// pad-pour-via (`topor.toml [planes] stitch_dogbone`, default true, user 2026-11-22): a pour
+    /// pad whose thermal spokes are all cut and that no straight pad stub reaches gets a dog-bone:
+    /// a stub out along its axis (straight, or with one 45 or 90 degree leg) to a via of the net
+    /// class (or an existing via of its net) standing in solid fill of the net on another layer
+    /// ([`crate::topo::stitch`]). False: such a pad is only reported.
+    pub stitch_dogbone: bool,
     /// stitch-vias (`[planes] stitch_per_area`, default true): a piece gets one via per
     /// x · y lattice cell of its area on top of `stitch_min_vias`; false = `stitch_min_vias` only.
     pub stitch_per_area: bool,
@@ -1899,6 +1905,7 @@ impl Default for Options {
             stitch_islands: true,
             plane_join_islands: true,
             stitch_min_vias: 2,
+            stitch_dogbone: true,
             stitch_per_area: true,
             stitch_pitch_x_nm: 5_000_000,
             stitch_pitch_y_nm: 5_000_000,

@@ -118,6 +118,7 @@ impl Raster {
         out
     }
 
+    /// Debug: distance from `p` to the nearest labelled cell centre within `r` (inf when none).
     /// Island id of the cell containing `p` (0 outside the fill or the raster).
     fn label_at(&self, p: Vec2) -> u32 {
         self.cell(p).map_or(0, |c| self.label[c])
@@ -348,15 +349,17 @@ fn edt_2d(fill: &[bool], nx: usize, ny: usize) -> Vec<f64> {
 /// width `w`), not its whole bounding box. At most `allowance` cells are stamped and `stop` is
 /// polled every 64 stamps; either cut leaves later stamps out. Returns the raster, the number of
 /// cells stamped and whether the stamping was cut short. Total `O(nx*ny + stamped cells)`.
+#[allow(clippy::too_many_arguments)]
 fn build_raster(
     rings: &[&[Vec2]],
     outs: &[&[Vec2]],
+    reliefs: &[(Skeleton, f64)],
     stamps: &[(Seg, f64)],
     allowance: u64,
     stop: &dyn Fn() -> bool,
     erode: f64,
     cells: f64,
-) -> (Raster, u64, bool) {
+) -> (Raster, u64, bool, Option<SpokeAux>) {
     let mut bb: Option<Aabb> = None;
     for ring in rings {
         for p in ring.iter() {
@@ -452,6 +455,27 @@ fn build_raster(
             }
         }
     }
+    // Thermal reliefs of the pour's own thermal pads (pad-pour-via): KiCad's refill knocks out the
+    // pad grown by its thermal gap and adds a spoke only where the spoke's test point lands in the
+    // fill ([`spoke_test_point`]); the pre-route fill still holds the old spokes, which would join the
+    // pad to fill KiCad no longer reaches. Cells whose centre is nearer than the gap to the pad's
+    // copper are no fill. O(cells in each relief's box).
+    let mut spokeable = if reliefs.is_empty() { Vec::new() } else { vec![false; nx * ny] };
+    for (sk, gap) in reliefs {
+        let bb = skeleton_bbox(sk).grow(*gap);
+        let (i0, i1, j0, j1) = r.range(&bb);
+        for j in j0..j1 {
+            for i in i0..i1 {
+                let c = j * nx + i;
+                // Spoke copper may stand anywhere in the relief (KiCad adds the spoke outline to the
+                // fill whatever the old fill held there), unless foreign copper's knockout takes it.
+                if crate::geom::point_skeleton(r.centre(i, j), sk) < *gap {
+                    fill[c] = false;
+                    spokeable[c] = true;
+                }
+            }
+        }
+    }
     // Knockouts: one interval per capsule and row.
     let mut stamped = 0u64;
     let mut cut = false;
@@ -480,10 +504,15 @@ fn build_raster(
             }
             while i <= i1 {
                 fill[j * nx + i as usize] = false;
+                if !spokeable.is_empty() {
+                    spokeable[j * nx + i as usize] = false;
+                }
                 i += 1;
             }
         }
     }
+    // The fill a spoke may be drawn into, and the fill before the opening ([`SpokeAux`]).
+    let aux = (!spokeable.is_empty()).then(|| SpokeAux { pre: fill.clone(), spokeable });
     // Fill depth and the min-width opening. A cell next to a knocked-out cell has its centre
     // half a cell inside the edge.
     let d2 = edt_2d(&fill, nx, ny);
@@ -540,7 +569,15 @@ fn build_raster(
         let n = cells.max(1) as f64;
         r.centroid[id as usize] = Vec2 { x: r.x0 + (si / n + 0.5) * res, y: r.y0 + (sj / n + 0.5) * res };
     }
-    (r, stamped, cut)
+    (r, stamped, cut, aux)
+}
+
+/// pad-pour-via: what [`spoke_joins`] needs of a raster with thermal reliefs: the fill after every
+/// knockout but before the min-width opening (`pre`), and the cells that only a thermal relief
+/// emptied (`spokeable`: a spoke drawn there is copper again, unless a foreign knockout covers it).
+pub struct SpokeAux {
+    pre: Vec<bool>,
+    spokeable: Vec<bool>,
 }
 
 /// x-interval where the horizontal line `y = yc` meets the capsule (segment `s` grown by `rad`);
@@ -619,6 +656,179 @@ fn prim_samples(p: &Prim, step: f64) -> Vec<Vec2> {
 }
 
 /// Half extent of a pad skeleton from the pad centre in direction `u` (support function).
+/// The zone connection of `pad` to pour `z` (pad override first; "thermal for THT" resolved by the
+/// pad's attribute). O(1).
+fn pad_mode(pad: &crate::model::Pad, z: &crate::model::Pour) -> i32 {
+    match pad.zone_connection.unwrap_or(z.pad_connection) {
+        CONN_THT_THERMAL if pad.attr == PadAttr::Pth => CONN_THERMAL,
+        CONN_THT_THERMAL => CONN_FULL,
+        m => m,
+    }
+}
+
+/// The spoke width KiCad 10 draws for `pad` in pour `z` (`buildThermalSpokes`): the zone's spoke
+/// width, at most the pad's minor size (its skeleton's extents in the pad frame). O(vertices).
+pub fn spoke_width(pad: &crate::model::Pad, sk: &Skeleton, z: &crate::model::Pour) -> f64 {
+    let c = pad.center.to_vec2();
+    let rot = pad.rotation_deg.to_radians();
+    let (e1, e2) = (Vec2 { x: rot.cos(), y: rot.sin() }, Vec2 { x: -rot.sin(), y: rot.cos() });
+    let h1 = support(sk, c, e1).max(support(sk, c, e1 * -1.0));
+    let h2 = support(sk, c, e2).max(support(sk, c, e2 * -1.0));
+    (z.spoke_width.max(0) as f64).min(2.0 * h1.min(h2))
+}
+
+/// The islands (labels of `r`) the thermal spokes `(pad centre, test point, width)` join the pad of
+/// skeleton `sk` to, and whether they reach the copper of `to` (a facing spoke pair's other pad)
+/// (pad-pour-via, KiCad 10 `fillCopperZone`: the spoke is added to the
+/// fill, the clearance holes are subtracted again and the fill is opened by half the minimum width,
+/// so a spoke that foreign copper narrows below the minimum width on its way to the pad is gone).
+/// The spoke is copper where only a relief emptied the fill ([`SpokeAux::spokeable`]); the opening
+/// is redone in a patch around the spoke (a cell stays when no empty cell centre lies within
+/// `half_min/res + 0.25` cells, as [`build_raster`] erodes); the pad joins every original island
+/// that a 4-connected path of kept cells reaches from the cells within `half_min` (+0.71 cell) of
+/// its copper (`to` likewise). O(patch cells x opening disc cells).
+fn spoke_joins(r: &Raster, aux: &SpokeAux, spokes: &[(Vec2, Vec2, f64)], sk: &Skeleton, to: Option<&Skeleton>, half_min: f64) -> (Vec<u32>, bool) {
+    if spokes.iter().any(|&(c, p, sw)| (p - c).len() <= 0.0 || sw <= 0.0) || spokes.is_empty() {
+        return (Vec::new(), false);
+    }
+    let in_spoke = |q: Vec2| spokes.iter().any(|&(c, p, sw)| in_spoke_rect(q, c, p, sw));
+    let res = r.res;
+    let rc = half_min / res + 0.25;
+    let rr = rc.ceil() as i64 + 1;
+    let offs: Vec<(i64, i64)> = (-rr..=rr).flat_map(|dj| (-rr..=rr).map(move |di| (di, dj))).filter(|&(di, dj)| ((di * di + dj * dj) as f64).sqrt() < rc).collect();
+    let mut bb: Option<Aabb> = None;
+    for &(c, p, sw) in spokes {
+        let b = Aabb { min: Vec2 { x: c.x.min(p.x), y: c.y.min(p.y) }, max: Vec2 { x: c.x.max(p.x), y: c.y.max(p.y) } }.grow(0.5 * sw + half_min + 3.0 * res);
+        bb = Some(bb.map_or(b, |x| x.union(&b)));
+    }
+    let (i0, i1, j0, j1) = r.range(&bb.expect("spokes"));
+    if i1 <= i0 || j1 <= j0 {
+        return (Vec::new(), false);
+    }
+    let (w, h) = (i1 - i0, j1 - j0);
+    let filled = |i: i64, j: i64| -> bool {
+        if i < 0 || j < 0 || i >= r.nx as i64 || j >= r.ny as i64 {
+            return false;
+        }
+        let k = j as usize * r.nx + i as usize;
+        aux.pre[k] || (aux.spokeable[k] && in_spoke(r.centre(i as usize, j as usize)))
+    };
+    let mut kept = vec![false; w * h];
+    for jj in 0..h {
+        for ii in 0..w {
+            let (i, j) = ((i0 + ii) as i64, (j0 + jj) as i64);
+            kept[jj * w + ii] = filled(i, j) && offs.iter().all(|&(di, dj)| filled(i + di, j + dj));
+        }
+    }
+    let near_pad = half_min + 0.71 * res;
+    let mut seen = vec![false; w * h];
+    let mut stack: Vec<usize> = Vec::new();
+    for jj in 0..h {
+        for ii in 0..w {
+            let k = jj * w + ii;
+            if kept[k] && crate::geom::point_skeleton(r.centre(i0 + ii, j0 + jj), sk) <= near_pad {
+                seen[k] = true;
+                stack.push(k);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut reached = false;
+    while let Some(k) = stack.pop() {
+        let (ii, jj) = (k % w, k / w);
+        if let Some(t) = to {
+            reached |= crate::geom::point_skeleton(r.centre(i0 + ii, j0 + jj), t) <= near_pad;
+        }
+        let l = r.label[(j0 + jj) * r.nx + i0 + ii];
+        if l != 0 {
+            out.push(l);
+        }
+        let mut go = |kk: usize| {
+            if kept[kk] && !seen[kk] {
+                seen[kk] = true;
+                stack.push(kk);
+            }
+        };
+        if ii > 0 {
+            go(k - 1);
+        }
+        if ii + 1 < w {
+            go(k + 1);
+        }
+        if jj > 0 {
+            go(k - w);
+        }
+        if jj + 1 < h {
+            go(k + w);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    (out, reached)
+}
+
+/// Whether `q` lies in the thermal spoke from `c` to its test point `p` of width `sw` (KiCad 10
+/// builds it as the rectangle from the pad centre to the test point). O(1).
+fn in_spoke_rect(q: Vec2, c: Vec2, p: Vec2, sw: f64) -> bool {
+    let d = p - c;
+    let len = d.len();
+    if len <= 0.0 {
+        return false;
+    }
+    let u = d * (1.0 / len);
+    let t = (q - c).dot(u);
+    t >= 0.0 && t <= len && (q - c).dot(Vec2 { x: -u.y, y: u.x }).abs() <= 0.5 * sw
+}
+
+/// Slack of the spoke test-point hit test, in raster cells (pad-pour-via): the estimate's fill is
+/// the opened fill's centre region at cell centres, so a test point within `half_min` of it is in
+/// KiCad's `testAreas`; half a cell absorbs the cell-centre sampling (qmtech C64.1: 0.150 mm at
+/// 0.05 mm cells, kept by KiCad) without joining a spoke KiCad drops.
+pub const SPOKE_TOL_CELLS: f64 = 0.5;
+
+/// Farthest centre distance of two thermal pads whose spokes can face each other (pad-pour-via),
+/// nm: two spokes reach at most their pads' half sizes + 2 x (gap + min width) each.
+const FACING_NM: f64 = 10.0e6;
+
+/// The four thermal-spoke test points of a thermal pad as KiCad 10 places them (pad-pour-via;
+/// `pcbnew/zone_filler.cpp` `buildThermalSpokes`, 10.0 branch): the pad's bounding box in its own
+/// frame (centred on the pad, `sk` = its copper skeleton) grown by the thermal gap + the board's
+/// `max_error` + half the zone's minimum width, and each spoke's test point where the spoke's ray
+/// (four directions, 90 degrees apart from the pad's spoke angle) leaves that box (a round pad: its
+/// radius + the same growth, in every direction). The refill keeps a spoke when its test point lies
+/// in the fill minus the reliefs and clearance holes, opened by half the minimum width
+/// (`testAreas`), so a spoke whose end the routed copper crowds is not drawn. No spokes at all when
+/// the spoke width, clamped to the pad's minor size, is below the zone's minimum width (KiCad:
+/// "Cannot create stubs having a width < zone min thickness"). O(skeleton vertices).
+pub fn spoke_test_points(pad: &crate::model::Pad, sk: &Skeleton, z: &crate::model::Pour, max_error: i64) -> Vec<Vec2> {
+    let c = pad.center.to_vec2();
+    let rot = pad.rotation_deg.to_radians();
+    let (e1, e2) = (Vec2 { x: rot.cos(), y: rot.sin() }, Vec2 { x: -rot.sin(), y: rot.cos() });
+    let h1 = support(sk, c, e1).max(support(sk, c, e1 * -1.0));
+    let h2 = support(sk, c, e2).max(support(sk, c, e2 * -1.0));
+    if spoke_width(pad, sk, z) < z.min_thickness as f64 {
+        return Vec::new();
+    }
+    let grow = pad.thermal_gap.unwrap_or(z.thermal_gap).max(0) as f64 + max_error.max(0) as f64 + 0.5 * z.min_thickness.max(0) as f64;
+    let round = matches!(sk, Skeleton::Point { .. });
+    let base = pad.spoke_angle_deg.unwrap_or(90.0).to_radians();
+    (0..4)
+        .map(|k| {
+            let a = base + std::f64::consts::FRAC_PI_2 * k as f64;
+            let (ca, sa) = (a.cos(), a.sin());
+            let u = e1 * ca + e2 * sa;
+            let d = if round {
+                h1 + grow
+            } else {
+                let dx = if ca.abs() > 1e-9 { (h1 + grow) / ca.abs() } else { f64::INFINITY };
+                let dy = if sa.abs() > 1e-9 { (h2 + grow) / sa.abs() } else { f64::INFINITY };
+                dx.min(dy)
+            };
+            c + u * d
+        })
+        .collect()
+}
+
 fn support(sk: &Skeleton, c: Vec2, u: Vec2) -> f64 {
     match sk {
         Skeleton::Point { p, r } => (*p - c).dot(u) + r,
@@ -903,7 +1113,8 @@ pub fn check_pour_reach_cells(
             .into_iter()
             .collect();
         let allowance = budget_left / keys.len().max(1) as u64;
-        let built: Vec<((usize, u32), Raster, u64, bool)> = keys
+        #[allow(clippy::type_complexity)]
+        let built: Vec<((usize, u32), Raster, u64, bool, Option<SpokeAux>)> = keys
             .par_iter()
             .map(|&(zi, layer)| {
                 let z = &model.pours[zi];
@@ -945,11 +1156,17 @@ pub fn check_pour_reach_cells(
                     .map(|k| k.poly.iter().map(|p| p.to_vec2()).collect())
                     .collect();
                 let outs: Vec<&[Vec2]> = outs_owned.iter().map(|r| r.as_slice()).collect();
-                let (raster, stamped, cut) = build_raster(&rings, &outs, &stamps, allowance, &stop, half_min, cells);
-                ((zi, layer), raster, stamped, cut)
+                let reliefs: Vec<(Skeleton, f64)> = model
+                    .pads
+                    .iter()
+                    .filter(|p| p.net == net && p.layers.contains(&layer) && pad_mode(p, z) == CONN_THERMAL)
+                    .map(|p| (model.skeleton(p, layer), p.thermal_gap.unwrap_or(z.thermal_gap).max(0) as f64))
+                    .collect();
+                let (raster, stamped, cut, aux) = build_raster(&rings, &outs, &reliefs, &stamps, allowance, &stop, half_min, cells);
+                ((zi, layer), raster, stamped, cut, aux)
             })
             .collect();
-        for (k, _, stamped, cut) in &built {
+        for (k, _, stamped, cut, _) in &built {
             out.stamped_cells += stamped;
             budget_left = budget_left.saturating_sub(*stamped);
             if *cut {
@@ -960,8 +1177,14 @@ pub fn check_pour_reach_cells(
                 ));
             }
         }
-        let mut rasters: BTreeMap<(usize, u32), Raster> =
-            built.into_iter().map(|(k, r, _, _)| (k, r)).collect();
+        let mut auxs: BTreeMap<(usize, u32), SpokeAux> = BTreeMap::new();
+        let mut rasters: BTreeMap<(usize, u32), Raster> = BTreeMap::new();
+        for (k, r, _, _, aux) in built {
+            rasters.insert(k, r);
+            if let Some(a) = aux {
+                auxs.insert(k, a);
+            }
+        }
 
         // Nodes: islands, pads, vias, tracks of the net.
         let mut island_base: BTreeMap<(usize, u32), usize> = BTreeMap::new();
@@ -1018,23 +1241,19 @@ pub fn check_pour_reach_cells(
         let mut dsu = Dsu::new(n);
         let island_node = |k: (usize, u32), l: u32| island_base[&k] + l as usize;
 
-        // Pads ↔ islands.
+        // Pads ↔ islands (and pad ↔ pad by facing spokes).
+        let mut facing: Vec<(usize, usize)> = Vec::new();
         for (a, &pi) in pads.iter().enumerate() {
             let pad = &model.pads[pi];
-            let c = pad.center.to_vec2();
             for (&(zi, layer), r) in &rasters {
                 if !pad.layers.contains(&layer) {
                     continue;
                 }
                 let z = &model.pours[zi];
-                let mode = match pad.zone_connection.unwrap_or(z.pad_connection) {
-                    CONN_THT_THERMAL if pad.attr == PadAttr::Pth => CONN_THERMAL,
-                    CONN_THT_THERMAL => CONN_FULL,
-                    m => m,
-                };
+                let mode = pad_mode(pad, z);
                 let sk = model.skeleton(pad, layer);
                 let half_min = 0.5 * z.min_thickness as f64;
-                let tol = half_min + r.res * 0.71;
+                
                 let labels: Vec<u32> = match mode {
                     CONN_FULL => {
                         let bb = skeleton_bbox(&sk).grow(r.res);
@@ -1053,18 +1272,41 @@ pub fn check_pour_reach_cells(
                         v
                     }
                     CONN_THERMAL => {
-                        let gap = pad.thermal_gap.unwrap_or(z.thermal_gap) as f64;
-                        let base = pad.rotation_deg.to_radians()
-                            + (pad.spoke_angle_deg.unwrap_or(90.0) - 90.0).to_radians();
+                        // KiCad 10: a spoke is drawn when its test point is in the opened fill
+                        // (`testAreas`), and it joins the pad to what it still touches after the
+                        // clearance holes and the min-width opening ([`spoke_joins`]).
                         let mut v = Vec::new();
-                        for k in 0..4 {
-                            let th = base + std::f64::consts::FRAC_PI_2 * k as f64;
-                            let u = Vec2 {
-                                x: th.cos(),
-                                y: th.sin(),
+                        let sw = spoke_width(pad, &sk, z);
+                        let c = pad.center.to_vec2();
+                        for p in spoke_test_points(pad, &sk, z, model.rules.max_error) {
+                            let ls = r.labels_within(p, half_min + SPOKE_TOL_CELLS * r.res);
+                            let aux = auxs.get(&(zi, layer));
+                            let joined = match aux {
+                                Some(aux) if !ls.is_empty() => spoke_joins(r, aux, &[(c, p, sw)], &sk, None, half_min).0,
+                                _ => ls,
                             };
-                            let d = support(&sk, c, u) + gap + 1_000.0;
-                            v.extend(r.labels_within(c + u * d, tol));
+                            // KiCad 10 also keeps a spoke whose test point lies in a facing spoke of
+                            // another thermal pad of the net whose test point lies in it (two pads
+                            // joined spoke to spoke, `fillCopperZone` "Hit-test against other
+                            // spokes"); the pair then has to survive the opening like one spoke.
+                            if joined.is_empty() {
+                                if let Some(aux) = aux {
+                                    for (b, &pj) in pads.iter().enumerate() {
+                                        let pb = &model.pads[pj];
+                                        if b == a || !pb.layers.contains(&layer) || pad_mode(pb, z) != CONN_THERMAL || (pb.center.to_vec2() - c).len() > FACING_NM {
+                                            continue;
+                                        }
+                                        let skb = model.skeleton(pb, layer);
+                                        let (cb, swb) = (pb.center.to_vec2(), spoke_width(pb, &skb, z));
+                                        for q in spoke_test_points(pb, &skb, z, model.rules.max_error) {
+                                            if in_spoke_rect(p, cb, q, swb) && in_spoke_rect(q, c, p, sw) && spoke_joins(r, aux, &[(c, p, sw), (cb, q, swb)], &sk, Some(&skb), half_min).1 {
+                                                facing.push((a, b));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            v.extend(joined);
                         }
                         v.sort_unstable();
                         v.dedup();
@@ -1076,6 +1318,9 @@ pub fn check_pour_reach_cells(
                     dsu.union(pad_base + a, island_node((zi, layer), l));
                 }
             }
+        }
+        for (a, b) in facing.drain(..) {
+            dsu.union(pad_base + a, pad_base + b);
         }
         // Vias ↔ islands.
         for (b, v) in nvias.iter().enumerate() {
@@ -1535,7 +1780,8 @@ mod tests {
             no_pads: false,
             no_footprints: false,
         };
-        let (u1, u3) = (Vec2 { x: 4.0e6, y: -15.0e6 }, Vec2 { x: 20.0e6, y: -15.0e6 });
+        // Probes 3 mm beside the pads (a thermal pad's own spot is its relief, no fill: pad-pour-via).
+        let (u1, u3) = (Vec2 { x: 4.0e6, y: -12.0e6 }, Vec2 { x: 20.0e6, y: -12.0e6 });
         let islands = |m: &BoardModel| {
             let r = check_pour_reach(m, &[], &[]);
             let ras = r.raster(0, 31).expect("raster");
@@ -1598,13 +1844,13 @@ mod tests {
         assert_eq!(r.lost_pads, vec![0], "{:?}", r.notes);
         assert!(r.lost_vias.is_empty());
         assert_eq!(r.main_pads[&0], vec![1]);
-        // The site filter keeps the main side only.
+        // The site filter keeps the main side only (3 mm beside U3.1: its own spot is its relief).
         assert!(r.site_in_main(
             0,
             &[0, 31],
             Vec2 {
                 x: 20.0e6,
-                y: -15.0e6
+                y: -12.0e6
             }
         ));
         assert!(!r.site_in_main(

@@ -138,21 +138,25 @@ def route_findings(result: dict | None) -> list:
 
     st = next((x for x in w if x.startswith("pour stitching:")), None)
     m = re.match(r"pour stitching: (\d+) pour pieces cut off by the routed copper before, (\d+) after; "
-                 r"(\d+) island vias, (\d+) pad stubs(?:, (\d+) island joins)?", st or "")
-    left = lines("no stitch site for ")
+                 r"(\d+) island vias, (\d+) pad stubs(?:, (\d+) island joins)?(?:, (\d+) dog-bones)?", st or "")
+    # pad-pour-via: a cut pour pad no dog-bone fits is named with the nets that box it in.
+    left = lines("no stitch site for ") + lines("no dog-bone via fits for ")
     if m and int(m.group(2)) > 0 or left:
         n_after = int(m.group(2)) if m else len(left)
         out.append(_mk("POUR_ISLANDS",
                        f"{n_after} piece(s) of copper pours are cut off from their pour by the new copper and could "
                        "not be stitched back; KiCad's DRC lists them as unconnected items after a zone refill.",
-                       [x.removeprefix("no stitch site for ") for x in left]))
+                       [x.removeprefix("no stitch site for ").removeprefix("no dog-bone via fits for ") for x in left]))
     long_joins = lines("long island join ")
-    stitched = lines("stitch via ") + lines("pad stub ") + lines("island join ") + long_joins
+    stitched = lines("stitch via ") + lines("pad stub ") + lines("dog-bone ") + lines("island join ") + long_joins
     joins = int(m.group(5) or 0) if m else 0
-    if m and (int(m.group(3)) or int(m.group(4)) or joins):
+    dogs = int(m.group(6) or 0) if m else 0
+    if m and (int(m.group(3)) or int(m.group(4)) or joins or dogs):
         out.append(_mk("POUR_STITCHED",
                        f"{m.group(3)} stitching via(s) and {m.group(4)} pad stub(s) join pour pieces the new copper "
                        f"cut off ({m.group(1)} pieces were cut off)"
+                       + (f"; {dogs} pour pad(s) whose thermal spokes were all cut got a dog-bone via "
+                          "(planes.stitch_dogbone)" if dogs else "")
                        + (f"; {joins} isolated island(s) without a pad joined to a pad of their net by a short track "
                           "(planes.join_islands)" if joins else "")
                        + (f"; {len(long_joins)} of those join(s) run more than 3 mm from the pad, check them by hand"
@@ -167,7 +171,7 @@ def route_findings(result: dict | None) -> list:
                        [x.removeprefix("stitch ") for x in lines("stitch (")
                         if not re.search(r": 0 (of \d+ )?via\(s\)$", x)]))
     # r6: the warnings the user asked for are findings of their own (not items of the capped info finding above).
-    off = [x for x in lines("stitch via off the via grid at ") + lines("pad stub ") if " off the via grid at " in x]
+    off = [x for x in lines("stitch via off the via grid at ") + lines("pad stub ") + lines("dog-bone ") if " off the via grid at " in x]
     if off:
         out.append(_mk("STITCH_OFF_GRID",
                        f"{len(off)} connection via(s) of pour stitching stand off your KiCad via grid because no grid "

@@ -614,7 +614,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** The new copper cuts pieces of a copper pour off from the rest of the pour, and topor found no place for a stitching via or pad stub to join them back; after a zone refill KiCad either removes those pieces or lists them as unconnected.
+**Cause.** The new copper cuts pieces of a copper pour off from the rest of the pour, and topor found no place for a stitching via, pad stub or dog-bone to join them back (a pour pad whose thermal spokes are all cut is named with the nets around it); after a zone refill KiCad either removes those pieces or lists them as unconnected.
 
 **Fix.** Refill the zones (KiCad → Edit → Fill All Zones, B), look at the listed places and add a via by hand (KiCad → Place → Via) or move a trace; planes.stitch_islands controls topor's own stitching.
 
@@ -622,7 +622,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: info.*
 
-**Cause.** The new copper cut pieces off a copper pour; topor joined them back with stitching vias inside the pieces or short stubs from their pads (each one is listed).
+**Cause.** The new copper cut pieces off a copper pour; topor joined them back with stitching vias inside the pieces, short stubs from their pads, or dog-bones (a stub along the pad's axis to a via) for pour pads whose thermal spokes were all cut (each one is listed).
 
 **Fix.** Nothing to do; check them after a zone refill (KiCad → Edit → Fill All Zones, B). planes.stitch_islands = false only reports the pieces.
 
@@ -710,7 +710,7 @@ copper violates a rule anywhere else, file a bug.
 
 *Severity: warning.*
 
-**Cause.** A stitching connection via (a pad stub, or the first via of a pour piece the new copper cut off: its only connection) stands off your KiCad via grid, because no legal point of the grid fits there. Connection copper may leave the grid, as in KiCad; extra stitching vias never do.
+**Cause.** A stitching connection via (a pad stub, a dog-bone of a pour pad whose thermal spokes are all cut, or the first via of a pour piece the new copper cut off: its only connection) stands off your KiCad via grid, because no legal point of the grid fits there. Connection copper may leave the grid, as in KiCad; extra stitching vias never do.
 
 **Fix.** Nothing to do if the place is fine; otherwise move the via by hand (KiCad → Edit → Properties) or use a finer via grid (KiCad → View → Grid Properties); planes.stitch_on_grid = false switches the grid off for the stitching vias.
 
