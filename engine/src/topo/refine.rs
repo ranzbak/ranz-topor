@@ -370,7 +370,7 @@ pub fn end_site(st: &State, w: WireId, a: LEv, b: LEv, free: &dyn Fn(usize, Vec2
 
 /// M3: the side of `p` against the polyline `pts` (the sign of the cross product with its
 /// nearest segment; 0 on it or without a segment). O(corners).
-fn poly_side(pts: &[Vec2], p: Vec2) -> f64 {
+pub(crate) fn poly_side(pts: &[Vec2], p: Vec2) -> f64 {
     let mut best: Option<(f64, f64)> = None;
     for x in pts.windows(2) {
         let (a, b) = (x[0], x[1]);
@@ -976,77 +976,93 @@ impl<'a> Frame<'a> {
     /// O(j1 - j0).
     fn shifted_lanes(&self, w: WireId, o: WireId, j0: usize, j1: usize) -> Vec<Vec<Vec2>> {
         let f = self.packer.site_slack;
-        let ow = &self.st.wires[o];
-        let n = ow.passes.len();
-        if f <= 0.0 || n == 0 || j0 > j1 || j1 >= n {
+        if f <= 0.0 || self.st.wires[o].passes.is_empty() {
             return Vec::new();
         }
         let trk = self.track(o);
-        if trk.sig.len() != n {
-            return Vec::new();
-        }
         let pp = self.ports[o].get_or_init(|| std::sync::Arc::new(self.st.pass_ports(o))).clone();
-        let pos = &self.st.proj.pos;
-        let pre = if j0 > 0 { trk.at(trk.sig[j0 - 1]) } else { pos[ow.a] };
-        let suf = if j1 + 1 < n { trk.at(trk.sig[j1 + 1]) } else { pos[ow.b] };
-        (0..2)
-            .map(|side| {
-                let mut v = Vec::with_capacity(j1 - j0 + 3);
-                v.push(pre);
-                for j in j0..=j1 {
-                    let c = trk.at(trk.sig[j]);
-                    let port = if side == 0 { pp[j].0 } else { pp[j].1 };
-                    let port = self.neighbour_stop(w, o, j, c, port);
-                    v.push(c + (port - c) * f);
-                }
-                v.push(suf);
-                v
-            })
-            .collect()
-    }
-
-    /// M3 slack: how far pass `j` of wire `o` (taut crossing `c` of its edge) can shift towards
-    /// `port` (an end of its span, [`State::pass_ports`]) with its neighbours on the edge where
-    /// the plan has them: the next pass of the edge order on that side, at its own taut crossing,
-    /// less the two half widths and the spacing between them (0 for the same net). The span end
-    /// when that neighbour lies beyond it or there is none; `c` itself when the neighbour is
-    /// already closer than the spacing (an over-full gap has no slack). The via's own wire `w`
-    /// is no neighbour: its crossing with `o` moves with the crosser. O(edge load + passes).
-    fn neighbour_stop(&self, w: WireId, o: WireId, j: usize, c: Vec2, port: Vec2) -> Vec2 {
-        let st = self.st;
-        let ow = &st.wires[o];
-        let p = ow.passes[j];
-        let e = st.passes[p].edge;
-        let ord = &st.edge_order[e];
-        let Some(g) = ord.iter().position(|&x| x == p) else { return port };
-        let dir = port - c;
-        let reach = dir.len();
-        if reach < 1.0 {
-            return c;
-        }
-        let u = dir * (1.0 / reach);
-        let mut stop = reach;
-        for nb in [g.checked_sub(1), Some(g + 1)].into_iter().flatten().filter(|&i| i < ord.len()) {
-            let q = ord[nb];
-            let x = st.passes[q].wire;
-            if x == w {
-                continue;
-            }
-            let xw = &st.wires[x];
-            let Some(jx) = xw.passes.iter().position(|&y| y == q) else { continue };
+        let cross_at = |x: WireId, jx: usize| {
             let tx = self.track(x);
-            if jx >= tx.sig.len() {
-                continue;
-            }
-            let along = (tx.at(tx.sig[jx]) - c).dot(u);
-            if along <= 0.0 {
-                continue;
-            }
-            let gap = 0.5 * (ow.w + st.pass_w.get(q).copied().unwrap_or(xw.w)) + if xw.net == ow.net { 0.0 } else { ow.s.max(xw.s) };
-            stop = stop.min((along - gap).max(0.0));
-        }
-        c + u * stop
+            tx.sig.get(jx).map(|&s| tx.at(s))
+        };
+        shifted_lanes_of(self.st, f, w, o, j0, j1, &trk, &pp, &cross_at)
     }
+}
+
+/// M3 slack, shared by the plan ([`Frame::shifted_lanes`]) and the drawing's via relocation
+/// ([`super::viaopt::relocate_vias`]), so that both judge a via against the same crosser model
+/// (predicted = drawn): the two shifted lanes of wire `o` (taut track `trk`, pass spans `pp` =
+/// [`State::pass_ports`]) over its passes `j0..=j1`: its taut crossing of each such edge moved
+/// the share `f` of the way to the left and to the right end of its passage, cut at its planned
+/// neighbours on the edge ([`neighbour_stop_of`], `cross_at(x, j)` = wire `x`'s taut crossing
+/// of its pass `j`), joined to its taut track at the passes just outside (or its terminals).
+/// Empty without slack or passes. O(j1 - j0).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shifted_lanes_of(st: &State, f: f64, w: WireId, o: WireId, j0: usize, j1: usize, trk: &super::viaopt::Track, pp: &[(Vec2, Vec2)], cross_at: &dyn Fn(WireId, usize) -> Option<Vec2>) -> Vec<Vec<Vec2>> {
+    let ow = &st.wires[o];
+    let n = ow.passes.len();
+    if f <= 0.0 || n == 0 || j0 > j1 || j1 >= n || trk.sig.len() != n || pp.len() != n {
+        return Vec::new();
+    }
+    let pos = &st.proj.pos;
+    let pre = if j0 > 0 { trk.at(trk.sig[j0 - 1]) } else { pos[ow.a] };
+    let suf = if j1 + 1 < n { trk.at(trk.sig[j1 + 1]) } else { pos[ow.b] };
+    (0..2)
+        .map(|side| {
+            let mut v = Vec::with_capacity(j1 - j0 + 3);
+            v.push(pre);
+            for (j, &(pl, pr)) in pp.iter().enumerate().take(j1 + 1).skip(j0) {
+                let c = trk.at(trk.sig[j]);
+                let port = if side == 0 { pl } else { pr };
+                let port = neighbour_stop_of(st, w, o, j, c, port, cross_at);
+                v.push(c + (port - c) * f);
+            }
+            v.push(suf);
+            v
+        })
+        .collect()
+}
+
+/// M3 slack: how far pass `j` of wire `o` (taut crossing `c` of its edge) can shift towards
+/// `port` (an end of its span, [`State::pass_ports`]) with its neighbours on the edge where
+/// the plan has them: the next pass of the edge order on that side, at its own taut crossing
+/// (`cross_at`), less the two half widths and the spacing between them (0 for the same net).
+/// The span end when that neighbour lies beyond it or there is none; `c` itself when the
+/// neighbour is already closer than the spacing (an over-full gap has no slack). The via's own
+/// wire `w` is no neighbour: its crossing with `o` moves with the crosser. O(edge load + passes).
+pub(crate) fn neighbour_stop_of(st: &State, w: WireId, o: WireId, j: usize, c: Vec2, port: Vec2, cross_at: &dyn Fn(WireId, usize) -> Option<Vec2>) -> Vec2 {
+    let ow = &st.wires[o];
+    let p = ow.passes[j];
+    let e = st.passes[p].edge;
+    let ord = &st.edge_order[e];
+    let Some(g) = ord.iter().position(|&x| x == p) else { return port };
+    let dir = port - c;
+    let reach = dir.len();
+    if reach < 1.0 {
+        return c;
+    }
+    let u = dir * (1.0 / reach);
+    let mut stop = reach;
+    for nb in [g.checked_sub(1), Some(g + 1)].into_iter().flatten().filter(|&i| i < ord.len()) {
+        let q = ord[nb];
+        let x = st.passes[q].wire;
+        if x == w {
+            continue;
+        }
+        let xw = &st.wires[x];
+        let Some(jx) = xw.passes.iter().position(|&y| y == q) else { continue };
+        let Some(cx) = cross_at(x, jx) else { continue };
+        let along = (cx - c).dot(u);
+        if along <= 0.0 {
+            continue;
+        }
+        let gap = 0.5 * (ow.w + st.pass_w.get(q).copied().unwrap_or(xw.w)) + if xw.net == ow.net { 0.0 } else { ow.s.max(xw.s) };
+        stop = stop.min((along - gap).max(0.0));
+    }
+    c + u * stop
+}
+
+impl<'a> Frame<'a> {
 
     /// thick-layer M3 (`[vias] site_planned`; docs/dev/design/thick-layer.md M3, S1 diagnosis):
     /// the room (nm: the via radius a disc centred at `q` can have, the unit of
@@ -1056,12 +1072,15 @@ impl<'a> Frame<'a> {
     /// packer's tolerance) around it. Every layer counts: a through via blocks them all. The
     /// lane lies on its taut track or, with `[vias] site_slack`, anywhere up to the shifted lanes
     /// of its passes around `t` ([`Frame::shifted_lanes`]): the room is that of the position
-    /// farthest from `q`. `r` is a point of `w`'s own taut path in the via's window: a position
-    /// of a lane that traverses `t` itself with `q` on the other side than `r` would have to be
-    /// jumped by `w` (a crossing the plan does not have there), and a lane that does not traverse
-    /// `t` may not move over `q`; with no allowed position `q` gets no room (`-inf`).
+    /// farthest from `q`. `r(o)` is a point of `w`'s own taut path in the via's window that must
+    /// stay on `q`'s side of wire `o` (the window's middle, or for a crosser bounding the window
+    /// its other end, [`Frame::end_site_lane`]): a position of a lane that traverses `t` itself
+    /// with `q` on the other side than `r(o)` would have to be jumped by `w` (a crossing the plan
+    /// does not have there, or on the wrong layer), and a lane that does not traverse `t` may not
+    /// move over `q`; with no allowed position `q` gets no room (`-inf`). The drawing's via
+    /// relocation measures with the same rule (`viaopt::Near::dist`).
     /// O(star wires x their track corners).
-    fn lane_room(&self, w: WireId, t: TriId, q: Vec2, r: Vec2) -> f64 {
+    fn lane_room(&self, w: WireId, t: TriId, q: Vec2, r: &dyn Fn(WireId) -> Vec2) -> f64 {
         let (st, pr) = (self.st, self.st.proj);
         let wi = &st.wires[w];
         let mut ws: Vec<(WireId, usize)> = pr.tris[t].iter().flat_map(|&v| pr.vert_tris[v].iter().flat_map(|&u| st.tri_trav[u].iter().copied())).filter(|&(o, _)| o != w && st.wires[o].alive && st.wires[o].net != wi.net).collect();
@@ -1087,7 +1106,7 @@ impl<'a> Frame<'a> {
             let mut best = f64::NEG_INFINITY;
             for (li, lane) in std::iter::once(&tr.pts).chain(shifted.iter()).enumerate() {
                 let sq = if li == 0 { side_q } else { poly_side(lane, q) };
-                let ok = if through { sq * poly_side(lane, r) >= 0.0 } else { li == 0 || sq * side_q > 0.0 };
+                let ok = if through { sq * poly_side(lane, r(o)) >= 0.0 } else { li == 0 || sq * side_q > 0.0 };
                 if ok {
                     best = best.max(super::viaopt::dist_polyline(q, lane) - half);
                 }
@@ -1117,7 +1136,7 @@ impl<'a> Frame<'a> {
         let r = trk.at(0.5 * (lo + hi));
         let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
         let cands = super::pack::tri_site_points(a, b, c).into_iter().chain((0..SAMPLES).map(|i| trk.at(lo + (hi - lo) * (i as f64 + 0.5) / SAMPLES as f64)));
-        let v = cands.map(|q| self.lane_room(w, t, q, r).min(self.point_free(w, q))).fold(f64::NEG_INFINITY, f64::max);
+        let v = cands.map(|q| self.lane_room(w, t, q, &|_| r).min(self.point_free(w, q))).fold(f64::NEG_INFINITY, f64::max);
         self.lane_k.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert((w, k), v);
         v
     }
@@ -1165,6 +1184,8 @@ impl<'a> Frame<'a> {
             let (p0, p1) = (poly[k], poly[k + 1]);
             let (klo, khi) = (trk.sigma(k, 0.0), trk.sigma(k, 1.0));
             let (mut lo, mut hi) = (klo, khi);
+            // The crossers bounding the window (wire, below = before the via).
+            let mut bound: Vec<(WireId, bool)> = Vec::new();
             for x in crossings.iter().filter(|x| x.k == k && st.wires[x.other].net != wi.net) {
                 let po = st.polyline(x.other);
                 let (q0, q1) = (po[x.other_k], po[(x.other_k + 1).min(po.len() - 1)]);
@@ -1179,16 +1200,26 @@ impl<'a> Frame<'a> {
                 let arcs = alt.into_iter().filter_map(|pts| super::viaopt::track_crossing(&trk, &super::viaopt::Track { pts, cum: Vec::new(), sig: Vec::new() }, klo, khi));
                 if s <= s0 + 1e-6 {
                     lo = lo.max(arcs.fold(arc, f64::min));
+                    bound.push((x.other, true));
                 } else if s >= s1 - 1e-6 {
                     hi = hi.min(arcs.fold(arc, f64::max));
+                    bound.push((x.other, false));
                 }
             }
-            let r = trk.at(0.5 * (lo + hi));
+            // A crosser below the via keeps the window's upper end on the via's side, and the
+            // reverse (it may not move between the via and that end: the crossing would change
+            // its layer); every other lane the window's middle.
+            let (r_mid, r_lo, r_hi) = (trk.at(0.5 * (lo + hi)), trk.at(lo), trk.at(hi));
+            let r = |o: WireId| match bound.iter().find(|b| b.0 == o) {
+                Some(&(_, true)) => r_hi,
+                Some(&(_, false)) => r_lo,
+                None => r_mid,
+            };
             let ok_t = pr.inradius(t) >= need && !self.site_taken(m, w, t);
             let [pa, pb, pc] = pr.tris[t].map(|v| pr.pos[v]);
             let samples = (0..SAMPLES).filter(|_| hi > lo).map(|i| trk.at(lo + (hi - lo) * (i as f64 + 0.5) / SAMPLES as f64));
             for q in samples.chain(super::pack::tri_site_points(pa, pb, pc)) {
-                let room = if ok_t && hi > lo { self.lane_room(w, t, q, r).min(self.point_free(w, q)) } else { f64::NEG_INFINITY };
+                let room = if ok_t && hi > lo { self.lane_room(w, t, q, &r).min(self.point_free(w, q)) } else { f64::NEG_INFINITY };
                 if room > best.1 {
                     best = (Some((k, q)), room);
                 }

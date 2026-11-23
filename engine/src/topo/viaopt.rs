@@ -344,6 +344,12 @@ pub struct ViaCtx<'a> {
     /// own track where that predicts no violation and loses at most the price in smallest gap
     /// ([`grid_site`]). None = as before.
     pub grid: Option<(super::gridsnap::Lattice, f64)>,
+    /// thick-layer M3 slack (`[vias] site_slack` with `site_planned`, else 0): the share of its
+    /// passage a crosser of the via's window may still shift ([`super::refine::shifted_lanes_of`],
+    /// the plan's model): the window ends at the crossing farthest out and the gap to a crosser
+    /// is that of its allowed position farthest from the via, as the plan judged the site. 0 =
+    /// the taut tracks are walls (as before).
+    pub site_slack: f64,
 }
 
 /// One via of the plan as the relocation sees it.
@@ -386,6 +392,25 @@ pub fn intervals(events: &[(usize, f64, i32)]) -> Vec<(usize, f64, usize, f64)> 
 struct Near {
     obs: Vec<usize>,
     wires: Vec<WireId>,
+    /// M3 slack ([`ViaCtx::site_slack`]): per crosser that bounds the window, its reference
+    /// point (the window's other end on the wire's track: the via stays between the crosser and
+    /// it) and its two shifted lanes ([`super::refine::shifted_lanes_of`]).
+    lanes: Vec<(WireId, Vec2, Vec<Vec<Vec2>>)>,
+}
+
+impl Near {
+    /// Distance (nm) of `p` to wire `u`'s copper centre line: its taut track, or with M3 slack
+    /// ([`Near::lanes`]) the allowed position farthest from `p` among the taut track and the two
+    /// shifted lanes, as the plan's lane room (`refine::Frame::lane_room`: a position with `p` on
+    /// the other side than the reference point would put the crosser between the via and the
+    /// window's other end, a crossing on the wrong layer). The taut track when no position is
+    /// allowed. O(corners).
+    fn dist(&self, tracks: &[Track], u: WireId, p: Vec2) -> f64 {
+        let taut = dist_polyline(p, &tracks[u].pts);
+        let Some((_, r, sh)) = self.lanes.iter().find(|x| x.0 == u) else { return taut };
+        let side = super::refine::poly_side;
+        std::iter::once(&tracks[u].pts).chain(sh.iter()).filter(|l| side(l, p) * side(l, *r) >= 0.0).map(|l| dist_polyline(p, l)).fold(None, |a: Option<f64>, d| Some(a.map_or(d, |a| a.max(d)))).unwrap_or(taut)
+    }
 }
 
 /// Gaps of a via of `net` (radius `rv`, clearance `c`) at `p`: `(rule, force, potential)`.
@@ -422,7 +447,7 @@ fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], pair: &Pai
     }
     for &u in &near.wires {
         let wu = &st.wires[u];
-        add(dist_polyline(p, &tracks[u].pts) - rv - 0.5 * wu.w - c.max(wu.s), true);
+        add(near.dist(tracks, u, p) - rv - 0.5 * wu.w - c.max(wu.s), true);
     }
     for s in sites {
         if (s.wire, s.i) == me {
@@ -538,6 +563,18 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
     let mut vs: Vec<V> = Vec::new();
     let mut sites: Vec<Site> = Vec::new();
     let mut pair: PairNeed = crate::fxhash::map();
+    // M3 slack: the shifted lanes of crosser `o` over the passes around its traversal `ko` (as the
+    // plan's end site, `refine::Frame::end_site_lane`), for the via of wire `w`.
+    let ports: Vec<std::cell::OnceCell<Vec<(Vec2, Vec2)>>> = vec![std::cell::OnceCell::new(); st.wires.len()];
+    let cross_at = |x: WireId, j: usize| tracks[x].sig.get(j).map(|&s| tracks[x].at(s));
+    let lanes_of = |w: WireId, o: WireId, ko: usize| -> Vec<Vec<Vec2>> {
+        let n = st.wires[o].passes.len();
+        if cx.site_slack <= 0.0 || n == 0 {
+            return Vec::new();
+        }
+        let pp = ports[o].get_or_init(|| st.pass_ports(o));
+        super::refine::shifted_lanes_of(st, cx.site_slack, w, o, ko.saturating_sub(1).min(n - 1), ko.min(n - 1), &tracks[o], pp, &cross_at)
+    };
     for (&w, pl) in plans.iter() {
         if pl.vias.is_empty() || tracks[w].is_empty() {
             continue;
@@ -571,20 +608,28 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             // crossing's own point (it may lie on either side of it).
             let (mut lo_x, mut hi_x): (Option<f64>, Option<f64>) = (None, None);
             let (mut lo_is_x, mut hi_is_x) = (false, false);
+            // M3 slack: the crossers bounding the window (wire, below = before the via).
+            let mut bound: Vec<(WireId, bool, usize)> = Vec::new();
             for x in xs.iter().filter(|x| x.k == ka || x.k == kb) {
                 let opoly = st.polyline(x.other);
                 let es = event_s(st, &poly, &opoly, w, x);
                 let (a, b) = (tr.sigma(x.k, 0.0), tr.sigma(x.k, 1.0));
                 let Some(arc) = track_crossing(tr, &tracks[x.other], a, b) else { continue };
+                // M3 slack: the crosser may cross the wire anywhere its passage lets it; the
+                // window ends at the crossing farthest out (the plan's end site).
+                let alt: Vec<f64> = lanes_of(w, x.other, x.other_k).into_iter().filter_map(|pts| track_crossing(tr, &Track { pts, cum: Vec::new(), sig: Vec::new() }, a, b)).collect();
+                let (arc_lo, arc_hi) = (alt.iter().fold(arc, |m, &v| m.min(v)), alt.iter().fold(arc, |m, &v| m.max(v)));
                 if std::env::var_os("TOPO_VIAREL").is_some() {
-                    eprintln!("VIACLAMP w{w} v{i} ka{ka} sa{sa:.3} kb{kb} sb{sb:.3} x.k{} other{} es{es:.3} arc{:.3} trav[{:.3},{:.3}]", x.k, x.other, arc / 1e6, a / 1e6, b / 1e6);
+                    eprintln!("VIACLAMP w{w} v{i} ka{ka} sa{sa:.3} kb{kb} sb{sb:.3} x.k{} other{} es{es:.3} arc{:.3} slack[{:.3},{:.3}] trav[{:.3},{:.3}]", x.k, x.other, arc / 1e6, arc_lo / 1e6, arc_hi / 1e6, a / 1e6, b / 1e6);
                 }
                 if x.k == ka && es <= sa + 1e-9 {
-                    lo_x = Some(lo_x.map_or(arc, |v: f64| v.max(arc)));
+                    lo_x = Some(lo_x.map_or(arc_lo, |v: f64| v.max(arc_lo)));
                     lo_is_x |= (es - sa).abs() <= 1e-9;
+                    bound.push((x.other, true, x.other_k));
                 }
                 if x.k == kb && es >= sb - 1e-9 {
-                    hi_x = Some(hi_x.map_or(arc, |v: f64| v.min(arc)));
+                    bound.push((x.other, false, x.other_k));
+                    hi_x = Some(hi_x.map_or(arc_hi, |v: f64| v.min(arc_hi)));
                     hi_is_x |= (es - sb).abs() <= 1e-9;
                 }
             }
@@ -625,7 +670,10 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             // The traversals the via may take: the plan's range (with [vias] between_crossings
             // strictly between the events, never a crossing's triangle).
             let (ka, kb) = pl.vias.get(i).map_or((ka, kb), |&(a, b)| (a, b.max(a)));
-            vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires }, pinched });
+            // M3 slack: the crossers bounding the window keep the plan's freedom (a crosser
+            // below the via keeps the window's upper end as its reference, and the reverse).
+            let lanes: Vec<(WireId, Vec2, Vec<Vec<Vec2>>)> = bound.iter().filter(|_| cx.site_slack > 0.0).map(|&(o, below, ko)| (o, tr.at(if below { hi } else { lo }), lanes_of(w, o, ko))).filter(|x| !x.2.is_empty()).collect();
+            vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires, lanes }, pinched });
             sites.push(Site { wire: w, i, k, p });
             bounds.push((lo, hi));
         }

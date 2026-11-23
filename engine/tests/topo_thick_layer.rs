@@ -208,8 +208,8 @@ fn diag_thick_dive_grouping() {
 fn thick_dive_grouping_predicts_what_it_draws() {
     let m = thick_dive_grouping();
     // ω off (P weaves, as main) and the end-site test alone (`site_lanes` off), the crossers'
-    // taut tracks as walls (`site_slack` 0): the drawing does not yet realise their slack, see
-    // `thick_dive_grouping_predicts_what_it_draws_with_slack`.
+    // taut tracks as walls (`site_slack` 0); the slack case (round 4: the drawing realises it)
+    // is `thick_dive_grouping_predicts_what_it_draws_with_slack`.
     let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_slack", serde_json::json!(0.0))]);
     let p = plan(&r);
     let drawn = r.violations.iter().filter(|v| v.conn == 0).count();
@@ -325,16 +325,16 @@ fn thick_dive_grouping_lane_sites_with_slack() {
     assert!(!v.is_empty() && v.iter().all(|x| x.0 && x.1 == 0.0), "{v:?}");
 }
 
-/// M3 slack, drawn half. TARGET, FAILS (ignored): with the slack the plan predicts every via of P
-/// a site (the crossers move 0.2 mm aside), but the drawing does not realise the shift: the via
-/// relocation ([`viaopt::relocate_vias`]) bounds each via by the crossers' taut crossings and
-/// measures its gap against their taut tracks, so it marks the sites tight; the drawing then takes
-/// them only when free of the crossers already drawn (`TOPO_VIADBG`: "VIAMISS ... tight true
-/// check [item:0 F3 -0.049 mm]"), searches other sites (one past B2 / B3: 2 shorts) and the
-/// crossers stay straight. Next: the relocation's window and gap with the same slack, so ERBS
-/// bends the crossers round the placed vias (memory reserve-planned-room).
+/// M3 slack, drawn half (round 4): with the slack the plan predicts every via of P a site (the
+/// crossers move 0.2 mm aside), and the drawing now realises it. The via relocation
+/// ([`viaopt::relocate_vias`]) bounds each via by the crossers' crossings farthest out and measures
+/// its gap against the allowed crosser position farthest from it (`refine::shifted_lanes_of`, the
+/// plan's model; a crosser stays between the via and the window's other end), so the planned
+/// sites are no longer tight, and the via pair's room counts only the crossers whose taut track
+/// runs between its two vias (B2 / B3 lie beyond via 2 in its own traversal). ERBS then bends B1,
+/// F3, F4 and B2 round the placed vias. Round 3 (taut walls): VIAMISS on vias 1 and 2, 2 shorts
+/// with B2 / B3 and 4 clearance items, predicted 0. Now: predicted = drawn = 0, no short.
 #[test]
-#[ignore = "drawing: via relocation and ERBS keep the crossers on their taut tracks (no slack realised); round 3 report"]
 fn thick_dive_grouping_predicts_what_it_draws_with_slack() {
     let m = thick_dive_grouping();
     let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true))]);
@@ -342,6 +342,9 @@ fn thick_dive_grouping_predicts_what_it_draws_with_slack() {
     let drawn = r.violations.iter().filter(|v| v.conn == 0).count();
     let pred: u64 = p["conns"]["0"]["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum();
     assert!(drawn == 0 || pred > 0, "P: drawn {drawn} violations, predicted {pred}: {}", p["conns"]["0"]);
+    assert_eq!(r.violations.iter().filter(|v| v.kind == "short").count(), 0, "{:?}", r.violations);
+    assert!(r.violations.is_empty(), "{:?}", r.violations);
+    assert_eq!(per_net(&r)[&1].0, 3, "P weaves with its 3 planned vias: {:?}", per_net(&r));
 }
 
 /// thick-layer r3 (`[search] free_crossing`, design addendum r3): S1-S5 have drilled pads at both

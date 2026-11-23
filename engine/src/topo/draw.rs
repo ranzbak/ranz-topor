@@ -1147,6 +1147,12 @@ pub struct Drawer<'a> {
     /// The planned sites whose relocation still predicts a violation ([`super::viaopt::RelocReport::tight`]):
     /// they pass only the side test on the drawing's nominal chords, not the one on the plan's taut geometry.
     pub via_site_tight: std::collections::BTreeSet<(WireId, usize)>,
+    /// thick-layer M3 slack ([`super::viaopt::ViaCtx::site_slack`], 0 = off): the planned sites
+    /// were judged with the crossers' slack, so the room a via pair keeps
+    /// ([`Drawer::via_pair_price`]) counts the crossers whose planned (taut) track runs between
+    /// the two vias, not every crosser of their traversals (one beyond the via in the same
+    /// traversal is no crosser between them).
+    pub site_slack: f64,
     /// exist-term r4 (`[search] dangling_lead_via`): wire `w`'s end (0 / 1) whose layer change the
     /// plan put at a continued dangling end's lead end: the via drawn at the lead's via end
     /// ([`super::board::KeptEndOut::via_end`]), the lead drawn up to it, no run on the lead's layer
@@ -1270,6 +1276,7 @@ impl<'a> Drawer<'a> {
             pad_end: BTreeMap::new(),
             via_site: BTreeMap::new(),
             via_site_tight: Default::default(),
+            site_slack: 0.0,
             lead_via: BTreeMap::new(),
             split_at: BTreeMap::new(),
             erbs: BTreeMap::new(),
@@ -1986,6 +1993,9 @@ impl<'a> Drawer<'a> {
             if xk < lo || xk > hi || self.drawn_once[o] || seen.contains(&o) {
                 continue;
             }
+            if self.site_slack > 0.0 && !self.taut_between(o, q, p) {
+                continue;
+            }
             seen.push(o);
             let oi = &self.st.wires[o];
             pitch += oi.w + oi.s.max(wi.s);
@@ -2003,6 +2013,16 @@ impl<'a> Drawer<'a> {
         }
         let x = depth / pitch;
         self.octi.room * pitch * (x + x * x)
+    }
+
+    /// M3 slack: wire `o`'s planned (taut) track crosses the segment `q`-`p` (between two vias of
+    /// one wire). O(passes).
+    fn taut_between(&self, o: WireId, q: Vec2, p: Vec2) -> bool {
+        let (st, pr) = (self.st, &self.b.proj);
+        let oi = &st.wires[o];
+        let t = self.packer.taut(st, o);
+        let pts: Vec<Vec2> = std::iter::once(pr.pos[oi.a]).chain(t.at.iter().copied()).chain(std::iter::once(pr.pos[oi.b])).collect();
+        pts.windows(2).any(|x| super::viaopt::seg_seg(x[0], x[1], q, p) <= 0.0)
     }
 
     /// Free room (nm) a via of diameter `d` at `p` of `net` leaves to the nearest foreign copper

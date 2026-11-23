@@ -7900,7 +7900,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             (Some(sa), Some(sb)) => crate::vias::via_via_need(&model.rules, a, sa, b, sb, margin),
             _ => 0.0,
         };
-        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via, pair_room: opts.via_pair_room, grid: super::gridsnap::via_grid(opts) };
+        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via, pair_room: opts.via_pair_room, grid: super::gridsnap::via_grid(opts), site_slack: if packer.site_planned { packer.site_slack } else { 0.0 } };
         let (mut sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
         // grid-snap r2: a via moved onto the grid must not change the plan's pour cut-offs (the
         // pour term the plan priced, [`super::pourplan`]): with the grid moves the plan copper
@@ -7919,6 +7919,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         dr.via_site = sites;
         dr.via_site_tight = rr.tight.iter().copied().collect();
+        dr.site_slack = cx.site_slack;
         warnings.push(format!(
             "via relocation ([vias] relocate; Dayan & Dai 1991, force balance): {} vias, {} moved in their free interval to the most clearance, smallest gap {:+.3} mm in total{}",
             rr.vias,
