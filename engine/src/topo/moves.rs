@@ -561,6 +561,8 @@ pub struct Labels<'a> {
     pub bottom: i32,
     /// Price of one layer change (the `via` factor).
     pub via_mm: f64,
+    /// thick-layer M1: the priority weight of a wire's own vias.
+    pub omega: super::layers::Omega,
     /// Layers `0..n_signal` are signal layers; wires with a label on a plane are left alone.
     pub n_signal: usize,
     pub evals: usize,
@@ -592,8 +594,8 @@ impl<'a> Labels<'a> {
         }
         self.evals += 1;
         self.tally.tried[kind as usize] += 1;
-        let via = self.via_mm;
-        let ok = try_move(self.st, &mut self.cm, &mut self.evl, mv, self.bottom, &|a, b| if a == b { 0.0 } else { via }, &|_, _, _| 0.0, self.add_vias, self.strict);
+        let (via, om, st) = (self.via_mm, self.omega, self.st);
+        let ok = try_move(self.st, &mut self.cm, &mut self.evl, mv, self.bottom, &|w, a, b| if a == b { 0.0 } else { via * om.of(st, w) }, &|_, _, _| 0.0, self.add_vias, self.strict);
         if ok {
             self.tally.applied[kind as usize] += 1;
         }

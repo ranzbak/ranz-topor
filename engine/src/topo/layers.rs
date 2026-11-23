@@ -557,6 +557,10 @@ pub struct LayerReport {
     pub before: GraphSize,
     pub after: GraphSize,
     pub vias: usize,
+    /// thick-layer M1: the vias weighted by their wire's ω ([`Omega`]): Σ ω(w) · vias(w), the via
+    /// term of the TopoR loop's evaluation (equal to `vias` with ω 1). `vias` stays the plain count
+    /// (the variant table's criterion, TopoR 6.3 manual p. 73).
+    pub vias_w: f64,
     /// Vias whose stretch has no triangle with a free disc for a via.
     pub vias_no_site: usize,
     pub via_pts: Vec<Vec2>,
@@ -592,6 +596,40 @@ pub struct LayerReport {
     /// The refinement's final capacity model measure ([`super::refine::FinalCap`]; par-refine
     /// item 3), valid while the state and `events` are the ones it was taken for.
     pub fin_cap: Option<super::refine::FinalCap>,
+}
+
+/// thick-layer M1 (`[vias] priority_weight`; docs/dev/design/thick-layer.md M1): the priority
+/// weight of a wire's own layer changes, ω(w) = 1 + a_w · max(0, w / w_def − 1) + a_t · [w >
+/// w_def] (the tier term: tier 2 = wider than the Default netclass width, as
+/// [`crate::decompose`] sets it; the user's net priority does not reach the layering yet). ω ≥ 1
+/// and grows smoothly with the width (graded, no cutoff). It multiplies only the `via_mm` part of
+/// the wire's layer change (the P3 domain-graph via edges, the N-layer transitions, the
+/// refinement's wire cost, the P4 label moves, the TopoR loop's via term); the per-via prices that
+/// exist already (power via rules, diff-pair and BGA share prices, `via_squeeze`, the TW6 site
+/// prices, plane cut) stay as they are, and a crosser's via keeps ω of its own wire. a_w = a_t = 0
+/// (or w_def 0) = ω 1 everywhere, the layering before thick-layer bit for bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Omega {
+    pub a_w: f64,
+    pub a_t: f64,
+    /// Default netclass track width (nm).
+    pub w_def: f64,
+}
+
+impl Omega {
+    /// ω of a wire of width `w` (nm). O(1).
+    pub fn of_width(&self, w: f64) -> f64 {
+        if self.w_def <= 0.0 || (self.a_w == 0.0 && self.a_t == 0.0) {
+            return 1.0;
+        }
+        let over = (w / self.w_def - 1.0).max(0.0);
+        1.0 + self.a_w * over + if w > self.w_def { self.a_t } else { 0.0 }
+    }
+
+    /// ω of wire `w` of `st`. O(1).
+    pub fn of(&self, st: &State, w: WireId) -> f64 {
+        st.wires.get(w).map_or(1.0, |wi| self.of_width(wi.w))
+    }
 }
 
 /// Parameters of P3.
@@ -636,6 +674,8 @@ pub struct LayerParams {
     /// par-refine: the refinement runs the serial in-place loop (`RefineParams::reference`), the
     /// reference the lane executor is tested against. Off by default.
     pub cap_reference: bool,
+    /// thick-layer M1: the priority weight of a wire's own vias ([`Omega`]).
+    pub omega: Omega,
 }
 
 impl Default for LayerParams {
@@ -657,6 +697,7 @@ impl Default for LayerParams {
             walk: 0,
             via_between: false,
             cap_reference: false,
+            omega: Omega::default(),
         }
     }
 }
@@ -901,8 +942,10 @@ fn stretches_and_vias(st: &State, polys: &[Vec<Vec2>], evl: &[Vec<(usize, f64, i
                 }
             }
         };
+        let om = p.omega.of(st, w);
         for (q, slot) in &ws.vias {
             rep.vias += 1;
+            rep.vias_w += om;
             rep.via_pts.push(*q);
             rep.slots.push(*slot);
         }
@@ -924,6 +967,7 @@ pub fn relabel_cached(st: &State, evl: &[Vec<(usize, f64, i32)>], p: &LayerParam
     rep.stretches.clear();
     rep.events.clear();
     rep.vias = 0;
+    rep.vias_w = 0.0;
     rep.via_pts.clear();
     rep.slots.clear();
     rep.vias_no_site = 0;
@@ -1404,7 +1448,8 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
     let site_pk = packer.filter(|pk| p.site_price && pk.site_price);
     for (w, ev) in events.iter().enumerate() {
         for x in ev.windows(2) {
-            let m = p.via_mm + site_pk.map_or(0.0, |pk| p.cap_mm * site_amount(st, pk, w, x[0].k, x[1].k, p.via_between));
+            // thick-layer M1: ω(w) multiplies the via_mm part only (not the site price).
+            let m = p.via_mm * p.omega.of(st, w) + site_pk.map_or(0.0, |pk| p.cap_mm * site_amount(st, pk, w, x[0].k, x[1].k, p.via_between));
             g.add_edge(x[0].node, x[1].node, if x[0].pi == x[1].pi { m } else { -m });
         }
     }
@@ -1464,7 +1509,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
                         mask,
                         partner,
                         bottom,
-                        &|a, b| if a == b { 0.0 } else { via },
+                        &|w, a, b| if a == b { 0.0 } else { via * p.omega.of(st, w) },
                         &|_, _, _| 0.0,
                         &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
                         Some(only),
@@ -1501,7 +1546,7 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             &mask,
             &partner,
             bottom,
-            &|a, b| if a == b { 0.0 } else { via },
+            &|w, a, b| if a == b { 0.0 } else { via * p.omega.of(st, w) },
             &|_, _, _| 0.0,
             &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
         )
@@ -1565,6 +1610,8 @@ struct Costs {
     plane_mm: f64,
     cut: f64,
     share: Vec<f64>,
+    /// thick-layer M1: per event, ω of its wire ([`Omega`]; empty: 1).
+    om: Vec<f64>,
 }
 
 impl Costs {
@@ -1573,16 +1620,22 @@ impl Costs {
     }
 
     fn trans(&self, a: usize, b: usize) -> f64 {
+        self.trans_w(a, b, 1.0)
+    }
+
+    /// [`Costs::trans`] of a wire with priority weight `om` (thick-layer M1: on the via part only,
+    /// not on the plane cut).
+    fn trans_w(&self, a: usize, b: usize, om: f64) -> f64 {
         if a == b {
             0.0
         } else {
-            self.via + 0.5 * self.cut * (self.plane(a) as u8 + self.plane(b) as u8) as f64
+            self.via * om + 0.5 * self.cut * (self.plane(a) as u8 + self.plane(b) as u8) as f64
         }
     }
 
     /// [`Costs::trans`] on the stretch from event `e` to the next one of its wire.
     fn trans_at(&self, e: usize, a: usize, b: usize) -> f64 {
-        let t = self.trans(a, b);
+        let t = self.trans_w(a, b, self.om.get(e).copied().unwrap_or(1.0));
         if a == b {
             t
         } else {
@@ -1750,7 +1803,17 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             }
         }
     }
-    let costs = Costs { site, via: p.via_mm, plane_from: if p.n_signal == 0 { nl } else { p.n_signal }, plane_mm: p.plane_mm, cut: p.plane_cut, share };
+    let mut om = Vec::new();
+    if p.omega != Omega::default() {
+        om = vec![1.0; ev.len()];
+        for (w, list) in wev.iter().enumerate() {
+            let o = p.omega.of(st, w);
+            for &e in list {
+                om[e] = o;
+            }
+        }
+    }
+    let costs = Costs { site, via: p.via_mm, plane_from: if p.n_signal == 0 { nl } else { p.n_signal }, plane_mm: p.plane_mm, cut: p.plane_cut, share, om };
     // 1. Greedy colouring in wire order.
     const NONE: u8 = u8::MAX;
     let mut lab = vec![NONE; ev.len()];
@@ -1943,7 +2006,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                         mask,
                         partner,
                         bottom,
-                        &|a, b| costs.trans(a, b),
+                        &|w, a, b| costs.trans_w(a, b, p.omega.of(st, w)),
                         &|w, i, l| wev.get(w).and_then(|x| x.get(i)).map_or(0.0, |&e| costs.unary(e, l)),
                         &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
                         Some(only),
@@ -1965,7 +2028,7 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
                 &mask,
                 &partner,
                 costs.plane_from.min(nl) as i32 - 1,
-                &|a, b| costs.trans(a, b),
+                &|w, a, b| costs.trans_w(a, b, p.omega.of(st, w)),
                 &|w, i, l| costs.unary(wev[w][i], l),
                 &RefineParams { overflow_mm: p.cap_mm, max_evals: p.cap_evals, add_vias: p.cap_vias, reference: p.cap_reference },
             )

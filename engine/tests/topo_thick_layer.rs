@@ -68,6 +68,84 @@ pub fn thick_dive_grouping() -> BoardModel {
     BoardModel::from_json(&j.to_string()).expect("fixture parses")
 }
 
+fn smd_rect(k: usize, r: &str, net: i32, x: f64, y: f64, w: f64, h: f64) -> serde_json::Value {
+    let mut v = smd(k, r, net, x, y, 0);
+    v["shapes"]["0"] = serde_json::json!({"kind": "rect", "w": n(w), "h": n(h)});
+    v
+}
+
+/// Fixture `wide_one_side` (PROPOSED pattern, design M1; scratch/boards/thick-layer/pat/wide_one_side.py
+/// r2): P (1.0 mm, via 0.9/0.5) between SMD pads on F.Cu at (1, 7) and (15, 7); S1-S5 (0.2 mm)
+/// top to bottom between PTH pads (1.0/0.5) at x 3.5, 5, 6.5, 8, 9.5 (either layer); S6 top to
+/// bottom between SMD pads on F.Cu at x 12, so S6 or P must change layer where they cross.
+/// Expected: P straight on F.Cu with 0 vias, S1-S5 straight on B.Cu, S6 dives under P with 2
+/// small vias; 86.0 mm of track in all (14 + 6 x 12).
+pub fn wide_one_side() -> BoardModel {
+    let (w, h) = (n(16.0), n(14.0));
+    let sig = serde_json::json!({"clearance": n(0.15), "width": n(0.2), "via_d": n(0.6), "via_drill": n(0.3), "netclass": "Default", "width_source": "default", "min_width": 0});
+    let pwr = serde_json::json!({"clearance": n(0.15), "width": n(1.0), "via_d": n(0.9), "via_drill": n(0.5), "netclass": "Power", "width_source": "netclass", "min_width": 0});
+    let mut nets = vec![serde_json::json!({"code": 1, "name": "P"})];
+    let mut pads = vec![smd_rect(1, "PA", 1, 1.0, 7.0, 1.4, 1.4), smd_rect(2, "PB", 1, 15.0, 7.0, 1.4, 1.4)];
+    let mut per_net = serde_json::Map::new();
+    per_net.insert("1".into(), pwr);
+    for (i, x) in [3.5, 5.0, 6.5, 8.0, 9.5].into_iter().enumerate() {
+        let code = i as i32 + 2;
+        nets.push(serde_json::json!({"code": code, "name": format!("S{}", i + 1)}));
+        pads.push(pth(10 + 2 * i, &format!("S{}T", i + 1), code, x, 1.0, 1.0, 0.5));
+        pads.push(pth(11 + 2 * i, &format!("S{}B", i + 1), code, x, 13.0, 1.0, 0.5));
+        per_net.insert(code.to_string(), sig.clone());
+    }
+    nets.push(serde_json::json!({"code": 7, "name": "S6"}));
+    pads.push(smd(30, "S6T", 7, 12.0, 1.0, 0));
+    pads.push(smd(31, "S6B", 7, 12.0, 13.0, 0));
+    per_net.insert("7".into(), sig.clone());
+    let j = serde_json::json!({
+        "units": "nm", "board": "wide_one_side",
+        "layers": [{"id": 0, "name": "F.Cu", "kind": "signal", "routable": true}, {"id": 2, "name": "B.Cu", "kind": "signal", "routable": true}],
+        "nets": nets, "pads": pads,
+        "vias": [], "kept": [], "copper_shapes": [], "holes": [],
+        "outline": [
+            {"kind": "seg", "a": [0, 0], "b": [w, 0]}, {"kind": "seg", "a": [w, 0], "b": [w, h]},
+            {"kind": "seg", "a": [w, h], "b": [0, h]}, {"kind": "seg", "a": [0, h], "b": [0, 0]}
+        ],
+        "keepouts": [], "net_ties": [], "pours": [], "teardrops": [], "dangling_ends": [],
+        "rules": {"min_clearance": n(0.15), "min_track_width": n(0.2), "min_via_diameter": n(0.4), "min_via_drill": n(0.3), "min_annular": n(0.05), "hole_clearance": n(0.25), "via_hole_clearance": n(0.25), "hole_to_hole": n(0.25), "edge_clearance": n(0.3), "max_error": 5000, "min_connection": 0, "profile": "board", "predefined_vias": [], "default": sig, "per_net": per_net, "floors_applied": [], "fallbacks": [], "warnings": [], "ignored_checks": [], "clearance_regions": [], "outline_half_stroke": 25000}
+    });
+    BoardModel::from_json(&j.to_string()).expect("fixture parses")
+}
+
+/// Per net: (vias, track length mm) of a route.
+fn per_net(r: &RouteResult) -> std::collections::BTreeMap<i32, (usize, f64)> {
+    let mut m = std::collections::BTreeMap::new();
+    for it in &r.items {
+        let v = serde_json::to_value(it).unwrap();
+        let net = v["net"].as_i64().unwrap() as i32;
+        let e = m.entry(net).or_insert((0usize, 0.0f64));
+        if v.get("d").is_some() {
+            e.0 += 1;
+        } else if v["prim"]["kind"] == "seg" {
+            let (a, b) = (&v["prim"]["a"], &v["prim"]["b"]);
+            let d = ((a[0].as_f64().unwrap() - b[0].as_f64().unwrap()).powi(2) + (a[1].as_f64().unwrap() - b[1].as_f64().unwrap()).powi(2)).sqrt();
+            e.1 += d / MM;
+        }
+    }
+    m
+}
+
+/// Diagnosis print (run with --nocapture): wide_one_side per net, ω off and on.
+#[test]
+#[ignore]
+fn diag_wide_one_side() {
+    let m = wide_one_side();
+    for pw in [serde_json::json!([0.0, 0.0]), serde_json::json!([1.0, 0.5])] {
+        let r = route(&m, &[("via_priority_weight", pw.clone())]);
+        println!("priority_weight {pw}: per net (vias, mm) {:?}; violations {}", per_net(&r), r.violations.len());
+        for it in &r.items {
+            println!("item {}", serde_json::to_string(it).unwrap());
+        }
+    }
+}
+
 fn route(m: &BoardModel, extra: &[(&str, serde_json::Value)]) -> RouteResult {
     let mut val = serde_json::to_value(Options::default()).unwrap();
     val["runs"] = serde_json::json!(1);
@@ -131,12 +209,13 @@ fn thick_dive_grouping_predicts_what_it_draws() {
 /// between the crossers' taut lines, too narrow for the 0.9 mm via with clearances (1.4 mm): with
 /// the option both are vias without a site, deficit = (1.4 - 1.0) / 2 = 0.2 mm each (the
 /// lane room, not the static room, which has space); without it (the static room alone, main)
-/// every via has a site and the plan predicts nothing.
+/// every via has a site and the plan predicts nothing. ω off (`priority_weight [0, 0]`), so P
+/// keeps its 3 vias.
 #[test]
 fn thick_dive_grouping_lane_sites() {
     let m = thick_dive_grouping();
     let sites = |on: bool| {
-        let r = route(&m, &[("via_site_planned", serde_json::json!(on))]);
+        let r = route(&m, &[("via_site_planned", serde_json::json!(on)), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
         let p = plan(&r);
         let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
         w["vias"].as_array().unwrap().iter().map(|v| (v["site"].as_bool().unwrap(), v["deficit"].as_f64().unwrap())).collect::<Vec<_>>()
@@ -149,4 +228,34 @@ fn thick_dive_grouping_lane_sites() {
     }
     let off = sites(false);
     assert!(off.iter().all(|v| v.0 && v.1 == 0.0), "static room alone: every via has a site: {off:?}");
+}
+
+/// S2 (M1, `[vias] priority_weight`): with ω (default [1, 0.5]: P's vias weigh 1 + 4 + 0.5 = 5.5)
+/// the layering keeps P on one layer and lets the thin crossers on that layer dive (2 small vias
+/// each, ω 1): P 0 vias, 0 drawn violations. With ω 1 for every via (main) P weaves with 3 vias,
+/// two of them in 1 mm gaps (the S1 items).
+#[test]
+fn thick_dive_grouping_wide_keeps_its_layer() {
+    let m = thick_dive_grouping();
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([1.0, 0.5]))]);
+    let pn = per_net(&r);
+    assert_eq!(pn[&1].0, 0, "P keeps its layer: {pn:?}");
+    assert_eq!(r.violations.len(), 0, "{:?}", r.violations);
+    let r0 = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+    assert_eq!(per_net(&r0)[&1].0, 3, "ω 1: P weaves (main): {:?}", per_net(&r0));
+}
+
+/// M1: ω = 1 + a_w · max(0, w / w_def − 1) + a_t when wider than the Default width; 1 at or
+/// below it, and for a_w = a_t = 0; grows with the width (graded).
+#[test]
+fn omega_formula() {
+    use topor_engine::topo::layers::Omega;
+    let o = Omega { a_w: 1.0, a_t: 0.5, w_def: 0.2e6 };
+    assert_eq!(o.of_width(0.2e6), 1.0);
+    assert_eq!(o.of_width(0.15e6), 1.0);
+    assert!((o.of_width(1.0e6) - 5.5).abs() < 1e-12);
+    assert!((o.of_width(0.3e6) - 2.0).abs() < 1e-12);
+    assert!(o.of_width(0.5e6) < o.of_width(0.6e6));
+    assert_eq!(Omega { a_w: 0.0, a_t: 0.0, w_def: 0.2e6 }.of_width(1.0e6), 1.0);
+    assert_eq!(Omega { a_w: 1.0, a_t: 0.5, w_def: 0.0 }.of_width(1.0e6), 1.0);
 }

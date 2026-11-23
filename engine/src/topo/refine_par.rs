@@ -427,7 +427,7 @@ struct CandOut {
 
 /// Cost of the layer changes and per-event extras of wire `w` with events `ev` (`wire_cost`).
 fn wire_cost_ev(ev: &[LEv], w: WireId, ctx: &Around) -> f64 {
-    let t: f64 = ev.windows(2).map(|x| (ctx.trans)(x[0].2 as usize, x[1].2 as usize)).sum();
+    let t: f64 = ev.windows(2).map(|x| (ctx.trans)(w, x[0].2 as usize, x[1].2 as usize)).sum();
     t + ev.iter().enumerate().map(|(i, e)| (ctx.unary)(w, i, e.2 as usize)).sum::<f64>()
 }
 

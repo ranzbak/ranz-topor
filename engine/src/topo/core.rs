@@ -3960,6 +3960,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         cap_vias: std::env::var("TOPO_CAPVIA").is_ok(),
         via_between: opts.via_between,
         cap_reference: opts.refine_reference,
+        omega: layers::Omega {
+            a_w: opts.via_priority_weight.first().copied().unwrap_or(0.0).max(0.0),
+            a_t: opts.via_priority_weight.get(1).copied().unwrap_or(0.0).max(0.0),
+            w_def: model.rules.default.width as f64,
+        },
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);
@@ -4080,8 +4085,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             area_mm += l * (st.wires[w].w + st.wires[w].s) / ws0;
         }
         let own = match obj {
-            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } | Objective::Best { mm_per_via, .. } => len_mm + mm_per_via * lr.vias as f64,
-            Objective::Area => area_mm + via_area_mm * lr.vias as f64,
+            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } | Objective::Best { mm_per_via, .. } => len_mm + mm_per_via * lr.vias_w,
+            Objective::Area => area_mm + via_area_mm * lr.vias_w,
         };
         // Predicted violations: over-full edge-layers, vias without a site, (M-B2) crossings
         // that cannot be layered (both stretches held to one layer: a short when drawn) and
@@ -4423,6 +4428,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             partner: &partner,
             bottom,
             via_mm: lp.via_mm,
+            omega: lp.omega,
             n_signal: n_sig,
             evals: 0,
             max_evals: opts.max_moves,
@@ -4833,7 +4839,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// The try's price of one via (the `via` factor's weight with the wire's coefficient
             /// and the cycle's emphasis) and the board's vias before the try (its layering).
             via_mm: f64,
-            vias_old: usize,
+            vias_old: f64,
             assign_t: AssignFn<'a, 'p>,
             ties: u64,
             measure: MeasureFn<'a, 'p>,
@@ -4901,7 +4907,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             fn violations(&mut self, st: &mut State<'p>, after: bool) -> f64 {
                 if !after {
-                    return self.viol_old + self.via_mm * self.vias_old as f64;
+                    return self.viol_old + self.via_mm * self.vias_old;
                 }
                 // The new state is layered as the loop layers it (the current tie seed) and judged
                 // by the archive's measure: its predicted violations and its vias (5.2c: the vias
@@ -4910,7 +4916,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let _pg = super::prof::g(super::prof::K::RrViolAfter);
                 let lr = (self.assign_t)(st, self.ties);
                 let p = (self.measure)(st, &lr);
-                let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
+                let v = p.price(self.viol_mm) + self.via_mm * lr.vias_w;
                 self.pending = Some((lr, p));
                 v
             }
@@ -4919,16 +4925,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     return self.violations(st, true);
                 };
                 let (lr, p) = local(st, saved, gone, new, self.lr_old, &self.pred_old, self.ties);
-                let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
+                let v = p.price(self.viol_mm) + self.via_mm * lr.vias_w;
                 if self.shadow {
                     let lg = (self.assign_t)(st, self.ties);
                     let pg = (self.measure)(st, &lg);
-                    let vg = pg.price(self.viol_mm) + self.via_mm * lg.vias as f64;
+                    let vg = pg.price(self.viol_mm) + self.via_mm * lg.vias_w;
                     let after = st.take_topology();
                     st.restore(saved.clone());
                     let lb = (self.assign_t)(st, self.ties);
                     let pb = (self.measure)(st, &lb);
-                    let vb = pb.price(self.viol_mm) + self.via_mm * lb.vias as f64;
+                    let vb = pb.price(self.viol_mm) + self.via_mm * lb.vias_w;
                     st.restore(after);
                     self.shadow_out = Some(Shadow { v: (v, vg), pred: (p, pg), vias: (lr.vias, lg.vias), unl: (lr.unlayerable.len(), lg.unlayerable.len()), base: (pb, lb.vias, lb.unlayerable.len(), vb) });
                 }
@@ -5375,7 +5381,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     viol_mm,
                     viol_old: self.pred.price(viol_mm),
                     via_mm,
-                    vias_old: self.lr.vias,
+                    vias_old: self.lr.vias_w,
                     assign_t: self.assign_t,
                     ties: self.ties,
                     measure: self.measure,
@@ -5756,8 +5762,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 self.st.took_part.clear();
                 let ties = super::optimise::mix_seed(seed, 0xF1 << 32 | w as u64) | 1;
                 let (lr, p) = local(self.st, &saved, &[w], &[w], &*self.lr, &self.pred, ties);
-                let old = self.pred.price(kv) + via_mm * self.lr.vias as f64;
-                let new = p.price(kv) + via_mm * lr.vias as f64;
+                let old = self.pred.price(kv) + via_mm * self.lr.vias_w;
+                let new = p.price(kv) + via_mm * lr.vias_w;
                 if new < old - 1e-6 {
                     self.set_lr(lr, Some(p));
                     self.pred_local = true;
@@ -6219,7 +6225,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let (na, nb, mid) = self.st.neck_runs(w);
                     shr += usize::from(na > 0) + usize::from(nb > 0) + mid.iter().enumerate().filter(|&(i, &k)| i == 0 || mid[i - 1] + 1 != k).count();
                 }
-                let area = if matches!(self.obj, Objective::Area) { area_mm + self.via_area_mm * self.lr.vias as f64 } else { 0.0 };
+                let area = if matches!(self.obj, Objective::Area) { area_mm + self.via_area_mm * self.lr.vias_w } else { 0.0 };
                 // The predicted violations (5.2a): the same measure the moves paid for; the cut
                 // model's necks are shrinkages too (2.4).
                 criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr + self.pred.shrink_n, area)
@@ -6534,6 +6540,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         partner: &partner,
                         bottom: self.bottom,
                         via_mm: self.lp.via_mm,
+                        omega: self.lp.omega,
                         n_signal: self.n_sig,
                         evals: 0,
                         max_evals: self.max_moves,

@@ -2510,15 +2510,15 @@ impl<'a> CapModel<'a> {
 }
 
 /// Cost of the layer changes and per-event extras of wire `w`.
-fn wire_cost(evl: &[Vec<LEv>], w: WireId, trans: &dyn Fn(usize, usize) -> f64, unary: &dyn Fn(WireId, usize, usize) -> f64) -> f64 {
+fn wire_cost(evl: &[Vec<LEv>], w: WireId, trans: &dyn Fn(WireId, usize, usize) -> f64, unary: &dyn Fn(WireId, usize, usize) -> f64) -> f64 {
     let l = &evl[w];
-    let t: f64 = l.windows(2).map(|x| trans(x[0].2 as usize, x[1].2 as usize)).sum();
+    let t: f64 = l.windows(2).map(|x| trans(w, x[0].2 as usize, x[1].2 as usize)).sum();
     t + l.iter().enumerate().map(|(i, e)| unary(w, i, e.2 as usize)).sum::<f64>()
 }
 
 /// Refine `evl` in place. `mask[w][i]` is the set of layers event `i` of wire `w` may take,
 /// `partner[w][i]` the event of the other wire of its crossing (the two must differ in layer).
-/// `trans(a, b)` prices a layer change, `unary(w, i, l)` the extra price of event `i` on `l`.
+/// `trans(w, a, b)` prices a layer change of wire `w` (thick-layer M1: with its ω), `unary(w, i, l)` the extra price of event `i` on `l`.
 /// O(`max_evals` x passes of the touched edges).
 #[allow(clippy::too_many_arguments)]
 pub fn refine(
@@ -2529,7 +2529,7 @@ pub fn refine(
     mask: &[Vec<u64>],
     partner: &[Vec<Option<(WireId, usize)>>],
     bottom: i32,
-    trans: &(dyn Fn(usize, usize) -> f64 + Sync),
+    trans: &(dyn Fn(WireId, usize, usize) -> f64 + Sync),
     unary: &(dyn Fn(WireId, usize, usize) -> f64 + Sync),
     p: &RefineParams,
 ) -> RefineStats {
@@ -2548,7 +2548,7 @@ pub fn refine_only(
     mask: &[Vec<u64>],
     partner: &[Vec<Option<(WireId, usize)>>],
     bottom: i32,
-    trans: &(dyn Fn(usize, usize) -> f64 + Sync),
+    trans: &(dyn Fn(WireId, usize, usize) -> f64 + Sync),
     unary: &(dyn Fn(WireId, usize, usize) -> f64 + Sync),
     p: &RefineParams,
     only: Option<&[bool]>,
@@ -2660,7 +2660,7 @@ pub(crate) struct Around<'r> {
     pub(crate) mask: &'r [Vec<u64>],
     pub(crate) partner: &'r [Vec<Option<(WireId, usize)>>],
     pub(crate) bottom: i32,
-    pub(crate) trans: &'r (dyn Fn(usize, usize) -> f64 + Sync),
+    pub(crate) trans: &'r (dyn Fn(WireId, usize, usize) -> f64 + Sync),
     pub(crate) unary: &'r (dyn Fn(WireId, usize, usize) -> f64 + Sync),
     pub(crate) add_vias: bool,
     pub(crate) max_evals: usize,
@@ -2725,7 +2725,7 @@ pub fn try_move(
     evl: &mut [Vec<LEv>],
     mv: &[((WireId, usize), i32)],
     _bottom: i32,
-    trans: &dyn Fn(usize, usize) -> f64,
+    trans: &dyn Fn(WireId, usize, usize) -> f64,
     unary: &dyn Fn(WireId, usize, usize) -> f64,
     add_vias: bool,
     strict: bool,
@@ -2741,7 +2741,7 @@ pub(crate) fn try_move_delta(
     evl: &mut [Vec<LEv>],
     mv: &[((WireId, usize), i32)],
     _bottom: i32,
-    trans: &dyn Fn(usize, usize) -> f64,
+    trans: &dyn Fn(WireId, usize, usize) -> f64,
     unary: &dyn Fn(WireId, usize, usize) -> f64,
     add_vias: bool,
     strict: bool,
@@ -2758,7 +2758,7 @@ fn try_move_in(
     cm: &mut CapModel,
     evl: &mut [Vec<LEv>],
     mv: &[((WireId, usize), i32)],
-    trans: &dyn Fn(usize, usize) -> f64,
+    trans: &dyn Fn(WireId, usize, usize) -> f64,
     unary: &dyn Fn(WireId, usize, usize) -> f64,
     add_vias: bool,
     strict: bool,
