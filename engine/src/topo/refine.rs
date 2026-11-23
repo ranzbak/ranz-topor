@@ -924,7 +924,7 @@ impl<'a> Frame<'a> {
         let d = self.packer.via_d(wi.net);
         let room = if d > 0.0 { self.packer.site_room(t, wi.net, wi.s) } else { f64::INFINITY };
         // M3 (`[vias] site_planned`): the other nets' planned lanes count as well as the static room.
-        let room = if d > 0.0 && self.packer.site_planned && room >= 0.5 * d { room.min(self.lane_room_k(w, k.min(wi.tris.len() - 1))) } else { room };
+        let room = if d > 0.0 && self.packer.site_lanes && room >= 0.5 * d { room.min(self.lane_room_k(w, k.min(wi.tris.len() - 1))) } else { room };
         let site = d <= 0.0 || (room >= 0.5 * d && !self.site_taken(m, w, t));
         let short = if self.packer.site_price && !site { Packer::site_deficit(room, d) as i64 } else { 0 };
         let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
@@ -2380,7 +2380,7 @@ impl<'a> CapModel<'a> {
                     Some(_) if d > 0.0 && fx.packer.site_planned && between.get(i) == Some(&false) && fx.lead_via(w, i, ks.len(), ev).is_none() => {
                         fx.end_key(w, ev, i).map_or(0.0, |(_, a, b)| Packer::site_deficit(fx.end_site_lane(&self.a, w, a, b).1, d))
                     }
-                    Some(t) if d > 0.0 && fx.packer.site_planned => Packer::site_deficit(fx.packer.site_room(t, wi.net, wi.s).min(fx.lane_room_k(w, k.min(wi.tris.len() - 1))), d),
+                    Some(t) if d > 0.0 && fx.packer.site_lanes => Packer::site_deficit(fx.packer.site_room(t, wi.net, wi.s).min(fx.lane_room_k(w, k.min(wi.tris.len() - 1))), d),
                     Some(t) if d > 0.0 => Packer::site_deficit(fx.packer.site_room(t, wi.net, wi.s), d),
                     _ => 0.0,
                 };

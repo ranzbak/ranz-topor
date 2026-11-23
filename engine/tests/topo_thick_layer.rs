@@ -171,7 +171,7 @@ fn plan(r: &RouteResult) -> serde_json::Value {
 #[ignore]
 fn diag_thick_dive_grouping() {
     let m = thick_dive_grouping();
-    let r = route(&m, &[]);
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
     let p = plan(&r);
     for w in p["wires"].as_array().unwrap().iter().filter(|w| w["net_name"] == "P") {
         println!("P wire: layers_now {} vias {} crossings {}", w["layers_now"], w["vias"], w["crossings"]);
@@ -198,7 +198,8 @@ fn diag_thick_dive_grouping() {
 #[test]
 fn thick_dive_grouping_predicts_what_it_draws() {
     let m = thick_dive_grouping();
-    let r = route(&m, &[]);
+    // ω off (P weaves, as main) and the default end-site test alone (`site_lanes` off).
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
     let p = plan(&r);
     let drawn = r.violations.iter().filter(|v| v.conn == 0).count();
     let pred: u64 = p["conns"]["0"]["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum();
@@ -215,7 +216,7 @@ fn thick_dive_grouping_predicts_what_it_draws() {
 fn thick_dive_grouping_lane_sites() {
     let m = thick_dive_grouping();
     let sites = |on: bool| {
-        let r = route(&m, &[("via_site_planned", serde_json::json!(on)), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+        let r = route(&m, &[("via_site_planned", serde_json::json!(on)), ("via_site_lanes", serde_json::json!(on)), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
         let p = plan(&r);
         let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
         w["vias"].as_array().unwrap().iter().map(|v| (v["site"].as_bool().unwrap(), v["deficit"].as_f64().unwrap())).collect::<Vec<_>>()
@@ -280,4 +281,18 @@ fn thick_dive_grouping_one_side_move() {
     assert_eq!(poff[&1].0, 3, "off: P weaves: {poff:?}");
     assert!(pon[&1].0 < 3, "one side: P fewer vias: {pon:?}");
     assert_eq!(on.violations.len(), 0, "{:?}", on.violations);
+}
+
+/// M3 with `site_lanes` off (the default) and ω off: only the end site (via 3, between F4 and B2
+/// in one traversal) is measured on the taut tracks; it has no room there (predicted), so the
+/// TopoR loop reroutes P (its via 3 moves above the crossers' ends of room): 1 drawn clearance
+/// item (B2 against P, 0.05 mm) instead of main's 6 (2 shorts). Without the option: main's 6.
+#[test]
+fn thick_dive_grouping_end_sites_only() {
+    let m = thick_dive_grouping();
+    let o = |on: bool| route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(on))]);
+    let (on, off) = (o(true), o(false));
+    let shorts = |r: &RouteResult| r.violations.iter().filter(|v| v.kind == "short").count();
+    assert_eq!((off.violations.len(), shorts(&off)), (6, 2), "main: {:?}", off.violations);
+    assert!(on.violations.len() < off.violations.len() && shorts(&on) == 0, "{:?}", on.violations);
 }

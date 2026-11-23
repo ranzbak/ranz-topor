@@ -1539,6 +1539,10 @@ pub struct Options {
     /// crossers that bound its interval on those taut paths; no room there = a via without a site
     /// (a predicted `via_site` item, graded by the deficit). False = the static room alone.
     pub via_site_planned: bool,
+    /// thick-layer M3 (`topor.toml [vias] site_lanes`): also a via in a traversal strictly between
+    /// its events is tested against the other nets' planned lanes (taut tracks) around its
+    /// triangle, not only the static room. False = only the end sites ([`Options::via_site_planned`]).
+    pub via_site_lanes: bool,
     /// thick-layer M1 (`topor.toml [vias] priority_weight`): `[a_w, a_t]` of the priority weight
     /// of a wide wire's own vias, ω = 1 + a_w · max(0, width / Default width − 1) + a_t when wider
     /// than the Default netclass width ([`crate::topo::layers::Omega`]); multiplies only the
@@ -2038,6 +2042,7 @@ impl Default for Options {
             grid_origin_nm: [0, 0],
             reserve_via_sites: true,
             via_site_planned: true,
+            via_site_lanes: false,
             via_priority_weight: vec![1.0, 0.5],
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
