@@ -259,3 +259,25 @@ fn omega_formula() {
     assert_eq!(Omega { a_w: 0.0, a_t: 0.0, w_def: 0.2e6 }.of_width(1.0e6), 1.0);
     assert_eq!(Omega { a_w: 1.0, a_t: 0.5, w_def: 0.0 }.of_width(1.0e6), 1.0);
 }
+
+/// S3 (M2.3, `[vias] pair_one_side`): with ω off (every via alike) the layering weaves P with 3
+/// vias; the one-side candidate holds P's whole run to one end layer and lays its crossers on
+/// that layer again (they dive), which the board's evaluation keeps (the 2 vias without a site,
+/// predicted errors, go): P fewer vias, no drawn violation. Off: main's weave.
+///
+/// S3 TARGET, FAILS (ignored): the candidate is tried (`TOPO_LOOPDBG`: "pair move wire 0 events
+/// 2..=6 onto 1: wires [3, 6, 7] laid again, eval 2173.268 -> 2173.268") but the crossers cannot
+/// go round (P's pads at the outline), they are laid again in place, and the board's layering
+/// after the move is free again: it weaves P as before (ω off, and P3's `site_amount` sees only
+/// the static room, not M3's lanes). Next: the move's layering holds the wire's events to `t`.
+#[test]
+#[ignore]
+fn thick_dive_grouping_one_side_move() {
+    let m = thick_dive_grouping();
+    let o = |on: bool| route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_pair_one_side", serde_json::json!(on))]);
+    let (on, off) = (o(true), o(false));
+    let (pon, poff) = (per_net(&on), per_net(&off));
+    assert_eq!(poff[&1].0, 3, "off: P weaves: {poff:?}");
+    assert!(pon[&1].0 < 3, "one side: P fewer vias: {pon:?}");
+    assert_eq!(on.violations.len(), 0, "{:?}", on.violations);
+}

@@ -1847,6 +1847,11 @@ pub struct Options {
     /// drops by more than that stretch price (a priced move, never a gate). No effect with
     /// `loop = "cycles"`.
     pub via_pair_move: bool,
+    /// thick-layer S3 (`[vias] pair_one_side`): the pair move also tries, for a wire with two or
+    /// more layer changes, its whole run held to one end layer with every wire crossing it on
+    /// that layer laid again (the wide trace on one side, its crossers on the other), ordered by
+    /// gain (ω x layer changes removed); kept by the board's evaluation like every pair move.
+    pub via_pair_one_side: bool,
     /// 5.4 (`[vias] relocate`): the plan puts every via at the point of its free interval where
     /// the forces of the copper around it balance (Dayan & Dai 1991; TopoR FreeStyle "Shift
     /// vias", 6.3 manual p. 179; Luzin-Popov 2013 p. 3), equal clearance between two neighbours,
@@ -2065,6 +2070,7 @@ impl Default for Options {
             via_pair_min: false,
             via_pair_max_mm: 10.0,
             via_pair_move: true,
+            via_pair_one_side: false,
             via_relocate: true,
             branch_relocate: false,
             via_between: true,

@@ -150,6 +150,17 @@ static INIT: OnceLock<()> = OnceLock::new();
 
 /// Is profiling on? One relaxed load (after the first call, which reads `TOPO_PROF`).
 #[inline]
+/// thick-layer S3: the process CPU time so far (ns, user + system, from `/proc/self/stat` at
+/// 100 ticks per second; 0 where that is not readable). Measurement only, never routing input.
+pub fn cpu_ns() -> u64 {
+    let Ok(s) = std::fs::read_to_string("/proc/self/stat") else { return 0 };
+    let Some(rest) = s.rfind(')').map(|i| &s[i + 2..]) else { return 0 };
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let tick = |i: usize| f.get(i).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+    // Fields 14 (utime) and 15 (stime) of stat; `rest` starts at field 3.
+    (tick(11) + tick(12)) * 10_000_000
+}
+
 pub fn on() -> bool {
     if INIT.get().is_none() {
         INIT.get_or_init(|| {

@@ -4960,6 +4960,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             obs: Vec<WireId>,
             len: f64,
             price: f64,
+            /// thick-layer S3 (M2.3, `[vias] pair_one_side`): the wire's whole run from its first
+            /// to its last layer change held to `t` (one side), not one stretch; `gain` = ω(w) x
+            /// the layer changes the hold removes (the candidates' order).
+            one_side: bool,
+            gain: f64,
         }
         /// TW7 B/C/E: one found pattern as one move ([`Sp::pattern_cands`]): its kind, the wires
         /// laid first in this order (`first`), the wires laid after them in route order (`obs`),
@@ -5085,6 +5090,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// 5.8 `[vias] pair_move`: the length scale (nm, `[vias] pair_max_mm`) of the graded
             /// stretch price ([`super::viaopt::pair_len_price`]); `None` = off.
             pair_move: Option<f64>,
+            /// thick-layer S3 (`[vias] pair_one_side`): the one-side candidates of the pair move.
+            one_side: bool,
+            /// thick-layer M1: ω of a wire's own vias (the one-side candidates' gain).
+            omega: super::layers::Omega,
             /// TW6 part E: `[optimize] site_move` / `branch_move`.
             site_move: bool,
             branch_move: bool,
@@ -5976,7 +5985,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             obs.sort_unstable();
                             obs.dedup();
                             if !obs.is_empty() {
-                                cands.push(PairCand { span: (i, j), t, lv, lu, obs, len, price });
+                                cands.push(PairCand { span: (i, j), t, lv, lu, obs, len, price, one_side: false, gain: 0.0 });
                             }
                         }
                         cands.sort_by_key(|c| c.obs.len());
@@ -5985,6 +5994,44 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     i = j + 1;
                 }
                 out.sort_by(|a, b| a.price.total_cmp(&b.price));
+                // thick-layer S3 (M2.3, design thick-layer.md: the wide trace on one side, its
+                // crossers on the other, outcome (b) as a move; Luzin, Popov & Popov 2013 p. 134
+                // step 8.1 with the stretch = the wire's whole run): for a wire with >= 2 layer
+                // changes, per end layer `t` the events from the first to the last one not on `t`
+                // held to `t` and every wire crossing that run on `t` laid again. After the stretch
+                // pairs, ordered by gain (ω(w) x layer changes removed, larger first); no cap.
+                if self.one_side {
+                    let changes = ev.windows(2).filter(|x| x[0].2 != x[1].2).count();
+                    let om = self.omega.of(self.st, w);
+                    let mut os: Vec<PairCand> = Vec::new();
+                    let ends: Vec<i32> = if ev.first().map(|e| e.2) == ev.last().map(|e| e.2) { ev.first().map(|e| e.2).into_iter().collect() } else { ev.first().into_iter().chain(ev.last()).map(|e| e.2).collect() };
+                    for t in ends {
+                        let sig = |x: i32| (0..n_sig).contains(&x);
+                        let (Some(i), Some(j)) = (ev.iter().position(|e| e.2 != t), ev.iter().rposition(|e| e.2 != t)) else { continue };
+                        if changes < 2 || !sig(t) || !(i..=j).all(|k| self.lr.mask[w].get(k).is_some_and(|m| (m >> t) & 1 == 1)) {
+                            continue;
+                        }
+                        // Every event outside i..=j is on `t`: the hold removes all the layer changes.
+                        let removed = changes;
+                        let mut obs: Vec<WireId> = (i..=j)
+                            .filter_map(|k| self.lr.partner[w].get(k).copied().flatten())
+                            .filter(|&(w2, i2)| w2 != w && self.lr.events.get(w2).and_then(|e| e.get(i2)).is_some_and(|e| e.2 == t))
+                            .map(|(w2, _)| w2)
+                            .filter(|&w2| has_conn(w2) && self.st.wires[w2].net != self.st.wires[w].net)
+                            .collect();
+                        obs.sort_unstable();
+                        obs.dedup();
+                        if obs.is_empty() {
+                            continue;
+                        }
+                        let lv = if i == 0 { t } else { ev[i - 1].2 };
+                        let lu = ev.get(j + 1).map_or(t, |e| e.2);
+                        let len = super::viaopt::crossing_stretch_len(self.st, w, &self.lr.events, &self.lr.partner[w], i, j);
+                        os.push(PairCand { span: (i, j), t, lv, lu, obs, len, price: super::viaopt::pair_len_price(len, scale, self.via_mm), one_side: true, gain: om * removed as f64 });
+                    }
+                    os.sort_by(|a, b| b.gain.total_cmp(&a.gain).then(a.price.total_cmp(&b.price)));
+                    out.extend(os);
+                }
                 out
             }
 
@@ -6016,7 +6063,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let n = now.len();
                     let at = |k: usize| k.min(n - 1);
                     let bit = |l: i32| 1u64 << l.clamp(0, 63);
-                    let (kv, ki, kj, ku) = (at(ev[i - 1].0), at(ev[i].0), at(ev[j].0), at(ev[j + 1].0));
+                    // thick-layer S3: a one-side span may start at the first event or end at the
+                    // last one (the run from that end is held to `t`).
+                    let (kv, ki, kj, ku) = (if i == 0 { 0 } else { at(ev[i - 1].0) }, at(ev[i].0), at(ev[j].0), ev.get(j + 1).map_or(n - 1, |e| at(e.0)));
                     // The stretch and the via intervals that go onto `t`; the interval on the
                     // side whose layer is not `t` keeps its via (`t` and that layer).
                     let (k0, k1) = (if c.t == c.lv { kv } else { ki }, if c.t == c.lu { ku } else { kj });
@@ -6731,7 +6780,18 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             cs.pair_moved += 1;
                             cs.pair_moved_wires += pc.obs.len();
                             ripped += pc.obs.len();
-                            if self.pair_move(w, &pc, c.seed ^ 0x3C3C, c.amp, c.emphasis.via_at(1.0)) {
+                            let (t0, c0) = (Instant::now(), super::prof::cpu_ns());
+                            let kept = self.pair_move(w, &pc, c.seed ^ 0x3C3C, c.amp, c.emphasis.via_at(1.0));
+                            if pc.one_side {
+                                cs.one_side_tried += 1;
+                                cs.one_side_kept += usize::from(kept);
+                                cs.one_side_ns += t0.elapsed().as_nanos() as u64;
+                                cs.one_side_cpu_ns += super::prof::cpu_ns().saturating_sub(c0);
+                            } else {
+                                cs.pair_ns += t0.elapsed().as_nanos() as u64;
+                                cs.pair_cpu_ns += super::prof::cpu_ns().saturating_sub(c0);
+                            }
+                            if kept {
                                 cs.pair_moved_kept += 1;
                                 cs.pair_moved_long += usize::from(pc.len > scale);
                             } else {
@@ -6909,6 +6969,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pred: pred0,
             pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             pair_move: opts.via_pair_move.then(|| opts.via_pair_max_mm.max(0.0) * MM),
+            one_side: opts.via_pair_one_side,
+            omega: lp.omega,
             site_move: opts.opt_site_move,
             branch_move: opts.opt_branch_move,
             move_detour: opts.opt_site_move_detour.max(0.0),
@@ -7362,6 +7424,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
             "crossing_share": opts.loop_crossing,
             "pair_move": [rep.stats.pair_moved_kept, rep.stats.pair_moved, rep.stats.pair_moved_wires, rep.stats.pair_moved_long],
+            // thick-layer S3: per candidate type tries, kept, wall and process CPU (ms; never routing input).
+            "pair_move_kinds": {
+                "stretch": {"tried": rep.stats.pair_moved - rep.stats.one_side_tried, "kept": rep.stats.pair_moved_kept.saturating_sub(rep.stats.one_side_kept), "wall_ms": rep.stats.pair_ns as f64 / 1e6, "cpu_ms": rep.stats.pair_cpu_ns as f64 / 1e6},
+                "one_side": {"tried": rep.stats.one_side_tried, "kept": rep.stats.one_side_kept, "wall_ms": rep.stats.one_side_ns as f64 / 1e6, "cpu_ms": rep.stats.one_side_cpu_ns as f64 / 1e6}
+            },
             "site_move": [rep.stats.site_kept, rep.stats.site_moved],
             "branch_move": [rep.stats.branch_kept, rep.stats.branch_moved],
             "site_move_detour_refused": rep.stats.site_detour_refused,

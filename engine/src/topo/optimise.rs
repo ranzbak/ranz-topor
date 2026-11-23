@@ -174,6 +174,14 @@ pub struct CycleStats {
     /// Kept moves whose stretch was longer than the `[vias] pair_max_mm` scale (its graded price
     /// grows with the square of the length over that scale; warned).
     pub pair_moved_long: usize,
+    /// thick-layer S3: one-side candidates of the pair move tried / kept, and wall / process CPU
+    /// (ns) of the stretch and one-side candidates (measurement only).
+    pub one_side_tried: usize,
+    pub one_side_kept: usize,
+    pub one_side_ns: u64,
+    pub one_side_cpu_ns: u64,
+    pub pair_ns: u64,
+    pub pair_cpu_ns: u64,
     /// TW6 part E (`[optimize] site_move` / `branch_move`): tries / kept of the site moves (own
     /// wire laid again, then the bounding crossers) and of the branch moves.
     pub site_moved: usize,
@@ -265,6 +273,12 @@ impl CycleStats {
         self.pair_moved_kept += o.pair_moved_kept;
         self.pair_moved_wires += o.pair_moved_wires;
         self.pair_moved_long += o.pair_moved_long;
+        self.one_side_tried += o.one_side_tried;
+        self.one_side_kept += o.one_side_kept;
+        self.one_side_ns += o.one_side_ns;
+        self.one_side_cpu_ns += o.one_side_cpu_ns;
+        self.pair_ns += o.pair_ns;
+        self.pair_cpu_ns += o.pair_cpu_ns;
         self.site_moved += o.site_moved;
         self.site_kept += o.site_kept;
         self.branch_moved += o.branch_moved;
