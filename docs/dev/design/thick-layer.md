@@ -198,3 +198,53 @@ on their far sides, so a crosser that can bend aside does not make the via a pre
 
 The night budget (≤ 2 ccx43 h) covers S1-S3 with det s0 runs on the patterns and qmtech, and one ladder at the end.
 S4 is measure-only tonight unless S1-S3 finish early.
+
+## Addendum r3 (2026-11-23): M3 slack, one-side hold, P2 crossing price of a layer-free connection
+
+**M3 crosser slack (done, `[vias] site_slack`).** A planned crosser is not a wall where it can
+still shift inside its passage. The shift is measured per pass: the pass's span on its edge
+(`State::pass_ports`), cut at its planned neighbours on that edge (they stay on their taut
+tracks, so the same room is not counted twice; the via's own wire is no neighbour). The lane may
+lie anywhere between its taut track and that shifted position. The room is that of the position
+farthest from the via, and the window ends at the crossing farthest out. The drawing does not
+yet realise the shift: the via relocation and ERBS still bound and measure against the taut
+tracks (test `thick_dive_grouping_predicts_what_it_draws_with_slack`, ignored).
+
+**One-side hold (done, `[vias] pair_hold`).** The one-side move's run stays on its layer through
+the layering that follows the move. Each of its events off that layer costs `pair_hold` via
+prices x ω in that layering: a domain edge to the fixed node in `assign_two`, a unary price in
+`assign_n`. This is a graded release price, not a lock, and the board's evaluation decides as
+before.
+
+**P2 crossing price of a layer-free connection (`[search] free_crossing`).**
+
+The problem: P2 prices every different-net crossing at a flat `crossing` price (20 mm,
+`init.rs` `cross_mm`). That price stands for the via that a crossing generally costs one of the
+two wires. A connection whose two terminals both allow every layer (PTH, `Obstacle::drilled`)
+pays no via when it crosses: it takes the layer the other wire does not use. Today it still pays
+20 mm per crossing, so S1/S2 of `wide_one_side` go round P's pad to save a crossing that costs
+nothing. The result is 91.41 mm against the expected 86.00 mm.
+
+The rule: the crossing price of the searching connection is multiplied by `free_crossing`
+(0..1) when both of the following hold:
+- the connection is layer-free (both terminal pads drilled);
+- the crossing leaves it a free layer (`cross_pin` = `Free`: its pinned layers along the path so
+  far still allow a layer the crossed stretch is not held to).
+
+A crossing that pins it (`Via`, `Unlayerable`) keeps the full price plus the forced-layer price,
+as today. So the price is graded by the path's own pin state, which the search already carries
+(`pin` in `arc_chords`). There is no cutoff. It applies to the connection's crossings with any
+width, not only with a wide trace: a layer-free connection's crossing costs no via in either
+case.
+
+Risk: a layer-free connection crossing many undecided wires (held to every layer) stays `Free`
+at each crossing, but the layering may need a via for it later. That case is graded by the
+existing forced-layer price only once the crossed stretches are held, which happens in the
+TopoR loop's reroutes (`layers_now`).
+
+The default comes from the det s0 A/B per connection. The target test is `wide_one_side`:
+86.00 mm with no detour, P 0 vias, S6 2 vias.
+
+Literature: Polubasov 2010 («Оптимизация разводки»): stretches are assigned layers before
+rerouting, and a crossing is priced by the via it implies. Dayan 1997 p. 55: a crossing of two
+nets that can take different layers needs no via.
