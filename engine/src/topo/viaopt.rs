@@ -344,6 +344,15 @@ pub struct ViaCtx<'a> {
     /// own track where that predicts no violation and loses at most the price in smallest gap
     /// ([`grid_site`]). None = as before.
     pub grid: Option<(super::gridsnap::Lattice, f64)>,
+    /// thick-layer M3 slack (`[vias] site_slack` with `site_planned`, else 0): the share of its
+    /// passage a crosser of the via's window may still shift ([`super::refine::shifted_lanes_of`],
+    /// the plan's model): the window ends at the crossing farthest out and the gap to a crosser
+    /// is that of its allowed position farthest from the via, as the plan judged the site. 0 =
+    /// the taut tracks are walls (as before).
+    pub site_slack: f64,
+    /// `[vias] site_window = "taut"`: the window ends at the bounding crossers' taut crossings
+    /// (they bend away from the via only); the gap is still measured with the slack.
+    pub window_taut: bool,
 }
 
 /// One via of the plan as the relocation sees it.
@@ -386,6 +395,25 @@ pub fn intervals(events: &[(usize, f64, i32)]) -> Vec<(usize, f64, usize, f64)> 
 struct Near {
     obs: Vec<usize>,
     wires: Vec<WireId>,
+    /// M3 slack ([`ViaCtx::site_slack`]): per crosser that bounds the window, its reference
+    /// point (the window's other end on the wire's track: the via stays between the crosser and
+    /// it) and its two shifted lanes ([`super::refine::shifted_lanes_of`]).
+    lanes: Vec<(WireId, Vec2, Vec<Vec<Vec2>>)>,
+}
+
+impl Near {
+    /// Distance (nm) of `p` to wire `u`'s copper centre line: its taut track, or with M3 slack
+    /// ([`Near::lanes`]) the allowed position farthest from `p` among the taut track and the two
+    /// shifted lanes, as the plan's lane room (`refine::Frame::lane_room`: a position with `p` on
+    /// the other side than the reference point would put the crosser between the via and the
+    /// window's other end, a crossing on the wrong layer). The taut track when no position is
+    /// allowed. O(corners).
+    fn dist(&self, tracks: &[Track], u: WireId, p: Vec2) -> f64 {
+        let taut = dist_polyline(p, &tracks[u].pts);
+        let Some((_, r, sh)) = self.lanes.iter().find(|x| x.0 == u) else { return taut };
+        let side = super::refine::poly_side;
+        std::iter::once(&tracks[u].pts).chain(sh.iter()).filter(|l| side(l, p) * side(l, *r) >= 0.0).map(|l| dist_polyline(p, l)).fold(None, |a: Option<f64>, d| Some(a.map_or(d, |a| a.max(d)))).unwrap_or(taut)
+    }
 }
 
 /// Gaps of a via of `net` (radius `rv`, clearance `c`) at `p`: `(rule, force, potential)`.
@@ -422,7 +450,7 @@ fn gap_at(cx: &ViaCtx, tracks: &[Track], near: &Near, sites: &[Site], pair: &Pai
     }
     for &u in &near.wires {
         let wu = &st.wires[u];
-        add(dist_polyline(p, &tracks[u].pts) - rv - 0.5 * wu.w - c.max(wu.s), true);
+        add(near.dist(tracks, u, p) - rv - 0.5 * wu.w - c.max(wu.s), true);
     }
     for s in sites {
         if (s.wire, s.i) == me {
@@ -480,7 +508,7 @@ fn event_s(st: &State, poly: &[Vec2], opoly: &[Vec2], w: WireId, x: &super::stat
 /// where the two tracks cross, the one nearest the arc range `lo..=hi` (the traversal of the
 /// crossing in the topology; the taut tracks may cross a little outside it). `None` when the
 /// tracks do not cross. O(corners^2).
-fn track_crossing(tw: &Track, to: &Track, lo: f64, hi: f64) -> Option<f64> {
+pub(crate) fn track_crossing(tw: &Track, to: &Track, lo: f64, hi: f64) -> Option<f64> {
     let mut best: Option<(f64, f64)> = None;
     for i in 0..tw.pts.len().saturating_sub(1) {
         let (a, b) = (tw.pts[i], tw.pts[i + 1]);
@@ -538,6 +566,18 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
     let mut vs: Vec<V> = Vec::new();
     let mut sites: Vec<Site> = Vec::new();
     let mut pair: PairNeed = crate::fxhash::map();
+    // M3 slack: the shifted lanes of crosser `o` over the passes around its traversal `ko` (as the
+    // plan's end site, `refine::Frame::end_site_lane`), for the via of wire `w`.
+    let ports: Vec<std::cell::OnceCell<Vec<(Vec2, Vec2)>>> = vec![std::cell::OnceCell::new(); st.wires.len()];
+    let cross_at = |x: WireId, j: usize| tracks[x].sig.get(j).map(|&s| tracks[x].at(s));
+    let lanes_of = |w: WireId, o: WireId, ko: usize| -> Vec<Vec<Vec2>> {
+        let n = st.wires[o].passes.len();
+        if cx.site_slack <= 0.0 || n == 0 {
+            return Vec::new();
+        }
+        let pp = ports[o].get_or_init(|| st.pass_ports(o));
+        super::refine::shifted_lanes_of(st, cx.site_slack, w, o, ko.saturating_sub(1).min(n - 1), ko.min(n - 1), &tracks[o], pp, &cross_at)
+    };
     for (&w, pl) in plans.iter() {
         if pl.vias.is_empty() || tracks[w].is_empty() {
             continue;
@@ -571,20 +611,29 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             // crossing's own point (it may lie on either side of it).
             let (mut lo_x, mut hi_x): (Option<f64>, Option<f64>) = (None, None);
             let (mut lo_is_x, mut hi_is_x) = (false, false);
+            // M3 slack: the crossers bounding the window (wire, below = before the via).
+            let mut bound: Vec<(WireId, bool, usize)> = Vec::new();
             for x in xs.iter().filter(|x| x.k == ka || x.k == kb) {
                 let opoly = st.polyline(x.other);
                 let es = event_s(st, &poly, &opoly, w, x);
                 let (a, b) = (tr.sigma(x.k, 0.0), tr.sigma(x.k, 1.0));
                 let Some(arc) = track_crossing(tr, &tracks[x.other], a, b) else { continue };
+                // M3 slack: the crosser may cross the wire anywhere its passage lets it; the
+                // window ends at the crossing farthest out (the plan's end site), or with
+                // `[vias] site_window = "taut"` at its taut crossing.
+                let alt: Vec<f64> = if cx.window_taut { Vec::new() } else { lanes_of(w, x.other, x.other_k).into_iter().filter_map(|pts| track_crossing(tr, &Track { pts, cum: Vec::new(), sig: Vec::new() }, a, b)).collect() };
+                let (arc_lo, arc_hi) = (alt.iter().fold(arc, |m, &v| m.min(v)), alt.iter().fold(arc, |m, &v| m.max(v)));
                 if std::env::var_os("TOPO_VIAREL").is_some() {
-                    eprintln!("VIACLAMP w{w} v{i} ka{ka} sa{sa:.3} kb{kb} sb{sb:.3} x.k{} other{} es{es:.3} arc{:.3} trav[{:.3},{:.3}]", x.k, x.other, arc / 1e6, a / 1e6, b / 1e6);
+                    eprintln!("VIACLAMP w{w} v{i} ka{ka} sa{sa:.3} kb{kb} sb{sb:.3} x.k{} other{} es{es:.3} arc{:.3} slack[{:.3},{:.3}] trav[{:.3},{:.3}]", x.k, x.other, arc / 1e6, arc_lo / 1e6, arc_hi / 1e6, a / 1e6, b / 1e6);
                 }
                 if x.k == ka && es <= sa + 1e-9 {
-                    lo_x = Some(lo_x.map_or(arc, |v: f64| v.max(arc)));
+                    lo_x = Some(lo_x.map_or(arc_lo, |v: f64| v.max(arc_lo)));
                     lo_is_x |= (es - sa).abs() <= 1e-9;
+                    bound.push((x.other, true, x.other_k));
                 }
                 if x.k == kb && es >= sb - 1e-9 {
-                    hi_x = Some(hi_x.map_or(arc, |v: f64| v.min(arc)));
+                    bound.push((x.other, false, x.other_k));
+                    hi_x = Some(hi_x.map_or(arc_hi, |v: f64| v.min(arc_hi)));
                     hi_is_x |= (es - sb).abs() <= 1e-9;
                 }
             }
@@ -625,7 +674,10 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
             // The traversals the via may take: the plan's range (with [vias] between_crossings
             // strictly between the events, never a crossing's triangle).
             let (ka, kb) = pl.vias.get(i).map_or((ka, kb), |&(a, b)| (a, b.max(a)));
-            vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires }, pinched });
+            // M3 slack: the crossers bounding the window keep the plan's freedom (a crosser
+            // below the via keeps the window's upper end as its reference, and the reverse).
+            let lanes: Vec<(WireId, Vec2, Vec<Vec<Vec2>>)> = bound.iter().filter(|_| cx.site_slack > 0.0).map(|&(o, below, ko)| (o, tr.at(if below { hi } else { lo }), lanes_of(w, o, ko))).filter(|x| !x.2.is_empty()).collect();
+            vs.push(V { w, i, lo, hi, ka, kb, near: Near { obs, wires, lanes }, pinched });
             sites.push(Site { wire: w, i, k, p });
             bounds.push((lo, hi));
         }
@@ -1250,5 +1302,89 @@ mod tests {
     fn intervals_follow_the_label_changes() {
         let ev = [(1, 0.5, 0), (3, 0.2, 1), (5, 0.1, 1), (7, 0.9, 0)];
         assert_eq!(intervals(&ev), vec![(1, 0.5, 3, 0.2), (5, 0.1, 7, 0.9)]);
+    }
+
+    /// Tiny deterministic generator for the fuzz tests (xorshift64*).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> f64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn pt(&mut self) -> Vec2 {
+            Vec2 { x: (self.next() * 20.0 - 10.0) * 1e6, y: (self.next() * 20.0 - 10.0) * 1e6 }
+        }
+    }
+
+    /// Distance from `p` to the segment `a-b` by dense sampling (slow reference, error <= len / 8000).
+    fn sampled_dist(p: Vec2, a: Vec2, b: Vec2) -> f64 {
+        (0..=4000).map(|i| (p - (a + (b - a) * (i as f64 / 4000.0))).len()).fold(f64::INFINITY, f64::min)
+    }
+
+    /// thick-layer r5 L6 (rule 2): `seg_seg` (the test of `Drawer::taut_between`: `<= 0` = the taut
+    /// track crosses the segment) against exact integer arithmetic for the proper crossing and a
+    /// sampled distance otherwise.
+    #[test]
+    fn seg_seg_fuzz_against_exact_crossing_and_sampled_distance() {
+        let mut rng = Rng(0xD1B54A32D192ED03);
+        let (mut crossing, mut apart) = (0, 0);
+        for _ in 0..3000 {
+            let (a, b, c, d) = (rng.pt(), rng.pt(), rng.pt(), rng.pt());
+            // exact: coordinates are whole nm after rounding, products fit i128
+            let r = |q: Vec2| (q.x.round() as i128, q.y.round() as i128);
+            let (ra, rb, rc, rd) = (r(a), r(b), r(c), r(d));
+            let cr = |o: (i128, i128), p: (i128, i128), q: (i128, i128)| (p.0 - o.0) * (q.1 - o.1) - (p.1 - o.1) * (q.0 - o.0);
+            let sg = |v: i128| v.signum();
+            let proper = sg(cr(rc, rd, ra)) * sg(cr(rc, rd, rb)) < 0 && sg(cr(ra, rb, rc)) * sg(cr(ra, rb, rd)) < 0;
+            let (a, b, c, d) = (Vec2 { x: ra.0 as f64, y: ra.1 as f64 }, Vec2 { x: rb.0 as f64, y: rb.1 as f64 }, Vec2 { x: rc.0 as f64, y: rc.1 as f64 }, Vec2 { x: rd.0 as f64, y: rd.1 as f64 });
+            let got = seg_seg(a, b, c, d);
+            assert_eq!(seg_seg(c, d, a, b) <= 0.0, got <= 0.0, "symmetric {a:?} {b:?} {c:?} {d:?}");
+            assert_eq!(seg_seg(b, a, d, c) <= 0.0, got <= 0.0, "reversed {a:?} {b:?} {c:?} {d:?}");
+            if proper {
+                assert!(got <= 0.0, "proper crossing missed {a:?} {b:?} {c:?} {d:?}: {got}");
+                crossing += 1;
+            } else {
+                let want = [sampled_dist(a, c, d), sampled_dist(b, c, d), sampled_dist(c, a, b), sampled_dist(d, a, b)].into_iter().fold(f64::INFINITY, f64::min);
+                assert!((got - want).abs() <= 0.002e6 + 1e-9, "{a:?} {b:?} {c:?} {d:?}: {got} against {want}");
+                assert!(got > 0.0 || want < 0.002e6, "{a:?} {b:?} {c:?} {d:?}");
+                apart += 1;
+            }
+        }
+        assert!(crossing > 300 && apart > 300, "crossing {crossing}, apart {apart}");
+    }
+
+    /// thick-layer r5 L6: `Near::dist` against a slow reference: the taut track alone, or with M3
+    /// slack the largest sampled distance over the allowed positions (the track and its shifted
+    /// lanes whose side of `p` is the side of the reference point `r`), the taut track when none
+    /// is allowed.
+    #[test]
+    fn near_dist_fuzz_against_the_sampled_lane_distance() {
+        let mut rng = Rng(0x2545F4914F6CDD1D);
+        let poly_dist = |p: Vec2, l: &[Vec2]| l.windows(2).map(|x| sampled_dist(p, x[0], x[1])).fold(f64::INFINITY, f64::min);
+        let (mut with_lanes, mut taut_only) = (0, 0);
+        for _ in 0..400 {
+            let line = |rng: &mut Rng| -> Vec<Vec2> { (0..3 + (rng.next() * 2.0) as usize).map(|_| rng.pt()).collect() };
+            let tr = line(&mut rng);
+            let tracks = vec![Track { pts: tr.clone(), cum: Vec::new(), sig: Vec::new() }];
+            let (p, rf) = (rng.pt(), rng.pt());
+            let sh: Vec<Vec<Vec2>> = vec![line(&mut rng), line(&mut rng)];
+            let have = rng.next() < 0.7;
+            let near = Near { obs: Vec::new(), wires: vec![0], lanes: if have { vec![(0, rf, sh.clone())] } else { Vec::new() } };
+            let got = near.dist(&tracks, 0, p);
+            let taut = poly_dist(p, &tr);
+            let ok = |l: &Vec<Vec2>| super::super::refine::poly_side(l, p) * super::super::refine::poly_side(l, rf) >= 0.0;
+            let want = if have {
+                let ds: Vec<f64> = std::iter::once(&tr).chain(sh.iter()).filter(|l| ok(l)).map(|l| poly_dist(p, l)).collect();
+                with_lanes += 1;
+                ds.into_iter().fold(None, |a: Option<f64>, d| Some(a.map_or(d, |a| a.max(d)))).unwrap_or(taut)
+            } else {
+                taut_only += 1;
+                taut
+            };
+            assert!((got - want).abs() <= 0.003e6, "{tr:?} {sh:?} p {p:?} r {rf:?}: {got} against {want}");
+        }
+        assert!(with_lanes > 200 && taut_only > 50, "{with_lanes} {taut_only}");
     }
 }

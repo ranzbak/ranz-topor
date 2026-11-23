@@ -381,6 +381,10 @@ struct Search<'s, 'p> {
     /// Extra price (mm, >= 0) of a pass of this net through an edge: the loss-augmentation hook
     /// of the S3b learning loop ([`super::learn`]); `None` in routing.
     hook: Option<&'s PassHook<'s>>,
+    /// thick-layer r3 (`[search] free_crossing`): the multiplier of the crossing price where the
+    /// crossing leaves this connection a free layer and both its terminal pads are drilled (it
+    /// takes the layer the crossed wire does not use: no via); 1 otherwise.
+    free_mul: f64,
 }
 
 /// Extra price (mm, >= 0) of a pass of wire net `net` through edge `e` ([`State::search_hooked`]).
@@ -474,7 +478,7 @@ impl Search<'_, '_> {
     /// `crossing` price, plus a via where both are held to one layer and one can leave it, or
     /// the `overflow` price where neither can.
     #[allow(clippy::too_many_arguments)]
-    fn arc_chords(tc: &[Chord], wt: &InitWeights, net: i32, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>], vias: bool, own_site: f64) -> (f64, u64) {
+    fn arc_chords(tc: &[Chord], wt: &InitWeights, net: i32, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>], vias: bool, own_site: f64, free_mul: f64) -> (f64, u64) {
         let (mut cross, mut pg) = (0.0, pin);
         for &(b1, b2, onet, o, held, oall, f, osite) in tc {
             if skip.contains(&Some(o)) || !interleave(xb, yb, b1, b2) {
@@ -488,7 +492,11 @@ impl Search<'_, '_> {
             pg = p2;
             // TW6 part B: the crossing predicts a via without a site when neither wire has one.
             cross += wt.site_mm * own_site.min(osite);
-            cross += wt.cross_mm * f
+            // thick-layer r3: a layer-free connection whose path keeps a free layer here pays
+            // `free_mul` of the crossing price (graded by its pin state, no cutoff).
+            // With `crossing_vias = "crossing"` `k` is always Free: the crossing's own layers decide.
+            let fm = if free_mul < 1.0 && cross_pin_full(pin, mine, held, oall).0 == CrossLayer::Free { free_mul } else { 1.0 };
+            cross += wt.cross_mm * f * fm
                 + match k {
                     CrossLayer::Free => 0.0,
                     CrossLayer::Via => wt.forced_layer_mm,
@@ -499,7 +507,7 @@ impl Search<'_, '_> {
     }
 
     fn arc(&self, t: TriId, xb: f64, yb: f64, pin: u64, mine: u64, skip: &[Option<WireId>]) -> (f64, u64) {
-        Self::arc_chords(self.tc[t].as_deref().expect("filled"), &self.wt, self.c.net, xb, yb, pin, mine, skip, self.st.cross_vias, self.own_site.get(t).copied().unwrap_or(0.0))
+        Self::arc_chords(self.tc[t].as_deref().expect("filled"), &self.wt, self.c.net, xb, yb, pin, mine, skip, self.st.cross_vias, self.own_site.get(t).copied().unwrap_or(0.0), self.free_mul)
     }
 
     fn slot(&self, e: EdgeId, g: usize, into: TriId) -> usize {
@@ -657,7 +665,7 @@ impl Search<'_, '_> {
                 let b0 = if taut { base_root } else { base };
                 let f = (2.0 * g as f64 + 1.0) / (2.0 * n as f64 + 2.0);
                 let yb = side as f64 + if fwd { f } else { 1.0 - f };
-                let (cross, pg) = Self::arc_chords(self.tc[t].as_deref().expect("filled above"), &wt, c.net, xb, yb, pin, mine, &[except], st.cross_vias, self.own_site.get(t).copied().unwrap_or(0.0));
+                let (cross, pg) = Self::arc_chords(self.tc[t].as_deref().expect("filled above"), &wt, c.net, xb, yb, pin, mine, &[except], st.cross_vias, self.own_site.get(t).copied().unwrap_or(0.0), self.free_mul);
                 let (extra, pin2, room1, room) = if pg == pin { base_pass } else { through(pg) };
                 // A pin narrowed by a crossing may meet a finite room the base pin did not.
                 if self.needs.is_empty() && (room.is_some_and(f64::is_finite) || room1.is_some_and(f64::is_finite)) {
@@ -985,7 +993,10 @@ impl<'p> State<'p> {
         let mut gpts: Vec<(Vec2, f64)> = dst.iter().map(|d| (pr.pos[d.v], d.adj)).collect();
         gpts.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)).then(a.1.total_cmp(&b.1)));
         gpts.dedup_by(|a, b| (a.0 - b.0).len2() < 1.0);
+        let drilled = |o: ObsId| pr.obstacles.get(o).is_some_and(|ob| ob.drilled);
+        let free_mul = if self.free_crossing < 1.0 && drilled(c.pa) && drilled(c.pb) { self.free_crossing.max(0.0) } else { 1.0 };
         let mut s = Search {
+            free_mul,
             st: self,
             c: *c,
             wt: *wt,

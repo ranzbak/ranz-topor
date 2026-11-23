@@ -279,6 +279,14 @@ pub struct RouteResult {
     /// class, located, and per connection its planned vias and length ([`crate::topo::compass`]);
     /// `None` for other engines and for results without a plan.
     pub compass: Option<crate::topo::compass::Compass>,
+    /// thick-layer F4 (`[output] plan_report`, topological core): the plan handed to the drawing
+    /// of the row this result drew, as compact JSON ([`crate::topo::plandump::plan_json`]: per
+    /// wire crossings in order with their layers, passes, layers, planned vias and sites, width
+    /// and room; per connection the compass's vias, taut length and predicted items; the row's
+    /// label, round and seed). The plugin writes it to `plan.json.gz` in the report folder and
+    /// leaves it out of `result.json`. `None` without a plan or with the option off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
     /// M2.TL: the time limit of the call and what it did (`None`: no limit set).
     pub limit: Option<LimitReport>,
     /// TW3: the four bests of the TopoR loop's one variant table as drawn (`role` = the roles the
@@ -893,6 +901,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         violations: Vec::new(),
         diff_pairs: Vec::new(),
         compass: None,
+        plan: None,
         limit: None,
         bests: Vec::new(),
         erbs: None,

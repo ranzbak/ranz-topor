@@ -1551,6 +1551,33 @@ pub struct Options {
     /// there; another net's via planned in the same small triangle counts as a via without a site,
     /// so P3/P4 move it or reroute its wire before the drawing (true, default).
     pub reserve_via_sites: bool,
+    /// thick-layer M3 (`topor.toml [vias] site_planned`): the site test of a planned via also
+    /// counts the other nets' planned lanes (their taut paths, half width plus clearance, on every
+    /// layer: a through via blocks them all), and an end-traversal site must lie between the two
+    /// crossers that bound its interval on those taut paths; no room there = a via without a site
+    /// (a predicted `via_site` item, graded by the deficit). False = the static room alone.
+    pub via_site_planned: bool,
+    /// thick-layer M3 (`topor.toml [vias] site_lanes`): also a via in a traversal strictly between
+    /// its events is tested against the other nets' planned lanes (taut tracks) around its
+    /// triangle, not only the static room. False = only the end sites ([`Options::via_site_planned`]).
+    pub via_site_lanes: bool,
+    /// thick-layer M3 slack (`topor.toml [vias] site_slack`): with `via_site_planned`, the share
+    /// (0..1) of a crossing trace's passage (the room between its neighbours on each edge it
+    /// crosses near the via) by which it may move aside for the via; 1 (default) = the whole
+    /// passage, 0 = the planned tight paths are walls.
+    pub via_site_slack: f64,
+    /// thick-layer M3 slack, round 4 (`topor.toml [vias] site_window`): where a via's window ends
+    /// against the crossers that bound it, in the plan's end site and the drawing's via
+    /// relocation alike. `"farthest"` (default, the design addendum r3) = at the crossing farthest
+    /// out of the crossers' shifted lanes (a crosser may move past the via's taut position);
+    /// `"taut"` = at their taut crossings (a crosser moves away from the via only; the room is
+    /// still measured with the slack). Any other value = `"farthest"`.
+    pub via_site_window: String,
+    /// thick-layer M1 (`topor.toml [vias] priority_weight`): `[a_w, a_t]` of the priority weight
+    /// of a wide wire's own vias, ω = 1 + a_w · max(0, width / Default width − 1) + a_t when wider
+    /// than the Default netclass width ([`crate::topo::layers::Omega`]); multiplies only the
+    /// `via_mm` part of that wire's layer changes. `[0, 0]` = ω 1 (every via priced alike).
+    pub via_priority_weight: Vec<f64>,
     /// M-45 (`topor.toml [drawing] style`): `"octilinear"` (default; straight and 45 degree
     /// segments, the hand boards' style; a stretch where 45 degrees does not fit stays any-angle
     /// and pays the `any_angle` factor) or `"smooth"` (the taut any-angle drawing).
@@ -1696,6 +1723,11 @@ pub struct Options {
     /// cut test: over-full) is measured. Its time goes back to the time limit. Off by default
     /// (user 2026-11-13); `harness.score_runs` turns it on. Never changes the routing.
     pub compass_cut_check: bool,
+    /// thick-layer F4 (`[output] plan_report`): keep the plan handed to the drawing of the drawn
+    /// row in the result (`RouteResult::plan`, [`crate::topo::plandump`]), so a user's run can be
+    /// traced plan vs drawing without a re-route. On by default; measurement only (its time,
+    /// well under a second on qmtech, counts as router time), never changes the routing.
+    pub plan_report: bool,
     /// M0 (`[capacity] edges_test`, `capacity_model = "edges"` only): how the per-edge model's
     /// over-full edge-layers enter P4. `"price"` (default) = as the method prices everything
     /// (Polubasov 2010 «Оптимизация разводки»: one price S = sum k_i x_i): a topology move pays
@@ -1849,6 +1881,21 @@ pub struct Options {
     /// drops by more than that stretch price (a priced move, never a gate). No effect with
     /// `loop = "cycles"`.
     pub via_pair_move: bool,
+    /// thick-layer S3 (`[vias] pair_one_side`): the pair move also tries, for a wire with two or
+    /// more layer changes, its whole run held to one end layer with every wire crossing it on
+    /// that layer laid again (the wide trace on one side, its crossers on the other), ordered by
+    /// gain (ω x layer changes removed); kept by the board's evaluation like every pair move.
+    pub via_pair_one_side: bool,
+    /// thick-layer S3 (`topor.toml [vias] pair_hold`): the one-side move's run stays on its layer
+    /// through the layering that follows the move, each of its events off that layer priced at
+    /// this many via prices (x the wire's ω): a graded release price, not a lock. 0 = the
+    /// layering is free (round 2).
+    pub via_pair_hold: f64,
+    /// thick-layer r3 (`topor.toml [search] free_crossing`): the crossing price of a connection
+    /// whose two terminal pads are drilled (it can take either layer with no via) is multiplied
+    /// by this where the crossing leaves its path a free layer; 1 = the full price for every
+    /// crossing (main).
+    pub free_crossing: f64,
     /// 5.4 (`[vias] relocate`): the plan puts every via at the point of its free interval where
     /// the forces of the copper around it balance (Dayan & Dai 1991; TopoR FreeStyle "Shift
     /// vias", 6.3 manual p. 179; Luzin-Popov 2013 p. 3), equal clearance between two neighbours,
@@ -2036,11 +2083,18 @@ impl Default for Options {
             grid_via_nm: [0, 0],
             grid_origin_nm: [0, 0],
             reserve_via_sites: true,
+            // thick-layer A/B tl3/tl4 (det s0): off; reasons in reports/thick-layer-20261123-0215.md.
+            via_site_planned: false,
+            via_site_lanes: false,
+            via_site_slack: 1.0,
+            via_site_window: "farthest".into(),
+            via_priority_weight: vec![0.0, 0.0],
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
             cut_report: String::new(),
             capacity_model: "edges".into(),
             compass_cut_check: false,
+            plan_report: true,
             edges_test: "price".into(),
             overflow_softness: 0.1,
             cut_vias: true,
@@ -2066,6 +2120,9 @@ impl Default for Options {
             via_pair_min: false,
             via_pair_max_mm: 10.0,
             via_pair_move: true,
+            via_pair_one_side: false,
+            via_pair_hold: 1.0,
+            free_crossing: 1.0,
             via_relocate: true,
             branch_relocate: false,
             via_between: true,

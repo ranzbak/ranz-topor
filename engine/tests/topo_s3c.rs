@@ -330,7 +330,7 @@ fn labels_case(f: impl FnOnce(&State, &board::Board, &Packer, &[Vec<topor_engine
 }
 
 fn labels<'a>(st: &'a State<'a>, cm: CapModel<'a>, evl: Vec<Vec<(usize, f64, i32)>>, mask: &'a [Vec<u64>], partner: &'a [Vec<Option<(WireId, usize)>>]) -> Labels<'a> {
-    Labels { st, cm, evl, mask, partner, bottom: 1, via_mm: 25.0, n_signal: 2, evals: 0, max_evals: 100, strict: true, add_vias: false, tally: Tally::default() }
+    Labels { st, cm, evl, mask, partner, bottom: 1, via_mm: 25.0, omega: Default::default(), n_signal: 2, evals: 0, max_evals: 100, strict: true, add_vias: false, tally: Tally::default() }
 }
 
 #[test]

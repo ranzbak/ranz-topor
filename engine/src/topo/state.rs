@@ -596,6 +596,9 @@ pub struct State<'p> {
     /// to the same layer implies and narrows the layer pin ([`super::init::cross_pin`]); false
     /// (default, "crossing"): only crossings no layer assignment separates are priced (overflow).
     pub cross_vias: bool,
+    /// thick-layer r3 (`[search] free_crossing`): the crossing price multiplier of a connection
+    /// with two drilled terminal pads where the crossing leaves it a free layer (1 = off).
+    pub free_crossing: f64,
     /// Width of each pass (nm, parallel to `passes`; M-C width in P2): its wire's nominal width,
     /// or the wire's neck floor where the pass lies in a necked stretch ([`State::refit_wire`]).
     pub pass_w: Vec<f64>,
@@ -632,6 +635,12 @@ pub struct State<'p> {
     /// ([`State::held_layers`]). Empty (default, every other caller): the stretch's own held
     /// layers only, as before.
     pub layers_now: Vec<Vec<u64>>,
+    /// thick-layer S3 (`[vias] pair_one_side`, lead 2026-11-23): held stretches of the next
+    /// layering, `(wire, layer, price)`: each of the wire's events off `layer` costs `price` (mm)
+    /// in the layering ([`super::layers`] `assign_two` / `assign_n`), a graded release price, not
+    /// a lock. Empty (default) = none. Not part of [`Topology`]; the one-side move sets it for
+    /// its own layering and clears it.
+    pub layer_hold: Vec<(WireId, i32, f64)>,
     /// TW5 (4), `[optimize] free_wire_cross` < 1: per wire, the multiplier of the crossing price
     /// for crossing it (a + (1 - a) k/(1 + k), k its crossings); empty (default) = 1 for every
     /// wire.
@@ -701,6 +710,7 @@ impl<'p> State<'p> {
             history: vec![0.0; proj.edges.len()],
             ends: vec![0; proj.pos.len()],
             cross_vias: false,
+            free_crossing: 1.0,
             pass_w: Vec::new(),
             pass_d: Vec::new(),
             floors: std::collections::HashMap::new(),
@@ -709,6 +719,7 @@ impl<'p> State<'p> {
             relay_after_uncross: true,
             took_part: Vec::new(),
             layers_now: Vec::new(),
+            layer_hold: Vec::new(),
             cross_k: Vec::new(),
             free_now: Vec::new(),
             free_wire_a: 1.0,
@@ -1241,33 +1252,50 @@ impl<'p> State<'p> {
         let pr = self.proj;
         let wi = &self.wires[w];
         let n = wi.passes.len();
+        let pp = self.pass_ports(w);
         let mut ports: Vec<(Vec2, Vec2)> = Vec::with_capacity(n + wi.turns.len() + 2);
         let (pa, pb) = (pr.pos[wi.a], pr.pos[wi.b]);
         ports.push((pa, pa));
         let mut ti = 0;
-        for k in 0..=n {
+        for (k, &port) in pp.iter().enumerate().take(n) {
             while ti < wi.turns.len() && wi.turns[ti].0 == k {
                 let v = pr.pos[wi.turns[ti].1];
                 ports.push((v, v));
                 ti += 1;
             }
-            if k == n {
-                break;
-            }
-            let p = wi.passes[k];
-            let e = self.passes[p].edge;
-            let (t1, t2) = (wi.tris[k], wi.tris[k + 1]);
-            let both = pr.allowed(t1, wi.net).map_or(0, |m| m.0) & pr.allowed(t2, wi.net).map_or(0, |m| m.0);
-            let (x, y) = self.pass_span(p, both);
-            // Left and right as seen coming from the triangle of traversal `k`.
-            let [vp, vq] = pr.edges[e];
-            let t = pr.tris[t1];
-            let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
-            let left_is_q = (pr.pos[vq] - pr.pos[vp]).cross(c - pr.pos[vp]) > 0.0;
-            ports.push(if left_is_q { (y, x) } else { (x, y) });
+            ports.push(port);
+        }
+        while ti < wi.turns.len() && wi.turns[ti].0 == n {
+            let v = pr.pos[wi.turns[ti].1];
+            ports.push((v, v));
+            ti += 1;
         }
         ports.push((pb, pb));
         super::pack::funnel(&ports).into_iter().map(|c| c.0).collect()
+    }
+
+    /// The span of each pass of `w` ([`State::pass_span`] on the layers both its triangles allow)
+    /// as `(left, right)` seen coming from the triangle before the pass: the ports of
+    /// [`State::taut_points`]' funnel, and the passage a pass can shift in (thick-layer M3 slack).
+    /// O(passes · edge load²).
+    pub fn pass_ports(&self, w: WireId) -> Vec<(Vec2, Vec2)> {
+        let pr = self.proj;
+        let wi = &self.wires[w];
+        (0..wi.passes.len())
+            .map(|k| {
+                let p = wi.passes[k];
+                let e = self.passes[p].edge;
+                let (t1, t2) = (wi.tris[k], wi.tris[k + 1]);
+                let both = pr.allowed(t1, wi.net).map_or(0, |m| m.0) & pr.allowed(t2, wi.net).map_or(0, |m| m.0);
+                let (x, y) = self.pass_span(p, both);
+                // Left and right as seen coming from the triangle of traversal `k`.
+                let [vp, vq] = pr.edges[e];
+                let t = pr.tris[t1];
+                let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
+                let left_is_q = (pr.pos[vq] - pr.pos[vp]).cross(c - pr.pos[vp]) > 0.0;
+                if left_is_q { (y, x) } else { (x, y) }
+            })
+            .collect()
     }
 
     fn order_index(&self, p: PassId) -> usize {

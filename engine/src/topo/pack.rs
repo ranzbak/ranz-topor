@@ -395,6 +395,20 @@ pub struct Packer<'a> {
     /// another net's via planned in the same triangle has none there unless the triangle holds
     /// two discs ([`super::refine::CapModel`]).
     pub reserve_sites: bool,
+    /// thick-layer M3 (`[vias] site_planned`): a planned via's site is tested against the other
+    /// nets' planned lanes as well as the static room ([`super::refine`] `Frame::lane_room`).
+    pub site_planned: bool,
+    /// thick-layer M3 (`[vias] site_lanes`): a via in a traversal strictly between its events
+    /// ([`super::refine`] `Frame::rank`) is tested against every other net's planned lane near
+    /// its triangle as well (`Frame::lane_room_k`).
+    pub site_lanes: bool,
+    /// thick-layer M3 slack (`[vias] site_slack`): the share (0..1) of a planned crosser's
+    /// passage room its lane may shift in when a via site is measured against it
+    /// ([`super::refine`] `Frame::shifted_lanes`); 0 = the taut tracks are walls.
+    pub site_slack: f64,
+    /// thick-layer r4 (`[vias] site_window = "taut"`): the via window ends at the bounding
+    /// crossers' taut crossings, not at their shifted lanes' crossings.
+    pub site_window_taut: bool,
     /// 5.4 `[vias] between_crossings`: via intervals exclude the triangles of their events
     /// ([`super::refine::via_ranges`]).
     pub via_between: bool,
@@ -487,6 +501,10 @@ impl<'a> Packer<'a> {
             free_cache: Arc::new(Mutex::new(fxmap())),
             via_squeeze: 0.0,
             reserve_sites: false,
+            site_planned: false,
+            site_lanes: false,
+            site_slack: 1.0,
+            site_window_taut: false,
             via_between: false,
             via_cuts: None,
             via_best: false,
@@ -588,6 +606,10 @@ impl<'a> Packer<'a> {
         p.via_d0 = first(0);
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
+        p.site_planned = opts.via_site_planned;
+        p.site_lanes = opts.via_site_lanes && opts.via_site_planned; // documented "with site_planned" (r5 L3)
+        p.site_slack = opts.via_site_slack.clamp(0.0, 1.0);
+        p.site_window_taut = opts.via_site_window == "taut";
         p.via_between = opts.via_between;
         p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.via_best = opts.via_best_point;

@@ -3345,6 +3345,7 @@ fn pick_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::dec
     };
     let mut st = State::new(&b2.proj);
     st.cross_vias = opts.crossing_vias == "via";
+    st.free_crossing = opts.free_crossing;
     st.taut_len = true;
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let term_obs = |net: i32, at: Vec2| (0..b2.proj.obstacles.len()).find(|&o| b2.pad_of[o] == usize::MAX && b2.proj.obstacles[o].net == Some(net) && (b2.proj.obstacles[o].center - at).len() <= 2.0 && b2.centre[o].is_some());
@@ -3676,6 +3677,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let proj = &b.proj;
     let mut st = State::new(proj);
     st.cross_vias = opts.crossing_vias == "via";
+    st.free_crossing = opts.free_crossing;
     // exist-term: the hand copper's connectivity and the continued ends' directions.
     for g in exist_groups.values() {
         st.pre_join.extend(g.1.windows(2).map(|x| (x[0], x[1])));
@@ -4020,6 +4022,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         cap_vias: std::env::var("TOPO_CAPVIA").is_ok(),
         via_between: opts.via_between,
         cap_reference: opts.refine_reference,
+        omega: layers::Omega {
+            a_w: opts.via_priority_weight.first().copied().unwrap_or(0.0).max(0.0),
+            a_t: opts.via_priority_weight.get(1).copied().unwrap_or(0.0).max(0.0),
+            w_def: model.rules.default.width as f64,
+        },
         ..LayerParams::default()
     };
     let sub = super::capacity::subset_check(&st);
@@ -4140,8 +4147,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             area_mm += l * (st.wires[w].w + st.wires[w].s) / ws0;
         }
         let own = match obj {
-            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } | Objective::Best { mm_per_via, .. } => len_mm + mm_per_via * lr.vias as f64,
-            Objective::Area => area_mm + via_area_mm * lr.vias as f64,
+            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } | Objective::Best { mm_per_via, .. } => len_mm + mm_per_via * lr.vias_w,
+            Objective::Area => area_mm + via_area_mm * lr.vias_w,
         };
         // Predicted violations: over-full edge-layers, vias without a site, (M-B2) crossings
         // that cannot be layered (both stretches held to one layer: a short when drawn) and
@@ -4483,6 +4490,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             partner: &partner,
             bottom,
             via_mm: lp.via_mm,
+            omega: lp.omega,
             n_signal: n_sig,
             evals: 0,
             max_evals: opts.max_moves,
@@ -4896,7 +4904,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// The try's price of one via (the `via` factor's weight with the wire's coefficient
             /// and the cycle's emphasis) and the board's vias before the try (its layering).
             via_mm: f64,
-            vias_old: usize,
+            vias_old: f64,
             assign_t: AssignFn<'a, 'p>,
             ties: u64,
             measure: MeasureFn<'a, 'p>,
@@ -4964,7 +4972,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             }
             fn violations(&mut self, st: &mut State<'p>, after: bool) -> f64 {
                 if !after {
-                    return self.viol_old + self.via_mm * self.vias_old as f64;
+                    return self.viol_old + self.via_mm * self.vias_old;
                 }
                 // The new state is layered as the loop layers it (the current tie seed) and judged
                 // by the archive's measure: its predicted violations and its vias (5.2c: the vias
@@ -4973,7 +4981,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let _pg = super::prof::g(super::prof::K::RrViolAfter);
                 let lr = (self.assign_t)(st, self.ties);
                 let p = (self.measure)(st, &lr);
-                let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
+                let v = p.price(self.viol_mm) + self.via_mm * lr.vias_w;
                 self.pending = Some((lr, p));
                 v
             }
@@ -4982,16 +4990,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     return self.violations(st, true);
                 };
                 let (lr, p) = local(st, saved, gone, new, self.lr_old, &self.pred_old, self.ties);
-                let v = p.price(self.viol_mm) + self.via_mm * lr.vias as f64;
+                let v = p.price(self.viol_mm) + self.via_mm * lr.vias_w;
                 if self.shadow {
                     let lg = (self.assign_t)(st, self.ties);
                     let pg = (self.measure)(st, &lg);
-                    let vg = pg.price(self.viol_mm) + self.via_mm * lg.vias as f64;
+                    let vg = pg.price(self.viol_mm) + self.via_mm * lg.vias_w;
                     let after = st.take_topology();
                     st.restore(saved.clone());
                     let lb = (self.assign_t)(st, self.ties);
                     let pb = (self.measure)(st, &lb);
-                    let vb = pb.price(self.viol_mm) + self.via_mm * lb.vias as f64;
+                    let vb = pb.price(self.viol_mm) + self.via_mm * lb.vias_w;
                     st.restore(after);
                     self.shadow_out = Some(Shadow { v: (v, vg), pred: (p, pg), vias: (lr.vias, lg.vias), unl: (lr.unlayerable.len(), lg.unlayerable.len()), base: (pb, lb.vias, lb.unlayerable.len(), vb) });
                 }
@@ -5017,6 +5025,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             obs: Vec<WireId>,
             len: f64,
             price: f64,
+            /// thick-layer S3 (M2.3, `[vias] pair_one_side`): the wire's whole run from its first
+            /// to its last layer change held to `t` (one side), not one stretch; `gain` = ω(w) x
+            /// the layer changes the hold removes (the candidates' order).
+            one_side: bool,
+            gain: f64,
         }
         /// TW7 B/C/E: one found pattern as one move ([`Sp::pattern_cands`]): its kind, the wires
         /// laid first in this order (`first`), the wires laid after them in route order (`obs`),
@@ -5142,6 +5155,16 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             /// 5.8 `[vias] pair_move`: the length scale (nm, `[vias] pair_max_mm`) of the graded
             /// stretch price ([`super::viaopt::pair_len_price`]); `None` = off.
             pair_move: Option<f64>,
+            /// thick-layer S3 (`[vias] pair_one_side`): the one-side candidates of the pair move.
+            one_side: bool,
+            /// thick-layer S3 (`[vias] pair_hold`): the release price of a one-side move's held
+            /// stretch per event off its layer, in via prices (x ω of the wire).
+            pair_hold: f64,
+            /// thick-layer S3: the held wire's layer changes in the layering right after the last
+            /// one-side move (0 = the hold kept its whole run on the side), for the cycle stats.
+            one_side_left: usize,
+            /// thick-layer M1: ω of a wire's own vias (the one-side candidates' gain).
+            omega: super::layers::Omega,
             /// TW6 part E: `[optimize] site_move` / `branch_move`.
             site_move: bool,
             branch_move: bool,
@@ -5438,7 +5461,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     viol_mm,
                     viol_old: self.pred.price(viol_mm),
                     via_mm,
-                    vias_old: self.lr.vias,
+                    vias_old: self.lr.vias_w,
                     assign_t: self.assign_t,
                     ties: self.ties,
                     measure: self.measure,
@@ -5819,8 +5842,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 self.st.took_part.clear();
                 let ties = super::optimise::mix_seed(seed, 0xF1 << 32 | w as u64) | 1;
                 let (lr, p) = local(self.st, &saved, &[w], &[w], &*self.lr, &self.pred, ties);
-                let old = self.pred.price(kv) + via_mm * self.lr.vias as f64;
-                let new = p.price(kv) + via_mm * lr.vias as f64;
+                let old = self.pred.price(kv) + via_mm * self.lr.vias_w;
+                let new = p.price(kv) + via_mm * lr.vias_w;
                 if new < old - 1e-6 {
                     self.set_lr(lr, Some(p));
                     self.pred_local = true;
@@ -6033,7 +6056,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             obs.sort_unstable();
                             obs.dedup();
                             if !obs.is_empty() {
-                                cands.push(PairCand { span: (i, j), t, lv, lu, obs, len, price });
+                                cands.push(PairCand { span: (i, j), t, lv, lu, obs, len, price, one_side: false, gain: 0.0 });
                             }
                         }
                         cands.sort_by_key(|c| c.obs.len());
@@ -6042,6 +6065,44 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     i = j + 1;
                 }
                 out.sort_by(|a, b| a.price.total_cmp(&b.price));
+                // thick-layer S3 (M2.3, design thick-layer.md: the wide trace on one side, its
+                // crossers on the other, outcome (b) as a move; Luzin, Popov & Popov 2013 p. 134
+                // step 8.1 with the stretch = the wire's whole run): for a wire with >= 2 layer
+                // changes, per end layer `t` the events from the first to the last one not on `t`
+                // held to `t` and every wire crossing that run on `t` laid again. After the stretch
+                // pairs, ordered by gain (ω(w) x layer changes removed, larger first); no cap.
+                if self.one_side {
+                    let changes = ev.windows(2).filter(|x| x[0].2 != x[1].2).count();
+                    let om = self.omega.of(self.st, w);
+                    let mut os: Vec<PairCand> = Vec::new();
+                    let ends: Vec<i32> = if ev.first().map(|e| e.2) == ev.last().map(|e| e.2) { ev.first().map(|e| e.2).into_iter().collect() } else { ev.first().into_iter().chain(ev.last()).map(|e| e.2).collect() };
+                    for t in ends {
+                        let sig = |x: i32| (0..n_sig).contains(&x);
+                        let (Some(i), Some(j)) = (ev.iter().position(|e| e.2 != t), ev.iter().rposition(|e| e.2 != t)) else { continue };
+                        if changes < 2 || !sig(t) || !(i..=j).all(|k| self.lr.mask[w].get(k).is_some_and(|m| (m >> t) & 1 == 1)) {
+                            continue;
+                        }
+                        // Every event outside i..=j is on `t`: the hold removes all the layer changes.
+                        let removed = changes;
+                        let mut obs: Vec<WireId> = (i..=j)
+                            .filter_map(|k| self.lr.partner[w].get(k).copied().flatten())
+                            .filter(|&(w2, i2)| w2 != w && self.lr.events.get(w2).and_then(|e| e.get(i2)).is_some_and(|e| e.2 == t))
+                            .map(|(w2, _)| w2)
+                            .filter(|&w2| has_conn(w2) && self.st.wires[w2].net != self.st.wires[w].net)
+                            .collect();
+                        obs.sort_unstable();
+                        obs.dedup();
+                        if obs.is_empty() {
+                            continue;
+                        }
+                        let lv = if i == 0 { t } else { ev[i - 1].2 };
+                        let lu = ev.get(j + 1).map_or(t, |e| e.2);
+                        let len = super::viaopt::crossing_stretch_len(self.st, w, &self.lr.events, &self.lr.partner[w], i, j);
+                        os.push(PairCand { span: (i, j), t, lv, lu, obs, len, price: super::viaopt::pair_len_price(len, scale, self.via_mm), one_side: true, gain: om * removed as f64 });
+                    }
+                    os.sort_by(|a, b| b.gain.total_cmp(&a.gain).then(a.price.total_cmp(&b.price)));
+                    out.extend(os);
+                }
                 out
             }
 
@@ -6073,7 +6134,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let n = now.len();
                     let at = |k: usize| k.min(n - 1);
                     let bit = |l: i32| 1u64 << l.clamp(0, 63);
-                    let (kv, ki, kj, ku) = (at(ev[i - 1].0), at(ev[i].0), at(ev[j].0), at(ev[j + 1].0));
+                    // thick-layer S3: a one-side span may start at the first event or end at the
+                    // last one (the run from that end is held to `t`).
+                    let (kv, ki, kj, ku) = (if i == 0 { 0 } else { at(ev[i - 1].0) }, at(ev[i].0), at(ev[j].0), ev.get(j + 1).map_or(n - 1, |e| at(e.0)));
                     // The stretch and the via intervals that go onto `t`; the interval on the
                     // side whose layer is not `t` keeps its via (`t` and that layer).
                     let (k0, k1) = (if c.t == c.lv { kv } else { ki }, if c.t == c.lu { ku } else { kj });
@@ -6110,6 +6173,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
                 let mut kept = false;
                 if placed {
+                    // thick-layer S3 (lead 2026-11-23): the one-side move's run stays on `c.t` through
+                    // the layering that follows, as a held stretch with a graded release price per
+                    // event off `t` (`[vias] pair_hold` via prices x ω), not a lock; the
+                    // board's evaluation then judges the result as for every pair move.
+                    if c.one_side && self.pair_hold > 0.0 {
+                        self.st.layer_hold = vec![(a, c.t, self.pair_hold * self.via_mm * self.omega.of(self.st, a))];
+                    }
                     if let Some(local) = self.local {
                         // loop-local: the obstructing wires' move layered and priced locally.
                         let new: Vec<WireId> = (n0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive).collect();
@@ -6119,6 +6189,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     } else {
                         let lr = (self.assign_t)(self.st, self.ties);
                         self.set_lr(lr, None);
+                    }
+                    self.st.layer_hold.clear();
+                    if c.one_side {
+                        self.one_side_left = self.lr.events.get(a).map_or(0, |e| e.windows(2).filter(|x| x[0].2 != x[1].2).count());
                     }
                     let e1 = self.eval_now();
                     if self.dbg {
@@ -6282,7 +6356,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     let (na, nb, mid) = self.st.neck_runs(w);
                     shr += usize::from(na > 0) + usize::from(nb > 0) + mid.iter().enumerate().filter(|&(i, &k)| i == 0 || mid[i - 1] + 1 != k).count();
                 }
-                let area = if matches!(self.obj, Objective::Area) { area_mm + self.via_area_mm * self.lr.vias as f64 } else { 0.0 };
+                let area = if matches!(self.obj, Objective::Area) { area_mm + self.via_area_mm * self.lr.vias_w } else { 0.0 };
                 // The predicted violations (5.2a): the same measure the moves paid for; the cut
                 // model's necks are shrinkages too (2.4).
                 criteria_of(self.pred, self.viol_mm, self.lr.vias, len_mm, shr + self.pred.shrink_n, area)
@@ -6597,6 +6671,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                         partner: &partner,
                         bottom: self.bottom,
                         via_mm: self.lp.via_mm,
+                        omega: self.lp.omega,
                         n_signal: self.n_sig,
                         evals: 0,
                         max_evals: self.max_moves,
@@ -6787,7 +6862,19 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             cs.pair_moved += 1;
                             cs.pair_moved_wires += pc.obs.len();
                             ripped += pc.obs.len();
-                            if self.pair_move(w, &pc, c.seed ^ 0x3C3C, c.amp, c.emphasis.via_at(1.0)) {
+                            let (t0, c0) = (Instant::now(), super::prof::cpu_ns());
+                            let kept = self.pair_move(w, &pc, c.seed ^ 0x3C3C, c.amp, c.emphasis.via_at(1.0));
+                            if pc.one_side {
+                                cs.one_side_tried += 1;
+                                cs.one_side_kept += usize::from(kept);
+                                cs.one_side_left += self.one_side_left;
+                                cs.one_side_ns += t0.elapsed().as_nanos() as u64;
+                                cs.one_side_cpu_ns += super::prof::cpu_ns().saturating_sub(c0);
+                            } else {
+                                cs.pair_ns += t0.elapsed().as_nanos() as u64;
+                                cs.pair_cpu_ns += super::prof::cpu_ns().saturating_sub(c0);
+                            }
+                            if kept {
                                 cs.pair_moved_kept += 1;
                                 cs.pair_moved_long += usize::from(pc.len > scale);
                             } else {
@@ -6965,6 +7052,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pred: pred0,
             pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             pair_move: opts.via_pair_move.then(|| opts.via_pair_max_mm.max(0.0) * MM),
+            one_side: opts.via_pair_one_side,
+            pair_hold: opts.via_pair_hold.max(0.0),
+            one_side_left: 0,
+            omega: lp.omega,
             site_move: opts.opt_site_move,
             branch_move: opts.opt_branch_move,
             move_detour: opts.opt_site_move_detour.max(0.0),
@@ -7427,6 +7518,11 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             "layerings": [rep.stats.layer_kept, rep.stats.layer_runs],
             "crossing_share": opts.loop_crossing,
             "pair_move": [rep.stats.pair_moved_kept, rep.stats.pair_moved, rep.stats.pair_moved_wires, rep.stats.pair_moved_long],
+            // thick-layer S3: per candidate type tries, kept, wall and process CPU (ms; never routing input).
+            "pair_move_kinds": {
+                "stretch": {"tried": rep.stats.pair_moved - rep.stats.one_side_tried, "kept": rep.stats.pair_moved_kept.saturating_sub(rep.stats.one_side_kept), "wall_ms": rep.stats.pair_ns as f64 / 1e6, "cpu_ms": rep.stats.pair_cpu_ns as f64 / 1e6},
+                "one_side": {"tried": rep.stats.one_side_tried, "kept": rep.stats.one_side_kept, "left_changes": rep.stats.one_side_left, "wall_ms": rep.stats.one_side_ns as f64 / 1e6, "cpu_ms": rep.stats.one_side_cpu_ns as f64 / 1e6}
+            },
             "site_move": [rep.stats.site_kept, rep.stats.site_moved],
             "branch_move": [rep.stats.branch_kept, rep.stats.branch_moved],
             "site_move_detour_refused": rep.stats.site_detour_refused,
@@ -7588,26 +7684,14 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         fc_plan.0, fc_plan.1
     ));
     if let Ok(path) = std::env::var("TOPO_PLANDUMP") {
-        // Debug: the plan handed to the drawing, per wire: net, connection, taut points, the
-        // layering's stretches, the passes (edge ends, room per layer, need) and crossings.
-        let pt = |p: Vec2| serde_json::json!([(p.x / MM * 1e3).round() / 1e3, (-p.y / MM * 1e3).round() / 1e3]);
+        // Debug: the plan handed to the drawing, per wire ([`super::plandump::wire_json`]): net,
+        // connection, taut points, the layering's stretches, the passes (edge ends, room per
+        // layer, need) and crossings, before the unlayerable drops.
         let lnow = super::optimise::layers_now(&st, &lr.events, bottom);
-        let wires: Vec<serde_json::Value> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).map(|w| {
-            let wi = &st.wires[w];
-            let ci = wire_conn.get(w).copied().filter(|&c| c != usize::MAX).map(|c| conn_of[c]);
-            let passes: Vec<serde_json::Value> = wi.passes.iter().enumerate().map(|(k, &p)| {
-                let e = st.passes[p].edge;
-                let [a, c] = proj.edges[e];
-                serde_json::json!({"k": k, "edge": e, "a": pt(proj.pos[a]), "b": pt(proj.pos[c]), "len": ((proj.pos[c] - proj.pos[a]).len() / MM * 1e3).round() / 1e3,
-                    "room": (0..proj.n_layers).map(|l| { let r = st.room(e, l); if r.is_finite() { (r / MM * 1e3).round() / 1e3 } else { -1.0 } }).collect::<Vec<_>>(),
-                    "need": (st.edge_need(e, None) / MM * 1e3).round() / 1e3, "n": st.edge_order[e].len(), "at": pt(st.pass_point(p))})
-            }).collect();
-            let xs: Vec<serde_json::Value> = st.crossings(w).iter().map(|x| serde_json::json!({"k": x.k, "other": x.other, "other_net": st.wires[x.other].net})).collect();
-            serde_json::json!({"wire": w, "net": wi.net, "conn": ci, "w": wi.w / MM, "s": wi.s / MM, "a": pt(proj.pos[wi.a]), "b": pt(proj.pos[wi.b]),
-                "taut": st.taut_points(w).into_iter().map(pt).collect::<Vec<_>>(),
-                "stretches": lr.stretches.get(w).map(|v| v.iter().map(|(l, ps)| serde_json::json!([l, ps.iter().map(|&q| pt(q)).collect::<Vec<_>>()])).collect::<Vec<_>>()).unwrap_or_default(),
-                "events": lr.events.get(w).cloned().unwrap_or_default(), "layers_now": lnow.get(w).cloned().unwrap_or_default(), "passes": passes, "crossings": xs})
-        }).collect();
+        let wires: Vec<serde_json::Value> = (0..st.wires.len())
+            .filter(|&w| st.wires[w].alive)
+            .map(|w| super::plandump::wire_json(&st, &lr, &lnow, w, wire_conn.get(w).copied().filter(|&c| c != usize::MAX).map(|c| conn_of[c])))
+            .collect();
         let _ = std::fs::write(format!("{path}.s{}.r{round}", opts.seed), serde_json::json!({"wires": wires, "foreign": fc_plan.0}).to_string());
     }
     if std::env::var("TOPO_VIADBG").is_ok() {
@@ -7699,6 +7783,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // M1 compass: the same plan's predicted items per violation class (structured, measurement
     // only), carried to this round's result below.
     let mut compass_plan: Option<super::compass::Compass>;
+    let mut plan_dump: Option<String> = None;
     {
         let alive: Vec<WireId> = (0..st.wires.len()).filter(|&w| st.wires[w].alive).collect();
         let crossings: usize = alive.iter().map(|&w| st.crossings(w).iter().filter(|c| st.wires[c.other].net != st.wires[w].net).count()).sum::<usize>() / 2;
@@ -7793,12 +7878,30 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             let view = super::compass::PlanView { st: &st, lr: &lr, cm_edge: &cm_plan, cm_cut: cmc_plan.as_ref(), cut_is_plan: cmc_plan.is_some(), bottom, conn: &wc, layer: &lname, forced: &fset, pad_exits: px.as_deref() };
             let mut cp = super::refine::meter::suspended(|| super::compass::plan_compass(&view, if cmc_plan.is_some() { "cuts" } else { "edges" }, &opts.opt_loop, round));
             cp.loop_predicted = m.get("loop").and_then(|l| l.get("predicted")).and_then(|p| p.get("violations")).and_then(|v| v.as_u64()).map(|v| v as usize);
+            // thick-layer F4 (`[output] plan_report`): the plan of this row as the drawing gets
+            // it, carried with the round's result (the result handed back is a drawn row's, so it
+            // carries that row's plan). Measurement only; its time (well under a second on qmtech)
+            // is router time: moving the limit by it (`RunControl::measured`) would make the
+            // result's `limit.limit_s` differ between two equal runs.
+            if opts.plan_report {
+                let names: Vec<String> = (0..b.n_signal).map(lname).collect();
+                let net_name = |code: i32| model.nets.iter().find(|n| n.code == code).map_or(String::new(), |n| n.name.clone());
+                let row = super::plandump::Row {
+                    label: drew_row.as_ref().map(|a| a.label.as_str()),
+                    roles: drew_row.as_ref().map_or_else(Vec::new, |a| a.roles.iter().map(|r| r.name()).collect()),
+                    round,
+                    seed: opts.seed,
+                    opt_loop: &opts.opt_loop,
+                };
+                plan_dump = Some(super::refine::meter::suspended(|| super::plandump::plan_json(&st, &lr, bottom, &cm_plan, Some(&cp), &wc, &net_name, &names, fc_plan.0, &row)).to_string());
+            }
             compass_plan = Some(cp);
         }
         if opts.stop_after == "plan" {
             let mut r = unrouted(model_real, opts, "not drawn: [run] stop_after = \"plan\" ends each run after the plan of its first cycle");
             r.warnings.extend(warnings);
             r.compass = compass_plan.take();
+            r.plan = plan_dump.take();
             return (RoundOut::unrouted(r), Vec::new(), mem.clone());
         }
     }
@@ -7869,7 +7972,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             (Some(sa), Some(sb)) => crate::vias::via_via_need(&model.rules, a, sa, b, sb, margin),
             _ => 0.0,
         };
-        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via, pair_room: opts.via_pair_room, grid: super::gridsnap::via_grid(opts) };
+        let cx = super::viaopt::ViaCtx { st: &st, outline: &outline, edge_clear: proj.edge_clear + margin, via_r: &via_r, clear: &clear, via_via: &via_via, pair_room: opts.via_pair_room, grid: super::gridsnap::via_grid(opts), site_slack: if packer.site_planned { packer.site_slack } else { 0.0 }, window_taut: packer.site_window_taut };
         let (mut sites, rr) = super::viaopt::relocate_vias(&cx, &mut plans, &lr.events);
         // grid-snap r2: a via moved onto the grid must not change the plan's pour cut-offs (the
         // pour term the plan priced, [`super::pourplan`]): with the grid moves the plan copper
@@ -7888,6 +7991,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         }
         dr.via_site = sites;
         dr.via_site_tight = rr.tight.iter().copied().collect();
+        dr.site_slack = cx.site_slack;
         warnings.push(format!(
             "via relocation ([vias] relocate; Dayan & Dai 1991, force balance): {} vias, {} moved in their free interval to the most clearance, smallest gap {:+.3} mm in total{}",
             rr.vias,
@@ -10101,6 +10205,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             c.drawn_shrinkages = crit_main.shrinkages;
             c
         }),
+
+        plan: plan_dump,
     };
     let pre = pre_parts.map(|(c, a)| (c, with_parts(&result, a)));
     let vias_out: BTreeMap<usize, usize> = plans.iter().filter(|_| cycles).map(|(&w, pl)| (conn_of[wire_conn[w]], pl.vias.len())).collect();
