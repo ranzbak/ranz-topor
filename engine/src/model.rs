@@ -2041,9 +2041,10 @@ impl Default for Options {
             grid_via_nm: [0, 0],
             grid_origin_nm: [0, 0],
             reserve_via_sites: true,
-            via_site_planned: true,
+            // thick-layer A/B tl3/tl4 (det s0): off; reasons in reports/thick-layer-20261123-0215.md.
+            via_site_planned: false,
             via_site_lanes: false,
-            via_priority_weight: vec![1.0, 0.5],
+            via_priority_weight: vec![0.0, 0.0],
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
             cut_report: String::new(),

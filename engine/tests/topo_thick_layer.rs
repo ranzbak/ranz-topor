@@ -198,8 +198,8 @@ fn diag_thick_dive_grouping() {
 #[test]
 fn thick_dive_grouping_predicts_what_it_draws() {
     let m = thick_dive_grouping();
-    // ω off (P weaves, as main) and the default end-site test alone (`site_lanes` off).
-    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+    // ω off (P weaves, as main) and the end-site test alone (`site_lanes` off).
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true))]);
     let p = plan(&r);
     let drawn = r.violations.iter().filter(|v| v.conn == 0).count();
     let pred: u64 = p["conns"]["0"]["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum();
@@ -231,7 +231,7 @@ fn thick_dive_grouping_lane_sites() {
     assert!(off.iter().all(|v| v.0 && v.1 == 0.0), "static room alone: every via has a site: {off:?}");
 }
 
-/// S2 (M1, `[vias] priority_weight`): with ω (default [1, 0.5]: P's vias weigh 1 + 4 + 0.5 = 5.5)
+/// S2 (M1, `[vias] priority_weight`): with ω ([1, 0.5]: P's vias weigh 1 + 4 + 0.5 = 5.5)
 /// the layering keeps P on one layer and lets the thin crossers on that layer dive (2 small vias
 /// each, ω 1): P 0 vias, 0 drawn violations. With ω 1 for every via (main) P weaves with 3 vias,
 /// two of them in 1 mm gaps (the S1 items).
@@ -283,7 +283,7 @@ fn thick_dive_grouping_one_side_move() {
     assert_eq!(on.violations.len(), 0, "{:?}", on.violations);
 }
 
-/// M3 with `site_lanes` off (the default) and ω off: only the end site (via 3, between F4 and B2
+/// M3 end sites (`site_planned` on, `site_lanes` off) and ω off: only the end site (via 3, between F4 and B2
 /// in one traversal) is measured on the taut tracks; it has no room there (predicted), so the
 /// TopoR loop reroutes P (its via 3 moves above the crossers' ends of room): 1 drawn clearance
 /// item (B2 against P, 0.05 mm) instead of main's 6 (2 shorts). Without the option: main's 6.
