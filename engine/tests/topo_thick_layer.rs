@@ -372,3 +372,62 @@ fn wide_one_side_full_crossing_detours() {
     assert!(total > 86.5, "main detours: {total:.3}");
 }
 
+
+/// M3 slack, the plan's end site (round 4): P's via 2 (between F4 at x 10 and B2 at x 11, one
+/// traversal) is planned between the two crossers. A crosser that bounds the window keeps the
+/// window's other end on the via's side (`refine::Frame::end_site_lane`): with the window's middle
+/// as the reference (round 3) a candidate past B2 counted B2 at its left-shifted lane, beyond the
+/// via, and the plan put the site at x 12.08, past B2 and B3.
+#[test]
+fn thick_dive_grouping_end_site_between_its_crossers() {
+    let m = thick_dive_grouping();
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true))]);
+    let p = plan(&r);
+    let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
+    let at: Vec<f64> = w["vias"].as_array().unwrap().iter().map(|v| v["at"][0].as_f64().unwrap()).collect();
+    assert_eq!(at.len(), 3, "{at:?}");
+    assert!(at[2] > 10.0 && at[2] < 11.0, "via 2 between F4 (x 10) and B2 (x 11): {at:?}");
+}
+
+/// Diagnosis print: [`thick_dive_grouping_with`] signals from `DIAG_SIGNALS` ("name:x:layer,...").
+#[test]
+#[ignore]
+fn diag_thick_dive_grouping_with() {
+    let spec = std::env::var("DIAG_SIGNALS").unwrap_or_default();
+    let owned: Vec<(String, f64, u32)> = spec.split(',').filter(|s| !s.is_empty()).map(|s| {
+        let f: Vec<&str> = s.split(':').collect();
+        (f[0].to_string(), f[1].parse().unwrap(), f[2].parse().unwrap())
+    }).collect();
+    let sig: Vec<(&str, f64, u32)> = owned.iter().map(|x| (x.0.as_str(), x.1, x.2)).collect();
+    let m = thick_dive_grouping_with(&sig);
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true))]);
+    let p = plan(&r);
+    for w in p["wires"].as_array().unwrap().iter().filter(|w| w["net_name"] == "P") {
+        println!("P vias {}", w["vias"]);
+    }
+    println!("conn0 {}", p["conns"]["0"]);
+    for v in &r.violations {
+        println!("drawn violation: {} {} {}", v.kind, v.name, v.against);
+    }
+    for it in r.items.iter().map(|it| serde_json::to_value(it).unwrap()).filter(|v| v.get("d").is_some()) {
+        println!("via {}", it["at"]);
+    }
+}
+
+/// M3 slack, a via past a crosser's taut crossing. TARGET, FAILS (ignored; round 4 finding): F4
+/// at x 10.6 and B2 at x 11.0 with B3 at 11.35 (B2 has no room to its right), F3 at 9 (F4 has
+/// 1.25 mm to its left). P's via 2 fits only at x <= 10.3, west of F4's taut track: F4 must bend
+/// 0.3+ mm west round it. The plan (window to the crossing farthest out) predicts a site and 0
+/// violations; the drawing places the via, but ERBS takes the via's side from the geometry, so
+/// F4 passes it on the wrong side or squeezes (clearance with F3 and P). Realisable only when the
+/// window stays at the taut crossings (crossers bend away from the via, not past it) or ERBS
+/// takes the via's side from the plan; proposal in the round 4 report.
+#[test]
+#[ignore = "plan window past the taut crossing is not realised by ERBS (round 4 report)"]
+fn thick_dive_grouping_via_past_taut_crossing() {
+    let m = thick_dive_grouping_with(&[("F1", 3.0, 0), ("F2", 4.0, 0), ("B1", 8.0, 2), ("F3", 9.0, 0), ("F4", 10.6, 0), ("B2", 11.0, 2), ("B3", 11.35, 2)]);
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true))]);
+    let p = plan(&r);
+    let pred: u64 = p["conns"].as_object().unwrap().values().map(|c| c["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum::<u64>()).sum();
+    assert!(r.violations.is_empty() || pred > 0, "drawn {} violations, predicted {pred}: {:?}", r.violations.len(), r.violations.iter().map(|v| (&v.name, &v.kind, &v.against)).collect::<Vec<_>>());
+}

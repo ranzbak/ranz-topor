@@ -206,9 +206,17 @@ still shift inside its passage. The shift is measured per pass: the pass's span 
 (`State::pass_ports`), cut at its planned neighbours on that edge (they stay on their taut
 tracks, so the same room is not counted twice; the via's own wire is no neighbour). The lane may
 lie anywhere between its taut track and that shifted position. The room is that of the position
-farthest from the via, and the window ends at the crossing farthest out. The drawing does not
-yet realise the shift: the via relocation and ERBS still bound and measure against the taut
-tracks (test `thick_dive_grouping_predicts_what_it_draws_with_slack`, ignored).
+farthest from the via, and the window ends at the crossing farthest out.
+
+r4 (drawn half): the drawing uses the same model, so predicted = drawn. The shift is one shared
+function (`refine::shifted_lanes_of`, `neighbour_stop_of`). `viaopt::relocate_vias` bounds the
+window at the crossers' crossings farthest out and measures the gap to a crosser at its allowed
+position farthest from the via. A crosser that bounds the window keeps the window's other end on
+the via's side, in the plan's end site and in the relocation alike (with the window's middle as
+the reference, a crosser could jump past the via, which is a crossing on the wrong layer). The
+via pair's room (`Drawer::via_pair_price`) counts only the crossers whose taut track runs
+between the two vias. ERBS then bends the crossers round the placed vias (reserve planned room).
+Test `thick_dive_grouping_predicts_what_it_draws_with_slack`: 0 violations.
 
 **One-side hold (done, `[vias] pair_hold`).** The one-side move's run stays on its layer through
 the layering that follows the move. Each of its events off that layer costs `pair_hold` via
