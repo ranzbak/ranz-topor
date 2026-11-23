@@ -464,6 +464,32 @@ pub struct LoopParams {
     pub relay_budget: usize,
 }
 
+/// pour-pad-join: per-cycle lines a [`LoopReport`] keeps from the loop's start and its end.
+pub const LINES_HEAD: usize = 20;
+pub const LINES_TAIL: usize = 20;
+
+impl LoopReport {
+    /// Keep `line` as the newest cycle's: the first [`LINES_HEAD`] lines stay, of the rest only the
+    /// last [`LINES_TAIL`] (the one between them that drops out is counted). O(LINES_TAIL).
+    pub fn push_line(&mut self, line: String) {
+        if self.lines.len() >= LINES_HEAD + LINES_TAIL {
+            self.lines.remove(LINES_HEAD);
+            self.lines_omitted += 1;
+        }
+        self.lines.push(line);
+    }
+
+    /// The per-cycle text: the kept lines joined by "; ", with the count of the cycles left out
+    /// between the head and the tail. O(kept lines).
+    pub fn lines_text(&self) -> String {
+        if self.lines_omitted == 0 {
+            return self.lines.join("; ");
+        }
+        let (head, tail) = self.lines.split_at(LINES_HEAD.min(self.lines.len()));
+        format!("{}; ... {} cycles not listed ...; {}", head.join("; "), self.lines_omitted, tail.join("; "))
+    }
+}
+
 /// What [`optimise`] did.
 #[derive(Clone, Debug, Default)]
 pub struct LoopReport {
@@ -481,8 +507,12 @@ pub struct LoopReport {
     /// The pick's objective value after every offer (the initial plan first): never rises.
     pub pick_values: Vec<f64>,
     pub stats: CycleStats,
-    /// One line per cycle.
+    /// One line per cycle: the first [`LINES_HEAD`] and the last [`LINES_TAIL`] cycles (pour-pad-join:
+    /// a dialog loop has no cycle cap, an unbounded list grew to megabytes per run); the cycles
+    /// between them are counted in `lines_omitted`.
     pub lines: Vec<String>,
+    /// Cycles whose line `lines` left out (between the head and the tail).
+    pub lines_omitted: usize,
     /// A running cycle was cut short by `inner()` and dropped (not offered).
     pub dropped: bool,
     /// TW3 periodic restarts: period checks, of them the descent still gaining (no restart), and
@@ -735,7 +765,7 @@ fn optimise_in<S: Space>(sp: &mut S, arch: &mut Archive<Gen<S::Var>>, p: &LoopPa
         sp.after_cycle(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, &own, rep.restarts.len());
         on_pick(cycle, &arch.items[arch.pick(&obj).expect("scored")].crit, rep.stable_at.is_some());
         super::prof::cycle(cycle, cs.tried, cs.kept, cs.relaid, cs.pair_moved, cs.pair_relaid, kept);
-        rep.lines.push(format!(
+        rep.push_line(format!(
             "{cycle}: amp {:.3}, reroutes {}/{}, via-rose {}/{}, layerings {}/{}, floating up {}, crossing passes {}, undone {}, judge {}g/{}m/{}l, {}{}, best {:.1}{}",
             ctx.amp,
             cs.kept,
@@ -1243,6 +1273,34 @@ mod tests {
         // Another seed takes other restarts or another path.
         let (_, _, r4) = run(8, 1);
         assert!(r4.restarts != r1.restarts || r4.lines != r1.lines);
+    }
+
+    #[test]
+    fn per_cycle_lines_keep_the_head_and_the_tail_only() {
+        // pour-pad-join: a dialog loop has no cycle cap; on a board with (almost) nothing to move it ran
+        // 40 075 cycles per run in 20 s and its one report line grew to 5.8 MB. 1000 toy cycles keep
+        // the first 20 and the last 20 lines and count the rest.
+        let mut sp = toy();
+        let mut a = Archive::new(6);
+        let t = std::cell::Cell::new(0.0);
+        let clock = || {
+            t.set(t.get() + 1.0);
+            t.get()
+        };
+        let p = LoopParams { cycles: 1000, stop_at_stable: false, ..params(1, 0) };
+        let rep = optimise(&mut sp, &mut a, &p, &mut || false, &mut || false, &clock, &mut |_, _, _| {});
+        assert_eq!(rep.cycles, 1000);
+        assert_eq!(rep.lines.len(), LINES_HEAD + LINES_TAIL);
+        assert_eq!(rep.lines_omitted, 1000 - LINES_HEAD - LINES_TAIL);
+        assert!(rep.lines[0].starts_with("1: ") && rep.lines[LINES_HEAD - 1].starts_with("20: "), "{}", rep.lines[LINES_HEAD - 1]);
+        assert!(rep.lines[LINES_HEAD].starts_with("981: ") && rep.lines.last().unwrap().starts_with("1000: "));
+        let txt = rep.lines_text();
+        assert!(txt.contains("; 20: ") && txt.contains("; ... 960 cycles not listed ...; 981: "), "{}", &txt[..200]);
+        assert!(txt.len() < 40 * 300, "{} bytes", txt.len());
+        // a short loop lists every cycle, nothing omitted
+        let (_, _, short) = run(3, 0);
+        assert_eq!((short.lines.len(), short.lines_omitted), (short.cycles, 0));
+        assert_eq!(short.lines_text(), short.lines.join("; "));
     }
 
     #[test]

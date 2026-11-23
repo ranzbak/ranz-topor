@@ -908,6 +908,10 @@ pub struct PourReach {
     pub lost_vias: Vec<String>,
     /// Per pour: the net's pads (indices) in the main component with copper on a pour layer.
     pub main_pads: BTreeMap<usize, Vec<usize>>,
+    /// Per pour: the net's pads (indices, sorted) with copper on a pour layer that are joined to
+    /// one of that pour's own islands (fill, spokes, tracks, vias), whether or not that pour is in
+    /// the net's main component ([`pour_joined_pads`]).
+    pub reached_pads: BTreeMap<usize, Vec<usize>>,
     /// Per pour: via uuids (model and `item_uuid`) in the main component on a pour layer.
     pub main_vias: BTreeMap<usize, Vec<String>>,
     /// One line per checked net: islands, main component size, lost items.
@@ -1049,6 +1053,30 @@ pub fn check_pour_reach_cells(
     deadline: Option<std::time::Instant>,
     cells: f64,
 ) -> PourReach {
+    check_pour_reach_nets(model, items, routed_pads, deadline, cells, None)
+}
+
+/// pour-pad-join: the pads each pour of a net in `nets` reaches before any routing, by pour
+/// index: the pads joined to one of that pour's own islands (the KiCad fill, its spoke rule, the
+/// board's tracks and vias), also when that pour is not part of its net's main component (a
+/// second pour of the net that nothing joins to the first one yet: its pads stay its own, and the
+/// real connection from that group to the rest of the net stays a connection). The
+/// decomposition asks it only for a pour label `REF.NUM` that names several pads (connector
+/// shields `SH`, mounting pads `MP`): the label cannot tell them apart, the fill can.
+/// O(pours of `nets` * (cells + stamped cells)).
+pub fn pour_joined_pads(model: &BoardModel, nets: &BTreeSet<i32>) -> BTreeMap<usize, Vec<usize>> {
+    check_pour_reach_nets(model, &[], &[], None, CELL_BUDGET, Some(nets)).reached_pads
+}
+
+/// [`check_pour_reach_cells`] for the nets in `only` (None = every pour net).
+fn check_pour_reach_nets(
+    model: &BoardModel,
+    items: &[Item],
+    routed_pads: &[usize],
+    deadline: Option<std::time::Instant>,
+    cells: f64,
+    only: Option<&BTreeSet<i32>>,
+) -> PourReach {
     let stop = move || deadline.map_or_else(crate::control::cancelled, crate::control::expired);
     let mut budget_left = STAMP_CELL_BUDGET;
     let mut out = PourReach::default();
@@ -1093,7 +1121,7 @@ pub fn check_pour_reach_cells(
 
     let mut by_net: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
     for (zi, z) in model.pours.iter().enumerate() {
-        if z.net != 0 && z.fills.iter().any(|f| f.outer.len() >= 3) {
+        if z.net != 0 && z.fills.iter().any(|f| f.outer.len() >= 3) && only.is_none_or(|o| o.contains(&z.net)) {
             by_net.entry(z.net).or_default().push(zi);
         }
     }
@@ -1425,6 +1453,23 @@ pub fn check_pour_reach_cells(
                     .or_default()
                     .1 += r.area[l];
             }
+        }
+        // Per pour: the pads joined to one of its own islands (any component).
+        for &zi in pours {
+            let z = &model.pours[zi];
+            let roots: BTreeSet<usize> = rasters
+                .iter()
+                .filter(|(k, _)| k.0 == zi)
+                .flat_map(|(k, r)| (1..=r.n_islands()).map(move |l| (*k, l as u32)))
+                .map(|(k, l)| dsu.find(island_node(k, l)))
+                .collect();
+            let rp: Vec<usize> = pads
+                .iter()
+                .enumerate()
+                .filter(|(a, &pi)| model.pads[pi].layers.iter().any(|l| z.layers.contains(l)) && roots.contains(&dsu.find(pad_base + a)))
+                .map(|(_, &pi)| pi)
+                .collect();
+            out.reached_pads.insert(zi, rp);
         }
         let main = score
             .iter()

@@ -263,6 +263,33 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     // `[run] drawing_grace_s`: how long the drawing's optional passes may (soft limit only).
     ctl.limit.set_grace(opts.limit_grace_s);
     ctl.limit.set_draw_grace(if opts.timeout_mode == "hard" { -1.0 } else { opts.drawing_grace_s });
+    // pour-pad-join (fail fast): a board whose every connection in scope is already made (KiCad's
+    // connectivity: pads, tracks, vias, the pours' fill) has nothing to route. End here, before the
+    // plane stubs and the projection (minutes on a large board) and before any TopoR loop: the
+    // dialog's loop has no cycle cap and no stop at "Routes stable", so an empty plan spun through
+    // empty cycles until the time limit (40 075 cycles per run in 20 s on a complete small board).
+    // The plane stubs come from the decomposition's connections (none here); the pours' stitching
+    // (classes 2-4: dropped islands, thin necks, `[planes] stitch_area`) works on the pours as
+    // given, so it runs here as it runs on the picked result of a full route (same call, no
+    // routed copper): with its vias the call hands them back (stop reason `stitch_only`), the
+    // NOTHING_TO_ROUTE end is only for a call that adds nothing at all.
+    let routable: Vec<u32> = model.layers.iter().filter(|l| l.routable).map(|l| l.id).collect();
+    if crate::decompose::decompose(model, opts, &routable).connections.is_empty() {
+        let mut r = unrouted(model, opts, NOTHING_TO_ROUTE);
+        r.stop_reason = "nothing_to_route".into();
+        r.converged = true;
+        if opts.stitch_islands {
+            stitch_regions_on(model, opts, &mut r, &|| ctl.is_cancelled());
+        }
+        if !r.items.is_empty() {
+            r.warnings[0] = STITCH_ONLY.into();
+            r.stop_reason = "stitch_only".into();
+        }
+        post(&mut r);
+        r.runtime_s = t0.elapsed().as_secs_f64();
+        r.limit = limit_report(ctl, opts, &mut r);
+        return r;
+    }
     let t_stubs = Instant::now();
     let stubs = place_plane_stubs(model, opts, ctl);
     if std::env::var_os("TOPO_TIMES").is_some() {
@@ -499,6 +526,14 @@ fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::
 
 /// M2.TL: the start of the loud error when Cancel / OK came before any plan was kept.
 pub const NOTHING_TO_DRAW: &str = "nothing to draw yet";
+
+/// pour-pad-join: the report line (and its prefix, which the plugin reads) of a call with no
+/// connection to route ([`route_topo`] ends before the plane stubs; stop reason `nothing_to_route`).
+pub const NOTHING_TO_ROUTE: &str = "nothing to route: every connection in scope is already made (pads, tracks, vias and pour fills joined as KiCad's connectivity has them); no plane stub, projection or TopoR loop was run and no copper is written";
+
+/// pour-pad-join r2: the report line of a call with no connection to route whose pours still
+/// needed stitching vias ([`route_topo`]: stop reason `stitch_only`; the vias are the call's items).
+pub const STITCH_ONLY: &str = "nothing to route: every connection in scope is already made (pads, tracks, vias and pour fills joined as KiCad's connectivity has them); only the pours' stitching ran ([planes] stitch_dropped / stitch_thin_mm / stitch_area), no plane stub, projection or TopoR loop";
 
 /// M2.TL (fail fast): the call's result when no plan was kept (`why` starts with
 /// [`NOTHING_TO_DRAW`]): every connection unrouted with `why`, an `ERROR:` line first, no copper.
@@ -7403,7 +7438,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             100.0 * rep.stats.layer_s / loop_s.max(1e-9),
             viol_mm,
             opts.loop_crossing,
-            rep.lines.join("; ")
+            rep.lines_text()
         ));
         warnings.push(format!("TopoR loop {table}"));
         {

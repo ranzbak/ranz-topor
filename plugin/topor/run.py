@@ -1300,6 +1300,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         key = json.dumps([items, sorted(remove_uuids)], sort_keys=True, default=str)
         if key == state["judged_key"]:  # a cancelled run returns the same result again: judged already
             return state["judged"]
+        if (not items and not remove_uuids and base_drc is not None
+                and (state.get("last_result") or {}).get("report", {}).get("stop_reason") == "nothing_to_route"):
+            # pour-pad-join: nothing to route = no copper added or removed, so the DRC copy is the unrouted copy, whose DRC
+            # is base_drc: reused instead of a second kicad-cli DRC (fail fast: the run ends in seconds)
+            state["rounds"] += 1
+            log.line(f"DRC round {state['rounds']}: nothing added or removed, the DRC of the unrouted copy holds "
+                     f"({len(base_drc.violations)} violations, {len(base_drc.unconnected)} unconnected)")
+            j = DrcJudgement(base_drc, {})
+            state["judged_key"], state["judged"], state["judged_items"] = key, j, []
+            return j
         emit("drc")
         state["rounds"] += 1
         # every call starts from the UNROUTED copy text (drcloop contract)
@@ -1476,7 +1486,21 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         ctx()
         ui.error(nr)
         return finish("error", error_code=nr.code)
-    if not out.items:  # nothing to show or apply (cancelled early, or nothing to route): silent, no window
+    if not out.items and rr.get("stop_reason") == "nothing_to_route" and not out.cancelled:
+        # pour-pad-join (fail fast, lead 2026-11-23): a fully connected board is a valid input, not an error: said
+        # clearly (an info dialog, no red error), never quiet empty TopoR loop cycles until the time limit
+        msg = messages.MESSAGES["NOTHING_TO_ROUTE"]
+        ntr = Finding("NOTHING_TO_ROUTE", msg.severity, messages.nothing_to_route_cause(plan.mode), msg.fix)
+        log.line(f"nothing to route: {ntr.message}")
+        findings.append(ntr)
+        report.facts["findings"] = findings
+        report.write(result=_facts_result("rejected", out, rr), drc_src=drc_src)
+        report.set_outcome("rejected", ntr.code)
+        report.write(result=_facts_result("rejected", out, rr), drc_src=drc_src)
+        ctx()
+        ui.error(ntr)
+        return finish("rejected", error_code=ntr.code)
+    if not out.items:  # nothing to show or apply (cancelled early): silent, no window
         status = "cancelled" if out.cancelled else "rejected"
         report.write(result=_facts_result(status, out, rr), drc_src=drc_src)
         report.set_outcome(status)

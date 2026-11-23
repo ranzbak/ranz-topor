@@ -700,6 +700,7 @@ title/label/button/checkbox/choice/heading/text).
 | dialog | id | kind | text |
 |---|---|---|---|
 | error | title | title | Topor — Error |
+| error | title_notice | text | Topor — Notice |
 | error | code | heading | {code} |
 | error | message | label | {message} |
 | error | fix_label | label | Fix |

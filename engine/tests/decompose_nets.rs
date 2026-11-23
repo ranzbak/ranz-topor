@@ -546,3 +546,133 @@ fn pour_without_fills_falls_back_to_m2() {
         ("U1.1", "U1.2")
     );
 }
+
+/// pour-pad-join: footprint J1 with four THT shield pads all numbered "SH", net 1, and the B.Cu pour of
+/// net 1 filling (0,0)-(30,30) mm with thermal spokes (KiCad's usual zone settings). `at` = the pads'
+/// centres in pad-list order; `listed` = the pour's pad list (one entry per pad it reaches, as the IPC and
+/// pcbnew exporters write it).
+fn shield_model(at: &[(i64, i64)], listed: &[&str]) -> BoardModel {
+    let mut m = model(&[]);
+    for (i, &(x, y)) in at.iter().enumerate() {
+        let mut p = tht(i + 1, 1, x, y);
+        p.ref_ = "J1".into();
+        p.number = "SH".into();
+        m.pads.push(p);
+    }
+    let mut z = gnd_pour(listed, vec![rect_fill(31, 0, 0, 30, 30)]);
+    (z.clearance, z.min_thickness, z.thermal_gap, z.spoke_width, z.pad_connection) = (200_000, 254_000, 500_000, 500_000, 1);
+    m.pours.push(z);
+    m
+}
+
+#[test]
+fn same_numbered_pads_the_fill_reaches_are_all_joined() {
+    // All four shield pads stand in the fill, listed four times: KiCad calls the net complete, so there is
+    // nothing to route. The first-match join left three of them out of the pour (phantom pad-to-pour
+    // connections on a complete board: the private board P's fast empty runs).
+    let m = shield_model(&[(5, 5), (25, 5), (5, 25), (25, 25)], &["J1.SH"; 4]);
+    let d = decompose(&m, &Options::default(), &L2);
+    assert!(d.connections.is_empty(), "{:?}", labels(&d));
+    assert!(d.nets[0].pour_served);
+}
+
+#[test]
+fn same_numbered_pad_outside_the_fill_keeps_its_connection() {
+    // Four shield pads, the fill reaches three (listed three times); the fourth at (40, 15) stands 10 mm
+    // right of the fill. Whatever its place in the pad list, exactly that pad gets the one connection, to
+    // the pour; the three in the fill are served.
+    let inside = [(5, 5), (25, 5), (5, 25)];
+    for k in 0..4 {
+        let mut at: Vec<(i64, i64)> = inside.to_vec();
+        at.insert(k, (40, 15));
+        let m = shield_model(&at, &["J1.SH"; 3]);
+        let d = decompose(&m, &Options::default(), &L2);
+        assert_eq!(d.connections.len(), 1, "outside pad at {k}: {:?}", labels(&d));
+        let c = &d.connections[0];
+        assert_eq!(c.to.kind, TermKind::Pour(0));
+        assert!((c.from.at.x - 40.0 * MM as f64).abs() < 1.0, "outside pad at {k}: from {:?}", c.from.at);
+        assert!((c.est_len - 10.0 * MM as f64).abs() < 1.0, "{}", c.est_len);
+        for a in (0..4).filter(|&a| a != k) {
+            assert_ne!(d.pad_cluster[&a], d.conn_clusters[0].0, "pad {a} in the fill is pour-served");
+        }
+    }
+}
+
+/// pour-pad-join r2: net 1 in two B.Cu pours with nothing joining them yet: `z0` (0..30 x 0..30 mm) holds THT pads
+/// U1.1 .. U1.`n0` at (5 + 10 k, 15), each listed once; `z1` (50..70 x 0..30 mm) holds connector J1's two THT shield
+/// pads "SH" at (55, 15) and (65, 15), listed twice. `u2`: z1 also holds THT pad U2.1 at (60, 25), listed once (a
+/// singly-listed pad beside the shield pads). Spoke settings as `shield_model`.
+fn two_pour_model(n0: usize, u2: bool) -> BoardModel {
+    let mut m = model(&[]);
+    for k in 0..n0 {
+        m.pads.push(tht(k + 1, 1, 5 + 10 * k as i64, 15));
+    }
+    for (i, x) in [55, 65].into_iter().enumerate() {
+        let mut p = tht(10 + i, 1, x, 15);
+        p.ref_ = "J1".into();
+        p.number = "SH".into();
+        m.pads.push(p);
+    }
+    let mut z1_pads = vec!["J1.SH", "J1.SH"];
+    if u2 {
+        let mut p = tht(1, 1, 60, 25);
+        p.ref_ = "U2".into();
+        p.uuid = "u2".into();
+        m.pads.push(p);
+        z1_pads.push("U2.1");
+    }
+    let z0_pads: Vec<String> = (1..=n0).map(|k| format!("U1.{k}")).collect();
+    let z0_refs: Vec<&str> = z0_pads.iter().map(String::as_str).collect();
+    for (uuid, listed, fill) in [("z0", z0_refs, rect_fill(31, 0, 0, 30, 30)), ("z1", z1_pads, rect_fill(31, 50, 0, 70, 30))] {
+        let mut z = gnd_pour(&listed, vec![fill]);
+        z.uuid = uuid.into();
+        (z.clearance, z.min_thickness, z.thermal_gap, z.spoke_width, z.pad_connection) = (200_000, 254_000, 500_000, 500_000, 1);
+        m.pours.push(z);
+    }
+    m
+}
+
+/// The side of the net a terminal is on: 0 = pour z0 and its U1 pads, 1 = pour z1 and the pads in it.
+fn side(t: &TermRef) -> u8 {
+    match t.kind {
+        TermKind::Pour(z) => z as u8,
+        _ if t.label.starts_with("U1.") => 0,
+        _ => 1,
+    }
+}
+
+#[test]
+fn shield_pads_in_a_second_pour_join_that_pour() {
+    // The shield pads stand in pour z1, which nothing joins to z0 yet. The fill joins them to z1 whether or not z1
+    // is the net's main component (z0 with 3 listed pads is; with 1 it is not): one real connection from the z1
+    // group to the z0 group, no pad-to-pour connection inside z1. (The main component's pads alone left z1 without
+    // a port when z0 was the main one: two phantom J1.SH -> z1 connections, and the z1 group never joined to z0.)
+    for n0 in [1, 3] {
+        for u2 in [false, true] {
+            let d = decompose(&two_pour_model(n0, u2), &Options::default(), &L2);
+            assert_eq!(d.connections.len(), 1, "n0 {n0} u2 {u2}: {:?}", labels(&d));
+            let c = &d.connections[0];
+            let mut sides = [side(&c.from), side(&c.to)];
+            sides.sort_unstable();
+            assert_eq!(sides, [0, 1], "n0 {n0} u2 {u2}: {:?}", labels(&d));
+        }
+    }
+}
+
+#[test]
+fn same_numbered_pads_split_over_two_pours_each_join_their_own() {
+    // J1 has one shield pad in each pour, and each pour lists "J1.SH" once: the label names two pads, the fill
+    // decides; each pad is joined to the pour it stands in, so the only connection is the one between the pours.
+    let mut m = two_pour_model(3, false);
+    m.pads.iter_mut().find(|p| p.number == "SH").unwrap().center = pt(25, 25);
+    m.pours[0].pads.push("J1.SH".into());
+    m.pours[1].pads.truncate(1);
+    let d = decompose(&m, &Options::default(), &L2);
+    assert_eq!(d.connections.len(), 1, "{:?}", labels(&d));
+    let c = &d.connections[0];
+    let mut sides = [side(&c.from), side(&c.to)];
+    sides.sort_unstable();
+    assert_eq!(sides, [0, 1], "{:?}", labels(&d));
+    let sh: Vec<usize> = (0..m.pads.len()).filter(|&i| m.pads[i].number == "SH").collect();
+    assert_ne!(d.pad_cluster[&sh[0]], d.pad_cluster[&sh[1]], "each shield pad in its own pour's cluster");
+}
