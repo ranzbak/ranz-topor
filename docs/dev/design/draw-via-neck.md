@@ -66,3 +66,10 @@ price it). The drawing never drops anything. Copper is identical for any thread 
 | neck_shared_channel | neck down to y 6.716, where S leaves | reproduces in part: neck to 7.238, S drawn off |
 | via_jam_shift | via below the column, N full width | **does not reproduce**: the plan puts the via in free room |
 | pad_axis_entry | axis leg to 0.11 mm past the tip, then 45 deg | **does not reproduce**: today's exit is on the axis |
+| via_interval_sliver | via below the column, X untouched (lead: Q2's cause) | **does not reproduce**: the planned site is missed (tight), VIAPICK takes free room below the column; no thin copper, DRC 0 |
+| pad_side_approach | axis leg, then 45 deg to J1 (lead: Q3's hook) | **does not reproduce**: today's exit is on the axis (5.739 vs 5.614 mm) |
+
+Neither lead variant reproduces Q2/Q3 on today's build: in a small layout the plan does not end up with a sliver-only
+via interval or a side-triangle pad entry. Q2/Q3 need the dense surroundings; a qmtech crop of each neighbourhood
+(public board) is the next candidate repro, if wanted. via_jam_shift, pad_axis_entry and the two variants stay as
+regression guards.
