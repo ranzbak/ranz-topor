@@ -283,3 +283,12 @@ The default comes from the det s0 A/B per connection. The target test is `wide_o
 Literature: Polubasov 2010 («Оптимизация разводки», as cited in `init.rs` `held_layers`):
 stretches are assigned layers before rerouting, and a crossing is priced by the via it implies.
 No page was checked for the layer-free case itself.
+
+Literature check (r5 L7): the closest source is SURF (Dayan and Dai, UCSC-CRL-93-04, summarised in
+`docs/topology/13-vias-and-layers.md` section 2): its cost is the via price times the vias plus a
+length estimate from pairwise detours, a continuous conflict measure instead of a yes/no
+crossing. A crossing is thus priced by what resolving it costs. For a net that may take either
+layer the resolving cost is no via, which is `free_crossing = 0`; the graded value in between is
+this design's own choice (price share), not taken from SURF. No page of SURF or of the TopoR
+manual (Polubasov 2010) was read for this case: there is no page citation, and the rule stands on
+the measured A/B (the default stays 1).
