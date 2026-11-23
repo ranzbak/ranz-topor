@@ -218,6 +218,33 @@ via pair's room (`Drawer::via_pair_price`) counts only the crossers whose taut t
 between the two vias. ERBS then bends the crossers round the placed vias (reserve planned room).
 Test `thick_dive_grouping_predicts_what_it_draws_with_slack`: 0 violations.
 
+r4 (window end, `[vias] site_window`): ERBS takes a via's side of a crosser from the geometry, so
+it does not bend a crosser past a via whose site lies beyond the crosser's taut crossing (the
+"farthest" window allows such sites). On qmtech the s1s plan equals the off plan up to one via
+site, but the relocation moved ~50 vias by up to 5 mm and DRC rose 113 -> 139. `site_window =
+"taut"` ends the window at the bounding crossers' taut crossings and keeps a candidate site on
+the window's side of their taut tracks: crossers only bend away from a via; the room is still
+measured with the slack. Default "farthest" (r3) until the det s0 A/B per connection decides.
+Tests `thick_dive_grouping_taut_window_keeps_vias_off_the_crossers_path`,
+`thick_dive_grouping_taut_window_draws_clean`.
+
+**RCA r4: the esp "flip" (58 -> 72 predicted violations, +3V3 laid again) is no keep bug.**
+The 58 and the 72 come from two different runs (arm off and arm s1s), not from one loop that
+kept a worse cycle. Within each run every kept move lowered the evaluation
+(`optimise.rs` `evaluation`: objective value + `viol_mm` x graded amount, `archive.rs`
+`Criteria::value` = base + penalty):
+- pair move keeps on `e1 + price < e0` (`core.rs` 6139);
+- layer floating keeps only when the evaluation does not rise (`try_layers`, `core.rs` 5216;
+  `take_layers` at 6635).
+LOOPDBG (tl8, det s0, esp): off cycle 1 starts at 82 predicted violations (eval 154240) and ends
+at 58 (98935); s1s starts at 166 (365190) and ends at 72 (205740), the pair moves 208319 ->
+207540 (89 -> 73) -> 205740 (73 -> 72). The archive gets the initial plan (`optimise.rs` 579) and
+each cycle (717); its pick ranks errors first (`Score { incomplete: errors, .. }`, 548-551), so
+cycle 1 (72) beats the initial plan (166), and the variant table holds one row because cycle 1
+dominates. The pick's fresh CapModel (`core.rs` 7237-7240) agrees with 72: no stale prediction.
+The two runs part before the loop: site_planned (and ω) change the P3/P4 pre-loop plan, so s1s
+starts at 166 and the loop's one cycle (runs=1, rounds=1) cannot reach the off plan's 58.
+
 **One-side hold (done, `[vias] pair_hold`).** The one-side move's run stays on its layer through
 the layering that follows the move. Each of its events off that layer costs `pair_hold` via
 prices x ω in that layering: a domain edge to the fixed node in `assign_two`, a unary price in
