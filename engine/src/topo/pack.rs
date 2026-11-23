@@ -607,7 +607,7 @@ impl<'a> Packer<'a> {
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
         p.site_planned = opts.via_site_planned;
-        p.site_lanes = opts.via_site_lanes;
+        p.site_lanes = opts.via_site_lanes && opts.via_site_planned; // documented "with site_planned" (r5 L3)
         p.site_slack = opts.via_site_slack.clamp(0.0, 1.0);
         p.site_window_taut = opts.via_site_window == "taut";
         p.via_between = opts.via_between;

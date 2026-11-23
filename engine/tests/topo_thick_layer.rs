@@ -565,3 +565,17 @@ fn four_layer_one_side_hold() {
     assert!(free.1 > 0, "no hold: the layering weaves P again: {free:?}");
     assert_eq!(held.1, 0, "hold: P stays on its side in the move's layering: {held:?}");
 }
+
+/// r5 L3: `site_lanes` is documented "with site_planned": on its own it changes nothing (the plan
+/// of P is the same with and without it).
+#[test]
+fn site_lanes_needs_site_planned() {
+    let m = thick_dive_grouping();
+    let vias = |lanes: bool| {
+        let r = route(&m, &[("via_site_lanes", serde_json::json!(lanes)), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+        let p = plan(&r);
+        let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
+        w["vias"].clone()
+    };
+    assert_eq!(vias(true), vias(false));
+}
