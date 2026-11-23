@@ -55,7 +55,7 @@ def _reach(pat, segs, vias) -> dict:
     nominal = {"PWR": 0.5}
     thin = [(net, w, p) for _, net, w, p in segs if w < nominal.get(net, 0.25) - 1e-4]
     out["thin"] = [[net, round(w, 3), [[round(x, 3), round(y, 3)] for x, y in p]] for net, w, p in thin]
-    if pat.name == "via_jam_shift":
+    if pat.name in ("via_jam_shift", "via_interval_sliver"):
         ok = ok and not thin
     if "neck_to_y" in e:
         ys = [y for net, _, p in thin if net == "PWR" for _, y in p]

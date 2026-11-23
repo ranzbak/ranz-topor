@@ -6,7 +6,7 @@
 set -u
 R=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
 note() { echo "$*" >> $R/rc.txt; }
-NAMES="via_jam_shift neck_in_pad_row neck_shared_channel pad_axis_entry"
+NAMES="via_jam_shift via_interval_sliver neck_in_pad_row neck_shared_channel pad_axis_entry"
 case ${1:-} in
   pats)
     python -m harness.dvn_patterns $R/dvnp/boards --drc > $R/dvnp-gen.log 2>&1; note "gen rc $?"

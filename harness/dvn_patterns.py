@@ -53,6 +53,17 @@ def _row(ref: str, nets: dict[int, str], xs: list[float], y: float, size: tuple[
 
 # ------------------------------------------------------------------------------------------------ 1. via_jam_shift
 def via_jam_shift() -> Pattern:
+    return _via_jam(False)
+
+
+def via_interval_sliver() -> Pattern:
+    """1b (lead 2026-11-23, Q2's cause): via_jam_shift plus X, an F.Cu wire below the column that V's B.Cu run must cross:
+    the via's interval is the pocket between X, N and the column, which the triangulation cuts into sliver fans from the
+    column's pad corners; the pocket still holds the via at its west side."""
+    return _via_jam(True)
+
+
+def _via_jam(sliver: bool) -> Pattern:
     W, H = 14.0, 14.0
     xc = 10.0  # the column's pads: 0.8 (x) x 0.3 (y) at 0.5 mm pitch, y 5.0 .. 7.5 (pin 3 = N, pin 4 = V)
     ys = [5.0 + 0.5 * i for i in range(6)]
@@ -80,6 +91,16 @@ def via_jam_shift() -> Pattern:
     v_b = [via, j1c]
     j1 = Fp("J1", [Pad("1", "V", j1c, (1.0, 1.0), layer="B.Cu")], "terminal")
     j2 = Fp("J2", [Pad("1", "N", j2c, (1.0, 1.0))], "terminal")
+    fps_x, conns_x, tracks_x, nets_x = [], [], [], []
+    if sliver:
+        # X on F.Cu at y 8.3 from J4 (12.5, 8.3) to J3 (8.4, 8.3): V (B.Cu, x 9.0) crosses it, so V's via lies above it, in
+        # the pocket x <= 9.1 (column), y <= 7.675 (X), x + y >= 16.08 (N). The expected via (9.0, 7.2) is in it.
+        yx = 8.3
+        j3c, j4c = (8.4, yx), (12.5, yx)
+        fps_x = [Fp("J3", [Pad("1", "X", j3c, (1.0, 1.0))], "terminal"), Fp("J4", [Pad("1", "X", j4c, (1.0, 1.0))], "terminal")]
+        conns_x = [("X", "J3.1", "J4.1")]
+        tracks_x = [Track("X", "F.Cu", W_SIG, [j3c, j4c])]
+        nets_x = ["X"]
     # The jam (what the drawing does today on qmtech Q2): the via at the column's pin 4, 0.32 mm off its edge, on N's
     # straight corridor; N then has to pass between it and the wall: room = dist(via, wall) - via_r - clearance.
     jam = (_r(edge - VIA_D / 2 - CLEAR - EPS), 6.5)
@@ -88,7 +109,9 @@ def via_jam_shift() -> Pattern:
             "via_free_band": "below y 7.0 on V's B.Cu path (x 9.0): the via clears N by >= 0.2 when x + y >= "
                              f"{_r(cN + (VIA_D / 2 + CLEAR + W_SIG / 2) * SQ2)}"}
     return Pattern(
-        name="via_jam_shift", title="A via jammed against a pad column necks its neighbour; shifted into free room it does not",
+        name="via_interval_sliver" if sliver else "via_jam_shift",
+        title=("The via's interval is a sliver pocket beside the column (X crossed on B.Cu): the via goes to the pocket's room"
+               if sliver else "A via jammed against a pad column necks its neighbour; shifted into free room it does not"),
         kind="solvable",
         gap_classes=["draw-via-neck (1): the drawing's via site prices the planned room of the neighbour (graded) and moves "
                      "the via before the neighbour necks (TopoR 6.3 manual p. 179 Shift Vias, p. 183)"],
@@ -105,13 +128,13 @@ def via_jam_shift() -> Pattern:
         why="Solvable by construction: N's corridor and the wall were laid out first, the via's band derived from them. The "
             "jammed site is legal for the via itself (it keeps 0.2 to the column), so a test that only checks the via's "
             "own clearance takes it; only the neighbour's planned room shows it is wrong.",
-        size=(W, H), layers=2, nets=["N", "V"], fps=[u1, j1, j2],
-        connections=[("N", "U1.3", "J2.1"), ("V", "U1.4", "J1.1")], cuts=[], keepouts=[wall],
+        size=(W, H), layers=2, nets=["N", "V"] + nets_x, fps=[u1, j1, j2] + fps_x,
+        connections=[("N", "U1.3", "J2.1"), ("V", "U1.4", "J1.1")] + conns_x, cuts=[], keepouts=[wall],
         classes=[dict(DEFAULT_CLASS)],
-        ref_tracks=[Track("N", "F.Cu", W_SIG, n_pts), Track("V", "F.Cu", W_SIG, v_f), Track("V", "B.Cu", W_SIG, v_b)],
+        ref_tracks=[Track("N", "F.Cu", W_SIG, n_pts), Track("V", "F.Cu", W_SIG, v_f), Track("V", "B.Cu", W_SIG, v_b)] + tracks_x,
         ref_vias=[Via("V", via)],
         witness={"N": ("F.Cu", n_pts), "V": ("F.Cu", v_f)},
-        extra={"dvn": {"ref_len": _r(_len(n_pts) + _len(v_f) + _len(v_b)), "vias": 1, "necks": 0, "room": room,
+        extra={"dvn": {"ref_len": _r(_len(n_pts) + _len(v_f) + _len(v_b) + sum(_len(t.pts) for t in tracks_x)), "vias": 1, "necks": 0, "room": room,
                        "jam_marks": [list(jam)],
                        "literature": "TopoR 6.3 manual p. 179 (F7 Shift Vias), p. 183 ('most violations are eliminated by "
                                      "procedures for automatic via shifting'); Dayan & Dai 1991 UCSC-CRL-91-40 pp. 2-6 "
@@ -254,7 +277,7 @@ def pad_axis_entry() -> Pattern:
                                      "2026-11-23 (straight out ~1 trace radius, then turn; SMD-FANOUT-STAIRCASE)"}})
 
 
-PATTERNS = {f.__name__: f for f in (via_jam_shift, neck_in_pad_row, neck_shared_channel, pad_axis_entry)}
+PATTERNS = {f.__name__: f for f in (via_jam_shift, via_interval_sliver, neck_in_pad_row, neck_shared_channel, pad_axis_entry)}
 
 
 def generate(name: str, out: Path, *, drc: bool = False) -> dict:
