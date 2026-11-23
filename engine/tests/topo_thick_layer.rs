@@ -338,3 +338,28 @@ fn thick_dive_grouping_predicts_what_it_draws_with_slack() {
     let pred: u64 = p["conns"]["0"]["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum();
     assert!(drawn == 0 || pred > 0, "P: drawn {drawn} violations, predicted {pred}: {}", p["conns"]["0"]);
 }
+
+/// thick-layer r3 (`[search] free_crossing`, design addendum r3): S1-S5 have drilled pads at both
+/// ends, so crossing P costs them no via (they take B.Cu). With the full crossing price (main)
+/// S1 / S2 go round P's pad (91.41 mm in all, round 1); with `free_crossing = 0` every wire runs
+/// straight: 86.00 mm (14 + 6 x 12), P 0 vias, S6 the only diver (2 vias), no violation.
+#[test]
+fn wide_one_side_free_crossing() {
+    let m = wide_one_side();
+    let r = route(&m, &[("free_crossing", serde_json::json!(0.0))]);
+    let pn = per_net(&r);
+    let total: f64 = pn.values().map(|v| v.1).sum();
+    assert_eq!(r.violations.len(), 0, "{:?}", r.violations);
+    assert_eq!(pn[&1].0, 0, "P keeps F.Cu: {pn:?}");
+    assert!((total - 86.0).abs() < 0.05, "86.00 mm, no detour: {total:.3} {pn:?}");
+    assert_eq!(pn.values().map(|v| v.0).sum::<usize>(), 2, "S6 dives with 2 vias: {pn:?}");
+}
+
+/// The same with the full crossing price (main, `free_crossing = 1`): the detour this fixes.
+#[test]
+fn wide_one_side_full_crossing_detours() {
+    let m = wide_one_side();
+    let r = route(&m, &[("free_crossing", serde_json::json!(1.0))]);
+    let total: f64 = per_net(&r).values().map(|v| v.1).sum();
+    assert!(total > 86.5, "main detours: {total:.3}");
+}

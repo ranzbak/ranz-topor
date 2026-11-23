@@ -596,6 +596,9 @@ pub struct State<'p> {
     /// to the same layer implies and narrows the layer pin ([`super::init::cross_pin`]); false
     /// (default, "crossing"): only crossings no layer assignment separates are priced (overflow).
     pub cross_vias: bool,
+    /// thick-layer r3 (`[search] free_crossing`): the crossing price multiplier of a connection
+    /// with two drilled terminal pads where the crossing leaves it a free layer (1 = off).
+    pub free_crossing: f64,
     /// Width of each pass (nm, parallel to `passes`; M-C width in P2): its wire's nominal width,
     /// or the wire's neck floor where the pass lies in a necked stretch ([`State::refit_wire`]).
     pub pass_w: Vec<f64>,
@@ -707,6 +710,7 @@ impl<'p> State<'p> {
             history: vec![0.0; proj.edges.len()],
             ends: vec![0; proj.pos.len()],
             cross_vias: false,
+            free_crossing: 1.0,
             pass_w: Vec::new(),
             pass_d: Vec::new(),
             floors: std::collections::HashMap::new(),

@@ -1866,6 +1866,11 @@ pub struct Options {
     /// this many via prices (x the wire's ω): a graded release price, not a lock. 0 = the
     /// layering is free (round 2).
     pub via_pair_hold: f64,
+    /// thick-layer r3 (`topor.toml [search] free_crossing`): the crossing price of a connection
+    /// whose two terminal pads are drilled (it can take either layer with no via) is multiplied
+    /// by this where the crossing leaves its path a free layer; 1 = the full price for every
+    /// crossing (main).
+    pub free_crossing: f64,
     /// 5.4 (`[vias] relocate`): the plan puts every via at the point of its free interval where
     /// the forces of the copper around it balance (Dayan & Dai 1991; TopoR FreeStyle "Shift
     /// vias", 6.3 manual p. 179; Luzin-Popov 2013 p. 3), equal clearance between two neighbours,
@@ -2089,6 +2094,7 @@ impl Default for Options {
             via_pair_move: true,
             via_pair_one_side: false,
             via_pair_hold: 1.0,
+            free_crossing: 1.0,
             via_relocate: true,
             branch_relocate: false,
             via_between: true,

@@ -3285,6 +3285,7 @@ fn pick_far(model: &BoardModel, opts: &Options, reg: &Registry, dec: &crate::dec
     };
     let mut st = State::new(&b2.proj);
     st.cross_vias = opts.crossing_vias == "via";
+    st.free_crossing = opts.free_crossing;
     st.taut_len = true;
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let term_obs = |net: i32, at: Vec2| (0..b2.proj.obstacles.len()).find(|&o| b2.pad_of[o] == usize::MAX && b2.proj.obstacles[o].net == Some(net) && (b2.proj.obstacles[o].center - at).len() <= 2.0 && b2.centre[o].is_some());
@@ -3616,6 +3617,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     let proj = &b.proj;
     let mut st = State::new(proj);
     st.cross_vias = opts.crossing_vias == "via";
+    st.free_crossing = opts.free_crossing;
     // exist-term: the hand copper's connectivity and the continued ends' directions.
     for g in exist_groups.values() {
         st.pre_join.extend(g.1.windows(2).map(|x| (x[0], x[1])));
