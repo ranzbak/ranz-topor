@@ -190,6 +190,9 @@ MESSAGES: dict[str, Msg] = {
         "The board contains groups; the KiCad API does not expose group membership, so grouped items are treated one by one and new tracks are not grouped.",
         "Select the footprints themselves, or ungroup first (KiCad → Edit → Ungroup)."),
     # ---------------------------------------------------------------- run
+    "NOTHING_TO_ROUTE": Msg("info",
+        "Every connection in scope is already made (pads, tracks, vias and the pours' fill, as KiCad's connectivity has them), so there is nothing to route: on a whole-board run the board is fully connected; when a selection was routed, the connections of the selection are (the rest of the board was not checked). Topor stopped right after reading the board, before building its map of the board and before any routing; no copper was written and the board was not changed.",
+        "Nothing to do. To route the board again from scratch, choose Rip up and re-route in the Options (run.existing_copper = \"rip\") or select the footprints whose connections to re-route; to check the connectivity, run KiCad's DRC (KiCad → Inspect → Design Rules Checker: no unconnected items)."),
     "NOTHING_ROUTED": Msg("warning",
         "The router produced no copper.",
         "See the connection reasons in the report; relax a setting (run.timeout_s, optimize.rounds) or route by hand."),
@@ -285,6 +288,26 @@ MESSAGES: dict[str, Msg] = {
         "KiCad cleanup / teardrops were skipped because the result has partial routes.",
         "Finish the partial connections by hand, then run KiCad → Tools → Cleanup Tracks & Vias yourself (run.kicad_cleanup)."),
 }
+
+
+#: pour-pad-join r2: NOTHING_TO_ROUTE's subject per scope mode (``ScopePlan.mode``): a whole-board run may say the board
+#: is fully connected, a selection only that its own connections are
+_NTR_SCOPE = {
+    "whole": "The board is already fully connected: every connection is made",
+    "between": "Every connection of the selection (scope mode 'between': between the selected footprints) is already made",
+    "touching": "Every connection of the selection (scope mode 'touching': of the selected footprints' pads) is already "
+                "made",
+}
+_NTR_HOW = " (pads, tracks, vias and the pours' fill, as KiCad's connectivity has them), so there is nothing to route"
+
+
+def nothing_to_route_cause(mode: str) -> str:
+    """NOTHING_TO_ROUTE's cause for the run's scope mode (whole | between | touching; any other value reads as a
+    selection of that mode). O(1)."""
+    head = _NTR_SCOPE.get(mode) or f"Every connection of the selection (scope mode '{mode}') is already made"
+    rest = "" if mode == "whole" else "; the rest of the board was not checked"
+    tail = MESSAGES["NOTHING_TO_ROUTE"].cause.split(" Topor stopped", 1)[1]
+    return f"{head}{_NTR_HOW}{rest}. Topor stopped{tail}"
 
 
 def fix_for(code: str) -> str:

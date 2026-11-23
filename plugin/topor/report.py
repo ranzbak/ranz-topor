@@ -136,6 +136,8 @@ STOP_WORDS = {
     "round cap": "the rounds safety cap ([optimize] rounds)",
     "re-lay budget": "the re-lay work cap",
     "stop_after plan": "run.stop_after = plan",
+    "nothing_to_route": "nothing to route: every connection in scope is already made",
+    "stitch_only": "nothing to route, only the pours' stitching vias were added",
 }
 
 

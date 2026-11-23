@@ -1056,3 +1056,20 @@ def test_grid_describe(tmp_path):
     assert grid.describe("auto", pcb, tmp_path) == "0.5 mm from KiCad settings; origin (1, 2) mm from the board"
     assert grid.describe(0.1, pcb, tmp_path).startswith("0.1 mm from topor.toml")
     assert grid.resolve("auto", pcb, tmp_path)[0]["grid_track_nm"] == [500000, 500000]
+
+
+@pytest.mark.parametrize("severity,title,tip,notice", [
+    ("info", "Topor — Notice", "Notice", True),
+    ("warning", "Topor — Error", "Error", False),
+    ("error", "Topor — Error", "Error", False),
+])
+def test_error_dialog_notice_look_is_for_info_only(app, tmp_path, severity, title, tip, notice):
+    """pour-pad-join r2: only an info finding (NOTHING_TO_ROUTE) gets the notice window (title, information icon); a
+    warning (NOTHING_ROUTED, POST_COMMIT_STEP_FAILED go through ui.error) or an error stays loud (fail fast, run.py)."""
+    d = ui_wx.ErrorDialog(Finding("X_CODE", severity, "cause.", "fix."), ui_wx.UiContext(report_dir=tmp_path))
+    try:
+        icon = next(c for c in d.GetChildren() if c.GetName() == "icon")
+        assert (d.GetTitle(), icon.GetToolTipText(), d.notice) == (title, tip, notice)
+        assert d.GetTitle() == ui_wx.WORDING["error"]["title_notice" if notice else "title"]
+    finally:
+        d.Destroy()

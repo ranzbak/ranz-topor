@@ -108,3 +108,17 @@ def test_via_not_set_up_states_what_really_happens():
     assert "vias.fallback_diameter_mm" in m.cause and "smaller pre-defined vias" in m.cause, m.cause
     assert "fab profile" not in m.cause and "0.25, 0.3, 0.4" not in m.cause, m.cause
     assert "Net Classes" in m.fix and "Pre-defined Sizes" in m.fix and "smaller pre-defined vias" in m.fix, m.fix
+
+
+def test_nothing_to_route_cause_per_scope_mode():
+    """pour-pad-join r2, rule 13: NOTHING_TO_ROUTE's cause for every value the text can take (ScopePlan.mode whole |
+    between | touching, and an unknown mode)."""
+    whole = messages.nothing_to_route_cause("whole")
+    assert whole.startswith("The board is already fully connected: every connection is made (pads, tracks, vias")
+    assert "the rest of the board was not checked" not in whole
+    for mode in ("between", "touching", "other"):
+        t = messages.nothing_to_route_cause(mode)
+        assert t.startswith(f"Every connection of the selection (scope mode '{mode}'"), t
+        assert "fully connected" not in t and "so there is nothing to route; the rest of the board was not checked." in t
+    for t in (whole, messages.nothing_to_route_cause("between")):
+        assert t.endswith("no copper was written and the board was not changed.")

@@ -149,8 +149,9 @@ Topor again. Please file the board as a bug ([debug.md](../dev/debug.md#filing-a
 ### Nothing to route on a routed board
 
 **Cause.** With *Existing copper: Keep as obstacles* (`[run] existing_copper = "fixed"`, the default) topor
-only routes what is not connected yet; on a fully routed board that is nothing
-([NOTHING_ROUTED](#nothing_routed) or 0 connections in the header).
+only routes what is not connected yet; on a fully routed board that is nothing: the run ends right after
+reading the board with the notice [NOTHING_TO_ROUTE](#nothing_to_route) (no map of the board is built, no copper
+is written).
 
 **Fix.** Choose *Rip up and re-route* in the [Options](operate.md#options), or route a selection.
 
@@ -586,6 +587,14 @@ bug](../dev/debug.md#filing-a-bug). `[output] plan_report = false` stops writing
 **Cause.** Cancel / OK came before the router had a first plan (before the topological search of any run had placed every connection), so there was nothing to draw: no copper was written and the board was not changed. From the first plan on (the progress dialog then says "first plan ready, Accept will draw it"), Accept draws the best plan so far, also during the layer assignment and rip-up that follow the search.
 
 **Fix.** Route again and wait until the progress dialog says "first plan ready, Accept will draw it" (on a large board the topological search can take a minute or more), then press Accept; or let the time limit end the run (run.timeout_s: with timeout_mode = soft the layer assignment and rip-up stop at run.limit_grace_s past it and the plan so far is drawn).
+
+### NOTHING_TO_ROUTE
+
+*Severity: info.*
+
+**Cause.** Every connection in scope is already made (pads, tracks, vias and the pours' fill, as KiCad's connectivity has them), so there is nothing to route: on a whole-board run the board is fully connected; when a selection was routed, the connections of the selection are (the rest of the board was not checked). Topor stopped right after reading the board, before building its map of the board and before any routing; no copper was written and the board was not changed.
+
+**Fix.** Nothing to do. To route the board again from scratch, choose Rip up and re-route in the Options (run.existing_copper = "rip") or select the footprints whose connections to re-route; to check the connectivity, run KiCad's DRC (KiCad → Inspect → Design Rules Checker: no unconnected items).
 
 ### PAD_OUTSIDE_BOARD
 
