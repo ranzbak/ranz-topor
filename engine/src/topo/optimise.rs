@@ -178,6 +178,8 @@ pub struct CycleStats {
     /// (ns) of the stretch and one-side candidates (measurement only).
     pub one_side_tried: usize,
     pub one_side_kept: usize,
+    /// thick-layer S3: the held wires' layer changes left right after their one-side moves (sum).
+    pub one_side_left: usize,
     pub one_side_ns: u64,
     pub one_side_cpu_ns: u64,
     pub pair_ns: u64,
@@ -275,6 +277,7 @@ impl CycleStats {
         self.pair_moved_long += o.pair_moved_long;
         self.one_side_tried += o.one_side_tried;
         self.one_side_kept += o.one_side_kept;
+        self.one_side_left += o.one_side_left;
         self.one_side_ns += o.one_side_ns;
         self.one_side_cpu_ns += o.one_side_cpu_ns;
         self.pair_ns += o.pair_ns;

@@ -1453,6 +1453,13 @@ fn assign_two(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &LayerP
             g.add_edge(x[0].node, x[1].node, if x[0].pi == x[1].pi { m } else { -m });
         }
     }
+    // thick-layer S3: a held stretch's events off its layer pay the release price (`State::layer_hold`;
+    // node 0 is the fixed orientation 0, so an event of parity `pi` is on layer `pi` with its node at 0).
+    for &(w, t, h) in &st.layer_hold {
+        for e in events.get(w).into_iter().flatten().filter(|e| e.node != 0) {
+            g.add_edge(e.node, 0, if e.pi as i32 == t { h } else { -h });
+        }
+    }
     rep.before = g.size();
     let mut reduced = g.clone();
     reduced.reduce();
@@ -1612,6 +1619,9 @@ struct Costs {
     share: Vec<f64>,
     /// thick-layer M1: per event, ω of its wire ([`Omega`]; empty: 1).
     om: Vec<f64>,
+    /// thick-layer S3: per event, the held layer and its release price (`State::layer_hold`;
+    /// empty: none).
+    hold: Vec<(u8, f64)>,
 }
 
 impl Costs {
@@ -1644,11 +1654,8 @@ impl Costs {
     }
 
     fn unary(&self, e: usize, l: usize) -> f64 {
-        if self.plane(l) {
-            self.plane_mm * self.share[e]
-        } else {
-            0.0
-        }
+        let held = self.hold.get(e).filter(|h| h.1 > 0.0 && h.0 as usize != l).map_or(0.0, |h| h.1);
+        held + if self.plane(l) { self.plane_mm * self.share[e] } else { 0.0 }
     }
 }
 
@@ -1813,7 +1820,16 @@ pub fn assign_n(st: &State, smd_layer: &dyn Fn(usize) -> Option<usize>, p: &Laye
             }
         }
     }
-    let costs = Costs { site, via: p.via_mm, plane_from: if p.n_signal == 0 { nl } else { p.n_signal }, plane_mm: p.plane_mm, cut: p.plane_cut, share, om };
+    let mut hold = Vec::new();
+    for &(w, t, h) in &st.layer_hold {
+        if hold.is_empty() {
+            hold = vec![(0u8, 0.0); ev.len()];
+        }
+        for &e in wev.get(w).into_iter().flatten() {
+            hold[e] = (t.clamp(0, 63) as u8, h);
+        }
+    }
+    let costs = Costs { site, via: p.via_mm, plane_from: if p.n_signal == 0 { nl } else { p.n_signal }, plane_mm: p.plane_mm, cut: p.plane_cut, share, om, hold };
     // 1. Greedy colouring in wire order.
     const NONE: u8 = u8::MAX;
     let mut lab = vec![NONE; ev.len()];

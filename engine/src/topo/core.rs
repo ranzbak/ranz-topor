@@ -5092,6 +5092,12 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pair_move: Option<f64>,
             /// thick-layer S3 (`[vias] pair_one_side`): the one-side candidates of the pair move.
             one_side: bool,
+            /// thick-layer S3 (`[vias] pair_hold`): the release price of a one-side move's held
+            /// stretch per event off its layer, in via prices (x ω of the wire).
+            pair_hold: f64,
+            /// thick-layer S3: the held wire's layer changes in the layering right after the last
+            /// one-side move (0 = the hold kept its whole run on the side), for the cycle stats.
+            one_side_left: usize,
             /// thick-layer M1: ω of a wire's own vias (the one-side candidates' gain).
             omega: super::layers::Omega,
             /// TW6 part E: `[optimize] site_move` / `branch_move`.
@@ -6102,6 +6108,13 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                 let placed = cis.iter().zip(&regs).all(|(&ci, reg)| (self.place)(self.st, ci, self.cap, self.wire_conn, reg));
                 let mut kept = false;
                 if placed {
+                    // thick-layer S3 (lead 2026-11-23): the one-side move's run stays on `c.t` through
+                    // the layering that follows, as a held stretch with a graded release price per
+                    // event off `t` (`[vias] pair_hold` via prices x ω), not a lock; the
+                    // board's evaluation then judges the result as for every pair move.
+                    if c.one_side && self.pair_hold > 0.0 {
+                        self.st.layer_hold = vec![(a, c.t, self.pair_hold * self.via_mm * self.omega.of(self.st, a))];
+                    }
                     if let Some(local) = self.local {
                         // loop-local: the obstructing wires' move layered and priced locally.
                         let new: Vec<WireId> = (n0..self.st.wires.len()).filter(|&x| self.st.wires[x].alive).collect();
@@ -6111,6 +6124,10 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     } else {
                         let lr = (self.assign_t)(self.st, self.ties);
                         self.set_lr(lr, None);
+                    }
+                    self.st.layer_hold.clear();
+                    if c.one_side {
+                        self.one_side_left = self.lr.events.get(a).map_or(0, |e| e.windows(2).filter(|x| x[0].2 != x[1].2).count());
                     }
                     let e1 = self.eval_now();
                     if self.dbg {
@@ -6785,6 +6802,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                             if pc.one_side {
                                 cs.one_side_tried += 1;
                                 cs.one_side_kept += usize::from(kept);
+                                cs.one_side_left += self.one_side_left;
                                 cs.one_side_ns += t0.elapsed().as_nanos() as u64;
                                 cs.one_side_cpu_ns += super::prof::cpu_ns().saturating_sub(c0);
                             } else {
@@ -6970,6 +6988,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             pair_max: opts.via_pair_min.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             pair_move: opts.via_pair_move.then(|| opts.via_pair_max_mm.max(0.0) * MM),
             one_side: opts.via_pair_one_side,
+            pair_hold: opts.via_pair_hold.max(0.0),
+            one_side_left: 0,
             omega: lp.omega,
             site_move: opts.opt_site_move,
             branch_move: opts.opt_branch_move,
@@ -7427,7 +7447,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             // thick-layer S3: per candidate type tries, kept, wall and process CPU (ms; never routing input).
             "pair_move_kinds": {
                 "stretch": {"tried": rep.stats.pair_moved - rep.stats.one_side_tried, "kept": rep.stats.pair_moved_kept.saturating_sub(rep.stats.one_side_kept), "wall_ms": rep.stats.pair_ns as f64 / 1e6, "cpu_ms": rep.stats.pair_cpu_ns as f64 / 1e6},
-                "one_side": {"tried": rep.stats.one_side_tried, "kept": rep.stats.one_side_kept, "wall_ms": rep.stats.one_side_ns as f64 / 1e6, "cpu_ms": rep.stats.one_side_cpu_ns as f64 / 1e6}
+                "one_side": {"tried": rep.stats.one_side_tried, "kept": rep.stats.one_side_kept, "left_changes": rep.stats.one_side_left, "wall_ms": rep.stats.one_side_ns as f64 / 1e6, "cpu_ms": rep.stats.one_side_cpu_ns as f64 / 1e6}
             },
             "site_move": [rep.stats.site_kept, rep.stats.site_moved],
             "branch_move": [rep.stats.branch_kept, rep.stats.branch_moved],

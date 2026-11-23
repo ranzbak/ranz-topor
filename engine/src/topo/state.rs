@@ -632,6 +632,12 @@ pub struct State<'p> {
     /// ([`State::held_layers`]). Empty (default, every other caller): the stretch's own held
     /// layers only, as before.
     pub layers_now: Vec<Vec<u64>>,
+    /// thick-layer S3 (`[vias] pair_one_side`, lead 2026-11-23): held stretches of the next
+    /// layering, `(wire, layer, price)`: each of the wire's events off `layer` costs `price` (mm)
+    /// in the layering ([`super::layers`] `assign_two` / `assign_n`), a graded release price, not
+    /// a lock. Empty (default) = none. Not part of [`Topology`]; the one-side move sets it for
+    /// its own layering and clears it.
+    pub layer_hold: Vec<(WireId, i32, f64)>,
     /// TW5 (4), `[optimize] free_wire_cross` < 1: per wire, the multiplier of the crossing price
     /// for crossing it (a + (1 - a) k/(1 + k), k its crossings); empty (default) = 1 for every
     /// wire.
@@ -709,6 +715,7 @@ impl<'p> State<'p> {
             relay_after_uncross: true,
             took_part: Vec::new(),
             layers_now: Vec::new(),
+            layer_hold: Vec::new(),
             cross_k: Vec::new(),
             free_now: Vec::new(),
             free_wire_a: 1.0,

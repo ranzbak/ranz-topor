@@ -1861,6 +1861,11 @@ pub struct Options {
     /// that layer laid again (the wide trace on one side, its crossers on the other), ordered by
     /// gain (ω x layer changes removed); kept by the board's evaluation like every pair move.
     pub via_pair_one_side: bool,
+    /// thick-layer S3 (`topor.toml [vias] pair_hold`): the one-side move's run stays on its layer
+    /// through the layering that follows the move, each of its events off that layer priced at
+    /// this many via prices (x the wire's ω): a graded release price, not a lock. 0 = the
+    /// layering is free (round 2).
+    pub via_pair_hold: f64,
     /// 5.4 (`[vias] relocate`): the plan puts every via at the point of its free interval where
     /// the forces of the copper around it balance (Dayan & Dai 1991; TopoR FreeStyle "Shift
     /// vias", 6.3 manual p. 179; Luzin-Popov 2013 p. 3), equal clearance between two neighbours,
@@ -2083,6 +2088,7 @@ impl Default for Options {
             via_pair_max_mm: 10.0,
             via_pair_move: true,
             via_pair_one_side: false,
+            via_pair_hold: 1.0,
             via_relocate: true,
             branch_relocate: false,
             via_between: true,
