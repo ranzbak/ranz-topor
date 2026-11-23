@@ -214,13 +214,13 @@ struct CrewShared<J, U> {
 }
 
 /// Spins of a waiting lane before it sleeps on the condvar, and of a round's caller before it
-/// yields: none. Measured (paosp-ce417bb, exclusive ccx43, runs 5, 8 threads, 3 samples): with
+/// sleeps: none. Measured (paosp-ce417bb, exclusive ccx43, runs 5, 8 threads, 3 samples): with
 /// 0 and with 256 spins the whole run is faster than `draw_lanes = 1` (qmtech 57.2 / 57.1 s vs
 /// 65.1 s, esp 18.0 / 18.8 s vs 21.5 s); the earlier 4096 took CPU from the other runs.
 const CREW_SPIN: u32 = 0;
 
 /// The spins of a waiting lane and of a round's caller: [`CREW_SPIN`], or the debug environment
-/// `TOPO_CREW_SPIN` (a count; 0 = a lane sleeps on the condvar and the caller yields at once).
+/// `TOPO_CREW_SPIN` (a count; 0 = a lane and the caller sleep on the condvar at once).
 /// Scheduling only: the copper is the same for every value. O(1) after the first call.
 fn crew_spin() -> u32 {
     static S: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -241,21 +241,29 @@ fn crew_work<J, U>(sh: &CrewShared<J, U>, unit: &(dyn Fn(&J, usize) -> U + Sync)
             std::thread::sleep(std::time::Duration::from_millis(8 - i as u64));
         }
         // a panicking unit fails the round (its caller panics; the scope passes the panic on)
-        struct Flag<'b>(&'b AtomicBool);
+        struct Flag<'b>(&'b AtomicBool, &'b std::sync::Mutex<()>, &'b std::sync::Condvar);
         impl Drop for Flag<'_> {
             fn drop(&mut self) {
                 if std::thread::panicking() {
                     self.0.store(true, Ordering::SeqCst);
+                    // wake the round's caller (sleeping in `round`); under the mutex, so it
+                    // cannot check `failed` and then sleep past this notify
+                    let _m = self.1.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    self.2.notify_all();
                 }
             }
         }
-        let _g = Flag(&sh.failed);
+        let _g = Flag(&sh.failed, &sh.m, &sh.cv);
         let u = with_mode(None, false, || unit(jb, i));
         let slot = i;
         if let Ok(mut c) = out[slot].lock() {
             *c = Some(u);
         }
-        sh.fin.fetch_add(1, Ordering::SeqCst);
+        if sh.fin.fetch_add(1, Ordering::SeqCst) + 1 == n {
+            // the round's last unit: wake the caller (under the mutex: no lost wakeup)
+            let _m = sh.m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            sh.cv.notify_all();
+        }
     }
 }
 
@@ -363,14 +371,17 @@ impl<J, U> Crew<'_, J, U> {
         }
         crew_work(sh, self.unit);
         // the units the lanes took are running on live threads: wait for them only
+        // (the optional debug spin first, then a sleep on the condvar the last unit or a panic
+        // notifies: a core is not burnt for the tail of the round)
+        let waiting = || sh.fin.load(Ordering::SeqCst) < n && !sh.failed.load(Ordering::SeqCst);
         let (mut spins, spin) = (0u32, crew_spin());
-        while sh.fin.load(Ordering::SeqCst) < n && !sh.failed.load(Ordering::SeqCst) {
-            if spins < spin {
-                std::hint::spin_loop();
-                spins += 1;
-            } else {
-                std::thread::yield_now();
-            }
+        while spins < spin && waiting() {
+            std::hint::spin_loop();
+            spins += 1;
+        }
+        if waiting() {
+            let g = sh.m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _g = sh.cv.wait_while(g, |_| waiting()).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         if sh.failed.load(Ordering::SeqCst) {
             panic!("a lane of the drawing's crew panicked");
@@ -518,6 +529,65 @@ mod tests {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().expect("pool");
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pool.install(|| with_mode(Some(Mode::Fixed(4)), false, || crew(lease(2).expect("lanes"), |_: &(), i: usize| if i == 3 { panic!("unit 3") } else { i }, |c| c.round((), 8).1)))
+        }));
+        assert!(r.is_err());
+    }
+
+    /// CPU time of the calling thread in clock ticks (100 Hz), from /proc.
+    fn thread_cpu_ticks() -> Option<u64> {
+        let s = std::fs::read_to_string("/proc/thread-self/stat").ok()?;
+        let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
+        Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
+    }
+
+    /// The round's caller sleeps while a unit still runs on another lane: its thread CPU stays
+    /// near 0 for a ~300 ms wait (a spin or yield loop burns all of it).
+    #[test]
+    fn a_waiting_round_caller_does_not_burn_cpu() {
+        let Some(c0) = thread_cpu_ticks() else { return };
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().expect("pool");
+        let caller = std::thread::current().id();
+        let t0 = std::time::Instant::now();
+        let (ticks, units) = pool.install(|| with_mode(Some(Mode::Fixed(4)), false, || {
+            // pool.install runs on a pool thread: the caller of the round is that one
+            let me = std::thread::current().id();
+            let c0 = thread_cpu_ticks().unwrap_or(0);
+            let unit = move |_: &(), i: usize| {
+                std::thread::sleep(std::time::Duration::from_millis(if std::thread::current().id() == me { 20 } else { 300 }));
+                i
+            };
+            let out = crew(lease(2).expect("lanes"), unit, |c| c.round((), 3).1);
+            (thread_cpu_ticks().unwrap_or(0) - c0, out)
+        }));
+        let _ = (caller, c0);
+        assert_eq!(units, vec![0, 1, 2]);
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(250), "no lane took a unit: {:?}", t0.elapsed());
+        assert!(ticks <= 5, "the caller burnt {ticks} ticks (10 ms each) while waiting");
+    }
+
+    /// A panic in the round's last running unit, while the caller sleeps, wakes it (no hang).
+    #[test]
+    fn a_panic_wakes_the_sleeping_caller() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().expect("pool");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.install(|| with_mode(Some(Mode::Fixed(4)), false, || {
+                let me = std::thread::current().id();
+                let lane_in = AtomicBool::new(false);
+                let unit = |_: &(), i: usize| {
+                    if std::thread::current().id() == me {
+                        // the caller's share ends only once a lane holds a unit
+                        let t = std::time::Instant::now();
+                        while !lane_in.load(Ordering::SeqCst) && t.elapsed() < std::time::Duration::from_secs(5) {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        return i;
+                    }
+                    lane_in.store(true, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    panic!("lane unit {i}")
+                };
+                crew(lease(2).expect("lanes"), unit, |c| c.round((), 3).1)
+            }))
         }));
         assert!(r.is_err());
     }
