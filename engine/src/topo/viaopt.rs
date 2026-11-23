@@ -350,6 +350,9 @@ pub struct ViaCtx<'a> {
     /// is that of its allowed position farthest from the via, as the plan judged the site. 0 =
     /// the taut tracks are walls (as before).
     pub site_slack: f64,
+    /// `[vias] site_window = "taut"`: the window ends at the bounding crossers' taut crossings
+    /// (they bend away from the via only); the gap is still measured with the slack.
+    pub window_taut: bool,
 }
 
 /// One via of the plan as the relocation sees it.
@@ -616,8 +619,9 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
                 let (a, b) = (tr.sigma(x.k, 0.0), tr.sigma(x.k, 1.0));
                 let Some(arc) = track_crossing(tr, &tracks[x.other], a, b) else { continue };
                 // M3 slack: the crosser may cross the wire anywhere its passage lets it; the
-                // window ends at the crossing farthest out (the plan's end site).
-                let alt: Vec<f64> = lanes_of(w, x.other, x.other_k).into_iter().filter_map(|pts| track_crossing(tr, &Track { pts, cum: Vec::new(), sig: Vec::new() }, a, b)).collect();
+                // window ends at the crossing farthest out (the plan's end site), or with
+                // `[vias] site_window = "taut"` at its taut crossing.
+                let alt: Vec<f64> = if cx.window_taut { Vec::new() } else { lanes_of(w, x.other, x.other_k).into_iter().filter_map(|pts| track_crossing(tr, &Track { pts, cum: Vec::new(), sig: Vec::new() }, a, b)).collect() };
                 let (arc_lo, arc_hi) = (alt.iter().fold(arc, |m, &v| m.min(v)), alt.iter().fold(arc, |m, &v| m.max(v)));
                 if std::env::var_os("TOPO_VIAREL").is_some() {
                     eprintln!("VIACLAMP w{w} v{i} ka{ka} sa{sa:.3} kb{kb} sb{sb:.3} x.k{} other{} es{es:.3} arc{:.3} slack[{:.3},{:.3}] trav[{:.3},{:.3}]", x.k, x.other, arc / 1e6, arc_lo / 1e6, arc_hi / 1e6, a / 1e6, b / 1e6);

@@ -1196,7 +1196,7 @@ impl<'a> Frame<'a> {
                 // M3 slack: the crosser may cross `w` anywhere its passage around the crossing
                 // lets it ([`Frame::shifted_lanes`]); the window ends at the crossing farthest out.
                 let no = st.wires[x.other].passes.len();
-                let alt = if no > 0 { self.shifted_lanes(w, x.other, x.other_k.saturating_sub(1).min(no - 1), x.other_k.min(no - 1)) } else { Vec::new() };
+                let alt = if no > 0 && !self.packer.site_window_taut { self.shifted_lanes(w, x.other, x.other_k.saturating_sub(1).min(no - 1), x.other_k.min(no - 1)) } else { Vec::new() };
                 let arcs = alt.into_iter().filter_map(|pts| super::viaopt::track_crossing(&trk, &super::viaopt::Track { pts, cum: Vec::new(), sig: Vec::new() }, klo, khi));
                 if s <= s0 + 1e-6 {
                     lo = lo.max(arcs.fold(arc, f64::min));
@@ -1218,8 +1218,18 @@ impl<'a> Frame<'a> {
             let ok_t = pr.inradius(t) >= need && !self.site_taken(m, w, t);
             let [pa, pb, pc] = pr.tris[t].map(|v| pr.pos[v]);
             let samples = (0..SAMPLES).filter(|_| hi > lo).map(|i| trk.at(lo + (hi - lo) * (i as f64 + 0.5) / SAMPLES as f64));
+            // `[vias] site_window = "taut"`: a candidate stays on the window's side of every
+            // bounding crosser's taut track (the crosser bends away from the via, never past it;
+            // a static point of the triangle may lie outside the window).
+            let taut_side = |q: Vec2| {
+                !self.packer.site_window_taut
+                    || bound.iter().all(|&(o, _)| {
+                        let tp = &self.track(o).pts;
+                        poly_side(tp, q) * poly_side(tp, r(o)) >= 0.0
+                    })
+            };
             for q in samples.chain(super::pack::tri_site_points(pa, pb, pc)) {
-                let room = if ok_t && hi > lo { self.lane_room(w, t, q, &r).min(self.point_free(w, q)) } else { f64::NEG_INFINITY };
+                let room = if ok_t && hi > lo && taut_side(q) { self.lane_room(w, t, q, &r).min(self.point_free(w, q)) } else { f64::NEG_INFINITY };
                 if room > best.1 {
                     best = (Some((k, q)), room);
                 }

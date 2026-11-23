@@ -400,7 +400,8 @@ fn diag_thick_dive_grouping_with() {
     }).collect();
     let sig: Vec<(&str, f64, u32)> = owned.iter().map(|x| (x.0.as_str(), x.1, x.2)).collect();
     let m = thick_dive_grouping_with(&sig);
-    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true))]);
+    let win = std::env::var("DIAG_WINDOW").unwrap_or_else(|_| "farthest".into());
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!(win))]);
     let p = plan(&r);
     for w in p["wires"].as_array().unwrap().iter().filter(|w| w["net_name"] == "P") {
         println!("P vias {}", w["vias"]);
@@ -430,4 +431,34 @@ fn thick_dive_grouping_via_past_taut_crossing() {
     let p = plan(&r);
     let pred: u64 = p["conns"].as_object().unwrap().values().map(|c| c["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum::<u64>()).sum();
     assert!(r.violations.is_empty() || pred > 0, "drawn {} violations, predicted {pred}: {:?}", r.violations.len(), r.violations.iter().map(|v| (&v.name, &v.kind, &v.against)).collect::<Vec<_>>());
+}
+
+/// `[vias] site_window = "taut"` (round 4): the fixture of
+/// [`thick_dive_grouping_via_past_taut_crossing`] with the via window at the bounding crossers'
+/// taut crossings (they bend away from the via only, never past it). With "farthest" the plan puts
+/// P's via 2 at x 10.17, west of F4's taut track (x 10.6), which the drawing does not realise
+/// (ERBS passes F4 on the wrong side). With "taut" no planned via of P lies between F3 (x 9) and
+/// F4's taut track: the loop routes P another way. (That way still draws one clearance item with
+/// B2 that the plan does not predict: a separate drawing gap, not a via site.)
+#[test]
+fn thick_dive_grouping_taut_window_keeps_vias_off_the_crossers_path() {
+    let m = thick_dive_grouping_with(&[("F1", 3.0, 0), ("F2", 4.0, 0), ("B1", 8.0, 2), ("F3", 9.0, 0), ("F4", 10.6, 0), ("B2", 11.0, 2), ("B3", 11.35, 2)]);
+    let xs = |win: &str| {
+        let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!(win))]);
+        let p = plan(&r);
+        let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
+        w["vias"].as_array().unwrap().iter().map(|v| v["at"][0].as_f64().unwrap()).collect::<Vec<f64>>()
+    };
+    let (taut, far) = (xs("taut"), xs("farthest"));
+    assert!(taut.iter().all(|&x| !(9.0..10.6).contains(&x)), "taut: {taut:?}");
+    assert!(far.iter().any(|&x| (9.0..10.6).contains(&x)), "farthest (the unrealised site): {far:?}");
+}
+
+/// `site_window = "taut"` keeps the base fixture's result: P's vias sit inside the taut windows
+/// there, so the drawn slack test holds as with "farthest".
+#[test]
+fn thick_dive_grouping_taut_window_draws_clean() {
+    let m = thick_dive_grouping();
+    let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!("taut"))]);
+    assert!(r.violations.is_empty(), "{:?}", r.violations);
 }

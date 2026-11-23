@@ -406,6 +406,9 @@ pub struct Packer<'a> {
     /// passage room its lane may shift in when a via site is measured against it
     /// ([`super::refine`] `Frame::shifted_lanes`); 0 = the taut tracks are walls.
     pub site_slack: f64,
+    /// thick-layer r4 (`[vias] site_window = "taut"`): the via window ends at the bounding
+    /// crossers' taut crossings, not at their shifted lanes' crossings.
+    pub site_window_taut: bool,
     /// 5.4 `[vias] between_crossings`: via intervals exclude the triangles of their events
     /// ([`super::refine::via_ranges`]).
     pub via_between: bool,
@@ -501,6 +504,7 @@ impl<'a> Packer<'a> {
             site_planned: false,
             site_lanes: false,
             site_slack: 1.0,
+            site_window_taut: false,
             via_between: false,
             via_cuts: None,
             via_best: false,
@@ -605,6 +609,7 @@ impl<'a> Packer<'a> {
         p.site_planned = opts.via_site_planned;
         p.site_lanes = opts.via_site_lanes;
         p.site_slack = opts.via_site_slack.clamp(0.0, 1.0);
+        p.site_window_taut = opts.via_site_window == "taut";
         p.via_between = opts.via_between;
         p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.via_best = opts.via_best_point;

@@ -1548,6 +1548,13 @@ pub struct Options {
     /// crosses near the via) by which it may move aside for the via; 1 (default) = the whole
     /// passage, 0 = the planned tight paths are walls.
     pub via_site_slack: f64,
+    /// thick-layer M3 slack, round 4 (`topor.toml [vias] site_window`): where a via's window ends
+    /// against the crossers that bound it, in the plan's end site and the drawing's via
+    /// relocation alike. `"farthest"` (default, the design addendum r3) = at the crossing farthest
+    /// out of the crossers' shifted lanes (a crosser may move past the via's taut position);
+    /// `"taut"` = at their taut crossings (a crosser moves away from the via only; the room is
+    /// still measured with the slack). Any other value = `"farthest"`.
+    pub via_site_window: String,
     /// thick-layer M1 (`topor.toml [vias] priority_weight`): `[a_w, a_t]` of the priority weight
     /// of a wide wire's own vias, ω = 1 + a_w · max(0, width / Default width − 1) + a_t when wider
     /// than the Default netclass width ([`crate::topo::layers::Omega`]); multiplies only the
@@ -2060,6 +2067,7 @@ impl Default for Options {
             via_site_planned: false,
             via_site_lanes: false,
             via_site_slack: 1.0,
+            via_site_window: "farthest".into(),
             via_priority_weight: vec![0.0, 0.0],
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
