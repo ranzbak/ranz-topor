@@ -26,8 +26,8 @@ enum After {
     /// the first run began routing (progress phase "route")
     Routing,
     /// a run began its TopoR loop (progress stage "TopoR loop ..."; a Cancel from there on draws
-    /// the loop's pick; before it, during P3/P4, a Cancel leaves no copper and says so loudly,
-    /// M2.TL "nothing to draw yet")
+    /// the loop's pick; before it, during P3/P4, it draws the plan so far, limit-p3p4; during P2
+    /// it leaves no copper and says so loudly, M2.TL "nothing to draw yet")
     Loop,
 }
 
@@ -138,13 +138,19 @@ fn cancel_in_p3_p4_with_the_cut_model_ends_quickly() {
         std::thread::sleep(Duration::from_millis(300));
         let t = Instant::now();
         ctl.request_cancel();
+        // limit-p3p4: the stop ends the planning within a move; the plan so far is then drawn (not
+        // counted here: the drawing of a kept plan runs to its end, as the TopoR loop's pick does).
+        while !(h.is_finished() || ["picking", "drawing", "via reduction", "pour stitching"].iter().any(|k| ctl.snapshot().stage.contains(k))) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let planned_s = t.elapsed().as_secs_f64();
         let r = h.join().expect("run thread");
-        let s = t.elapsed().as_secs_f64();
+        let s = planned_s;
         eprintln!("{fx}: stopped {s:.2} s after the Cancel ({} s into the call)", t0.elapsed().as_secs_f64() - s);
-        assert!(s < BOUND_S, "{fx}: Cancel in P3/P4 took {s:.2} s to end the run");
+        assert!(s < BOUND_S, "{fx}: Cancel in P3/P4 took {s:.2} s to end the planning");
         assert_eq!(r.stop_reason, "cancel", "{fx}: {:?}", r.warnings);
-        // M2.TL: the initial routing's plan counts once P4 ends: no copper, said loudly
-        assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")) && r.items.is_empty(), "{fx}: {:?}", r.warnings);
+        // limit-p3p4: after P2 the plan so far is kept and drawn (was M2.TL: no copper)
+        assert!(!r.warnings.iter().any(|w| w.starts_with("ERROR: nothing to draw yet")) && !r.items.is_empty(), "{fx}: {:?}", r.warnings);
     }
 }
 

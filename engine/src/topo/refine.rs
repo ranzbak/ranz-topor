@@ -2853,7 +2853,7 @@ impl Around<'_> {
             }
             for mv in moves {
                 // M0: a Cancel / the time limit ends the refinement at the next move.
-                if *evals >= self.max_evals || crate::control::stop_requested() {
+                if *evals >= self.max_evals || crate::control::stop_point("refine move") {
                     break;
                 }
                 *evals += 1;

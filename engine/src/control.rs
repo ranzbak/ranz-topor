@@ -1280,7 +1280,7 @@ thread_local! {
 
 /// What [`stop_requested`] reads: the cancel flag, the time limit and whether it always stops the
 /// steps (`hard`; else only once it acts as hard, [`TimeLimit::is_hard`]: the overrun cap, F3).
-type StopState = (Arc<AtomicBool>, Arc<TimeLimit>, bool);
+type StopState = (Arc<AtomicBool>, Arc<TimeLimit>, bool, TestHook);
 
 /// Runs `f` with `ctl`'s cancel flag and time limit as what [`stop_requested`] reads on this
 /// thread; the state before comes back after `f`, also when it panics. O(1) + `f`.
@@ -1298,8 +1298,19 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
             STOP.with(|c| *c.borrow_mut() = prev);
         }
     }
-    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone(), limit_stops)))));
+    let _restore = Restore(STOP.with(|c| c.replace(Some((ctl.cancel.clone(), ctl.limit.clone(), limit_stops, TestHook(ctl.test_hook.0.clone()))))));
     f()
+}
+
+/// [`stop_requested`] at a named stop check: the run's test hook ([`RunControl::set_test_hook`],
+/// tests only) is asked first, so a test can stop or delay the run at an exact check (limit-p3p4:
+/// "refine move", the capacity refinement's per-move check). Without a hook: [`stop_requested`]. O(1).
+pub fn stop_point(point: &str) -> bool {
+    let hooked = STOP.with(|c| c.borrow().as_ref().and_then(|s| s.3 .0.clone()));
+    if let Some(h) = hooked {
+        h(point);
+    }
+    stop_requested()
 }
 
 /// The run of this thread ([`with_control`]) was cancelled or its time limit passed (the latter
@@ -1307,7 +1318,7 @@ pub fn with_control_mode<R>(ctl: &RunControl, limit_stops: bool, f: impl FnOnce(
 /// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
 /// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut()) || (LOOP_SCOPE.with(|s| s.get()) && l.grace_over())))
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always, _)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut()) || (LOOP_SCOPE.with(|s| s.get()) && l.grace_over())))
 }
 
 thread_local! {
@@ -1327,6 +1338,30 @@ pub fn in_loop_scope<R>(f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(LOOP_SCOPE.with(|s| s.replace(true)));
     f()
+}
+
+/// limit-p3p4 (F10): [`in_loop_scope`] as a guard for a span of straight-line code: while it
+/// lives, [`stop_requested`] on this thread also answers true once the time limit and its grace
+/// (`[run] limit_grace_s`) have passed. The topological core holds one over the layer assignment,
+/// rip-up and moves of the initial plan (P3/P4, from the first layering until the TopoR loop), so
+/// their refinement and move loops stop at their next check and the plan so far is kept (TopoR 6.3
+/// manual p. 73: the first variant is saved after the first cycle "or 20 seconds after the start").
+/// The flag before comes back when the guard drops, also on a panic. Not `Send`: it must drop on the
+/// thread that made it. O(1).
+pub struct StepScope {
+    before: bool,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+/// Open a [`StepScope`] on this thread. O(1).
+pub fn step_scope() -> StepScope {
+    StepScope { before: LOOP_SCOPE.with(|s| s.replace(true)), _not_send: std::marker::PhantomData }
+}
+
+impl Drop for StepScope {
+    fn drop(&mut self) {
+        LOOP_SCOPE.with(|s| s.set(self.before));
+    }
 }
 
 /// Deadline passed or run cancelled: the single stop test of every deadline site. O(1).

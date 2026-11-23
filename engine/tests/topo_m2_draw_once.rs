@@ -277,11 +277,11 @@ fn cancel_before_any_plan_is_a_loud_error() {
 
 // Note (verify round 1, low): the esp crop's P3 has 0 moves, so Cancel ignored in P3/P4 moves is not
 // killed here; the cancel_latency qmtech test kills that mutant in CI. No change needed.
-fn cancel_in_p3_p4_keeps_no_plan_and_says_so_on(crops: &[&str]) {
-    // Cancel while the layer assignment and the rip-up rounds run: the initial routing (P2-P4) is
-    // one step and its plan counts as a variant only once P4 ends (user 2026-11-13, M2.TL); M0's
-    // stop checks end P3/P4 within a move, so nothing is kept: the loud "nothing to draw yet",
-    // no copper, quickly, never half a plan drawn.
+fn cancel_in_p3_p4_draws_the_plan_so_far_on(crops: &[&str]) {
+    // Cancel / OK while the layer assignment and the rip-up rounds run: M0's stop checks end P3/P4
+    // within a move and (limit-p3p4, user 2026-11-23: "Accept ... must always have something to draw
+    // once the first plan exists") the plan so far is kept and drawn in full, quickly (was M2.TL
+    // 2026-11-13: no plan, the loud "nothing to draw yet").
     for fx in crops.iter().copied() {
         let m = crop(fx);
         let o = topor(r#", "runs": 2, "capacity_model": "cuts""#);
@@ -297,27 +297,35 @@ fn cancel_in_p3_p4_keeps_no_plan_and_says_so_on(crops: &[&str]) {
         assert!(!h.is_finished(), "{fx}: the run ended before P3");
         let t = Instant::now();
         ctl.request_cancel();
+        // limit-p3p4: the stop ends the planning within a move; the plan so far is then drawn (not
+        // counted here: the drawing of a kept plan runs to its end, as the TopoR loop's pick does).
+        while !(h.is_finished() || ["picking", "drawing", "via reduction", "pour stitching"].iter().any(|k| ctl.snapshot().stage.contains(k))) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let planned_s = t.elapsed().as_secs_f64();
         let r = h.join().expect("run thread");
         // Latency in seconds depends on the build profile: a debug build (tests/test_scaffold.py runs
         // `cargo test` unoptimised) is ~10x slower per move, so its bound is wider (measured 6.1 s on
         // the esp crop where release stays well under 1 s); the stop check is within one move either way.
         let bound = if cfg!(debug_assertions) { 60.0 } else { 5.0 };
-        assert!(t.elapsed().as_secs_f64() < bound, "{fx}: Cancel in P3/P4 took {:.2} s (bound {bound} s)", t.elapsed().as_secs_f64());
+        assert!(planned_s < bound, "{fx}: Cancel in P3/P4 took {planned_s:.2} s to end the planning (bound {bound} s)");
         assert_eq!(r.stop_reason, "cancel", "{fx}: {:?}", r.warnings);
-        assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")), "{fx}: {:?}", r.warnings);
-        assert!(r.items.is_empty() && r.routed == 0, "{fx}");
+        assert!(!r.warnings.iter().any(|w| w.starts_with("ERROR: nothing to draw yet")), "{fx}: {:?}", r.warnings);
+        assert!(r.warnings.iter().any(|w| w.starts_with("initial plan: Cancel / OK came during the layer assignment")), "{fx}: {:?}", r.warnings);
+        assert!(!r.items.is_empty() && r.routed > 0, "{fx}: the plan so far is drawn");
+        assert!(!r.connections.iter().any(|c| c.reason.starts_with("Cancel / OK")), "{fx}: drawn in full: {:?}", r.connections.iter().filter(|c| c.status != "routed").map(|c| &c.reason).collect::<Vec<_>>());
     }
 }
 
 #[test]
-fn cancel_in_p3_p4_keeps_no_plan_and_says_so() {
-    cancel_in_p3_p4_keeps_no_plan_and_says_so_on(FAST_P3_CROPS);
+fn cancel_in_p3_p4_draws_the_plan_so_far() {
+    cancel_in_p3_p4_draws_the_plan_so_far_on(FAST_P3_CROPS);
 }
 
 #[test]
 #[ignore = "slow set (vm-load 2026-11-17): the 4-layer qmtech crop, >60 s in release; run on the VM with --ignored"]
-fn cancel_in_p3_p4_keeps_no_plan_and_says_so_qmtech() {
-    cancel_in_p3_p4_keeps_no_plan_and_says_so_on(SLOW_P3_CROPS);
+fn cancel_in_p3_p4_draws_the_plan_so_far_qmtech() {
+    cancel_in_p3_p4_draws_the_plan_so_far_on(SLOW_P3_CROPS);
 }
 
 /// The P3/P4 move counts of a run: the P4 lines (evaluations, moves tried / applied per kind) and
