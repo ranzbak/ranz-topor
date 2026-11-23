@@ -44,11 +44,33 @@ pub fn thick_dive_grouping() -> BoardModel {
 
 /// [`thick_dive_grouping`] with other signals (name, x, layer id).
 fn thick_dive_grouping_with(signals: &[(&str, f64, u32)]) -> BoardModel {
+    thick_dive_grouping_layers(signals, 2, false)
+}
+
+/// [`thick_dive_grouping_with`] on 2 copper layers (F.Cu, B.Cu) or 4 (F.Cu, In1.Cu, In2.Cu, B.Cu;
+/// `p_smd`: P's pads are SMD on F.Cu, else PTH with a ring on every layer; the signals' SMD pads stay on their layer (F 0, In1 4, In2 6, B 2)).
+fn thick_dive_grouping_layers(signals: &[(&str, f64, u32)], layers: usize, p_smd: bool) -> BoardModel {
     let (w, h) = (n(16.0), n(14.0));
     let sig = serde_json::json!({"clearance": n(0.15), "width": n(0.2), "via_d": n(0.6), "via_drill": n(0.3), "netclass": "Default", "width_source": "default", "min_width": 0});
     let pwr = serde_json::json!({"clearance": n(0.15), "width": n(1.0), "via_d": n(0.9), "via_drill": n(0.5), "netclass": "Power", "width_source": "netclass", "min_width": 0});
     let mut nets = vec![serde_json::json!({"code": 1, "name": "P"})];
     let mut pads = vec![pth(1, "PA", 1, 1.0, 7.0, 1.4, 0.7), pth(2, "PB", 1, 15.0, 7.0, 1.4, 0.7)];
+    if p_smd {
+        // P's pads are SMD on F.Cu: P starts and ends on F.Cu and may leave it only by vias.
+        pads = vec![smd_rect(1, "PA", 1, 1.0, 7.0, 1.4, 1.4), smd_rect(2, "PB", 1, 15.0, 7.0, 1.4, 1.4)];
+    } else if layers == 4 {
+        for p in pads.iter_mut() {
+            let s = p["shapes"]["0"].clone();
+            p["layers"] = serde_json::json!([0, 4, 6, 2]);
+            p["shapes"]["4"] = s.clone();
+            p["shapes"]["6"] = s;
+        }
+    }
+    let layer_json = if layers == 4 {
+        serde_json::json!([{"id": 0, "name": "F.Cu", "kind": "signal", "routable": true}, {"id": 4, "name": "In1.Cu", "kind": "signal", "routable": true}, {"id": 6, "name": "In2.Cu", "kind": "signal", "routable": true}, {"id": 2, "name": "B.Cu", "kind": "signal", "routable": true}])
+    } else {
+        serde_json::json!([{"id": 0, "name": "F.Cu", "kind": "signal", "routable": true}, {"id": 2, "name": "B.Cu", "kind": "signal", "routable": true}])
+    };
     let mut per_net = serde_json::Map::new();
     per_net.insert("1".into(), pwr);
     for (i, &(name, x, l)) in signals.iter().enumerate() {
@@ -60,7 +82,7 @@ fn thick_dive_grouping_with(signals: &[(&str, f64, u32)]) -> BoardModel {
     }
     let j = serde_json::json!({
         "units": "nm", "board": "thick_dive_grouping",
-        "layers": [{"id": 0, "name": "F.Cu", "kind": "signal", "routable": true}, {"id": 2, "name": "B.Cu", "kind": "signal", "routable": true}],
+        "layers": layer_json,
         "nets": nets, "pads": pads,
         "vias": [], "kept": [], "copper_shapes": [], "holes": [],
         "outline": [
@@ -498,4 +520,48 @@ fn thick_dive_grouping_site_window_reaches_the_drawing() {
     assert!(plan_t[2] > 10.0 && plan_t[2] < 10.6, "taut plan: via 2 west of F4's taut track (10.6): {plan_t:?}");
     assert!(drawn_t[2] > 10.0 && drawn_t[2] < 10.6, "taut drawing: via 2 stays at F4's side: {drawn_t:?}");
     assert!(drawn_f[2] > 12.5, "farthest drawing: via 2 past the crossers: {drawn_f:?}");
+}
+
+/// 4-layer variant of `thick_dive_grouping` (r5 F3, verifier mutants om_n_off, os_hold_n_off:
+/// every other thick-layer fixture has 2 layers, so the N-layer layering `assign_n` was never
+/// reached): P (PTH pads, a ring on every layer) crosses thin signals whose SMD pads pin them to
+/// F.Cu (x 3), In1.Cu, In2.Cu and B.Cu: whatever layer P takes, it crosses a signal on it.
+fn four_layer(signals: &[(&str, f64, u32)]) -> BoardModel {
+    thick_dive_grouping_layers(signals, 4, false)
+}
+
+/// r5 F3, ω in the N-layer layering (`assign_n`, `Costs::trans_w`): P (ω 5.5) crossing one thin
+/// signal on each of F.Cu, In1.Cu, In2.Cu, B.Cu. Without ω P takes one via to get past the signal
+/// on its layer (1 via, thin signals 0); with `priority_weight [1, 0.5]` the layering lets the
+/// thin signal dive instead (2 small vias) and P keeps its layer (0 vias).
+#[test]
+fn four_layer_wide_keeps_its_layer() {
+    let m = four_layer(&[("F1", 3.0, 0), ("I1", 5.0, 4), ("I2", 7.0, 6), ("B1", 9.0, 2)]);
+    let off = per_net(&route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0]))]));
+    let on = per_net(&route(&m, &[("via_priority_weight", serde_json::json!([1.0, 0.5]))]));
+    let thin = |pn: &std::collections::BTreeMap<i32, (usize, f64)>| pn.iter().filter(|(k, _)| **k != 1).map(|(_, v)| v.0).sum::<usize>();
+    assert_eq!((off[&1].0, thin(&off)), (1, 0), "ω 1: P pays the via: {off:?}");
+    assert_eq!(on[&1].0, 0, "ω: P keeps its layer: {on:?}");
+    assert!(thin(&on) > 0, "ω: a thin signal dives: {on:?}");
+}
+
+/// r5 F3, the one-side hold in the N-layer layering (`Costs::unary`): P crossing two thin signals
+/// on each of the 4 layers, `pair_one_side` on. Metrics `pair_move_kinds.one_side.left_changes`
+/// (P's layer changes in the layering right after each one-side move): without a hold the
+/// layering weaves P again, with a strong hold none is left (as `thick_dive_grouping_one_side_move`
+/// on 2 layers).
+#[test]
+fn four_layer_one_side_hold() {
+    let m = four_layer(&[("F1", 3.0, 0), ("I1", 4.0, 4), ("I2", 5.0, 6), ("B1", 6.0, 2), ("F2", 8.0, 0), ("I3", 9.0, 4), ("I4", 10.0, 6), ("B2", 11.0, 2)]);
+    let left = |hold: f64| {
+        let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_pair_one_side", serde_json::json!(true)), ("via_pair_hold", serde_json::json!(hold))]);
+        let pm = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics");
+        let v: serde_json::Value = serde_json::from_str(pm.trim_start_matches("plan metrics:").trim()).expect("json");
+        let os = &v["loop"]["pair_move_kinds"]["one_side"];
+        (os["tried"].as_u64().unwrap_or(0), os["left_changes"].as_u64().unwrap_or(0))
+    };
+    let (free, held) = (left(0.0), left(10.0));
+    assert!(free.0 > 0 && held.0 > 0, "one-side moves tried: free {free:?} held {held:?}");
+    assert!(free.1 > 0, "no hold: the layering weaves P again: {free:?}");
+    assert_eq!(held.1, 0, "hold: P stays on its side in the move's layering: {held:?}");
 }
