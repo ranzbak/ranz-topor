@@ -224,7 +224,12 @@ fn a_limit_reached_in_p3_p4_still_draws_the_initial_plan_on(crops: &[&str]) {
             std::thread::sleep(Duration::from_millis(2));
         }
         ctl.limit.reach();
-        assert!(ctl.snapshot().notice.starts_with("time limit reached, waiting for the current step to finish (layer assignment"), "{:?}", ctl.snapshot().notice);
+        // The step is the layer assignment, labelled "layer assignment, ..." while P3 starts and
+        // "first plan ready, Accept will draw it - layer assignment, ..." once the first plan is
+        // kept (limit-p3p4 F2): the loop above waits on contains("layer assignment"), so both.
+        let notice = ctl.snapshot().notice;
+        let wait = "time limit reached, waiting for the current step to finish (";
+        assert!(notice.starts_with(&format!("{wait}layer assignment")) || notice.starts_with(&format!("{wait}{}", topor_engine::topo::core::PLAN_READY_STAGE)), "{notice:?}");
         let r = h.join().expect("run thread");
         let open: Vec<_> = r.connections.iter().filter(|c| c.status != "routed" && c.reason.contains("time limit")).collect();
         assert!(open.is_empty(), "{fx}: nothing is cut by the soft limit: {open:?}");
