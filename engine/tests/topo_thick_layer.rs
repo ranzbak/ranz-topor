@@ -39,6 +39,11 @@ fn smd(k: usize, r: &str, net: i32, x: f64, y: f64, layer: u32) -> serde_json::V
 const SIGNALS: [(&str, f64, u32); 7] = [("F1", 3.0, 0), ("F2", 4.0, 0), ("B1", 8.0, 2), ("F3", 9.0, 0), ("F4", 10.0, 0), ("B2", 11.0, 2), ("B3", 12.0, 2)];
 
 pub fn thick_dive_grouping() -> BoardModel {
+    thick_dive_grouping_with(&SIGNALS)
+}
+
+/// [`thick_dive_grouping`] with other signals (name, x, layer id).
+fn thick_dive_grouping_with(signals: &[(&str, f64, u32)]) -> BoardModel {
     let (w, h) = (n(16.0), n(14.0));
     let sig = serde_json::json!({"clearance": n(0.15), "width": n(0.2), "via_d": n(0.6), "via_drill": n(0.3), "netclass": "Default", "width_source": "default", "min_width": 0});
     let pwr = serde_json::json!({"clearance": n(0.15), "width": n(1.0), "via_d": n(0.9), "via_drill": n(0.5), "netclass": "Power", "width_source": "netclass", "min_width": 0});
@@ -46,7 +51,7 @@ pub fn thick_dive_grouping() -> BoardModel {
     let mut pads = vec![pth(1, "PA", 1, 1.0, 7.0, 1.4, 0.7), pth(2, "PB", 1, 15.0, 7.0, 1.4, 0.7)];
     let mut per_net = serde_json::Map::new();
     per_net.insert("1".into(), pwr);
-    for (i, &(name, x, l)) in SIGNALS.iter().enumerate() {
+    for (i, &(name, x, l)) in signals.iter().enumerate() {
         let code = i as i32 + 2;
         nets.push(serde_json::json!({"code": code, "name": name}));
         pads.push(smd(10 + 2 * i, &format!("{name}T"), code, x, 1.0, l));
@@ -363,3 +368,4 @@ fn wide_one_side_full_crossing_detours() {
     let total: f64 = per_net(&r).values().map(|v| v.1).sum();
     assert!(total > 86.5, "main detours: {total:.3}");
 }
+
