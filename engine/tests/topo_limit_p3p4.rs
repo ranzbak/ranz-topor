@@ -217,3 +217,18 @@ fn a_stop_before_p2_ends_keeps_no_plan() {
         assert!(r.warnings.first().is_some_and(|w| w.starts_with("ERROR: nothing to draw yet")) && r.items.is_empty(), "{:?}", r.warnings);
     }
 }
+
+#[test]
+fn whole_route_cycles_keep_the_first_plan_and_drop_a_later_cut_one() {
+    // `[optimize] loop = "cycles"`: a stop in the first cycle's P3/P4 draws that plan in full (no loop
+    // draws it through); a stop in a later cycle's P3/P4 drops that cycle (its earlier cycles are the
+    // best so far, as before limit-p3p4).
+    let m = dense(40, 2);
+    let o = Options::from_json(r#"{"wall_clock_s": 0.0, "stop_when_stable": false, "finish_when_stable": false, "runs": 1, "opt_loop": "cycles", "topo_rounds": 3}"#).expect("options");
+    let (r1, _) = run_at(&m, &o, "plan ready", 1, Act::Stop);
+    kept_all_placed(&r1, "cycles, stop in cycle 1");
+    assert!(r1.warnings.iter().any(|w| w.starts_with("initial plan: Cancel / OK came during the layer assignment")), "{:?}", r1.warnings);
+    let (r2, _) = run_at(&m, &o, "plan ready", 2, Act::Stop);
+    kept_all_placed(&r2, "cycles, stop in cycle 2");
+    assert!(r2.warnings.iter().any(|w| w.contains("of a later whole-route cycle; the earlier cycles' variants are kept")), "{:?}", r2.warnings);
+}
