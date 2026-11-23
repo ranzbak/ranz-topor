@@ -148,7 +148,7 @@ def route_findings(result: dict | None) -> list:
                        "not be stitched back; KiCad's DRC lists them as unconnected items after a zone refill.",
                        [x.removeprefix("no stitch site for ").removeprefix("no dog-bone via fits for ") for x in left]))
     long_joins = lines("long island join ")
-    stitched = lines("stitch via ") + lines("pad stub ") + lines("dog-bone ") + lines("island join ") + long_joins
+    stitched = lines("stitch via ") + lines("pad stub ") + [x for x in lines("dog-bone ") if " off the via grid at " not in x] + lines("island join ") + long_joins
     joins = int(m.group(5) or 0) if m else 0
     dogs = int(m.group(6) or 0) if m else 0
     if m and (int(m.group(3)) or int(m.group(4)) or joins or dogs):

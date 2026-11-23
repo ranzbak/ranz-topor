@@ -64,7 +64,7 @@ Cause of the misjudgement: differences from KiCad 10.0 (`pcbnew/zone_filler.cpp`
 - Stub width: the net width (at most the pad's minor size), necked in steps (0.75, 0.5, board minimum) at a graded
   price (0.5 mm for the whole width). qmtech: the 0.5 mm-pitch rows need 0.188 mm on ADV7511.27 / .37.
 - Each part is checked alone (leg 1, via, leg 2); a failing leg fails every longer leg on its ray, a failing via site
-  every leg ending there; both remembered, so the 2048 checker queries per pad (32·MAX_TRIES) go to new geometry.
+  every leg ending there; both remembered, so the 8192 checker queries per pad (DOG_TRIES = 128·MAX_TRIES) go to new geometry.
 - Placed after routing, against the drawn copper, so it never takes routed copper or planned room.
 - No fit: the note "no dog-bone via fits for pad X.N (all thermal spokes cut; boxed in by NET, NET ... (N checker
   queries))" lists the foreign nets the refused candidates hit; when no candidate reached the checker it names the

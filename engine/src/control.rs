@@ -955,6 +955,9 @@ impl TimeLimit {
     /// the M1 compass's read-only cut test); not a change by the caller ([`TimeLimit::changed`]).
     /// No limit: nothing. O(1).
     pub fn extend(&self, seconds: f64) {
+        if self.in_drawing() {
+            return; // the limit does not apply in the final drawing: a measurement there must not move a stopped limit (F-T1)
+        }
         if seconds > 0.0 && seconds.is_finite() {
             let add = (seconds * 1e9) as u64;
             let _ = self.ns.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ns| (ns < LIMIT_NONE).then(|| ns.saturating_add(add).min(LIMIT_NONE - 1)));
@@ -1453,6 +1456,8 @@ mod tests {
         ctl.limit.set(at + 1.0);
         ctl.limit.reach();
         assert!((ctl.limit.seconds().unwrap_or(0.0) - (at + 1.0)).abs() < 1e-6, "reach does nothing in the drawing");
+        ctl.measured(5.0); // F-T1: the compass measurement after the drawing leaves the limit alone
+        assert!((ctl.limit.seconds().unwrap_or(0.0) - (at + 1.0)).abs() < 1e-6, "measured does not extend the limit in the drawing");
         let p = ctl.snapshot();
         assert!(p.drawing && p.optimize_s == at && p.draw_s >= 0.03 && !p.limit_reached, "{p:?}");
         assert!(ctl.since_start_s() >= at + 0.03, "the run's own wall seconds");

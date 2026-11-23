@@ -1276,9 +1276,14 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         if cancelled_at is not None:
             log.line(f"engine stopped {time.monotonic() - cancelled_at:.1f} s after the stop request")
         elif limit_at is not None:
-            log.line(f"engine finished {time.monotonic() - limit_at:.1f} s (wall clock) after the "
-                     f"{'soft' if soft_limit else 'hard'} time limit")
+            after_limit_s = time.monotonic() - limit_at
         res = json.loads(job.wait())  # a panicked job raises RuntimeError("routing thread panicked: ...")
+        if cancelled_at is None and limit_at is not None:
+            # L6: the final drawing is off the clock (timeout_scope = optimizing): say how much of the wait it was
+            draw_s = ((res.get("limit") or {}).get("draw_s") or 0.0)
+            log.line(f"engine finished {after_limit_s:.1f} s (wall clock) after the "
+                     f"{'soft' if soft_limit else 'hard'} time limit"
+                     + (f", {min(draw_s, after_limit_s):.1f} s of it the final drawing (off the clock)" if draw_s > 0 else ""))
         if res.get("profile"):  # TW0: only with TOPO_PROF set in the engine's environment
             res["profile"]["python"] = {"before_s": round(job_t0 - t0, 3), "job_s": round(time.monotonic() - job_t0, 3)}
         note_limit(res)

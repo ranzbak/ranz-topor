@@ -128,7 +128,7 @@ def route(board_copy: str, options: dict | None = None) -> dict:
     env = dict(_cli_env(out_dir / "kicad-home", keep_display=True), TOPOR_REPORT_ROOT=str(out_dir / "reports"))
     try:
         cp = subprocess.run(cmd, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
-                            timeout=float(opts.get("run_timeout_s", 3600)), cwd=REPO)
+                            timeout=_run_timeout_s(opts, sets), cwd=REPO)
     except subprocess.TimeoutExpired:
         raise ToolError(f"route did not finish within run_timeout_s; partial files in {out_dir}") from None
     mfile = out_dir / f"{pcb.stem}--metrics.json"
@@ -156,6 +156,30 @@ def route(board_copy: str, options: dict | None = None) -> dict:
     except ToolError:
         pass
     return out
+
+
+RUN_TIMEOUT_FLOOR_S = 3600.0   # the old fixed hard kill: never lower than it
+DRAWING_MARGIN_S = 1800.0      # the final drawing is off the router's clock; a margin of its own past the limits
+
+
+def _run_timeout_s(opts: dict, sets: dict) -> float:
+    """Hard kill of the route subprocess: `run_timeout_s` when the caller gives it, else derived from the time limit.
+
+    The router's limit (run.timeout_s, 600 s default) counts optimizing time only; the soft limit can run past it up
+    to the overrun cap (auto = equal to the limit in headless runs), and the final drawing is off the clock. So:
+    2 x timeout_s + DRAWING_MARGIN_S, at least 3600 s: a long timeout_s never kills the drawing."""
+    if opts.get("run_timeout_s") is not None:
+        return float(opts["run_timeout_s"])
+    t = opts.get("timeout_s")
+    if t is None:
+        t = sets.get("run.timeout_s")
+    try:
+        t = float(t) if t is not None else 600.0
+    except (TypeError, ValueError):
+        t = 600.0
+    if not math.isfinite(t) or t <= 0:  # 0 / none = no limit: the run is bounded by the floor only
+        t = 600.0
+    return max(RUN_TIMEOUT_FLOOR_S, 2.0 * t + DRAWING_MARGIN_S)
 
 
 def _toml_overrides(board_dir: Path) -> dict:
