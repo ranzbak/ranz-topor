@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # dvn_job.sh (branch draw-via-neck, docs/dev/design/draw-via-neck.md): PROPOSED patterns on the VM.
+#   dvn_job.sh job    the pats unit under hzq (hz.sh job -- bash tools/dvn_job.sh job)
 #   dvn_job.sh pats   boards (KiCad DRC of the references), each pattern routed through the plugin flow (route_board.sh,
 #                     product defaults, runs=1, seed 0, TOPO_VIADBG + TOPO_NECKDBG + TOPO_ERBS_DEBUG), PNGs + summary.json
 set -u
@@ -16,5 +17,6 @@ case ${1:-} in
     done
     python -m harness.dvn_patterns_png $R/dvnp/runs $R/dvnp/png > $R/dvnp-png.log 2>&1; note "png rc $?"
     note "all done" ;;
-  *) echo "usage: $0 pats"; exit 2 ;;
+  job) hzq run --threads 2 --name dvnp-pats -- bash $ROOT/tools/dvn_job.sh pats > $R/u-pats.log 2>&1; note "unit pats rc $?" ;;
+  *) echo "usage: $0 pats | job"; exit 2 ;;
 esac
