@@ -480,7 +480,7 @@ fn event_s(st: &State, poly: &[Vec2], opoly: &[Vec2], w: WireId, x: &super::stat
 /// where the two tracks cross, the one nearest the arc range `lo..=hi` (the traversal of the
 /// crossing in the topology; the taut tracks may cross a little outside it). `None` when the
 /// tracks do not cross. O(corners^2).
-fn track_crossing(tw: &Track, to: &Track, lo: f64, hi: f64) -> Option<f64> {
+pub(crate) fn track_crossing(tw: &Track, to: &Track, lo: f64, hi: f64) -> Option<f64> {
     let mut best: Option<(f64, f64)> = None;
     for i in 0..tw.pts.len().saturating_sub(1) {
         let (a, b) = (tw.pts[i], tw.pts[i + 1]);

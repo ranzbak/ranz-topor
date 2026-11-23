@@ -1533,6 +1533,12 @@ pub struct Options {
     /// there; another net's via planned in the same small triangle counts as a via without a site,
     /// so P3/P4 move it or reroute its wire before the drawing (true, default).
     pub reserve_via_sites: bool,
+    /// thick-layer M3 (`topor.toml [vias] site_planned`): the site test of a planned via also
+    /// counts the other nets' planned lanes (their taut paths, half width plus clearance, on every
+    /// layer: a through via blocks them all), and an end-traversal site must lie between the two
+    /// crossers that bound its interval on those taut paths; no room there = a via without a site
+    /// (a predicted `via_site` item, graded by the deficit). False = the static room alone.
+    pub via_site_planned: bool,
     /// M-45 (`topor.toml [drawing] style`): `"octilinear"` (default; straight and 45 degree
     /// segments, the hand boards' style; a stretch where 45 degrees does not fit stays any-angle
     /// and pays the `any_angle` factor) or `"smooth"` (the taut any-angle drawing).
@@ -2021,6 +2027,7 @@ impl Default for Options {
             grid_via_nm: [0, 0],
             grid_origin_nm: [0, 0],
             reserve_via_sites: true,
+            via_site_planned: true,
             mixed_clearance: "conservative".into(),
             cut_radius_mm: 0.0,
             cut_report: String::new(),

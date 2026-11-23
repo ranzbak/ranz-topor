@@ -395,6 +395,9 @@ pub struct Packer<'a> {
     /// another net's via planned in the same triangle has none there unless the triangle holds
     /// two discs ([`super::refine::CapModel`]).
     pub reserve_sites: bool,
+    /// thick-layer M3 (`[vias] site_planned`): a planned via's site is tested against the other
+    /// nets' planned lanes as well as the static room ([`super::refine`] `Frame::lane_room`).
+    pub site_planned: bool,
     /// 5.4 `[vias] between_crossings`: via intervals exclude the triangles of their events
     /// ([`super::refine::via_ranges`]).
     pub via_between: bool,
@@ -487,6 +490,7 @@ impl<'a> Packer<'a> {
             free_cache: Arc::new(Mutex::new(fxmap())),
             via_squeeze: 0.0,
             reserve_sites: false,
+            site_planned: false,
             via_between: false,
             via_cuts: None,
             via_best: false,
@@ -588,6 +592,7 @@ impl<'a> Packer<'a> {
         p.via_d0 = first(0);
         p.via_d = model.nets.iter().map(|n| (n.code, first(n.code))).collect();
         p.reserve_sites = opts.reserve_via_sites;
+        p.site_planned = opts.via_site_planned;
         p.via_between = opts.via_between;
         p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.via_best = opts.via_best_point;

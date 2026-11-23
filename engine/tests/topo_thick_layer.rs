@@ -105,9 +105,12 @@ fn diag_thick_dive_grouping() {
         println!("drawn violation: {}", serde_json::to_string(v).unwrap());
     }
     println!("vias {} routed {}/{}", r.vias, r.routed, r.connections_total);
+    for it in &r.items {
+        println!("item {}", serde_json::to_string(it).unwrap());
+    }
 }
 
-/// S1 target (design M3, F1; fails on 7513b3db): what the plan hands the drawing predicts the
+/// S1 target (design M3, F1; failed on 7513b3db, passes with `[vias] site_planned`): what the plan hands the drawing predicts the
 /// drawn violations of P. Found with the plan report (S1 diagnosis): P's last via interval lies in
 /// traversal 7 between its crossings with F4 (event s 0.44) and B2 (s 0.65); the site
 /// ([`end_site`]) is chosen on the pass-point polyline, where the two crossings are ~1 mm apart, at
@@ -115,7 +118,6 @@ fn diag_thick_dive_grouping() {
 /// point lies past B2 and the 1.0 mm gap holds no 0.9 mm via with P's clearances (0.5 mm free):
 /// predicted 0, drawn 2 shorts with B2 / B3 and 4 clearance items.
 #[test]
-#[ignore]
 fn thick_dive_grouping_predicts_what_it_draws() {
     let m = thick_dive_grouping();
     let r = route(&m, &[]);
@@ -123,4 +125,28 @@ fn thick_dive_grouping_predicts_what_it_draws() {
     let drawn = r.violations.iter().filter(|v| v.conn == 0).count();
     let pred: u64 = p["conns"]["0"]["predicted"].as_object().unwrap().values().map(|v| v.as_u64().unwrap()).sum();
     assert!(drawn == 0 || pred > 0, "P: drawn {drawn} violations, predicted {pred}: {}", p["conns"]["0"]);
+}
+
+/// M3 (`[vias] site_planned`): P's vias between B1 / F3 and between F4 / B2 sit in 1.0 mm gaps
+/// between the crossers' taut lines, too narrow for the 0.9 mm via with clearances (1.4 mm): with
+/// the option both are vias without a site, deficit = (1.4 - 1.0) / 2 = 0.2 mm each (the
+/// lane room, not the static room, which has space); without it (the static room alone, main)
+/// every via has a site and the plan predicts nothing.
+#[test]
+fn thick_dive_grouping_lane_sites() {
+    let m = thick_dive_grouping();
+    let sites = |on: bool| {
+        let r = route(&m, &[("via_site_planned", serde_json::json!(on))]);
+        let p = plan(&r);
+        let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
+        w["vias"].as_array().unwrap().iter().map(|v| (v["site"].as_bool().unwrap(), v["deficit"].as_f64().unwrap())).collect::<Vec<_>>()
+    };
+    let on = sites(true);
+    assert_eq!(on.len(), 3, "{on:?}");
+    assert!(on[0].0 && on[0].1 == 0.0, "via 0 (between F2 and B1, 4 mm) has a site: {on:?}");
+    for v in &on[1..] {
+        assert!(!v.0 && (v.1 - 0.2).abs() < 0.05, "1 mm gap: no site, deficit ~0.2 mm: {on:?}");
+    }
+    let off = sites(false);
+    assert!(off.iter().all(|v| v.0 && v.1 == 0.0), "static room alone: every via has a site: {off:?}");
 }

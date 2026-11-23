@@ -368,6 +368,26 @@ pub fn end_site(st: &State, w: WireId, a: LEv, b: LEv, free: &dyn Fn(usize, Vec2
     best.map(|b| (b.2, b.3))
 }
 
+/// M3: the side of `p` against the polyline `pts` (the sign of the cross product with its
+/// nearest segment; 0 on it or without a segment). O(corners).
+fn poly_side(pts: &[Vec2], p: Vec2) -> f64 {
+    let mut best: Option<(f64, f64)> = None;
+    for x in pts.windows(2) {
+        let (a, b) = (x[0], x[1]);
+        let e = b - a;
+        let l2 = e.len2();
+        if l2 <= 0.0 {
+            continue;
+        }
+        let t = ((p - a).dot(e) / l2).clamp(0.0, 1.0);
+        let d = (p - (a + e * t)).len();
+        if best.is_none_or(|b| d < b.0) {
+            best = Some((d, e.cross(p - a)));
+        }
+    }
+    best.map_or(0.0, |b| b.1.signum() * (b.1 != 0.0) as i32 as f64)
+}
+
 /// The default traversal of a via in interval `(ka, kb)`: `(ka + kb) / 2` rounded up (at `ka`
 /// when both events are in one traversal).
 pub fn mid_k(ka: usize, kb: usize) -> usize {
@@ -596,6 +616,13 @@ pub struct Frame<'a> {
     /// tw4-r2 (1) (`[capacity] pad_exits`): per wire its planned pad exits ([`super::padexit`]),
     /// static for the model's life (state and taut paths are borrowed). Memo.
     exits: Vec<std::sync::OnceLock<std::sync::Arc<Vec<super::padexit::ExitGeo>>>>,
+    /// thick-layer M3 (`[vias] site_planned`): per wire its taut track ([`super::viaopt::Track`],
+    /// the plan's path the drawing realises), static for the model's life. Memo.
+    tracks: Vec<std::sync::OnceLock<std::sync::Arc<super::viaopt::Track>>>,
+    /// M3: the planned-lane room of a via of wire `w` in traversal `k` ([`Frame::lane_room_k`]),
+    /// per `(w, k)`; a function of the state alone (every layer counts), so the order lanes fill
+    /// it in changes nothing. Memo.
+    lane_k: std::sync::Mutex<crate::fxhash::FxHashMap<(WireId, usize), f64>>,
 }
 
 /// CM1: the neighbourhood of a wire's path ([`Frame::nstar`]).
@@ -866,7 +893,8 @@ impl<'a> Frame<'a> {
         let vbase = pr.edges.len() * nl;
         let nstar = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
         let exits = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
-        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins, vbase, vfocus: None, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar, exits }
+        let tracks = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
+        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins, vbase, vfocus: None, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar, exits, tracks, lane_k: std::sync::Mutex::new(crate::fxhash::map()) }
     }
 
     /// The price of one over-full edge-layer (mm).
@@ -895,6 +923,8 @@ impl<'a> Frame<'a> {
         let wi = &st.wires[w];
         let d = self.packer.via_d(wi.net);
         let room = if d > 0.0 { self.packer.site_room(t, wi.net, wi.s) } else { f64::INFINITY };
+        // M3 (`[vias] site_planned`): the other nets' planned lanes count as well as the static room.
+        let room = if d > 0.0 && self.packer.site_planned && room >= 0.5 * d { room.min(self.lane_room_k(w, k.min(wi.tris.len() - 1))) } else { room };
         let site = d <= 0.0 || (room >= 0.5 * d && !self.site_taken(m, w, t));
         let short = if self.packer.site_price && !site { Packer::site_deficit(room, d) as i64 } else { 0 };
         let others = st.tri_trav[t].iter().filter(|&&(o, _)| o != w).count();
@@ -914,6 +944,147 @@ impl<'a> Frame<'a> {
         st.tri_trav[t].iter().any(|&(o, ko)| o != w && st.wires[o].net != net && m.via_k(o).contains(&ko)) && st.proj.inradius(t) < 2.0 * self.need_r(w)
     }
 
+    /// M3: the taut track of wire `x` ([`super::viaopt::Track::of`]). Memo (the state is fixed
+    /// for the model's life).
+    fn track(&self, x: WireId) -> std::sync::Arc<super::viaopt::Track> {
+        self.tracks[x].get_or_init(|| std::sync::Arc::new(super::viaopt::Track::of(self.st, x))).clone()
+    }
+
+    /// M3: [`super::cutflow::point_free`] of a via centre `q` of `w` (the packer's memo when it
+    /// is on this projection).
+    fn point_free(&self, w: WireId, q: Vec2) -> f64 {
+        let wi = &self.st.wires[w];
+        if self.packer.same_proj(self.st.proj) {
+            self.packer.point_free_cached(q, wi.net, wi.s)
+        } else {
+            super::cutflow::point_free(self.st.proj, self.packer, q, wi.net, wi.s)
+        }
+    }
+
+    /// thick-layer M3 (`[vias] site_planned`; docs/dev/design/thick-layer.md M3, S1 diagnosis):
+    /// the room (nm: the via radius a disc centred at `q` can have, the unit of
+    /// [`super::cutflow::point_free`]) that the other nets' planned lanes leave a via of wire `w`
+    /// in triangle `t`. A lane is the taut track of another net's live wire that traverses a
+    /// triangle sharing a vertex with `t`, with its half width and the larger of the two
+    /// clearances (and the packer's tolerance) around it. Every layer counts: a through via
+    /// blocks them all. `r` is a point of `w`'s own taut path in the via's window: a lane that
+    /// traverses `t` itself and has `q` on the other side than `r` would have to be jumped by
+    /// `w` (a crossing the plan does not have there), so `q` gets no room (`-inf`). The lanes are
+    /// the plan's taut paths, which the drawing keeps as planned room (memory
+    /// reserve-planned-room); that crossers could bend aside into their far-side slack is not
+    /// counted, because the drawing does not realise such bends (the S1 fixture: B1 bent 0.25 mm
+    /// of the 0.33 needed, F3 not at all). O(star wires x their track corners).
+    fn lane_room(&self, w: WireId, t: TriId, q: Vec2, r: Vec2) -> f64 {
+        let (st, pr) = (self.st, self.st.proj);
+        let wi = &st.wires[w];
+        let mut ws: Vec<WireId> = pr.tris[t].iter().flat_map(|&v| pr.vert_tris[v].iter().flat_map(|&u| st.tri_trav[u].iter().map(|x| x.0))).filter(|&o| o != w && st.wires[o].alive && st.wires[o].net != wi.net).collect();
+        ws.sort_unstable();
+        ws.dedup();
+        let mut room = f64::INFINITY;
+        for o in ws {
+            let tr = self.track(o);
+            let ow = &st.wires[o];
+            let d = super::viaopt::dist_polyline(q, &tr.pts);
+            room = room.min(d - 0.5 * ow.w - ow.s.max(wi.s) - self.packer.eps());
+            if st.tri_trav[t].iter().any(|x| x.0 == o) && poly_side(&tr.pts, q) * poly_side(&tr.pts, r) < 0.0 {
+                return f64::NEG_INFINITY;
+            }
+        }
+        room
+    }
+
+    /// M3: the best room ([`Frame::lane_room`] and the static [`super::cutflow::point_free`],
+    /// the lesser of the two at one centre) for a via of `w` in its traversal `k`, over the
+    /// triangle's static candidate points ([`super::pack::tri_site_points`]) and points of `w`'s
+    /// taut path in that traversal. Memo per `(w, k)`. O(candidates x lane_room).
+    fn lane_room_k(&self, w: WireId, k: usize) -> f64 {
+        if let Some(&v) = self.lane_k.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(w, k)) {
+            return v;
+        }
+        const SAMPLES: usize = 8;
+        let (st, pr) = (self.st, self.st.proj);
+        let wi = &st.wires[w];
+        let t = wi.tris[k.min(wi.tris.len() - 1)];
+        let trk = self.track(w);
+        let (lo, hi) = (trk.sigma(k, 0.0), trk.sigma(k, 1.0));
+        let r = trk.at(0.5 * (lo + hi));
+        let [a, b, c] = pr.tris[t].map(|v| pr.pos[v]);
+        let cands = super::pack::tri_site_points(a, b, c).into_iter().chain((0..SAMPLES).map(|i| trk.at(lo + (hi - lo) * (i as f64 + 0.5) / SAMPLES as f64)));
+        let v = cands.map(|q| self.lane_room(w, t, q, r).min(self.point_free(w, q))).fold(f64::NEG_INFINITY, f64::max);
+        self.lane_k.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert((w, k), v);
+        v
+    }
+
+    /// M3: the end site ([`end_site`]'s job, 5.2) of the via between events `a` and `b` of `w`
+    /// on the taut paths: per end piece (traversal `k`, fractions `s0..s1` of the polyline, as
+    /// [`end_site`] builds them) the window on `w`'s taut track between the taut crossings with
+    /// the other nets' wires whose crossing lies at or before `s0` and at or after `s1` (the
+    /// crossers bounding the event pair; [`super::viaopt::track_crossing`]), candidates on that
+    /// window and the triangle's static points, each taking the lesser of its lane room
+    /// ([`Frame::lane_room`], `r` = the window's middle) and its static room; the best. Returns
+    /// the site (traversal, centre) when its room holds the via (`>= d / 2`, and the triangle's
+    /// inradius and [`Frame::site_taken`] as [`Frame::end_site_raw`]), and the best room (nm;
+    /// `-inf` without a piece). O(pieces x crossings x track corners + candidates x lane_room).
+    fn end_site_lane<M: MemRead + ?Sized>(&self, m: &M, w: WireId, a: LEv, b: LEv) -> (Option<(usize, Vec2)>, f64) {
+        const SAMPLES: usize = 12;
+        let (st, pr) = (self.st, self.st.proj);
+        let wi = &st.wires[w];
+        let half = 0.5 * self.packer.via_d(wi.net);
+        let need = self.need_r(w);
+        let inside = |s: f64| s > 1e-9 && s < 1.0 - 1e-9;
+        let mut pieces: Vec<(usize, f64, f64)> = Vec::new();
+        if a.0 == b.0 && b.1 > a.1 {
+            pieces.push((a.0, a.1, b.1));
+        } else {
+            if inside(b.1) {
+                pieces.push((b.0, 0.0, b.1));
+            }
+            if inside(a.1) {
+                pieces.push((a.0, a.1, 1.0));
+            }
+        }
+        let poly = st.polyline(w);
+        let trk = self.track(w);
+        let crossings = st.crossings(w);
+        let mut best: (Option<(usize, Vec2)>, f64) = (None, f64::NEG_INFINITY);
+        for (k, s0, s1) in pieces {
+            if k >= wi.tris.len() || wi.turns.iter().any(|t| t.0 == k) || k + 1 >= poly.len() {
+                continue;
+            }
+            let t = wi.tris[k];
+            if pr.tri_out[t] {
+                continue;
+            }
+            let (p0, p1) = (poly[k], poly[k + 1]);
+            let (klo, khi) = (trk.sigma(k, 0.0), trk.sigma(k, 1.0));
+            let (mut lo, mut hi) = (klo, khi);
+            for x in crossings.iter().filter(|x| x.k == k && st.wires[x.other].net != wi.net) {
+                let po = st.polyline(x.other);
+                let (q0, q1) = (po[x.other_k], po[(x.other_k + 1).min(po.len() - 1)]);
+                let (dw, dq) = (p1 - p0, q1 - q0);
+                let den = dw.cross(dq);
+                let s = if den.abs() < 1e-12 { 0.5 } else { ((q0 - p0).cross(dq) / den).clamp(0.0, 1.0) };
+                let Some(arc) = super::viaopt::track_crossing(&trk, &self.track(x.other), klo, khi) else { continue };
+                if s <= s0 + 1e-6 {
+                    lo = lo.max(arc);
+                } else if s >= s1 - 1e-6 {
+                    hi = hi.min(arc);
+                }
+            }
+            let r = trk.at(0.5 * (lo + hi));
+            let ok_t = pr.inradius(t) >= need && !self.site_taken(m, w, t);
+            let [pa, pb, pc] = pr.tris[t].map(|v| pr.pos[v]);
+            let samples = (0..SAMPLES).filter(|_| hi > lo).map(|i| trk.at(lo + (hi - lo) * (i as f64 + 0.5) / SAMPLES as f64));
+            for q in samples.chain(super::pack::tri_site_points(pa, pb, pc)) {
+                let room = if ok_t && hi > lo { self.lane_room(w, t, q, r).min(self.point_free(w, q)) } else { f64::NEG_INFINITY };
+                if room > best.1 {
+                    best = (Some((k, q)), room);
+                }
+            }
+        }
+        (best.0.filter(|_| best.1 >= half), best.1)
+    }
+
     /// The key of the end site of via interval `i` of `w` under events `ev`, and its two events;
     /// `None` without `[vias] between_crossings` or without such an interval.
     fn end_key(&self, w: WireId, ev: &[LEv], i: usize) -> Option<(EndKey, LEv, LEv)> {
@@ -929,6 +1100,9 @@ impl<'a> Frame<'a> {
         let wi = &self.st.wires[w];
         let d = self.packer.via_d(wi.net);
         let (pr, packer, net, s) = (self.st.proj, self.packer, wi.net, wi.s);
+        if packer.site_planned && d > 0.0 {
+            return self.end_site_lane(m, w, a, b).0;
+        }
         let need = self.need_r(w);
         end_site(self.st, w, a, b, &|t, q| pr.inradius(t) >= need && !self.site_taken(m, w, t) && super::cutflow::point_free(pr, packer, q, net, s) >= 0.5 * d)
     }
@@ -2187,7 +2361,9 @@ impl<'a> CapModel<'a> {
     /// events `ev`: its interval, its traversal, its place ([`CapModel::via_place`]), whether it
     /// has no site by the build's own test ([`Frame::via_no_site`], read-only) and the static
     /// room deficit of its traversal's triangle (nm, [`Packer::site_deficit`]; 0 = a disc fits
-    /// the static copper). Read-only. O(vias x one site test).
+    /// the static copper; with `[vias] site_planned` the room with the other nets' planned lanes,
+    /// [`Frame::lane_room_k`], and for an end site its best room on the taut paths,
+    /// [`Frame::end_site_lane`]). Read-only. O(vias x one site test).
     pub fn via_report(&self, w: WireId, ev: &[LEv]) -> Vec<ViaRow> {
         let fx = &self.fx;
         let ks = self.via_k.get(w).map_or(&[][..], |v| v.as_slice());
@@ -2200,6 +2376,11 @@ impl<'a> CapModel<'a> {
                 let k = ks[i];
                 let t = wi.tris.get(k.min(wi.tris.len().saturating_sub(1))).copied();
                 let deficit = match t {
+                    // M3: the end site's best room on the taut paths, or the traversal's room with the lanes.
+                    Some(_) if d > 0.0 && fx.packer.site_planned && between.get(i) == Some(&false) && fx.lead_via(w, i, ks.len(), ev).is_none() => {
+                        fx.end_key(w, ev, i).map_or(0.0, |(_, a, b)| Packer::site_deficit(fx.end_site_lane(&self.a, w, a, b).1, d))
+                    }
+                    Some(t) if d > 0.0 && fx.packer.site_planned => Packer::site_deficit(fx.packer.site_room(t, wi.net, wi.s).min(fx.lane_room_k(w, k.min(wi.tris.len() - 1))), d),
                     Some(t) if d > 0.0 => Packer::site_deficit(fx.packer.site_room(t, wi.net, wi.s), d),
                     _ => 0.0,
                 };
