@@ -2053,16 +2053,15 @@ impl<'a> Drawer<'a> {
     }
 
     /// draw-via-neck A (`[drawing] via_shift_mm`; TopoR 6.3 manual p. 179: vias shifted into free
-    /// room; Dayan & Dai 1991 UCSC-CRL-91-40 pp. 2-6): via sites for via `i` of wire `w` outside
-    /// its interval `ka..=kb`: the site points of the wire's traversals before and after the
-    /// interval whose triangles lie within the shift distance of the interval's taut chord, never
-    /// past a traversal where another net's wire crosses this one (the layer change keeps the
-    /// plan's class), nor before the previous via (`prev`) or into the next via's interval; and a
-    /// ring of 12 directions at 0.5, 1, 1.5 and 2 via diameters (up to the shift distance) round
-    /// the chord's middle, each in the traversal whose triangle holds it. O(traversals + 48 x
-    /// traversals).
-    #[allow(clippy::too_many_arguments)]
-    fn via_shift_sites(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, prev: Option<usize>, need_r: f64, dv: f64) -> Vec<(usize, Vec2)> {
+    /// room; Dayan & Dai 1991 UCSC-CRL-91-40 pp. 2-6): extra via sites for via `i` of wire `w`
+    /// inside its interval `ka..=kb`: a ring of 12 directions at 0.5, 1, 1.5 and 2 via diameters
+    /// (up to the shift distance) round the middle of the interval's taut chord, each in the
+    /// interval's traversal whose triangle holds it. Never outside the interval (lead 2026-11-24):
+    /// the interval runs between two layer events of the plan (`layers.rs`: a crossing, an SMD
+    /// pad, a one-layer triangle, a gap that fits one layer), so a site past it puts the run on the
+    /// wrong layer at the bounding event; widening the interval is the plan's job.
+    /// O(48 x interval traversals).
+    fn via_shift_sites(&self, w: WireId, ka: usize, kb: usize, dv: f64) -> Vec<(usize, Vec2)> {
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let n = wi.tris.len();
@@ -2070,34 +2069,14 @@ impl<'a> Drawer<'a> {
             return Vec::new();
         }
         let lim = self.opts.via_shift_mm * 1e6;
-        let chord: Vec<Vec2> = (ka..=kb.min(n - 1)).flat_map(|k| self.taut_chord(w, k)).collect();
+        let kb = kb.min(n - 1);
+        let chord: Vec<Vec2> = (ka..=kb).flat_map(|k| self.taut_chord(w, k)).collect();
         if chord.is_empty() {
             return Vec::new();
         }
-        let dist = |p: Vec2| if chord.len() == 1 { (p - chord[0]).len() } else { chord.windows(2).map(|x| seg_dist(p, x[0], x[1])).fold(f64::INFINITY, f64::min) };
-        let centroid = |k: usize| pr.tris[wi.tris[k]].iter().fold(Vec2::default(), |a, &v| a + pr.pos[v]) * (1.0 / 3.0);
-        let crossed: Vec<usize> = st.crossings(w).iter().filter(|x| st.wires[x.other].net != wi.net).map(|x| x.k).collect();
-        let mut sa = ka;
-        while sa > 0 && prev.is_none_or(|p| sa > p) && !crossed.contains(&(sa - 1)) && !crossed.contains(&sa) && dist(centroid(sa - 1)) <= lim {
-            sa -= 1;
-        }
-        let next = plan.vias.get(i + 1).map_or(n, |v| v.0);
-        let mut sb = kb.min(n - 1);
-        while sb + 1 < n && sb + 1 < next && !crossed.contains(&(sb + 1)) && !crossed.contains(&sb) && dist(centroid(sb + 1)) <= lim {
-            sb += 1;
-        }
-        let mut out: Vec<(usize, Vec2)> = Vec::new();
-        if sa < ka {
-            out.extend(self.via_candidates(w, sa, ka - 1, need_r, None));
-        }
-        if sb > kb {
-            out.extend(self.via_candidates(w, kb + 1, sb, need_r, None));
-        }
-        if std::env::var("TOPO_VIADBG").is_ok() {
-            eprintln!("VIASHIFT wire {w} via {i} ka {ka} kb {kb} -> sa {sa} sb {sb} prev {prev:?} next {next} crossed {:?}", crossed.iter().filter(|&&k| k + 6 >= ka && k <= kb + 6).collect::<Vec<_>>());
-        }
         let mid = chord[chord.len() / 2];
-        let tri_of = |p: Vec2| (sa..=sb).find(|&k| super::state::point_in_poly(p, &pr.tris[wi.tris[k]].map(|v| pr.pos[v])));
+        let tri_of = |p: Vec2| (ka..=kb).find(|&k| super::state::point_in_poly(p, &pr.tris[wi.tris[k]].map(|v| pr.pos[v])));
+        let mut out: Vec<(usize, Vec2)> = Vec::new();
         for r in [0.5, 1.0, 1.5, 2.0] {
             let rr = r * dv;
             if rr > lim {
@@ -2251,15 +2230,11 @@ impl<'a> Drawer<'a> {
                     let (far, close): (Vec<_>, Vec<_>) = sites.into_iter().partition(|&(_, p)| !near(p));
                     sites = far.into_iter().chain(close).collect();
                 }
-                // draw-via-neck A (`[drawing] via_shift_mm`): sites out of the interval in free room
-                // (the wire's traversals before and after it up to the shift distance, never past a
-                // crossing of another net's wire, so the layer change keeps the plan's class) and a
-                // ring round the interval's taut chord; each priced by its shift below. They come
-                // after the interval's own sites.
-                // Debug arm `TOPO_FD45_OFF=dvn_shift_sites` (proposed pattern via_outside_full_interval):
-                // the interval's own sites only, the rest of A kept.
-                if self.opts.via_shift_mm > 0.0 && !super::octi::fd45_off("dvn_shift_sites") {
-                    sites.extend(self.via_shift_sites(w, plan, i, ka, kb.max(ka), out.last().map(|l| l.0), need_r, sz.d as f64));
+                // draw-via-neck A (`[drawing] via_shift_mm`): a ring of sites round the interval's
+                // taut chord, inside the interval (never past it: that breaks the plan's layer
+                // event); each priced by its shift below. They come after the interval's own sites.
+                if self.opts.via_shift_mm > 0.0 {
+                    sites.extend(self.via_shift_sites(w, ka, kb.max(ka), sz.d as f64));
                 }
                 // Of the valid sites (side test, clearance) in the first triangle that has one
                 // (the planned one first: the plan fixed which crossings lie on which side of
@@ -3753,9 +3728,12 @@ impl<'a> Drawer<'a> {
                             CheckReport::default()
                         }
                         None => {
-                            // draw-via-neck B: necked at the floor only where that changes something.
-                            let nk = if self.opts.neck_trim { self.fit_neck(w, lid, &pts, pn, pn.min_w) } else { *pn };
-                            items = self.neck_items(w, lid, &pts, &nk, pn.min_w).0;
+                            // draw-via-neck B: no width passes (a violation the width cannot
+                            // remove): the widest width that adds none to the floor's, necked
+                            // only where that changes something.
+                            let wn = if self.opts.neck_trim { self.plan_neck_widest(w, lid, &pts, pn) } else { pn.min_w };
+                            let nk = if self.opts.neck_trim { self.fit_neck(w, lid, &pts, pn, wn) } else { *pn };
+                            items = self.neck_items(w, lid, &pts, &nk, wn).0;
                             self.checker.check_against(&self.idx, &items, &[])
                         }
                     },
@@ -4197,15 +4175,17 @@ impl<'a> Drawer<'a> {
                                     }
                                 }
                             } else if self.opts.neck_trim {
-                                // draw-via-neck B: a forced run keeps its violations, but its neck
-                                // only where narrowing adds nothing to them (`fit_neck` against the
-                                // plan zones' count).
-                                let nk = self.fit_neck(w, lid, &pts, pn, wmin);
-                                let (its, ls) = self.neck_items(w, lid, &pts, &nk, wmin);
+                                // draw-via-neck B: a forced run keeps its violations, but at the
+                                // widest width that adds none to the floor's
+                                // (`plan_neck_widest`) and necked only where narrowing adds
+                                // nothing to them (`fit_neck` against the plan zones' count).
+                                let wn = if wmin <= pn.min_w + 0.5 { self.plan_neck_widest(w, lid, &pts, pn) } else { wmin };
+                                let nk = self.fit_neck(w, lid, &pts, pn, wn);
+                                let (its, ls) = self.neck_items(w, lid, &pts, &nk, wn);
                                 let n_old = self.checker.check_against(&self.idx, &items, &[]).violations.len();
                                 if self.track_own_pad_ok(w, &its) && self.checker.check_against(&self.idx, &its, &[]).violations.len() <= n_old {
                                     items = its;
-                                    zones = (nk, wmin, ls);
+                                    zones = (nk, wn, ls);
                                 }
                             }
                             let (z, wn, ls) = zones;
@@ -4861,6 +4841,42 @@ impl<'a> Drawer<'a> {
         let nk = if self.opts.neck_trim { self.fit_neck(w, lid, pts, neck, wn) } else { *neck };
         let (items, lens) = self.neck_items(w, lid, pts, &nk, wn);
         Some((wn, items, lens))
+    }
+
+    /// draw-via-neck B (`[drawing] neck_trim`, lead 2026-11-24): the neck width of the run `pts`
+    /// with the plan's zones `neck` when no width passes the checker ([`Drawer::plan_neck_run`]
+    /// is `None`: a violation the width cannot remove, e.g. a terminal closer to the board edge
+    /// than the edge clearance). The widest width in `[floor, nominal]` that adds no violation to
+    /// the floor's: every object it violates (the same pad, track, via, hole or edge on the same
+    /// layer) is one the floor violates too. Graded, not by count: the floor's violations only
+    /// deepen by the width step itself (half the extra width; the run's centre line is fixed), so
+    /// the unavoidable one does not grow past what the width costs, and nothing new is hit. The
+    /// floor when even a little more width hits something new. TopoR 6.3 manual p. 56: the
+    /// minimum width only where needed. O(14 checks of the run).
+    fn plan_neck_widest(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck) -> f64 {
+        let wi = &self.st.wires[w];
+        let hit = |wn: f64| -> std::collections::BTreeSet<(String, u32)> {
+            let its = self.neck_items(w, lid, pts, neck, wn).0;
+            self.checker.check_against(&self.idx, &its, &[]).violations.into_iter().map(|v| (v.against, v.layer)).collect()
+        };
+        let floor = hit(neck.min_w);
+        let ok = |wn: f64| hit(wn).is_subset(&floor);
+        if ok(wi.w) {
+            return wi.w;
+        }
+        let (mut lo, mut hi) = (neck.min_w, wi.w);
+        for _ in 0..12 {
+            let mid = 0.5 * (lo + hi);
+            if ok(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        if std::env::var("TOPO_NECKDBG").is_ok() {
+            eprintln!("NECKWIDEST wire {w} floor {:.0} -> {:.0} (violated objects {})", neck.min_w, lo.floor(), floor.len());
+        }
+        lo.floor().max(neck.min_w)
     }
 
     /// draw-via-neck B (`[drawing] neck_trim`): the plan's neck zones of the run `pts` (necked to

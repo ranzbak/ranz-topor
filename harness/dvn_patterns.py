@@ -386,7 +386,8 @@ def via_outside_full_interval() -> Pattern:
     strip where F.Cu is closed (a rule area: V must be on B.Cu there); the interval keeps exactly one tight via site. Past
     the strip the board is free, within `via_shift_mm` of the interval. A site there is free room for the via, but V's
     F.Cu run would then cross the strip: the plan's layer event bounds the interval. Expected: the via stays in the
-    interval (the shifted sites of `via_shift_sites`, mutant A4, must not win here)."""
+    interval. r4 (lead 2026-11-24): the drawing no longer offers sites outside the interval (r3's traversal extension of
+    `via_shift_sites`, mutant A4, removed with it); a guard only."""
     W, H = 12.0, 10.0
     yv = 5.0
     x_n = 3.0
@@ -423,7 +424,7 @@ def via_outside_full_interval() -> Pattern:
         ref_vias=[Via("V", via)], witness={"V": ("F.Cu", v_f)},
         extra={"dvn": {"ref_len": _r(_len(v_f) + _len(v_b) + _len(n_pts)), "vias": 1, "necks": 0, "via_x_range": [lo, hi],
                        "jam_marks": [[past, yv]],
-                       "mutant": "A4 (no shifted sites; debug arm TOPO_FD45_OFF=dvn_shift_sites)",
+                       "mutant": "none since r4 (the sites outside the interval are gone; lead 2026-11-24)",
                        "literature": "Dayan 1997 PDF pp. 15-16 (the topology fixes the layer of every crossing; the via "
                                      "lies between them); TopoR 6.3 manual p. 179 (vias shifted within the topology)"}})
 

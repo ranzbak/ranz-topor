@@ -146,3 +146,20 @@ fn guards_keep_their_answers() {
         assert!(l <= 1.05 * len, "{p}: {l} mm vs {len}");
     }
 }
+
+/// B (lead 2026-11-24): neck_in_pad_row with its terminal J1 (0.6 mm pad) 0.15 mm from the board's
+/// bottom edge (edge clearance 0.5): PWR's last segment breaks the edge clearance at every width (as
+/// the qmtech Q3 crop terminal XT4.1, 0.14 mm from its crop edge), so no width passes the checker.
+/// PWR still takes the widest width that adds no violation to that one (the row's 0.3 neck, the pad
+/// gap's room), not the floor (0.25: the board's minimum track width), and the edge violation stays
+/// the only one.
+#[test]
+fn neck_edge_terminal_keeps_the_widest_width() {
+    let r = route("neck_edge_terminal", &[]);
+    assert_eq!(r.unrouted, 0);
+    let thin = |r: &Routed| r.segs.iter().filter(|s| s.net == "PWR" && s.w < 0.5 - 1e-4).map(|s| s.w).fold(f64::INFINITY, f64::min);
+    assert!(thin(&r) > 0.29, "PWR necked to {} (expected about 0.3)", thin(&r));
+    assert_eq!(r.violations, 1, "only the terminal's edge clearance");
+    let r0 = route("neck_edge_terminal", &off("neck_trim"));
+    assert!(thin(&r0) < 0.26, "neck_trim off: the floor ({})", thin(&r0));
+}

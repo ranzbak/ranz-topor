@@ -118,3 +118,15 @@ Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals 
   SMD pad, a triangle with one allowed layer, a gap that fits one layer). A site outside it puts the run on the wrong
   layer at the bounding event: a crossing (excluded by `via_shift_sites`), a rule area or a too narrow gap (not excluded).
   So no correct layout needs a site outside the interval; the proposed guard `via_outside_full_interval` pins that.
+
+**r4 (2026-11-24, lead decisions).**
+- A: no via site outside the plan's via interval (lead (a)). `via_shift_sites` keeps only the ring round the interval's
+  taut chord, each ring site in the interval traversal whose triangle holds it; the traversal extension (r1-r3) and its
+  debug arm `dvn_shift_sites` are gone, and mutant A4 with them. The relaxed first-traversal break (A2) and the shift
+  price (A3) still let every traversal of the interval compete. Widening the interval is the plan's job.
+- B: where no width passes the checker (`plan_neck_run` None: a violation the width cannot remove), the run takes the
+  widest width that adds no violation to the floor's (`Drawer::plan_neck_widest`: every object it violates is one the
+  floor violates too; the floor's violations only deepen by the width step itself, as the centre line is fixed), not
+  the floor (lead (b)). Also for a forced run at the floor. Fixture `neck_edge_terminal` (neck_in_pad_row with its
+  terminal 0.15 mm from the board edge, edge clearance 0.5): 0.3 at the row instead of the 0.25 floor, the edge
+  violation the only one.

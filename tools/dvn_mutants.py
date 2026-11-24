@@ -2,7 +2,7 @@
 engine/; the targeted release tests run against it; killed = a test fails. Run on the VM (one tree, one target dir per
 call, mutants one after another so the build is incremental).
 
-usage: python3 tools/dvn_mutants.py OUT_DIR GROUP     (GROUP: a | bc | c3 | all; results OUT_DIR/mutants-GROUP.json)"""
+usage: python3 tools/dvn_mutants.py OUT_DIR GROUP     (GROUP: a | bc | c3 | r4 | all; results OUT_DIR/mutants-GROUP.json)"""
 import json
 import os
 import shutil
@@ -24,9 +24,18 @@ MUTANTS = {
          "if best.is_some_and(|b| b.1 != k) {"),
         ("A3 no shift distance price", D,
          "price + 0.5 * self.octi.room * dv * (xs_ + xs_ * xs_)", "price"),
-        ("A4 no shifted sites", D,
-         "sites.extend(self.via_shift_sites(w, plan, i, ka, kb.max(ka), out.last().map(|l| l.0), need_r, sz.d as f64));",
-         "let _ = need_r;"),
+    ],
+    # r4 (lead 2026-11-24): A's sites outside the interval are gone (A4 with them); the ring inside it stays; B's
+    # no-legal-width fallback takes the widest width that adds no violation.
+    "r4": [
+        ("A5 r4: no ring sites in the interval", D,
+         "sites.extend(self.via_shift_sites(w, ka, kb.max(ka), sz.d as f64));", "let _ = sz;"),
+        ("B3 r4: no legal width -> the floor", D,
+         "let wn = if self.opts.neck_trim { self.plan_neck_widest(w, lid, &pts, pn) } else { pn.min_w };", "let wn = pn.min_w;"),
+        ("B4 r4: widest without the no-new-violation test", D,
+         "let ok = |wn: f64| hit(wn).is_subset(&floor);", "let ok = |wn: f64| { let _ = (hit(wn), &floor); true };"),
+        ("B5 r4: forced runs keep the narrowest width", D,
+         "let wn = if wmin <= pn.min_w + 0.5 { self.plan_neck_widest(w, lid, &pts, pn) } else { wmin };", "let wn = wmin;"),
     ],
     "bc": [
         ("B1 fit_neck off", D,
@@ -67,7 +76,7 @@ def main():
         shutil.rmtree(tree)
     shutil.copytree(ROOT / "engine", tree, ignore=shutil.ignore_patterns("target"))
     env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS=os.environ.get("RAYON_NUM_THREADS", "4"), RUST_TEST_THREADS="4")
-    muts = MUTANTS["a"] + MUTANTS["bc"] if group == "all" else [m for m in MUTANTS["bc"] if m[0].startswith(("C1", "C5", "C6", "C7"))] if group == "c3" else MUTANTS[group]
+    muts = MUTANTS["a"] + MUTANTS["r4"] + MUTANTS["bc"] if group == "all" else [m for m in MUTANTS["bc"] if m[0].startswith(("C1", "C5", "C6", "C7"))] if group == "c3" else MUTANTS[group]
     res = []
     for name, f, old, new in muts:
         src = (ROOT / "engine" / f).read_text()
