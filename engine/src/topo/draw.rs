@@ -2076,7 +2076,7 @@ impl<'a> Drawer<'a> {
         let centroid = |k: usize| pr.tris[wi.tris[k]].iter().fold(Vec2::default(), |a, &v| a + pr.pos[v]) * (1.0 / 3.0);
         let crossed: Vec<usize> = st.crossings(w).iter().filter(|x| st.wires[x.other].net != wi.net).map(|x| x.k).collect();
         let mut sa = ka;
-        while sa > 0 && prev.is_none_or(|p| sa - 1 >= p) && !crossed.contains(&(sa - 1)) && !crossed.contains(&sa) && dist(centroid(sa - 1)) <= lim {
+        while sa > 0 && prev.is_none_or(|p| sa > p) && !crossed.contains(&(sa - 1)) && !crossed.contains(&sa) && dist(centroid(sa - 1)) <= lim {
             sa -= 1;
         }
         let next = plan.vias.get(i + 1).map_or(n, |v| v.0);
@@ -2797,6 +2797,21 @@ impl<'a> Drawer<'a> {
         let st = self.st;
         let wi = &st.wires[w];
         let t = wi.tris[k];
+        // draw-via-neck A: a site outside its traversal's triangle (an offset or shifted site
+        // labelled with the nearest traversal) leaves its runs through the neighbouring
+        // triangles: the chords there are tested too (the via never lands past a crossing the
+        // plan put after it, so the layer change keeps the class). A site inside is tested in
+        // its own triangle alone, as before.
+        let pr = &self.b.proj;
+        let tris: Vec<super::state::TriId> = if super::state::point_in_poly(p, &pr.tris[t].map(|v| pr.pos[v])) {
+            vec![t]
+        } else {
+            let n = wi.tris.len();
+            let mut v: Vec<super::state::TriId> = (k.saturating_sub(2)..=(k + 2).min(n - 1)).map(|j| wi.tris[j]).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
         let chord_layer = |o: WireId, ok: usize| -> i32 {
             let ps = &st.wires[o].passes;
             let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
@@ -2807,7 +2822,7 @@ impl<'a> Drawer<'a> {
                 _ => -1,
             }
         };
-        for &(o, ok) in &st.tri_trav[t] {
+        for &(o, ok) in tris.iter().flat_map(|&t| st.tri_trav[t].iter()) {
             let oi = &st.wires[o];
             if o == w || !oi.alive || oi.net == wi.net || self.polys[o].is_empty() {
                 continue;

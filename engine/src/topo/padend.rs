@@ -318,6 +318,15 @@ impl Drawer<'_> {
                 }
                 continue;
             }
+            // Nor of another net's band on the layer (its wire is not drawn yet): none inside the
+            // swept area or across the new tail (the class), none closer to it than to the old
+            // tail where that was under the pitch (its planned room).
+            if let Some(why) = self.band_in_way(w, layer, &ring, &[c, tp, q[j]], &q[..=j]) {
+                if dbg {
+                    eprintln!("TIPREJ wire {w} t {:.3}: band of wire {why} in the way", t / 1e6);
+                }
+                continue;
+            }
             let pts: Vec<Vec2> = if end == 1 { np.iter().rev().copied().collect() } else { np.clone() };
             let items = self.run_items(w, layer, &pts[..]);
             if !self.checker.check_against(&self.idx, &items, &[]).violations.is_empty() || !self.track_own_pad_ok(w, &items) {
@@ -330,6 +339,34 @@ impl Drawer<'_> {
                 eprintln!("TIPANCHOR wire {w} end {end} pad ({:.3},{:.3}) exit axial {:.3} hl {:.3} t {:.3}", pc.x / 1e6, -pc.y / 1e6, ax / 1e6, hl / 1e6, t / 1e6);
             }
             return Some(pts);
+        }
+        None
+    }
+
+    /// The first wire of another net whose ERBS band on `layer` has a point inside `ring`, crosses
+    /// the polyline `new`, or comes closer to `new` than its pitch (half the two widths plus the
+    /// larger clearance) and than to the polyline `old`; `None` when no band is in the way.
+    /// O(bands x segments).
+    fn band_in_way(&self, w: WireId, layer: usize, ring: &[Vec2], new: &[Vec2], old: &[Vec2]) -> Option<WireId> {
+        let st = self.st;
+        let wi = &st.wires[w];
+        let bb = bbox_of(ring);
+        let dmin = |a: &[Vec2], b: &[Vec2]| a.windows(2).flat_map(|x| b.windows(2).map(move |y| super::draw::seg_seg_dist(x[0], x[1], y[0], y[1]))).fold(f64::INFINITY, f64::min);
+        for (&ow, runs) in &self.erbs {
+            let wo = &st.wires[ow];
+            if ow == w || wo.net == wi.net {
+                continue;
+            }
+            let need = 0.5 * (wi.w + wo.w) + wi.s.max(wo.s);
+            for rb in runs.iter().filter(|r| r.layer == layer && r.path.len() >= 2) {
+                let p = &rb.path;
+                let inside = p.iter().any(|&x| x.x >= bb.min.x && x.x <= bb.max.x && x.y >= bb.min.y && x.y <= bb.max.y && point_in_poly(x, ring));
+                let cross = p.windows(2).any(|a| new.windows(2).any(|b| super::draw::seg_cross_sos(a[0], a[1], b[0], b[1])));
+                let dn = dmin(p, new);
+                if inside || cross || dn < need.min(dmin(p, old)) - 1.0 {
+                    return Some(ow);
+                }
+            }
         }
         None
     }

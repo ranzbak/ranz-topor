@@ -104,21 +104,26 @@ fn crop_q3_avdd_enters_along_the_pad_axis() {
     assert!(l_off > 0.1, "pad_tip_anchor off: the side hook ({l_off} mm necked)");
 }
 
-/// B on the crop of the user's Q2 spot (U9 fan-out): CTS necks only through the choke beside the
-/// column (about 0.9 mm; 0.21 mm then 0.5-1.6 mm of room after it), not 4 mm to the terminal.
+/// B on the crop of the user's Q2 spot (U9 fan-out), as a guard: CTS necks at most through the
+/// choke beside the column (about 0.9 mm), never 4 mm to the terminal. The old failure (CTS
+/// necked 3.98 mm) shows in the plugin's flow on the crop board (reports/draw-via-neck-r2.md,
+/// Q2 PNGs), not in this one-call route of its model: here CTS keeps its width with every option
+/// off, so this test has no option-off half (r1's half passed only because the unguarded tip
+/// anchor of r1 took CTS's room; B's mutant is killed by the two pattern tests above).
 #[test]
 fn crop_q2_cts_necks_only_at_the_choke() {
     let r = route("dvn_crop_q2", &[]);
     assert_eq!(r.unrouted, 0);
     let (_, l) = necked(&r, "FPGA_UART1_CTS", 0.25, |_| true);
     assert!(l < 2.0, "CTS necked {l} mm");
-    let (_, l_off) = necked(&route("dvn_crop_q2", &off("neck_trim")), "FPGA_UART1_CTS", 0.25, |_| true);
-    assert!(l_off > 3.0, "neck_trim off: the plan's zone ({l_off} mm)");
 }
 
 /// A: the plan's via interval is a sliver pocket beside a pad column; the via goes into the free
 /// room below the column next to the expected site (9.0, 7.2), not 1 mm further along the wire
-/// (the first traversal with a legal site, today's pick without `via_shift_mm`).
+/// (the first traversal with a legal site, today's pick without `via_shift_mm`), and never past
+/// X (an offset site labelled with the interval's last traversal but lying beyond X's crossing:
+/// X then detoured round V's F.Cu stub, 20.19 mm total; `Drawer::via_side_ok_` tests the
+/// neighbouring triangles' chords for a site outside its own triangle).
 #[test]
 fn via_interval_sliver_shifts_into_the_pocket() {
     let d = |r: &Routed| r.vias.iter().map(|v| ((v.1 - 9.0).powi(2) + (v.2 - 7.2).powi(2)).sqrt()).fold(f64::INFINITY, f64::min);
