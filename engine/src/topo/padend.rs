@@ -183,3 +183,173 @@ pub(super) fn boundary_dist(p: Vec2, poly: &[Vec2]) -> f64 {
     (0..n).map(|i| super::draw::seg_dist(p, poly[i], poly[(i + 1) % n])).fold(f64::INFINITY, f64::min)
 }
 
+
+/// draw-via-neck C (`[drawing] pad_tip_anchor`): the long axis of a pad outline round `c`
+/// (direction of its longest edge), its half length along it and half width across it.
+pub(super) fn pad_axis(poly: &[Vec2], c: Vec2) -> Option<(Vec2, f64, f64)> {
+    let n = poly.len();
+    if n < 3 {
+        return None;
+    }
+    let e = (0..n).map(|i| poly[(i + 1) % n] - poly[i]).max_by(|a, b| a.len2().total_cmp(&b.len2()))?;
+    let l = e.len();
+    if l < 1.0 {
+        return None;
+    }
+    let d = e * (1.0 / l);
+    let nrm = Vec2 { x: -d.y, y: d.x };
+    let hl = poly.iter().map(|&p| (p - c).dot(d).abs()).fold(0.0, f64::max);
+    let hw = poly.iter().map(|&p| (p - c).dot(nrm).abs()).fold(0.0, f64::max);
+    Some((d, hl, hw))
+}
+
+impl Drawer<'_> {
+    /// draw-via-neck C (`[drawing] pad_tip_anchor`; TopoR 6.3 manual p. 71: a trace leaves a pad
+    /// along its axis): every ERBS run that ends in its own elongated pad through the pad's long
+    /// side (the band reached the centre through the pad's side triangle, the plan's spoke passes
+    /// of the pad itself) is re-anchored at the pad's tip: the band's points within reach of the
+    /// pad are replaced by the axis point `t` past the tip (`t` from one trace radius out, the
+    /// smallest that keeps every rule at the full width against the copper indexed so far: the
+    /// static board and the placed vias). Only where nothing of another net lies between the old
+    /// tail and the new one (the class is kept); else, or with no legal `t`, the run stays.
+    /// The octilinear stage's axis exit then applies (its previous node lies past the tip).
+    /// Returns the number of re-anchored ends. O(runs x 9 tries x checker query).
+    pub fn anchor_pad_tips(&mut self) -> usize {
+        let mut n_done = 0;
+        let wires: Vec<WireId> = self.erbs.keys().copied().collect();
+        for w in wires {
+            let runs = self.erbs[&w].clone();
+            let last = runs.len().saturating_sub(1);
+            let mut new_runs = runs.clone();
+            for (ri, rb) in runs.iter().enumerate() {
+                for end in [0usize, 1] {
+                    if (end == 0 && ri != 0) || (end == 1 && ri != last) || rb.path.len() < 2 {
+                        continue;
+                    }
+                    let cur = &new_runs[ri].path;
+                    if let Some(p) = self.tip_anchor_path(w, end, rb.layer, cur) {
+                        new_runs[ri].path = p;
+                        n_done += 1;
+                    }
+                }
+            }
+            self.erbs.insert(w, new_runs);
+        }
+        n_done
+    }
+
+    /// The re-anchored band of [`Drawer::anchor_pad_tips`] at end `end` of wire `w`, or `None`.
+    fn tip_anchor_path(&self, w: WireId, end: usize, layer: usize, path: &[Vec2]) -> Option<Vec<Vec2>> {
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        let ob = if end == 0 { wi.pa } else { wi.pb };
+        if ob == NO_OBS || ob >= pr.obstacles.len() {
+            return None;
+        }
+        let poly = &pr.obstacles[ob].poly;
+        // The band from the pad outwards.
+        let mut q: Vec<Vec2> = path.to_vec();
+        if end == 1 {
+            q.reverse();
+        }
+        let c = q[0];
+        if !point_in_poly(c, poly) {
+            return None;
+        }
+        let (d, hl, hw) = pad_axis(poly, pr.obstacles[ob].center)?;
+        if hl < 1.2 * hw {
+            return None;
+        }
+        let pc = pr.obstacles[ob].center;
+        // Where the band leaves the pad: through the tip end, nothing to do.
+        let j_out = q.iter().position(|&p| !point_in_poly(p, poly))?;
+        let (a, b) = (q[j_out - 1], q[j_out]);
+        let mut lo = 0.0f64;
+        let mut hi = 1.0f64;
+        for _ in 0..30 {
+            let m = 0.5 * (lo + hi);
+            if point_in_poly(a + (b - a) * m, poly) {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        let exit = a + (b - a) * lo;
+        let ax = (exit - pc).dot(d);
+        let dbg = std::env::var("TOPO_TIPDBG").is_ok();
+        if dbg {
+            eprintln!("TIPEND wire {w} end {end} pad ({:.3},{:.3}) exit ({:.3},{:.3}) axial {:.3} hl {:.3} hw {:.3}", pc.x / 1e6, -pc.y / 1e6, exit.x / 1e6, -exit.y / 1e6, ax / 1e6, hl / 1e6, hw / 1e6);
+        }
+        // Re-anchored when the band reaches the pad through its long side, or when it does not
+        // keep every rule at the full width (the hook round the tip's corner, necked by the
+        // neighbour pad): then the axis leg is tried.
+        // Or when the band's node next to the pad does not lie on the axis past the tip (a
+        // diagonal approach to the tip's corner: the octilinear axis exit needs that node).
+        let side = ax.abs() < hl - 0.5 * wi.w;
+        let nrm = Vec2 { x: -d.y, y: d.x };
+        let q1 = q[1];
+        let on_axis = (q1 - pc).dot(nrm).abs() <= 1000.0 && (q1 - pc).dot(d).abs() >= hl + 0.5 * wi.w;
+        if !side && on_axis {
+            return None;
+        }
+        // The tip the band heads for: the side of the axis where it goes on.
+        let far = q.iter().find(|&&p| poly_dist_out(p, poly) > wi.w + wi.s).copied().unwrap_or(q[q.len() - 1]);
+        let sg = (far - pc).dot(d);
+        if sg.abs() < 1.0 {
+            return None;
+        }
+        let u = d * sg.signum();
+        let pitch = wi.w + wi.s;
+        let mut tries: Vec<f64> = (0..9).map(|k| 0.5 * wi.w + k as f64 * pitch * 0.25).collect();
+        tries.sort_by(f64::total_cmp);
+        for t in tries {
+            let tp = pc + u * (hl + t);
+            let reach = t + 0.5 * wi.w + wi.s;
+            // The first band point beyond the pad's reach.
+            let Some(j) = q.iter().position(|&p| poly_dist_out(p, poly) > reach && (p - pc).dot(u) >= hl) else { continue };
+            let mut np: Vec<Vec2> = vec![c, tp];
+            np.extend_from_slice(&q[j..]);
+            // The swept area between the old and the new tail holds nothing of another net.
+            let mut ring: Vec<Vec2> = vec![c, tp];
+            ring.extend(q[1..=j].iter().rev().copied());
+            if self.foreign_inside(wi.net, layer, &ring) {
+                if dbg {
+                    eprintln!("TIPREJ wire {w} t {:.3}: foreign copper between", t / 1e6);
+                }
+                continue;
+            }
+            let pts: Vec<Vec2> = if end == 1 { np.iter().rev().copied().collect() } else { np.clone() };
+            let items = self.run_items(w, layer, &pts[..]);
+            if !self.checker.check_against(&self.idx, &items, &[]).violations.is_empty() || !self.track_own_pad_ok(w, &items) {
+                if dbg {
+                    eprintln!("TIPREJ wire {w} t {:.3}: rules", t / 1e6);
+                }
+                continue;
+            }
+            if std::env::var("TOPO_TIPDBG").is_ok() {
+                eprintln!("TIPANCHOR wire {w} end {end} pad ({:.3},{:.3}) exit axial {:.3} hl {:.3} t {:.3}", pc.x / 1e6, -pc.y / 1e6, ax / 1e6, hl / 1e6, t / 1e6);
+            }
+            return Some(pts);
+        }
+        None
+    }
+
+    /// An obstacle of another net (or of none) on `layer` has a point inside the polygon `ring`.
+    fn foreign_inside(&self, net: i32, layer: usize, ring: &[Vec2]) -> bool {
+        let bb = bbox_of(ring);
+        self.b.proj.obstacles.iter().any(|o| {
+            o.net != Some(net)
+                && (o.layers.has(layer) || o.drilled)
+                && std::iter::once(o.center).chain(o.poly.iter().copied()).any(|p| p.x >= bb.min.x && p.x <= bb.max.x && p.y >= bb.min.y && p.y <= bb.max.y && point_in_poly(p, ring))
+        })
+    }
+}
+
+/// Distance from `p` to the outline `poly` when outside it, 0 inside.
+fn poly_dist_out(p: Vec2, poly: &[Vec2]) -> f64 {
+    if point_in_poly(p, poly) {
+        0.0
+    } else {
+        super::draw::poly_dist(p, poly)
+    }
+}

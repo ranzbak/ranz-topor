@@ -2050,6 +2050,68 @@ impl<'a> Drawer<'a> {
         room
     }
 
+    /// draw-via-neck A (`[drawing] via_shift_mm`; TopoR 6.3 manual p. 179: vias shifted into free
+    /// room; Dayan & Dai 1991 UCSC-CRL-91-40 pp. 2-6): via sites for via `i` of wire `w` outside
+    /// its interval `ka..=kb`: the site points of the wire's traversals before and after the
+    /// interval whose triangles lie within the shift distance of the interval's taut chord, never
+    /// past a traversal where another net's wire crosses this one (the layer change keeps the
+    /// plan's class), nor before the previous via (`prev`) or into the next via's interval; and a
+    /// ring of 12 directions at 0.5, 1, 1.5 and 2 via diameters (up to the shift distance) round
+    /// the chord's middle, each in the traversal whose triangle holds it. O(traversals + 48 x
+    /// traversals).
+    #[allow(clippy::too_many_arguments)]
+    fn via_shift_sites(&self, w: WireId, plan: &Plan, i: usize, ka: usize, kb: usize, prev: Option<usize>, need_r: f64, dv: f64) -> Vec<(usize, Vec2)> {
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        let n = wi.tris.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let lim = self.opts.via_shift_mm * 1e6;
+        let chord: Vec<Vec2> = (ka..=kb.min(n - 1)).flat_map(|k| self.taut_chord(w, k)).collect();
+        if chord.is_empty() {
+            return Vec::new();
+        }
+        let dist = |p: Vec2| if chord.len() == 1 { (p - chord[0]).len() } else { chord.windows(2).map(|x| seg_dist(p, x[0], x[1])).fold(f64::INFINITY, f64::min) };
+        let centroid = |k: usize| pr.tris[wi.tris[k]].iter().fold(Vec2::default(), |a, &v| a + pr.pos[v]) * (1.0 / 3.0);
+        let crossed: Vec<usize> = st.crossings(w).iter().filter(|x| st.wires[x.other].net != wi.net).map(|x| x.k).collect();
+        let mut sa = ka;
+        while sa > 0 && prev.is_none_or(|p| sa - 1 >= p) && !crossed.contains(&(sa - 1)) && !crossed.contains(&sa) && dist(centroid(sa - 1)) <= lim {
+            sa -= 1;
+        }
+        let next = plan.vias.get(i + 1).map_or(n, |v| v.0);
+        let mut sb = kb.min(n - 1);
+        while sb + 1 < n && sb + 1 < next && !crossed.contains(&(sb + 1)) && !crossed.contains(&sb) && dist(centroid(sb + 1)) <= lim {
+            sb += 1;
+        }
+        let mut out: Vec<(usize, Vec2)> = Vec::new();
+        if sa < ka {
+            out.extend(self.via_candidates(w, sa, ka - 1, need_r, None));
+        }
+        if sb > kb {
+            out.extend(self.via_candidates(w, kb + 1, sb, need_r, None));
+        }
+        if std::env::var("TOPO_VIADBG").is_ok() {
+            eprintln!("VIASHIFT wire {w} via {i} ka {ka} kb {kb} -> sa {sa} sb {sb} prev {prev:?} next {next} crossed {:?}", crossed.iter().filter(|&&k| k + 6 >= ka && k <= kb + 6).collect::<Vec<_>>());
+        }
+        let mid = chord[chord.len() / 2];
+        let tri_of = |p: Vec2| (sa..=sb).find(|&k| super::state::point_in_poly(p, &pr.tris[wi.tris[k]].map(|v| pr.pos[v])));
+        for r in [0.5, 1.0, 1.5, 2.0] {
+            let rr = r * dv;
+            if rr > lim {
+                break;
+            }
+            for j in 0..12 {
+                let a = j as f64 * std::f64::consts::PI / 6.0;
+                let p = mid + Vec2 { x: rr * a.cos(), y: rr * a.sin() };
+                if let Some(k) = tri_of(p) {
+                    out.push((k, p));
+                }
+            }
+        }
+        out
+    }
+
     /// Place the vias of wire `w` (ids of the indexed items in `ids`), or the reason it cannot be.
     pub fn place_vias(&mut self, w: WireId, plan: &Plan, ids: &mut Vec<usize>) -> Result<Vec<(usize, Vec2, ViaSize)>, String> {
         let net = self.st.wires[w].net;
@@ -2187,6 +2249,14 @@ impl<'a> Drawer<'a> {
                     let (far, close): (Vec<_>, Vec<_>) = sites.into_iter().partition(|&(_, p)| !near(p));
                     sites = far.into_iter().chain(close).collect();
                 }
+                // draw-via-neck A (`[drawing] via_shift_mm`): sites out of the interval in free room
+                // (the wire's traversals before and after it up to the shift distance, never past a
+                // crossing of another net's wire, so the layer change keeps the plan's class) and a
+                // ring round the interval's taut chord; each priced by its shift below. They come
+                // after the interval's own sites.
+                if self.opts.via_shift_mm > 0.0 {
+                    sites.extend(self.via_shift_sites(w, plan, i, ka, kb.max(ka), out.last().map(|l| l.0), need_r, sz.d as f64));
+                }
                 // Of the valid sites (side test, clearance) in the first triangle that has one
                 // (the planned one first: the plan fixed which crossings lie on which side of
                 // the via, and its packing kept the disc's room there), the one that takes the
@@ -2199,13 +2269,20 @@ impl<'a> Drawer<'a> {
                 // the first triangle it is 47.
                 let mut best: Option<(f64, usize, Vec2)> = None;
                 let mut best_price = f64::INFINITY;
+                let mut best_jam = 0.0f64;
                 let dbg = std::env::var("TOPO_VIADBG").is_ok();
                 let (mut n_side, mut n_check) = (0usize, 0usize);
                 // In a traversal where the wire turns at a junction, only the junction itself:
                 // elsewhere in it the via could stand on the wrong side of the tee (D6b).
                 let turn_at = |k: usize| self.st.wires[w].turns.iter().find(|x| x.0 == k).map(|x| self.b.proj.pos[x.1]);
+                // draw-via-neck A: the first traversal with a legal site, and the plan's taut path
+                // through the interval (the shift price's origin).
+                let mut first_pick: Option<(usize, Vec2)> = None;
+                let chord: Vec<Vec2> = if self.opts.via_shift_mm > 0.0 { (ka..=kb.max(ka)).flat_map(|k| self.taut_chord(w, k)).collect() } else { Vec::new() };
                 for (k, p) in sites {
-                    if best.is_some_and(|b| b.1 != k) {
+                    // The first traversal with a legal site decides, unless that site takes
+                    // planned room (price > 0) and a shift may find a cheaper one (draw-via-neck A).
+                    if best.is_some_and(|b| b.1 != k) && (self.opts.via_shift_mm <= 0.0 || best_jam <= 1.0) {
                         break;
                     }
                     if turn_at(k).is_some_and(|q| (q - p).len() > 1.0) {
@@ -2240,12 +2317,29 @@ impl<'a> Drawer<'a> {
                         let squeeze = squeeze + self.octi.room * dv * (xm + xm * xm);
                         // 5.4 task 1: the via as its reach disc (the hole rule included).
                         let dr = 2.0 * crate::vias::via_reach(&self.model.rules, net, sz);
-                        let price = self.via_plan_price(w, ka, kb.max(ka), p, dr) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
+                        let plan_p = self.via_plan_price(w, ka, kb.max(ka), p, dr);
+                        // draw-via-neck A: what the site takes from its neighbours (their planned
+                        // room, its own squeeze): while the best site takes some, later traversals
+                        // and shifted sites still compete.
+                        let jam = plan_p + squeeze;
+                        let price = plan_p + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
                         // In the plan's class only; the reach's violations priced like the squeeze
                         // (one via diameter of squeeze per violation unit, graded).
                         let (in_class, reach) = self.via_reach_for_price(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
                         // `[vias] reach_price` (default off): the reach's violations priced too.
                         let price = price + self.reach_cost(reach, self.octi.room * dv);
+                        // draw-via-neck A: a site past the first traversal with a legal site (in
+                        // the interval or shifted out of it) pays its distance from the plan's
+                        // taut path through the interval, graded (half the squeeze price per via
+                        // diameter); it wins only by the room it gives back.
+                        let price = match first_pick {
+                            Some((k1, _)) if self.opts.via_shift_mm > 0.0 && k != k1 => {
+                                let sh = chord.windows(2).map(|x| seg_dist(p, x[0], x[1])).fold(f64::INFINITY, f64::min);
+                                let xs_ = if sh.is_finite() { sh / dv } else { 0.0 };
+                                price + 0.5 * self.octi.room * dv * (xs_ + xs_ * xs_)
+                            }
+                            _ => price,
+                        };
                         if dbg {
                             eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0} reach {reach:.2} in class {in_class}", p.x / 1e6, -p.y / 1e6, room, price);
                         }
@@ -2258,6 +2352,10 @@ impl<'a> Drawer<'a> {
                         if best.is_none_or(|b| price < best_price - 1.0 || (price <= best_price + 1.0 && room > b.0 + 1.0)) {
                             best = Some((room, k, p));
                             best_price = price;
+                            best_jam = jam;
+                            if first_pick.is_none_or(|f| f.0 == k) {
+                                first_pick = Some((k, p));
+                            }
                         }
                     }
                 }
@@ -3598,7 +3696,9 @@ impl<'a> Drawer<'a> {
                             CheckReport::default()
                         }
                         None => {
-                            items = self.neck_items(w, lid, &pts, pn, pn.min_w).0;
+                            // draw-via-neck B: necked at the floor only where that changes something.
+                            let nk = if self.opts.neck_trim { self.fit_neck(w, lid, &pts, pn, pn.min_w) } else { *pn };
+                            items = self.neck_items(w, lid, &pts, &nk, pn.min_w).0;
                             self.checker.check_against(&self.idx, &items, &[])
                         }
                     },
@@ -4038,6 +4138,17 @@ impl<'a> Drawer<'a> {
                                         items = its;
                                         zones = (tz, wn, ls);
                                     }
+                                }
+                            } else if self.opts.neck_trim {
+                                // draw-via-neck B: a forced run keeps its violations, but its neck
+                                // only where narrowing adds nothing to them (`fit_neck` against the
+                                // plan zones' count).
+                                let nk = self.fit_neck(w, lid, &pts, pn, wmin);
+                                let (its, ls) = self.neck_items(w, lid, &pts, &nk, wmin);
+                                let n_old = self.checker.check_against(&self.idx, &items, &[]).violations.len();
+                                if self.track_own_pad_ok(w, &its) && self.checker.check_against(&self.idx, &its, &[]).violations.len() <= n_old {
+                                    items = its;
+                                    zones = (nk, wmin, ls);
                                 }
                             }
                             let (z, wn, ls) = zones;
@@ -4690,8 +4801,95 @@ impl<'a> Drawer<'a> {
             }
         }
         let wn = lo.floor().max(neck.min_w);
-        let (items, lens) = self.neck_items(w, lid, pts, neck, wn);
+        let nk = if self.opts.neck_trim { self.fit_neck(w, lid, pts, neck, wn) } else { *neck };
+        let (items, lens) = self.neck_items(w, lid, pts, &nk, wn);
         Some((wn, items, lens))
+    }
+
+    /// draw-via-neck B (`[drawing] neck_trim`): the plan's neck zones of the run `pts` (necked to
+    /// `wn`) cut to where the room ends. Each zone first shrinks to the smallest radius the checker
+    /// accepts ([`Drawer::trim_neck`]; a zone over the whole wire is tried from either end, the
+    /// shorter neck wins); then, between that radius and the plan's, the radius of least price
+    /// `necked length + sum over the full-width part of (room price at full width - at wn)` is
+    /// taken, the room price being the planned room of the wires not drawn yet
+    /// ([`Drawer::via_plan_price`] per sample, over the wire's pitch): the neck reaches further
+    /// only where another trace needs that room (TopoR 6.3 manual p. 56, the minimum width only
+    /// where needed). Graded, no cutoff. O(zones x 14 checks of the run + zones x 65 x segments).
+    fn fit_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
+        let wi = &self.st.wires[w];
+        let ext = |c: Vec2| pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0;
+        let len_of = |n: &super::exact::Neck| self.neck_items(w, lid, pts, n, wn).1.iter().sum::<f64>();
+        // A zone over the whole wire: from the end where the shorter neck does.
+        let mut base = *neck;
+        if let Some(i) = neck.ends.iter().position(|z| z.is_some_and(|(_, r)| !r.is_finite())) {
+            let pr = &self.b.proj;
+            let mut best: Option<(f64, super::exact::Neck)> = None;
+            for c in [pr.pos[wi.a], pr.pos[wi.b]] {
+                let mut n = *neck;
+                n.ends[i] = Some((c, ext(c)));
+                let t = self.trim_neck(w, lid, pts, &n, wn);
+                let l = len_of(&t);
+                if best.as_ref().is_none_or(|b| l < b.0 - 1.0) {
+                    best = Some((l, n));
+                }
+            }
+            base = best.map_or(base, |b| b.1);
+        }
+        let mut nk = self.trim_neck(w, lid, pts, &base, wn);
+        let room = self.octi.room;
+        let nv = |n: &super::exact::Neck| self.checker.check_against(&self.idx, &self.neck_items(w, lid, pts, n, wn).0, &[]).violations.len();
+        let nv0 = nv(&nk);
+        let ok = |n: &super::exact::Neck| nv(n) <= nv0;
+        let last = wi.tris.len().saturating_sub(1);
+        let pitch = (wi.w + wi.s).max(1.0);
+        // Room price of the full width over the necked width at `q`, per nm of track.
+        let extra = |q: Vec2| ((self.via_plan_price(w, 0, last, q, wi.w) - self.via_plan_price(w, 0, last, q, wn)) / pitch).max(0.0);
+        for i in 0..super::exact::NECK_ZONES {
+            let (Some((c, r1)), Some((_, r0))) = (base.ends[i], nk.ends[i]) else { continue };
+            let r1 = if r1.is_finite() { r1 } else { ext(c) };
+            if room <= 0.0 || r1 <= r0 + 1.0 {
+                continue;
+            }
+            // Samples of the run between the trimmed and the plan's circle (50 um apart).
+            let mut samples: Vec<(f64, f64)> = Vec::new(); // (distance to c, price x length)
+            for s in pts.windows(2) {
+                let l = (s[1] - s[0]).len();
+                let n = ((l / 5.0e4).ceil() as usize).max(1);
+                for j in 0..n {
+                    let q = s[0] + (s[1] - s[0]) * ((j as f64 + 0.5) / n as f64);
+                    let d = (q - c).len();
+                    if d > r0 && d <= r1 {
+                        samples.push((d, extra(q) * l / n as f64));
+                    }
+                }
+            }
+            if samples.iter().all(|s| s.1 <= 0.0) {
+                continue;
+            }
+            let mut pick = (f64::INFINITY, r0);
+            // Radii 25 um apart (at most 64 steps): only lengths, no checker.
+            let steps = (((r1 - r0) / 2.5e4).ceil() as usize).clamp(1, 64);
+            for j in 0..=steps {
+                let r = r0 + (r1 - r0) * j as f64 / steps as f64;
+                let mut n = nk;
+                n.ends[i] = Some((c, r));
+                let necked = self.neck_items(w, lid, pts, &n, wn).1[i];
+                let full: f64 = samples.iter().filter(|s| s.0 > r).map(|s| s.1).sum();
+                let price = necked + room * full;
+                if price < pick.0 - 1.0 {
+                    pick = (price, r);
+                }
+            }
+            let mut n = nk;
+            n.ends[i] = Some((c, pick.1));
+            if pick.1 > r0 && ok(&n) {
+                nk = n;
+            }
+        }
+        if std::env::var("TOPO_NECKDBG").is_ok() {
+            eprintln!("NECKFIT wire {w} wn {wn:.0} plan {:?} fit {:?}", neck.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), nk.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>());
+        }
+        nk
     }
 
     /// `neck` with each zone shrunk to the smallest radius at which the run `pts` necked to `wn`
@@ -4701,10 +4899,11 @@ impl<'a> Drawer<'a> {
     /// bottleneck. O(zones x 13 checks of the run).
     fn trim_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
         let mut nk = *neck;
-        let ok = |n: &super::exact::Neck| {
-            let its = self.neck_items(w, lid, pts, n, wn).0;
-            self.checker.check_against(&self.idx, &its, &[]).violations.is_empty()
-        };
+        // No more violations than with the plan's zones (none for a legal run; a run that keeps
+        // some elsewhere, e.g. a forced one, is still trimmed where the neck adds nothing).
+        let nv = |n: &super::exact::Neck| self.checker.check_against(&self.idx, &self.neck_items(w, lid, pts, n, wn).0, &[]).violations.len();
+        let base = nv(neck);
+        let ok = |n: &super::exact::Neck| nv(n) <= base;
         for i in 0..super::exact::NECK_ZONES {
             let Some((c, r)) = nk.ends[i] else { continue };
             let r = if r.is_finite() { r } else { pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0 };

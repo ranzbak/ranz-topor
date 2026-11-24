@@ -1616,6 +1616,21 @@ pub struct Options {
     /// vertex goes where the straight leg keeps every rule and the side of every wire not drawn
     /// yet; `draw::Drawer::pull_taut`).
     pub draw_pull_taut: bool,
+    /// draw-via-neck A (`[drawing] via_shift_mm`): how far (mm) the drawing may move a via out of
+    /// the plan's via interval into free room (sites in the wire's traversals up to this far from
+    /// the interval, and rings round the interval's best site), priced by the shift
+    /// (`room x dv x 0.5 (x + x^2)`, x = shift / via diameter) against the planned room of the
+    /// wires not drawn yet; 0 = only the interval (the behaviour before). TopoR 6.3 manual p. 179.
+    pub via_shift_mm: f64,
+    /// draw-via-neck B (`[drawing] neck_trim`): every run the plan necks is necked only where the
+    /// room ends: each neck zone shrinks to the stretch the checker needs, and grows back only
+    /// where the full width would take a wire's planned room (graded price). false = the plan's
+    /// zones as they are.
+    pub neck_trim: bool,
+    /// draw-via-neck C (`[drawing] pad_tip_anchor`): a run that ends at its own elongated pad
+    /// through the pad's side is drawn into the pad along its axis from the tip (TopoR 6.3 manual
+    /// p. 71) where only own copper lies between. false = the run's own end as it is.
+    pub pad_tip_anchor: bool,
     /// M3, TW2 (`[drawing] realise`): how the drawing realises the plan's topology. `"erbs"`
     /// (default since TW2; every run as its extended rubber band from the plan's spoke tips and
     /// stack radii, `topo::erbs`; all bands checked together and the kept ones committed before
@@ -2068,6 +2083,9 @@ impl Default for Options {
             short_leg_mm: 2.0,
             octi_room: true,
             draw_pull_taut: true,
+            via_shift_mm: 1.0,
+            neck_trim: true,
+            pad_tip_anchor: true,
             realise: "erbs".into(),
             erbs_conflict_keep: "tier".into(),
             octi_order: "sweep".into(),
