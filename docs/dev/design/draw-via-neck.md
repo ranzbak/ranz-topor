@@ -130,3 +130,13 @@ Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals 
   the floor (lead (b)). Also for a forced run at the floor. Fixture `neck_edge_terminal` (neck_in_pad_row with its
   terminal 0.15 mm from the board edge, edge clearance 0.5): 0.3 at the row instead of the 0.25 floor, the edge
   violation the only one.
+- Attribution of r3's same-row qmtech regressions (det s0, plan row "run 3 cycle 11", pick 8184.1 in every arm; arms
+  noA = via_shift_mm 0, noB = neck_trim false, noC = pad_tip_anchor false, each vs the 06eb6450 tip): B changes 2
+  connections (JS1_4 4 -> 5, FPGA_UART1_RX 3 -> 2), C 3 (JS1_9 2 -> 1, JS1_4, ADV_HPD_C length only), A 32. ADV_SCL,
+  /rtc-spi/vbat, JS2_6, JS_INTB_5V, JS1_4 and MAX_LRCLK all come with A's via moves: JS1_9 1.37 mm, SDRAM_A2 1.5 mm and
+  vbat 0.84 mm along their paths (the shift price measured the distance from the plan's taut path, so a site far along
+  the path was free), and ADV_SDA 0.14 mm onto ADV_SCL's planned via site (forced, 3 -> 5).
+- Generic fixes (A): a site past the first traversal with a legal site is at most `via_shift_mm` from the plan's site
+  (free, missed or tight; else the first legal site) and pays its distance from it, graded; and `via_site_price` prices
+  the planned via sites of the other nets' wires not drawn yet (reach discs plus clearance, the `planned_room` form), as
+  `via_plan_price` prices their corridors.

@@ -1945,6 +1945,31 @@ impl<'a> Drawer<'a> {
     /// points, vias included §7; §8 p. 6: a non-linear force function bounds a quantity without
     /// a hard limit). O(traversals of the interval's triangles x turns).
     pub fn via_plan_price(&self, w: WireId, k0: usize, k1: usize, p: Vec2, d: f64) -> f64 {
+        let wi = &self.st.wires[w];
+        let tris: Vec<TriId> = (k0..=k1.min(wi.tris.len().saturating_sub(1))).map(|k| wi.tris[k]).collect();
+        self.via_plan_price_in(w, &tris, p, d)
+    }
+
+    /// draw-via-neck A (r4, `[drawing] via_shift_mm` > 0): [`Drawer::via_plan_price`] over the
+    /// interval's triangles and every triangle sharing a vertex with the site's own (traversal
+    /// `k`): a site near its triangle's side reaches into the corridors of wires that pass the
+    /// next triangles, outside the interval (qmtech: SDRAM_A2's via shifted 1 mm onto
+    /// SDRAM_A1's corridor next to its interval; the price saw nothing). O((interval + ring
+    /// triangles) x traversals).
+    fn via_plan_price_near(&self, w: WireId, k0: usize, k1: usize, k: usize, p: Vec2, d: f64) -> f64 {
+        let pr = &self.b.proj;
+        let wi = &self.st.wires[w];
+        let n = wi.tris.len();
+        let mut tris: Vec<TriId> = (k0..=k1.min(n.saturating_sub(1))).map(|j| wi.tris[j]).collect();
+        if let Some(&t) = wi.tris.get(k) {
+            tris.extend(pr.tris[t].iter().flat_map(|&v| pr.vert_tris[v].iter().copied()));
+        }
+        tris.sort_unstable();
+        tris.dedup();
+        self.via_plan_price_in(w, &tris, p, d)
+    }
+
+    fn via_plan_price_in(&self, w: WireId, tris: &[TriId], p: Vec2, d: f64) -> f64 {
         let room = self.octi.room;
         if room <= 0.0 {
             return 0.0;
@@ -1953,8 +1978,8 @@ impl<'a> Drawer<'a> {
         let wi = &st.wires[w];
         let mut seen: Vec<(WireId, usize)> = Vec::new();
         let mut tot = 0.0;
-        for k in k0..=k1.min(wi.tris.len().saturating_sub(1)) {
-            for &(o, ok) in &st.tri_trav[wi.tris[k]] {
+        for &t in tris {
+            for &(o, ok) in &st.tri_trav[t] {
                 let oi = &st.wires[o];
                 if o == w || !oi.alive || oi.net == wi.net || self.drawn_once[o] || seen.contains(&(o, ok)) {
                     continue;
@@ -2336,7 +2361,7 @@ impl<'a> Drawer<'a> {
                         let squeeze = squeeze + self.octi.room * dv * (xm + xm * xm);
                         // 5.4 task 1: the via as its reach disc (the hole rule included).
                         let dr = 2.0 * crate::vias::via_reach(&self.model.rules, net, sz);
-                        let plan_p = self.via_plan_price(w, ka, kb.max(ka), p, dr) + if self.opts.via_shift_mm > 0.0 { self.via_site_price(w, p, dr) } else { 0.0 };
+                        let plan_p = if self.opts.via_shift_mm > 0.0 { self.via_plan_price_near(w, ka, kb.max(ka), k, p, dr) + self.via_site_price(w, p, dr) } else { self.via_plan_price(w, ka, kb.max(ka), p, dr) };
                         // draw-via-neck A: what the site takes from its neighbours (their planned
                         // room, its own squeeze): while the best site takes some, later traversals
                         // and shifted sites still compete.
