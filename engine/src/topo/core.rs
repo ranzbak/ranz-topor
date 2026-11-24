@@ -8428,13 +8428,6 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
                     ctl.test_point(&format!("erbs draw order {}", names.join(",")));
                 }
                 dr.erbs = r.runs;
-                // draw-via-neck C: runs that reach their own elongated pad through its side end at its tip.
-                if opts.pad_tip_anchor {
-                    let n = dr.anchor_pad_tips();
-                    if n > 0 && std::env::var("TOPO_TIPDBG").is_ok() {
-                        eprintln!("TIPANCHOR {n} pad ends re-anchored at the pad tip");
-                    }
-                }
                 dr.test_no_sequential = ctl.test_point("no sequential run");
                 dr.test_no_class_keep = ctl.test_point("erbs class keep off");
                 dr.test_straight_seq = ctl.test_point("straight sequential run");

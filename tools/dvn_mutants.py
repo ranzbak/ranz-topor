@@ -2,7 +2,7 @@
 engine/; the targeted release tests run against it; killed = a test fails. Run on the VM (one tree, one target dir per
 call, mutants one after another so the build is incremental).
 
-usage: python3 tools/dvn_mutants.py OUT_DIR GROUP     (GROUP: a | bc | all; results OUT_DIR/mutants-GROUP.json)"""
+usage: python3 tools/dvn_mutants.py OUT_DIR GROUP     (GROUP: a | bc | c3 | all; results OUT_DIR/mutants-GROUP.json)"""
 import json
 import os
 import shutil
@@ -34,9 +34,9 @@ MUTANTS = {
          "        if wn >= 0.0 { return *neck; }\n        let wi = &self.st.wires[w];\n        let ext = |c: Vec2|"),
         ("B2 no room growth (trim only)", D,
          "if room <= 0.0 || r1 <= r0 + 1.0 {", "if room <= 0.0 || r1 <= r0 + 1.0 || room > 0.0 {"),
-        ("C1 anchor off", P,
-         "        let mut n_done = 0;\n        let wires: Vec<WireId> = self.erbs.keys().copied().collect();",
-         "        let mut n_done = 0;\n        let wires: Vec<WireId> = Vec::new();"),
+        ("C1 anchor off (r3: at draw time)", D,
+         "Some(b) if self.opts.pad_tip_anchor && b.len() >= 2 && (r == 0 || r == plan.layers.len() - 1) => {",
+         "Some(b) if false && self.opts.pad_tip_anchor && b.len() >= 2 && (r == 0 || r == plan.layers.len() - 1) => {"),
         ("C2 band guard off", P,
          "            if let Some(why) = self.band_in_way(w, layer, &ring, &[c, tp, q[j]], &q[..=j]) {",
          "            if let Some(why) = None::<WireId> {"),
@@ -44,6 +44,15 @@ MUTANTS = {
          "if inside || cross || dn < need.min(dmin(p, old)) - 1.0 {", "if inside || cross || (dn < 0.0 && need > dmin(p, old)) {"),
         ("C4 side entries only (no off-axis trigger)", P,
          "        if !side && on_axis {", "        if !side {"),
+        ("C5 r3: no drawn-copper ring test", P,
+         "if self.foreign_inside(wi.net, layer, &ring) || self.drawn_inside(wi.net, layer, &ring) {",
+         "if self.foreign_inside(wi.net, layer, &ring) {"),
+        ("C6 r3: band guard reads every band (drawn and reserved too)", P,
+         "for rb in runs.iter().filter(|r| r.layer == layer && r.path.len() >= 2 && !reserved(r)) {",
+         "for rb in runs.iter().filter(|r| r.layer == layer && r.path.len() >= 2 && (true || !reserved(r))) {"),
+        ("C7 r3: the old tail's reservation kept (adopted at attempt -1)", D,
+         "                        for h in res.take().map(|x| x.handles).into_iter().flatten() {\n                            self.uncommit(h);\n                        }\n                        self.stats.tip_anchored += 1;",
+         "                        self.stats.tip_anchored += 1;"),
     ],
 }
 
@@ -58,7 +67,7 @@ def main():
         shutil.rmtree(tree)
     shutil.copytree(ROOT / "engine", tree, ignore=shutil.ignore_patterns("target"))
     env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS=os.environ.get("RAYON_NUM_THREADS", "4"), RUST_TEST_THREADS="4")
-    muts = MUTANTS["a"] + MUTANTS["bc"] if group == "all" else MUTANTS[group]
+    muts = MUTANTS["a"] + MUTANTS["bc"] if group == "all" else [m for m in MUTANTS["bc"] if m[0].startswith(("C1", "C5", "C6", "C7"))] if group == "c3" else MUTANTS[group]
     res = []
     for name, f, old, new in muts:
         src = (ROOT / "engine" / f).read_text()

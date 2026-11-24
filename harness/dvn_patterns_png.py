@@ -55,8 +55,11 @@ def _reach(pat, segs, vias) -> dict:
     nominal = {"PWR": 0.5}
     thin = [(net, w, p) for _, net, w, p in segs if w < nominal.get(net, 0.25) - 1e-4]
     out["thin"] = [[net, round(w, 3), [[round(x, 3), round(y, 3)] for x, y in p]] for net, w, p in thin]
-    if pat.name in ("via_jam_shift", "via_interval_sliver"):
+    if pat.name in ("via_jam_shift", "via_interval_sliver", "via_outside_full_interval"):
         ok = ok and not thin
+    if "via_x_range" in e:
+        lo, hi = e["via_x_range"]
+        ok = ok and all(lo - 0.02 <= v[0] <= hi + 0.02 for v in vias)
     if "neck_to_y" in e:
         ys = [y for net, _, p in thin if net == "PWR" for _, y in p]
         out["neck_to_y"] = round(max(ys), 3) if ys else None
@@ -102,11 +105,17 @@ def main(argv: list[str] | None = None) -> int:
         ax = list(ax) if n > 1 else [ax]
         _panel(ax[0], pat, ref_segs, ref_vias, "expected", view)
         _marks(ax[0], pat)
+        # RUNS/labels.json (optional): {cfg dir: panel label}; else today's tw-on label.
+        try:
+            labels = json.load(open(runs / "labels.json"))
+        except (OSError, ValueError):
+            labels = {}
         for k, (c, (r, segs, vias)) in enumerate(sorted(rows.items()), start=1):
-            _panel(ax[k], pat, segs, vias, f"today (tw-on c7f8bc8f, defaults): DRC new {r.get('drc_new', '?')}, unconnected "
+            lab = labels.get(c, "today (tw-on c7f8bc8f, defaults)")
+            _panel(ax[k], pat, segs, vias, f"{lab}: DRC new {r.get('drc_new', '?')}, unconnected "
                                          f"{r.get('unconnected', '?')}; matches expected: {'yes' if r['matches_expected'] else 'no'}", view)
             _marks(ax[k], pat)
-        fig.suptitle(f"{name}: {pat.title}\n[{STATUS.get(name, 'PROPOSED (awaiting approval)')}]{'  B.Cu closed.' if full else ''}  x = jammed via site (today on qmtech Q2); dotted = rule area; dashed = row tip; 'matches expected' = see expected.json", fontsize=11)
+        fig.suptitle(f"{name}: {pat.title}\n[{STATUS.get(name, 'PROPOSED (awaiting approval)')}]{'  B.Cu closed.' if full else ''}  x = marked via site (via_jam_shift: the jam of qmtech Q2; via_outside_full_interval: the free site past the layer event); dotted = rule area; dashed = row tip; 'matches expected' = see expected.json", fontsize=11)
         fig.tight_layout()
         fig.savefig(out / f"{name}.png", dpi=110)
         plt.close(fig)

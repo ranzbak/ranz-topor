@@ -205,41 +205,20 @@ pub(super) fn pad_axis(poly: &[Vec2], c: Vec2) -> Option<(Vec2, f64, f64)> {
 
 impl Drawer<'_> {
     /// draw-via-neck C (`[drawing] pad_tip_anchor`; TopoR 6.3 manual p. 71: a trace leaves a pad
-    /// along its axis): every ERBS run that ends in its own elongated pad through the pad's long
-    /// side (the band reached the centre through the pad's side triangle, the plan's spoke passes
-    /// of the pad itself) is re-anchored at the pad's tip: the band's points within reach of the
-    /// pad are replaced by the axis point `t` past the tip (`t` from one trace radius out, the
-    /// smallest that keeps every rule at the full width against the copper indexed so far: the
-    /// static board and the placed vias). Only where nothing of another net lies between the old
-    /// tail and the new one (the class is kept); else, or with no legal `t`, the run stays.
-    /// The octilinear stage's axis exit then applies (its previous node lies past the tip).
-    /// Returns the number of re-anchored ends. O(runs x 9 tries x checker query).
-    pub fn anchor_pad_tips(&mut self) -> usize {
-        let mut n_done = 0;
-        let wires: Vec<WireId> = self.erbs.keys().copied().collect();
-        for w in wires {
-            let runs = self.erbs[&w].clone();
-            let last = runs.len().saturating_sub(1);
-            let mut new_runs = runs.clone();
-            for (ri, rb) in runs.iter().enumerate() {
-                for end in [0usize, 1] {
-                    if (end == 0 && ri != 0) || (end == 1 && ri != last) || rb.path.len() < 2 {
-                        continue;
-                    }
-                    let cur = &new_runs[ri].path;
-                    if let Some(p) = self.tip_anchor_path(w, end, rb.layer, cur) {
-                        new_runs[ri].path = p;
-                        n_done += 1;
-                    }
-                }
-            }
-            self.erbs.insert(w, new_runs);
-        }
-        n_done
-    }
-
-    /// The re-anchored band of [`Drawer::anchor_pad_tips`] at end `end` of wire `w`, or `None`.
-    fn tip_anchor_path(&self, w: WireId, end: usize, layer: usize, path: &[Vec2]) -> Option<Vec<Vec2>> {
+    /// along its axis): the band `path` of a run of wire `w` on `layer` that ends (`end` 0: at
+    /// its start, 1: at its end) in its own elongated pad through the pad's long side (or whose
+    /// node next to the pad is off the axis past the tip) re-anchored at the pad's tip: the band's
+    /// points within reach of the pad are replaced by the axis point `t` past the tip (`t` from
+    /// one trace radius out, the smallest that keeps every rule at the full width). r3: decided
+    /// when the run is drawn ([`Drawer::draw_wire`], attempt -1), against the copper in the index
+    /// then: the wires drawn before it as drawn (their octilinear shapes) and the reserved bands
+    /// of the joint commit as committed; `skip` = the index ids of the run's own reserved copper
+    /// (the old tail). Only where nothing of another net lies between the old tail and the new
+    /// one (static copper, drawn or reserved copper, and the bands of the wires whose copper is
+    /// not in the index yet: the class is kept); else, or with no legal `t`, `None` (the run
+    /// stays). The octilinear stage's axis exit then applies (its previous node lies past the
+    /// tip). O(9 tries x (checker query + live objects + bands)).
+    pub(super) fn tip_anchor_path(&self, w: WireId, end: usize, layer: usize, path: &[Vec2], skip: &[usize]) -> Option<Vec<Vec2>> {
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let ob = if end == 0 { wi.pa } else { wi.pb };
@@ -312,7 +291,7 @@ impl Drawer<'_> {
             // The swept area between the old and the new tail holds nothing of another net.
             let mut ring: Vec<Vec2> = vec![c, tp];
             ring.extend(q[1..=j].iter().rev().copied());
-            if self.foreign_inside(wi.net, layer, &ring) {
+            if self.foreign_inside(wi.net, layer, &ring) || self.drawn_inside(wi.net, layer, &ring) {
                 if dbg {
                     eprintln!("TIPREJ wire {w} t {:.3}: foreign copper between", t / 1e6);
                 }
@@ -329,7 +308,7 @@ impl Drawer<'_> {
             }
             let pts: Vec<Vec2> = if end == 1 { np.iter().rev().copied().collect() } else { np.clone() };
             let items = self.run_items(w, layer, &pts[..]);
-            if !self.checker.check_against(&self.idx, &items, &[]).violations.is_empty() || !self.track_own_pad_ok(w, &items) {
+            if !self.checker.check_against(&self.idx, &items, skip).violations.is_empty() || !self.track_own_pad_ok(w, &items) {
                 if dbg {
                     eprintln!("TIPREJ wire {w} t {:.3}: rules", t / 1e6);
                 }
@@ -345,7 +324,10 @@ impl Drawer<'_> {
 
     /// The first wire of another net whose ERBS band on `layer` has a point inside `ring`, crosses
     /// the polyline `new`, or comes closer to `new` than its pitch (half the two widths plus the
-    /// larger clearance) and than to the polyline `old`; `None` when no band is in the way.
+    /// larger clearance) and than to the polyline `old`; `None` when no band is in the way. r3:
+    /// only the bands whose copper is not in the index (wire not drawn yet, run not reserved by
+    /// the joint commit): a drawn or reserved run is judged by its copper (the checker,
+    /// [`Drawer::drawn_inside`]), as the drawing made it (an octilinear shape leaves its band).
     /// O(bands x segments).
     fn band_in_way(&self, w: WireId, layer: usize, ring: &[Vec2], new: &[Vec2], old: &[Vec2]) -> Option<WireId> {
         let st = self.st;
@@ -354,11 +336,12 @@ impl Drawer<'_> {
         let dmin = |a: &[Vec2], b: &[Vec2]| a.windows(2).flat_map(|x| b.windows(2).map(move |y| super::draw::seg_seg_dist(x[0], x[1], y[0], y[1]))).fold(f64::INFINITY, f64::min);
         for (&ow, runs) in &self.erbs {
             let wo = &st.wires[ow];
-            if ow == w || wo.net == wi.net {
+            if ow == w || wo.net == wi.net || self.drawn_once.get(ow).copied().unwrap_or(false) {
                 continue;
             }
             let need = 0.5 * (wi.w + wo.w) + wi.s.max(wo.s);
-            for rb in runs.iter().filter(|r| r.layer == layer && r.path.len() >= 2) {
+            let reserved = |rb: &super::erbs::RunBand| self.joint.reserved.range((ow, 0)..=(ow, usize::MAX)).any(|(_, r)| r.pts.first().is_some_and(|p| (*p - rb.path[0]).len() < 1_000.0));
+            for rb in runs.iter().filter(|r| r.layer == layer && r.path.len() >= 2 && !reserved(r)) {
                 let p = &rb.path;
                 let inside = p.iter().any(|&x| x.x >= bb.min.x && x.x <= bb.max.x && x.y >= bb.min.y && x.y <= bb.max.y && point_in_poly(x, ring));
                 let cross = p.windows(2).any(|a| new.windows(2).any(|b| super::draw::seg_cross_sos(a[0], a[1], b[0], b[1])));
@@ -369,6 +352,25 @@ impl Drawer<'_> {
             }
         }
         None
+    }
+
+    /// Copper in the index of another net (drawn or reserved tracks and vias: the drawer's live
+    /// dynamic objects) on `layer` has a point inside the polygon `ring` (a segment: an end or
+    /// its middle; the checker sees the rest where it comes near the new tail). O(live objects).
+    fn drawn_inside(&self, net: i32, layer: usize, ring: &[Vec2]) -> bool {
+        let bb = bbox_of(ring);
+        let bit = 1u64.checked_shl(layer as u32).unwrap_or(0);
+        let inside = |p: Vec2| p.x >= bb.min.x && p.x <= bb.max.x && p.y >= bb.min.y && p.y <= bb.max.y && point_in_poly(p, ring);
+        self.ents[self.n_static..].iter().any(|e| {
+            e.live
+                && e.net != Some(net)
+                && e.mask & bit != 0
+                && match &e.core {
+                    super::draw::Core::Seg(a, b) => inside(*a) || inside(*b) || inside((*a + *b) * 0.5),
+                    super::draw::Core::Pt(c) => inside(*c),
+                    super::draw::Core::Poly(p) => p.iter().any(|&q| inside(q)),
+                }
+        })
     }
 
     /// An obstacle of another net (or of none) on `layer` has a point inside the polygon `ring`.

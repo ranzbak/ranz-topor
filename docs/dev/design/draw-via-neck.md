@@ -93,3 +93,28 @@ Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals 
   a site inside keeps today's one-triangle test. The pocket site (9.095, 7.329) wins: 18.43 mm (ref 18.24, base 18.90),
   and topo_vias54 keeps its equal-clearance vias with the same graded shift price.
 - `via_shift_passes` stays unimplemented (it needs the place_vias loop to re-price placed vias).
+
+**r3 (2026-11-24, lead brief: C's guard must see the drawn copper).**
+- C is decided when the run is drawn (`Drawer::draw_wire_runs`, before attempt -1), not before the joint commit: the
+  index then holds the wires drawn before it as drawn (their octilinear shapes) and every other kept band as the joint
+  commit reserved it. The anchored tail is checked against that index (the run's own reserved copper skipped); the run's
+  reservation goes and the anchored band is checked like any attempt -1. `drawn_inside` refuses a tail whose swept area
+  holds drawn/reserved copper of another net; `band_in_way` reads only the bands whose copper is not in the index (not
+  drawn, not reserved). Why: r2 anchored before the joint commit from the bands alone, so the joint commit saw other
+  bands than the plan's (the forms it commits are not only static: the octilinear rescue `band_octi` prices the other
+  wires' bands as corridors). On esp, IO8_SCL (wire 84) then lost its reserved band to a new joint gap conflict with
+  wire 77 (0.11 mm at (152.56, 89.53); result.json erbs gap_kept_list, absent with C off) and was drawn by the ladder
+  (forced: 2 clearance errors at R1.2 and a +3V3 via). r3 on esp: drc_new 22 = base, IO8_SCL = base copper.
+- Q3 crop terminal (ADV_AVDD 0.09 where KiCad accepts 0.27 on the same path, checked by widening it: 0.27 DRC-clean,
+  0.28 hits R7.1): a crop artefact plus a B gap. The terminal XT4.1 lies 0.14 mm from the crop's board edge; the board
+  has copper-to-edge 0, so the engine keeps 0.254 there (`[rules] edge_clearance_zero`, finding EDGE_CLEARANCE_ZERO;
+  KiCad checks 0). The run's first segment breaks that at every width, so `plan_neck_run` finds no legal width
+  (`ok(min_w)` false) and the fallback necks the whole fitted zone to the floor. Generic gap (not fixed): with an
+  unavoidable violation the width should be the widest that adds none (graded by deficit, not count).
+- qmtech's U6 cluster (JS1_2/3/4/9, 26) is not C: C off gives the same cluster (25 of 416 connections differ, none
+  of JS1_*). Both branch runs picked the TopoR loop's row "run 3 cycle 12" (12 loop iterations under the CPU limit); the
+  base picked "run 2 cycle 8" (10 iterations). The cluster comes with that plan row (limit class), not with the drawing.
+- A, outside the interval: a via interval runs between two layer events of the plan (`layers.rs` events: a crossing, an
+  SMD pad, a triangle with one allowed layer, a gap that fits one layer). A site outside it puts the run on the wrong
+  layer at the bounding event: a crossing (excluded by `via_shift_sites`), a rule area or a too narrow gap (not excluded).
+  So no correct layout needs a site outside the interval; the proposed guard `via_outside_full_interval` pins that.

@@ -646,6 +646,8 @@ pub type ClassCrossings = std::collections::BTreeSet<(usize, i32, i32)>;
 pub struct DrawStats {
     /// Runs accepted from the exact taut path.
     pub exact_ok: usize,
+    /// draw-via-neck C: runs re-anchored at their pad's tip when drawn (`[drawing] pad_tip_anchor`).
+    pub tip_anchored: usize,
     /// Attempts where the exact search found no path (or hit its cap).
     pub exact_none: usize,
     /// Runs accepted only by S2a's funnel + repair fallback.
@@ -2254,7 +2256,9 @@ impl<'a> Drawer<'a> {
                 // crossing of another net's wire, so the layer change keeps the plan's class) and a
                 // ring round the interval's taut chord; each priced by its shift below. They come
                 // after the interval's own sites.
-                if self.opts.via_shift_mm > 0.0 {
+                // Debug arm `TOPO_FD45_OFF=dvn_shift_sites` (proposed pattern via_outside_full_interval):
+                // the interval's own sites only, the rest of A kept.
+                if self.opts.via_shift_mm > 0.0 && !super::octi::fd45_off("dvn_shift_sites") {
                     sites.extend(self.via_shift_sites(w, plan, i, ka, kb.max(ka), out.last().map(|l| l.0), need_r, sz.d as f64));
                 }
                 // Of the valid sites (side test, clearance) in the first triangle that has one
@@ -3598,6 +3602,44 @@ impl<'a> Drawer<'a> {
             for h in res.iter().flat_map(|x| &x.handles) {
                 self.joint.owner.remove(h);
             }
+            // draw-via-neck C (`[drawing] pad_tip_anchor`, r3): a band that reaches its own
+            // elongated pad through the pad's side is re-anchored at the tip here, when the run
+            // is drawn: the wires drawn before it are in the index as drawn (their octilinear
+            // shapes, which leave their bands), the others as the joint commit reserved them, so
+            // the anchor takes no room their copper holds (r2 decided it before the joint commit
+            // from the bands alone: esp IO8_SCL lost its reserved band). The run's reservation
+            // (the old tail) goes; the anchored band is then checked like any attempt -1.
+            let band = match band {
+                Some(b) if self.opts.pad_tip_anchor && b.len() >= 2 && (r == 0 || r == plan.layers.len() - 1) => {
+                    let mut skip: Vec<usize> = res.iter().flat_map(|x| &x.handles).map(|&h| self.handles[h].0).collect();
+                    skip.sort_unstable();
+                    let mut p = b.clone();
+                    let mut moved = false;
+                    for end in [0usize, 1] {
+                        if (end == 0 && r != 0) || (end == 1 && r != plan.layers.len() - 1) {
+                            continue;
+                        }
+                        if let Some(np) = self.tip_anchor_path(w, end, layer, &p, &skip) {
+                            p = np;
+                            moved = true;
+                        }
+                    }
+                    if moved {
+                        for h in res.take().map(|x| x.handles).into_iter().flatten() {
+                            self.uncommit(h);
+                        }
+                        self.stats.tip_anchored += 1;
+                        // The wires drawn after it read its band (corridors, class test) as drawn.
+                        if let Some(rb) = self.erbs.get_mut(&w).and_then(|v| v.iter_mut().find(|b| b.layer == layer && (b.s - s).len() < 1000.0 && (b.e - e).len() < 1000.0)) {
+                            rb.path = p.clone();
+                        }
+                        Some(p)
+                    } else {
+                        Some(b)
+                    }
+                }
+                other => other,
+            };
             let mut adopt: Option<Vec<usize>> = None;
             let (mut erbs_octi, mut octi_vs_band) = (false, false);
             let cut = self.cut_class(w, r, band.is_some());
@@ -4864,6 +4906,10 @@ impl<'a> Drawer<'a> {
             let (Some((c, r1)), Some((_, r0))) = (base.ends[i], nk.ends[i]) else { continue };
             let r1 = if r1.is_finite() { r1 } else { ext(c) };
             if room <= 0.0 || r1 <= r0 + 1.0 {
+                continue;
+            }
+            // Debug arm `TOPO_FD45_OFF=dvn_growth` (proposed pattern neck_between_signals): trim only.
+            if super::octi::fd45_off("dvn_growth") {
                 continue;
             }
             // Samples of the run between the trimmed and the plan's circle (50 um apart).
