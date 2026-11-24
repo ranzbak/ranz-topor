@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             _panel(ax[k], pat, segs, vias, f"today (tw-on c7f8bc8f, defaults): DRC new {r.get('drc_new', '?')}, unconnected "
                                          f"{r.get('unconnected', '?')}; matches expected: {'yes' if r['matches_expected'] else 'no'}", view)
             _marks(ax[k], pat)
-        fig.suptitle(f"{name}: {pat.title}\n[{STATUS}]{'  B.Cu closed.' if full else ''}  x = jammed via site (today on qmtech Q2); dotted = rule area; dashed = row tip; 'matches expected' = see expected.json", fontsize=11)
+        fig.suptitle(f"{name}: {pat.title}\n[{STATUS.get(name, 'PROPOSED (awaiting approval)')}]{'  B.Cu closed.' if full else ''}  x = jammed via site (today on qmtech Q2); dotted = rule area; dashed = row tip; 'matches expected' = see expected.json", fontsize=11)
         fig.tight_layout()
         fig.savefig(out / f"{name}.png", dpi=110)
         plt.close(fig)

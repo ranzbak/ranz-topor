@@ -30,7 +30,13 @@ from harness.fit_patterns import CLEAR, DEFAULT_CLASS, W_SIG, Fp, Keepout, Pad, 
 from harness.fx_survivors import clearance_report
 from harness.radii_patterns import EPS
 
-STATUS = "PROPOSED (awaiting approval)"
+# User 2026-11-24 ("yes to all"): neck_in_pad_row and neck_shared_channel approved as expected (with the qmtech crops
+# dvn_crop_q2 / dvn_crop_q3, harness.abstract_crop + harness.dvn_crop_png); the via/pad small variants stay as guards
+# (today's answers kept; none reproduces Q2/Q3 in a small layout).
+APPROVED = "APPROVED (user 2026-11-24)"
+GUARD = "GUARD (today's answer kept; user 2026-11-24)"
+STATUS = {"neck_in_pad_row": APPROVED, "neck_shared_channel": APPROVED, "dvn_crop_q2": APPROVED, "dvn_crop_q3": APPROVED,
+          "via_jam_shift": GUARD, "via_interval_sliver": GUARD, "pad_axis_entry": GUARD, "pad_side_approach": GUARD}
 SQ2 = math.sqrt(2.0)
 VIA_D = 0.6
 W_POW, FLOOR = 0.5, 0.2
@@ -329,7 +335,7 @@ def generate(name: str, out: Path, *, drc: bool = False) -> dict:
     d = Path(out) / name
     paths = {"problem": write_board(pat, d / "problem" / f"{name}.kicad_pcb", copper=False),
              "reference": write_board(pat, d / "reference" / f"{name}.kicad_pcb", copper=True)}
-    doc = {"name": pat.name, "title": pat.title, "status": STATUS, "purpose": pat.purpose, "expected": pat.answer, "why": pat.why,
+    doc = {"name": pat.name, "title": pat.title, "status": STATUS.get(name, "PROPOSED (awaiting approval)"), "purpose": pat.purpose, "expected": pat.answer, "why": pat.why,
            "connections": [{"net": n, "from": a, "to": b} for n, a, b in pat.connections],
            "reference_tracks": [{"net": t.net, "layer": t.layer, "width": t.width, "pts": t.pts} for t in pat.ref_tracks],
            "reference_vias": [list(v.pos) for v in pat.ref_vias], **pat.extra.get("dvn", {})}
