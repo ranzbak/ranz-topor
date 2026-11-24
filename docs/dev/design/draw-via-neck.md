@@ -140,3 +140,19 @@ Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals 
   (free, missed or tight; else the first legal site) and pays its distance from it, graded; and `via_site_price` prices
   the planned via sites of the other nets' wires not drawn yet (reach discs plus clearance, the `planned_room` form), as
   `via_plan_price` prices their corridors.
+- r4b (7ca7224a) left SDRAM_A1 0 -> 3: SDRAM_A2's via moved within 1 mm into SDRAM_A1's corridor through triangles
+  outside A2's via interval, which `via_plan_price` did not read. `via_plan_price_near` prices the other wires'
+  planned corridors over the interval's triangles plus every triangle sharing a vertex with the site's triangle
+  (used when `via_shift_mm` > 0; off = the old price).
+- Same row result (985142bb vs the all-off arm, qmtech det s0): drc_new 260 -> 257, vias 242 -> 234, detour>1.5 18 ->
+  18, unconnected 16 -> 17 (GND pour pieces C8.2, H3.1 new, C47.2 gone). 34 changed connections. Better: JS_SCK 7 -> 0,
+  JS_MISO 3 -> 0, SDRAM_A3 1 -> 0, ADV_SCL 3 -> 2, FPGA_UART1_RX 3 -> 2. Worse: /rtc-spi/vbat 4 -> 12 (its B.Cu short
+  and crossing with VIN5V are gone; the 12 are clearance deficits up to 0.063 mm against the necked FPGA_UART1_TX),
+  JS_INTB_5V 0 -> 1 (forced via-in-pad deficit, the U5 region 14 -> 3), ADV_HPD_C 3 -> 4 (the plan's crossing with
+  HDMI5V in both, reshaped, its via hole clearance gone), SDRAM_A2 0 -> 1 (0.031 to IC1.26: pad exit up 0.235 then a
+  45-degree run that clips the next pad). TOPO_VIADBG on the same row: SDRAM_A2 (wire 1024) is placed twice; the first
+  call takes ring site k 0 (162.736, 82.300), room +0.011 mm; the second (redraw) finds the plan's triangle blocked by
+  drawn neighbours (items 1035, 1055) and takes the first legal traversal k 9 (163.478, 80.348), room -0.40 mm, 2.77 mm
+  from the plan's site: the first legal traversal is not bounded (as with A off). Open: why the redraw, and whether the
+  first pick should be kept. JS2_6, JS1_4, SDRAM_A1, MAX_LRCLK back to
+  the all-off value.
