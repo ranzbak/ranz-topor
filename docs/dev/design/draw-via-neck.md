@@ -81,3 +81,15 @@ defaults, det seed 0; PNGs reports/dvn_crop_q{2,3}-PROPOSED.png; room = widest t
 | dvn_crop_q3 (ADV7511 row) | **C+B**: ADV_AVDD bar under the row hooks diagonally into the x 134.72 pad side, necked 0.112 (0.29 fits on the bar); 0.09 at the terminal where 0.27 fits | bar ends straight on the pad's axis leg below the tip at 0.28 |
 
 Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals (q2); 1 GND pour piece (q3).
+
+**r2 (2026-11-24, after the user's approval).**
+- C's class guard also reads the other nets' ERBS bands (`padend.rs` `band_in_way`): a re-anchored tail is refused where
+  a band lies in the swept area, crosses the new tail, or comes closer than its pitch (and than to the old tail). r1
+  re-anchored all seven U6 pin-row ends (their node next to the pad is off the axis) through the neighbours' bands: the
+  topo_first_draw_45 U6 bundle got 9 clearance violations on S3.
+- A: `via_extra`'s offset sites carry the nearest traversal, not the one whose triangle holds them. A's relaxed
+  first-traversal break reached one past X's crossing in via_interval_sliver (X then detoured round V's F.Cu stub,
+  20.19 mm). `via_side_ok_` now side-tests a site outside its own triangle against the chords of traversals k-2..=k+2;
+  a site inside keeps today's one-triangle test. The pocket site (9.095, 7.329) wins: 18.43 mm (ref 18.24, base 18.90),
+  and topo_vias54 keeps its equal-clearance vias with the same graded shift price.
+- `via_shift_passes` stays unimplemented (it needs the place_vias loop to re-price placed vias).
