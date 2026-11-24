@@ -30,6 +30,10 @@ MUTANTS = {
     "r4": [
         ("A5 r4: no ring sites in the interval", D,
          "sites.extend(self.via_shift_sites(w, ka, kb.max(ka), sz.d as f64));", "let _ = sz;"),
+        ("A6 r4: no price for other wires' planned via sites", D,
+         "+ if self.opts.via_shift_mm > 0.0 { self.via_site_price(w, p, dr) } else { 0.0 };", ";"),
+        ("A7 r4: no via_shift_mm bound on a later traversal's site", D,
+         "                                if sh > self.opts.via_shift_mm * 1e6 {\n", "                                if false {\n"),
         ("B3 r4: no legal width -> the floor", D,
          "let wn = if self.opts.neck_trim { self.plan_neck_widest(w, lid, &pts, pn) } else { pn.min_w };", "let wn = pn.min_w;"),
         ("B4 r4: widest without the no-new-violation test", D,

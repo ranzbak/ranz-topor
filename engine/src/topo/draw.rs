@@ -1977,6 +1977,44 @@ impl<'a> Drawer<'a> {
         room * tot
     }
 
+    /// draw-via-neck A (r4, `[drawing] via_shift_mm` > 0): price of a via of wire `w` (reach
+    /// diameter `d`) at `p` for the planned via sites (`via_site`) of the other nets' wires not
+    /// drawn yet: per site, the depth by which the two reach discs plus the clearance overlap,
+    /// priced like [`Drawer::via_plan_price`] (`room x pitch x (x + x^2)`, `x = depth / pitch`,
+    /// `pitch` = the other via's reach diameter plus the clearance): graded, no wall. Why: a via
+    /// shifted 0.14 mm took the planned site of the next wire's via (qmtech ADV_SDA / ADV_SCL at
+    /// U7: ADV_SCL's via then had no legal site), and `via_plan_price` sees only the corridors.
+    /// O(planned via sites).
+    fn via_site_price(&self, w: WireId, p: Vec2, d: f64) -> f64 {
+        let room = self.octi.room;
+        if room <= 0.0 {
+            return 0.0;
+        }
+        let st = self.st;
+        let wi = &st.wires[w];
+        let mut tot = 0.0;
+        for (&(o, _), &(_, q)) in &self.via_site {
+            let oi = &st.wires[o];
+            if o == w || !oi.alive || oi.net == wi.net || self.drawn_once[o] {
+                continue;
+            }
+            let s = oi.s.max(wi.s);
+            let dist = (p - q).len();
+            if dist >= 0.5 * d + s + 2.0e6 {
+                continue;
+            }
+            let Some(&sz) = via_sizes(&self.model.rules, oi.net, self.opts).first() else { continue };
+            let dor = 2.0 * crate::vias::via_reach(&self.model.rules, oi.net, sz);
+            let depth = 0.5 * d + s + 0.5 * dor - dist;
+            if depth > 0.0 {
+                let pitch = (dor + s).max(1.0);
+                let x = depth / pitch;
+                tot += pitch * (x + x * x);
+            }
+        }
+        room * tot
+    }
+
     /// P6: price of the room a via pair keeps for the wires the plan crosses between its two
     /// vias. With the wire's previous via at `prev` (traversal, centre, size), a via of size
     /// `sz` at `p` in traversal `k` leaves the wires of `xs` that cross the wire in traversals
@@ -2254,10 +2292,12 @@ impl<'a> Drawer<'a> {
                 // In a traversal where the wire turns at a junction, only the junction itself:
                 // elsewhere in it the via could stand on the wrong side of the tee (D6b).
                 let turn_at = |k: usize| self.st.wires[w].turns.iter().find(|x| x.0 == k).map(|x| self.b.proj.pos[x.1]);
-                // draw-via-neck A: the first traversal with a legal site, and the plan's taut path
-                // through the interval (the shift price's origin).
+                // draw-via-neck A: the first traversal's first legal site (the shift price's
+                // origin).
                 let mut first_pick: Option<(usize, Vec2)> = None;
-                let chord: Vec<Vec2> = if self.opts.via_shift_mm > 0.0 { (ka..=kb.max(ka)).flat_map(|k| self.taut_chord(w, k)).collect() } else { Vec::new() };
+                // draw-via-neck A: the plan's site (free, missed or tight), where it lies in the
+                // interval: the shift's origin.
+                let plan_site = self.via_site.get(&(w, i)).filter(|s| (ka..=kb.max(ka)).contains(&s.0)).map(|s| s.1);
                 for (k, p) in sites {
                     // The first traversal with a legal site decides, unless that site takes
                     // planned room (price > 0) and a shift may find a cheaper one (draw-via-neck A).
@@ -2296,7 +2336,7 @@ impl<'a> Drawer<'a> {
                         let squeeze = squeeze + self.octi.room * dv * (xm + xm * xm);
                         // 5.4 task 1: the via as its reach disc (the hole rule included).
                         let dr = 2.0 * crate::vias::via_reach(&self.model.rules, net, sz);
-                        let plan_p = self.via_plan_price(w, ka, kb.max(ka), p, dr);
+                        let plan_p = self.via_plan_price(w, ka, kb.max(ka), p, dr) + if self.opts.via_shift_mm > 0.0 { self.via_site_price(w, p, dr) } else { 0.0 };
                         // draw-via-neck A: what the site takes from its neighbours (their planned
                         // room, its own squeeze): while the best site takes some, later traversals
                         // and shifted sites still compete.
@@ -2307,14 +2347,24 @@ impl<'a> Drawer<'a> {
                         let (in_class, reach) = self.via_reach_for_price(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
                         // `[vias] reach_price` (default off): the reach's violations priced too.
                         let price = price + self.reach_cost(reach, self.octi.room * dv);
-                        // draw-via-neck A: a site past the first traversal with a legal site (in
-                        // the interval or shifted out of it) pays its distance from the plan's
-                        // taut path through the interval, graded (half the squeeze price per via
-                        // diameter); it wins only by the room it gives back.
+                        // draw-via-neck A: a site past the first traversal with a legal site is
+                        // never more than `via_shift_mm` from the plan's site (free, missed or
+                        // tight; without one, that first legal site, today's pick), and pays its
+                        // distance from it, graded (half the squeeze price per via diameter; from
+                        // a missed planned site the P6 (d) price above already does): it wins
+                        // only by the room it gives back. r4: priced by the distance from the
+                        // plan's taut path, a site far along the path was free (qmtech JS1_9 and
+                        // SDRAM_A2 moved 1.4-1.5 mm into their neighbours' room).
                         let price = match first_pick {
-                            Some((k1, _)) if self.opts.via_shift_mm > 0.0 && k != k1 => {
-                                let sh = chord.windows(2).map(|x| seg_dist(p, x[0], x[1])).fold(f64::INFINITY, f64::min);
-                                let xs_ = if sh.is_finite() { sh / dv } else { 0.0 };
+                            Some((k1, p1)) if self.opts.via_shift_mm > 0.0 && k != k1 => {
+                                let sh = (p - plan_site.unwrap_or(p1)).len();
+                                if sh > self.opts.via_shift_mm * 1e6 {
+                                    if dbg {
+                                        eprintln!("VIAFAR wire {w} via {i} k {k} at ({:.3},{:.3}) shift {:.3} mm", p.x / 1e6, -p.y / 1e6, sh / 1e6);
+                                    }
+                                    continue;
+                                }
+                                let xs_ = if missed.is_some() { 0.0 } else { sh / dv };
                                 price + 0.5 * self.octi.room * dv * (xs_ + xs_ * xs_)
                             }
                             _ => price,
