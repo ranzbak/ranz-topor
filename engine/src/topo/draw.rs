@@ -4851,6 +4851,7 @@ impl<'a> Drawer<'a> {
             base = best.map_or(base, |b| b.1);
         }
         let mut nk = self.trim_neck(w, lid, pts, &base, wn);
+        let trimmed_dbg = nk;
         let room = self.octi.room;
         let nv = |n: &super::exact::Neck| self.checker.check_against(&self.idx, &self.neck_items(w, lid, pts, n, wn).0, &[]).violations.len();
         let nv0 = nv(&nk);
@@ -4902,7 +4903,7 @@ impl<'a> Drawer<'a> {
             }
         }
         if std::env::var("TOPO_NECKDBG").is_ok() {
-            eprintln!("NECKFIT wire {w} wn {wn:.0} plan {:?} fit {:?}", neck.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), nk.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>());
+            eprintln!("NECKFIT wire {w} wn {wn:.0} plan {:?} trim {:?} fit {:?}", neck.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), trimmed_dbg.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), nk.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>());
         }
         nk
     }

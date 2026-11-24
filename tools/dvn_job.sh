@@ -59,6 +59,11 @@ PY
     hzq run --threads 2 --name dvn-crops -- bash $ROOTD/tools/dvn_job.sh crops > $R/u-crops.log 2>&1 &
     hzq run --threads 4 --name dvn-tests -- bash $ROOTD/tools/dvn_job.sh tests > $R/u-tests.log 2>&1 &
     wait; note "all done" ;;
+  espdbg)  # r2 RCA of esp's +2 DRC (IO8_SCL): the default run with TOPO_TIPDBG, and pad_tip_anchor off
+    ROOTD=$(pwd); F="--clock cpu --timeout 2400 --set capacity.compass_cut_check=true --no-png"
+    TOPOR_UNRELEASED_SETTINGS=1 TOPO_TIPDBG=1 hzq run --threads 4 --name dvn-esp-tip -- $ROOTD/tools/route_board.sh esp-rust-board $R/esp-tipdbg/s0 $F > $R/u-esp-tip.log 2>&1 &
+    TOPOR_UNRELEASED_SETTINGS=1 hzq run --threads 4 --name dvn-esp-notip -- $ROOTD/tools/route_board.sh esp-rust-board $R/esp-notip/s0 $F --set drawing.pad_tip_anchor=false > $R/u-esp-notip.log 2>&1 &
+    wait; note "all done" ;;
   job) hzq run --threads 2 --name dvnp-pats -- bash $ROOT/tools/dvn_job.sh pats > $R/u-pats.log 2>&1; note "unit pats rc $?" ;;
   *) echo "usage: $0 pats | job | r2 | tests | crops"; exit 2 ;;
 esac
