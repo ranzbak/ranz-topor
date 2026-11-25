@@ -35,6 +35,26 @@ fn route(p: &str, extra: &[(&str, serde_json::Value)]) -> Routed {
     let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let mut val = serde_json::to_value(Options::default()).unwrap();
     val["runs"] = serde_json::json!(1);
+    // via-shift-free (rebased onto main ca2bb502 without the tw-on defaults c7f8bc8f): these
+    // patterns and crops were measured with the TW5/TW7 defaults of tw-on (the plan they draw).
+    // On main's defaults the plan differs: via_interval_sliver routes V round X without TW7's
+    // pattern moves (22.64 mm, the via at (10.98, 10.36)), and the Q3 crop's plan no longer
+    // reaches ADV_AVDD's pad through its side with pad_tip_anchor off (0 mm necked; 0.553 mm
+    // with every tw-on value, none alone). Plan differences, not the drawing these tests check:
+    // pinned as tw-on had them (as c7f8bc8f pinned the old values where tests measure them).
+    for (k, v) in [
+        ("pattern_moves", serde_json::json!(["clinch", "double", "unlayerable", "u_clinch", "evasion", "pour"])),
+        ("oscillation", serde_json::json!("bounded")),
+        ("escape", serde_json::json!("layering")),
+        ("escape_take", serde_json::json!("always")),
+        ("relay_count_fade", serde_json::json!(0.8)),
+        ("loop_history", serde_json::json!(true)),
+        ("float_wire", serde_json::json!(true)),
+        ("preloop_p4", serde_json::json!(false)),
+        ("via_pair_min", serde_json::json!(true)),
+    ] {
+        val[k] = v;
+    }
     for (k, v) in extra {
         val[*k] = v.clone();
     }
