@@ -682,6 +682,9 @@ fn expand_point_runs(runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: 
             cl[k].1 = shift_ends(&cl[k].1, da, db);
         }
     }
+    if (head || tail) && centre && std::env::var_os("TOPO_DPDBG").is_some() {
+        eprintln!("TOPO_DPDBG one-point run kept: head={head} tail={tail} runs={n} at {:?}", if head { cl[0].1[0] } else { cl[n - 1].1[0] });
+    }
     let done = centre && n == 2 && (head || tail);
     let mut out = Vec::with_capacity(n);
     for k in 0..n {
