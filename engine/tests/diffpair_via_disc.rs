@@ -14,6 +14,11 @@ const MM: f64 = 1e6;
 /// A pad field: J1 on the left, J2 on the right, each with a USB+ / USB- pad 0.65 mm apart
 /// (0.4 x 0.4 mm SMD on F.Cu), a 0.2 / 0.2 mm pair with a 0.45 / 0.25 mm pair via, gap 0.2 mm.
 fn pair_board() -> BoardModel {
+    pair_board_pitch(0.65)
+}
+
+/// [`pair_board`] with the two pads of a pair `dy` mm apart.
+fn pair_board_pitch(dy: f64) -> BoardModel {
     let p = |v: f64| (v * MM).round() as i64;
     let c = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)];
     let segs: Vec<String> = (0..4)
@@ -23,7 +28,7 @@ fn pair_board() -> BoardModel {
         })
         .collect();
     // (ref, number, net, x, y)
-    let pads = [("J1", "1", 1, 2.0, 5.0), ("J1", "2", 2, 2.0, 5.65), ("J2", "1", 1, 18.0, 5.0), ("J2", "2", 2, 18.0, 5.65)];
+    let pads = [("J1", "1", 1, 2.0, 5.0), ("J1", "2", 2, 2.0, 5.0 + dy), ("J2", "1", 1, 18.0, 5.0), ("J2", "2", 2, 18.0, 5.0 + dy)];
     let pj: Vec<String> = pads
         .iter()
         .enumerate()
@@ -99,4 +104,52 @@ fn pair_via_disc_keeps_clear_of_the_partner_pads() {
     // in the open the disc fits
     let mid = topor_engine::geom::Vec2 { x: 10.0e6, y: 5.0e6 };
     assert!(cutflow::point_free(&b.proj, &packer, mid, 1, 200_000.0) > 0.55e6);
+}
+
+/// A pair whose plan changes layer at ONE point at each pad (a run of one point, e.g. the plan's
+/// forced via at a pad centre when the terminal triangle has no site): `realise` kept no via pair
+/// for it (`pts.len() >= 2` filter) and both tracks ended on the far layer at their F.Cu pads.
+#[test]
+fn one_point_layer_change_keeps_its_via_pair() {
+    use topor_engine::check::Checker;
+    use topor_engine::geom::Vec2;
+    use topor_engine::model::Item;
+    let model = pair_board_pitch(1.2);
+    let opts = Options::default();
+    let mut dec = topor_engine::decompose::decompose(&model, &opts, &[0, 2]);
+    let pairs = diffpair::plan(&model, &mut dec);
+    let cp = &pairs.coupled[0];
+    let checker = Checker::new(&model, &opts);
+    let ctx = diffpair::Ctx { model: &model, opts: &opts, checker: &checker, octi: true };
+    let at = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+    let pad = |i: usize| model.pads[i].center.to_vec2();
+    let long = diffpair::pad_long(&model.pads[0]);
+    let (ea, eb) = (diffpair::Ends { p: pad(0), n: pad(1), long }, diffpair::Ends { p: pad(2), n: pad(3), long });
+    // F.Cu at the J1 pad (one point), B.Cu across, F.Cu at the J2 pad (one point).
+    let runs = vec![(0u32, vec![at(2.0, 5.0)]), (2u32, vec![at(2.0, 5.0), at(18.0, 5.0)]), (0u32, vec![at(18.0, 5.0)])];
+    let idx = topor_engine::check::ItemIndex::new(checker.cell());
+    let rz = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, true);
+    assert_eq!((rz.p_vias.len(), rz.n_vias.len()), (2, 2), "a via pair at each one-point layer change");
+    for (items, net, pads) in [(&rz.p_items, 1, [0usize, 2]), (&rz.n_items, 2, [1usize, 3])] {
+        for &pi in &pads {
+            let c = pad(pi);
+            // F.Cu copper (stub) touches the pad centre, and B.Cu copper exists: the wire reaches the pad on its layer.
+            let on = |layer: u32| {
+                items.iter().any(|it| match it {
+                    Item::Track(t) if t.layer == layer => {
+                        let pts = match t.prim {
+                            topor_engine::geom::TrackPrim::Seg { a, b } => [a, b],
+                            _ => return false,
+                        };
+                        pts.iter().any(|q| (Vec2 { x: f64::from(q.x), y: -f64::from(q.y) } - c).len() < 1.0 || (Vec2 { x: f64::from(q.x), y: f64::from(q.y) } - c).len() < 1.0)
+                    }
+                    _ => false,
+                })
+            };
+            assert!(on(0), "net {net}: no F.Cu stub at pad {pi}");
+        }
+        assert!(items.iter().any(|it| matches!(it, Item::Track(t) if t.layer == 2)), "net {net}: B.Cu run");
+    }
+    let rep = checker.check_items(&[rz.p_items.clone(), rz.n_items.clone()].concat());
+    assert!(rep.violations.is_empty(), "{:?}", rep.violations);
 }

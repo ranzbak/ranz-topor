@@ -638,6 +638,57 @@ pub struct ConnStats {
     pub conn_n: usize,
 }
 
+/// The runs with a one-point run at either end of the connection kept as a tiny two-point run: the
+/// plan changes layer at one point (e.g. at a pad centre when the terminal triangle has no legal via
+/// site), and dropping that run left no via pair and both tracks on the wrong layer at their pads.
+/// The neighbour run's end leg is first moved sideways onto the middle of the pad pair (`centre`, as
+/// [`realise`] does for an end leg) so the via pair is centred on the pair, not on the P pad; the tiny
+/// run (`POINT_RUN_NM` long) points along that leg, so the via pair sits square to the pair and the
+/// stubs run from the via to the pad as for any other run. A one-point run in the middle, or the only
+/// run, is still dropped (a layer change there has no run to carry it).
+fn expand_point_runs(runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: bool) -> Vec<(u32, Vec<Vec2>)> {
+    let mut cl: Vec<(u32, Vec<Vec2>)> = runs.iter().map(|(l, pts)| (*l, clean(pts))).collect();
+    let n = cl.len();
+    let mid = |e: Ends| (e.p + e.n) * 0.5;
+    // The one-point end runs that have a real neighbour run.
+    let head = n >= 2 && cl[0].1.len() == 1 && cl[1].1.len() >= 2;
+    let tail = n >= 2 && cl[n - 1].1.len() == 1 && cl[n - 2].1.len() >= 2 && !(head && n == 2);
+    if centre {
+        // Each neighbour is moved once, both ends together (a single leg moves by the mean of both).
+        let mut shift: BTreeMap<usize, (f64, f64)> = BTreeMap::new();
+        if head {
+            let q = &cl[1].1;
+            shift.entry(1).or_default().0 = (mid(start) - q[0]).dot(unit(q[1] - q[0]).perp());
+        }
+        if tail {
+            let q = &cl[n - 2].1;
+            let m = q.len();
+            shift.entry(n - 2).or_default().1 = (mid(end) - q[m - 1]).dot(unit(q[m - 1] - q[m - 2]).perp());
+        }
+        for (k, (da, db)) in shift {
+            cl[k].1 = shift_ends(&cl[k].1, da, db);
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let (l, pts) = (cl[k].0, &cl[k].1);
+        if pts.len() >= 2 {
+            out.push((l, pts.clone()));
+        } else if k == 0 && head {
+            let q = &cl[1].1;
+            out.push((l, vec![q[0] - unit(q[1] - q[0]) * POINT_RUN_NM, q[0]]));
+        } else if k + 1 == n && tail {
+            let q = &cl[n - 2].1;
+            let m = q.len();
+            out.push((l, vec![q[m - 1], q[m - 1] + unit(q[m - 1] - q[m - 2]) * POINT_RUN_NM]));
+        }
+    }
+    out
+}
+
+/// Length of the tiny run that keeps a one-point layer change ([`expand_point_runs`]): 0.02 mm.
+const POINT_RUN_NM: f64 = 20_000.0;
+
 /// The realised copper of one pair connection.
 pub struct Realised {
     pub p_items: Vec<Item>,
@@ -685,7 +736,7 @@ fn tracks(net: i32, layer: u32, w: f64, pts: &[Vec2]) -> Vec<Item> {
 pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, idx: &ItemIndex, centre: bool) -> Realised {
     let r = &cp.rule;
     let (w, p) = (r.width as f64, cp.pitch());
-    let runs: Vec<(u32, Vec<Vec2>)> = runs.iter().map(|(l, pts)| (*l, clean(pts))).filter(|(_, pts)| pts.len() >= 2).collect();
+    let runs = expand_point_runs(runs, start, end, centre);
     let mut st = ConnStats::default();
     let (mut p_items, mut n_items) = (Vec::new(), Vec::new());
     let (mut p_vias, mut n_vias) = (Vec::new(), Vec::new());
