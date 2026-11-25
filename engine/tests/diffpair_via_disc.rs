@@ -153,3 +153,39 @@ fn one_point_layer_change_keeps_its_via_pair() {
     let rep = checker.check_items(&[rz.p_items.clone(), rz.n_items.clone()].concat());
     assert!(rep.violations.is_empty(), "{:?}", rep.violations);
 }
+
+/// A pair connection of only two runs (a one-point run and one real run): the real run's end legs
+/// are centred on the pad pairs exactly once. Centring it twice (in the run expansion and again in
+/// `realise`) moved a single leg by the mean of both ends each time and left it off the pair middle.
+#[test]
+fn one_point_run_with_one_neighbour_is_centred_once() {
+    use topor_engine::check::Checker;
+    use topor_engine::geom::{TrackPrim, Vec2};
+    use topor_engine::model::Item;
+    let model = pair_board_pitch(1.2);
+    let opts = Options::default();
+    let mut dec = topor_engine::decompose::decompose(&model, &opts, &[0, 2]);
+    let pairs = diffpair::plan(&model, &mut dec);
+    let cp = &pairs.coupled[0];
+    let checker = Checker::new(&model, &opts);
+    let ctx = diffpair::Ctx { model: &model, opts: &opts, checker: &checker, octi: true };
+    let pad = |i: usize| model.pads[i].center.to_vec2();
+    let long = diffpair::pad_long(&model.pads[0]);
+    let (ea, eb) = (diffpair::Ends { p: pad(0), n: pad(1), long }, diffpair::Ends { p: pad(2), n: pad(3), long });
+    let at = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+    let runs = vec![(0u32, vec![at(2.0, 5.0)]), (2u32, vec![at(2.0, 5.0), at(18.0, 5.0)])];
+    let idx = topor_engine::check::ItemIndex::new(checker.cell());
+    let rz = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, true);
+    // The long B.Cu leg of P and N lies at mid -+ pitch / 2 (pads at y 5.0 and 6.2, mid 5.6; items have y flipped).
+    let leg = |items: &[Item]| {
+        items.iter().filter_map(|it| match it {
+            Item::Track(t) if t.layer == 2 => match t.prim {
+                TrackPrim::Seg { a, b } if a.y == b.y && (b.x - a.x).abs() > 5_000_000 => Some(-f64::from(a.y)),
+                _ => None,
+            },
+            _ => None,
+        }).next().expect("a long B.Cu leg")
+    };
+    let (yp, yn) = (leg(&rz.p_items), leg(&rz.n_items));
+    assert!(((yp + yn) * 0.5 - 5.6 * MM).abs() < 5_000.0, "legs at {yp} / {yn}, pair middle 5.6 mm");
+}

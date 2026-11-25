@@ -646,7 +646,7 @@ pub struct ConnStats {
 /// run (`POINT_RUN_NM` long) points along that leg, so the via pair sits square to the pair and the
 /// stubs run from the via to the pad as for any other run. A one-point run in the middle, or the only
 /// run, is still dropped (a layer change there has no run to carry it).
-fn expand_point_runs(runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: bool) -> Vec<(u32, Vec<Vec2>)> {
+fn expand_point_runs(runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: bool) -> (Vec<(u32, Vec<Vec2>)>, bool) {
     let mut cl: Vec<(u32, Vec<Vec2>)> = runs.iter().map(|(l, pts)| (*l, clean(pts))).collect();
     let n = cl.len();
     let mid = |e: Ends| (e.p + e.n) * 0.5;
@@ -665,10 +665,24 @@ fn expand_point_runs(runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: 
             let m = q.len();
             shift.entry(n - 2).or_default().1 = (mid(end) - q[m - 1]).dot(unit(q[m - 1] - q[m - 2]).perp());
         }
+        if n == 2 && (head || tail) {
+            // The neighbour is the whole connection: both its ends are centred here, once (realise
+            // must not move it again: a single leg moves by the mean of both ends).
+            let k = if head { 1 } else { 0 };
+            let q = &cl[k].1;
+            let m = q.len();
+            let e = shift.entry(k).or_default();
+            if head {
+                e.1 = (mid(end) - q[m - 1]).dot(unit(q[m - 1] - q[m - 2]).perp());
+            } else {
+                e.0 = (mid(start) - q[0]).dot(unit(q[1] - q[0]).perp());
+            }
+        }
         for (k, (da, db)) in shift {
             cl[k].1 = shift_ends(&cl[k].1, da, db);
         }
     }
+    let done = centre && n == 2 && (head || tail);
     let mut out = Vec::with_capacity(n);
     for k in 0..n {
         let (l, pts) = (cl[k].0, &cl[k].1);
@@ -683,7 +697,7 @@ fn expand_point_runs(runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: 
             out.push((l, vec![q[m - 1], q[m - 1] + unit(q[m - 1] - q[m - 2]) * POINT_RUN_NM]));
         }
     }
-    out
+    (out, done)
 }
 
 /// Length of the tiny run that keeps a one-point layer change ([`expand_point_runs`]): 0.02 mm.
@@ -736,7 +750,8 @@ fn tracks(net: i32, layer: u32, w: f64, pts: &[Vec2]) -> Vec<Item> {
 pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, idx: &ItemIndex, centre: bool) -> Realised {
     let r = &cp.rule;
     let (w, p) = (r.width as f64, cp.pitch());
-    let runs = expand_point_runs(runs, start, end, centre);
+    let (runs, centred) = expand_point_runs(runs, start, end, centre);
+    let centre = centre && !centred;
     let mut st = ConnStats::default();
     let (mut p_items, mut n_items) = (Vec::new(), Vec::new());
     let (mut p_vias, mut n_vias) = (Vec::new(), Vec::new());
