@@ -1046,11 +1046,28 @@ impl<'p> State<'p> {
         let me = Item { net: wi.net, w: wi.w, s: wi.s };
         let mut ports: Vec<(Vec2, Vec2)> = Vec::with_capacity(n + wi.turns.len() + 2);
         ports.push((pr.pos[wi.a], pr.pos[wi.a]));
+        // A turn round an obstacle corner is drawn at the clearance round it: its port is the
+        // corner of the obstacle grown by half the width plus the clearance (the miter point on
+        // the outward bisector), so the path's legs keep that distance from the corner's edges.
+        let turn_port = |x: VertId| -> Vec2 {
+            let v = pr.pos[x];
+            let VertKind::Outline(o) = pr.vkind[x] else { return v };
+            if super::octi::fd45_off("nrg_turnport") {
+                return v;
+            }
+            let ob = &pr.obstacles[o];
+            let m = ob.poly.len();
+            let Some(i) = (0..m).find(|&i| (ob.poly[i] - v).len() < 2.0) else { return v };
+            let (Some(e1), Some(e2)) = ((v - ob.poly[(i + m - 1) % m]).unit(), (ob.poly[(i + 1) % m] - v).unit()) else { return v };
+            let Some(bis) = (e1 - e2).unit() else { return v };
+            let r = 0.5 * wi.w + if ob.bare { ob.clear } else { ob.clear.max(wi.s) } + 10.0;
+            v + bis * (r * 2.0 / (e1 + e2).len().max(0.5))
+        };
         let mut sp = Vec::new();
         let mut ti = 0;
         for j in 0..n {
             while ti < wi.turns.len() && wi.turns[ti].0 == j {
-                let v = pr.pos[wi.turns[ti].1];
+                let v = turn_port(wi.turns[ti].1);
                 ports.push((v, v));
                 ti += 1;
             }
@@ -1069,7 +1086,7 @@ impl<'p> State<'p> {
             ports.push(if (b - a).cross(c - a) > 0.0 { (y, x) } else { (x, y) });
         }
         while ti < wi.turns.len() && wi.turns[ti].0 == n {
-            let v = pr.pos[wi.turns[ti].1];
+            let v = turn_port(wi.turns[ti].1);
             ports.push((v, v));
             ti += 1;
         }
