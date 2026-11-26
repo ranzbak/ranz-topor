@@ -317,3 +317,14 @@ fn a_gap_kept_band_is_necked_against_its_partner() {
     assert!(tracks(&on).iter().all(|t| t.0 >= 150_000), "{:?}", tracks(&on));
     assert_eq!(on.routed, off.routed);
 }
+
+/// The neck takes the widest width that clears, not the floor: with a floor of 0.05 mm the gap
+/// (0.5 mm between the walls, 0.2 mm clearance each side) is cleared at about 0.1 mm.
+#[test]
+fn a_forced_shrink_takes_the_widest_width_that_clears() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(50_000));
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!(on.violations.len(), 0, "{:?}", on.violations);
+    let thin = tracks(&on).iter().map(|t| t.0).min().unwrap();
+    assert!(thin > 90_000 && thin <= 100_000, "neck width {thin}");
+}

@@ -193,6 +193,41 @@ The undo primitives exist: `uncommit` (`draw.rs:3308`) and `restore_wire` (`draw
   - `neck_not_at_pad`: as above, with the gap at the pad. Expected: the neck starts at the pad edge, the end at the pad
     centre.
 
+**A1 as built (branch draw-absorb, 2026-11-26; lead GO widened to the gap-kept band).** `[drawing] forced_shrink`, default
+false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
+
+- **Joint commit** (`joint.rs` `reserve_bands`, before the gap pairs are kept):
+  - Each model-gap pair (overlap <= `erbs_gap_keep_max_mm`) is tried with the yielding band first, then the other.
+  - The band is uncommitted and re-realised by `neck_band` (joint.rs). Its zones are the plan's (`plan_neck`) plus one
+    zone per track that breaks the rule against a gap partner (`Drawer::hit_zones`).
+  - It takes the widest width in `[floor, nominal]` at which it hits no gap partner and nothing its full width did
+    not hit; then `fit_neck` trims the zones (`neck_trim`).
+  - Its pairs are measured again from both sides. A band that does not clear keeps its copper.
+  - A0 found that the plan's own zones do not reach most model gaps: no over-full cut predicts them, so the zones sit
+    round the pad ends. On qmtech, 3 of 46 tries cleared with the plan's zones alone.
+  - The reservation keeps its zones (`Reserved::zones`), so the band keeps its neck:
+    - the warnings name them;
+    - its octilinear form is drawn at the neck's zones and width, never wider;
+    - `tip_anchor_reserved` does not re-anchor it at full width.
+  - Counted: `route.erbs.gap_shrunk`.
+- **Forced run** (`draw.rs`, never-drop branch, after the octilinear form, pull and plan necks; `shrink_forced`):
+  - Only a run that is still at full width everywhere. A run the plan or a pad end already necks keeps those necks.
+  - Zones go over the violating tracks (`hit_zones`), at the widest width whose severity key ([`viol_key`]) is the
+    floor's, trimmed (`trim_neck`), never ending inside its own end pad (`neck_out_of_pads`).
+  - Taken only when the key gets strictly better (graded: a neck that only makes a violation shallower is taken too).
+  - Counted: `stats.forced_shrunk`; each neck is a NECKED warning.
+- **The floor** is `State::w_min`: the plan's neck floor, i.e. the KiCad minimum track width, the net class minimum,
+  and 2 x the minimum connection width.
+- **Where it touches the neck-regrow branch:** both paths build their copper with `Drawer::neck_items` (necked inside
+  the zones, nominal outside). A change there, such as never widening after a neck inside a run, applies to both. The
+  new code is in joint.rs (`neck_band`, the gap loop) and draw.rs (`hit_zones`, `shrink_forced`, the call in the
+  forced branch, `a1z` in the adopted-band path). `neck_items` and `fit_neck` became `pub(super)`; their bodies are
+  unchanged.
+- **Tests:** `engine/tests/topo_draw_absorb.rs` holds the patterns `wide_bottleneck_neck`
+  (`a_forced_run_shrinks_over_the_gap_instead_of_violating`) and `neck_not_at_pad`
+  (`a_shrink_next_to_a_pad_has_no_width_step_in_the_pad`), plus the joint commit, the graded shallow case and the
+  no-floor case.
+
 ### A2. Re-taut neighbours of a forced wire (local rubber-band update, RBU)
 - **What.** Before a wire W is forced:
   1. Take N = the drawn wires that W's best candidate hits, the movable hits from `viols_of`. They are ordered by
