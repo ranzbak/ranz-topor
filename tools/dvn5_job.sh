@@ -36,6 +36,7 @@ case ${1:-} in
     export CARGO_TARGET_DIR=$OUT/target-suite CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
     (cd engine && cargo test --release --no-fail-fast) > $OUT/suite.log 2>&1 9>&-; note "release suite rc $?"
     grep -E '^test result|FAILED|panicked' $OUT/suite.log | sort | uniq -c | sort -rn | head -40 > $OUT/suite-summary.txt
+    (cd engine && cargo clippy --release --all-targets) > $OUT/clippy.log 2>&1 9>&-; note "clippy rc $? warnings $(grep -c '^warning' $OUT/clippy.log)"
     CI=1 python -m pytest -q tests/test_engine_surface.py tests/test_docs_links.py tests/plugin/test_config_docs.py tests/plugin/test_toml_defaults.py \
       > $OUT/pytest.log 2>&1 9>&-; note "pytest rc $?" ;;
   ladder)
