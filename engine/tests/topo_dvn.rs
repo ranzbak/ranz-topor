@@ -289,8 +289,9 @@ fn centre_misses(m: &BoardModel, r: &topor_engine::route::RouteResult) -> Vec<(S
 /// crop ADV_AVDD's trace into C19.2 ends 0.26 mm off the pad's centre at weight 0 (main's copper:
 /// a first leg inside the pad that KiCad's Cleanup deletes, so the run ends at its far joint);
 /// weight 5 prices that end in the drawing and the trace ends at the centre, with no new
-/// violation, via or unrouted connection and at most 0.5 mm more copper. Kills the weight term
-/// of the DP's end-leg price (`octi::end_stub_price`).
+/// violation, via or unrouted connection and at most 0.5 mm more copper. Routed with main's
+/// defaults. The fuse's pad-end price makes the change here (mutants pcp4: dropping its far end
+/// leg term or its T-point term fails this test; the DP's weight term alone does not).
 #[test]
 fn crop_q3_pad_off_centre_ends_c19_at_the_centre() {
     let arm = |w: f64| {

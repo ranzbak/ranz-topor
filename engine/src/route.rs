@@ -940,8 +940,8 @@ mod tests {
         use crate::topo::tidy::{PadEndBreach, PadEndKind as K};
         let b = |kind: K, off: f64, edge: bool, blocked: bool| PadEndBreach { kind, net: 1, layer: 0, pad: "U1.1".into(), at: (0, 0), off, edge, centre_blocked: blocked, wire: None };
         assert!(pad_off_centre_line(&[]).starts_with("pad_off_centre: 0 trace ends inside a pad of their net off its centre (Terminal 0, Junction 0, Tee 0, PassThrough 0;"));
-        let l = pad_off_centre_line(&[b(K::Terminal, 250_000.0, false, false), b(K::Terminal, 100_000.0, false, false), b(K::Junction, 50_000.0, false, false), b(K::Tee, 700_000.0, false, false), b(K::PassThrough, 30_000.0, false, false), b(K::PassThrough, 0.0, false, false), b(K::Terminal, 900_000.0, true, false), b(K::Terminal, 900_000.0, false, true)]);
-        assert!(l.starts_with("pad_off_centre: 5 trace ends inside a pad of their net off its centre (Terminal 2, Junction 1, Tee 1, PassThrough 1;"), "{l}");
+        let l = pad_off_centre_line(&[b(K::Terminal, 250_000.0, false, false), b(K::Terminal, 100_000.0, false, false), b(K::Junction, 50_000.0, false, false), b(K::Tee, 700_000.0, false, false), b(K::Tee, 300_000.0, false, false), b(K::PassThrough, 30_000.0, false, false), b(K::PassThrough, 0.0, false, false), b(K::Terminal, 900_000.0, true, false), b(K::Terminal, 900_000.0, false, true)]);
+        assert!(l.starts_with("pad_off_centre: 6 trace ends inside a pad of their net off its centre (Terminal 2, Junction 1, Tee 2, PassThrough 1;"), "{l}");
         assert!(l.ends_with("largest 0.700 mm"), "{l}");
     }
 
