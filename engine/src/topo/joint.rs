@@ -94,6 +94,9 @@ pub struct Reserved {
     pub pneck: Option<(f64, [f64; super::exact::NECK_ZONES])>,
     /// In the band's octilinear form (the any-angle band missed a clearance its octilinear form keeps).
     pub octi: bool,
+    /// draw-absorb A1 (`[drawing] forced_shrink`): the neck zones of `pneck` when the joint commit
+    /// necked the band against a gap partner (the plan's zones and the gap's); `None` = the plan's.
+    pub zones: Option<[Option<(Vec2, f64)>; super::exact::NECK_ZONES]>,
 }
 
 /// The deepest overlap of a band pair's clearance (nm), where (KiCad frame, nm) and the layer id.
@@ -178,6 +181,7 @@ impl<'a> Drawer<'a> {
             pts: Vec<Vec2>,
             items: Vec<Item>,
             pneck: Option<(f64, [f64; super::exact::NECK_ZONES])>,
+            zones: Option<[Option<(Vec2, f64)>; super::exact::NECK_ZONES]>,
             gap: bool,
             octi: bool,
             n: usize,
@@ -242,7 +246,7 @@ impl<'a> Drawer<'a> {
         let mut bands: Vec<Band> = Vec::with_capacity(jobs.len());
         for (j, f) in jobs.into_iter().zip(formed) {
             match f {
-                Some((octi, o, items, pn)) => bands.push(Band { w: j.w, r: j.r, pts: o.unwrap_or(j.pts), items, pneck: pn, gap: j.gap, octi, n: j.n }),
+                Some((octi, o, items, pn)) => bands.push(Band { w: j.w, r: j.r, pts: o.unwrap_or(j.pts), items, pneck: pn, zones: None, gap: j.gap, octi, n: j.n }),
                 None => {
                     self.joint.class.insert((j.w, j.r), CutClass::Static);
                     self.joint.n_static += 1;
@@ -335,11 +339,31 @@ impl<'a> Drawer<'a> {
                         let net = |b: usize| self.st.wires[bands[b].w].net;
                         eprintln!("ABSORBDBG pair (w{} net {}, w{} net {}) depth {:?} x w{w} pneck {} partners {:?}", bands[a].w, net(a), bands[c].w, net(c), deep.get(&(a, c)).map(|d| d.0), pn.as_ref().map_or("none".to_string(), |n| format!("min {:.0} zones {:?}", n.min_w, n.ends.iter().flatten().map(|z| ((z.0.x / 1e3).round() / 1e3, (-z.0.y / 1e3).round() / 1e3, (z.1 / 1e3).round() / 1e3)).collect::<Vec<_>>())), partners.iter().map(|&q| (bands[q].w, net(q))).collect::<Vec<_>>());
                     }
-                    let Some(pn) = pn else { continue };
                     let layer = self.layer_of_band(&bands[x].items);
                     let lid = self.layer_id(layer);
                     // What the reserved band hits now (labels; its own items are its net's).
-                    let old: BTreeSet<String> = self.checker.check_against(&self.idx, &bands[x].items, &[]).violations.into_iter().map(|v| v.against).collect();
+                    let rep0 = self.checker.check_against(&self.idx, &bands[x].items, &[]);
+                    let old: BTreeSet<String> = rep0.violations.iter().map(|v| v.against.clone()).collect();
+                    // The neck zones: the plan's, and one round each stretch where the band breaks
+                    // the rule against a gap partner (the model gap: no over-full cut of the plan
+                    // predicts it, so the plan's zones need not reach it; A1, user-approved: neck
+                    // to the net class minimum outside the pad exit), the deepest first.
+                    let wi = &self.st.wires[w];
+                    let mut nk = pn.unwrap_or(super::exact::Neck { min_w: self.st.w_min(wi.net, wi.w), ends: [None; super::exact::NECK_ZONES] });
+                    if nk.min_w >= wi.w - 0.5 {
+                        continue;
+                    }
+                    let hits = crate::check::CheckReport { violations: rep0.violations.iter().filter(|v| v.against.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)).is_some_and(|b| partners.contains(b))).cloned().collect(), ..Default::default() };
+                    let mut spots = self.viols_of(&bands[x].items, &hits);
+                    spots.sort_by(|p, q| q.amount().total_cmp(&p.amount()));
+                    let free: Vec<usize> = (0..super::exact::NECK_ZONES).filter(|&i| nk.ends[i].is_none()).collect();
+                    for (i, v) in free.into_iter().zip(&spots) {
+                        nk.ends[i] = Some((v.at, 0.5 * v.len_nm + wi.w + wi.s));
+                    }
+                    if nk.ends.iter().all(|z| z.is_none()) {
+                        continue;
+                    }
+                    let pn = nk;
                     let cur = self.joint.cur.replace(w);
                     for h in std::mem::take(&mut handles[x]) {
                         of_id.remove(&self.handles[h].0);
@@ -349,9 +373,10 @@ impl<'a> Drawer<'a> {
                     let partner_of = |lbl: &str| lbl.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)).is_some_and(|b| partners.contains(b));
                     let got = self.neck_band(w, lid, &bands[x].pts, &pn, &|lbl: &str| !partner_of(lbl) && old.contains(lbl), dbg);
                     let ok = got.is_some();
-                    if let Some((its, pnr)) = got {
+                    if let Some((its, pnr, z)) = got {
                         bands[x].items = its;
                         bands[x].pneck = Some(pnr);
+                        bands[x].zones = Some(z.ends);
                     }
                     let hs: Vec<usize> = bands[x].items.iter().map(|it| self.commit(it)).collect();
                     for &h in &hs {
@@ -432,7 +457,7 @@ impl<'a> Drawer<'a> {
             if kept.keep[bi] && !stat[bi] {
                 self.joint.octi_rescued += b.octi as usize;
                 self.joint.kept.insert((b.w, b.r));
-                self.joint.reserved.insert((b.w, b.r), Reserved { pts: b.pts, items: b.items, handles: hs, pneck: b.pneck, octi: b.octi });
+                self.joint.reserved.insert((b.w, b.r), Reserved { pts: b.pts, items: b.items, handles: hs, pneck: b.pneck, octi: b.octi, zones: b.zones });
                 continue;
             }
             let cur = self.joint.cur.replace(b.w);
@@ -460,7 +485,7 @@ impl<'a> Drawer<'a> {
                     }
                     self.joint.octi_rescued += 1;
                     self.joint.kept.insert((b.w, b.r));
-                    self.joint.reserved.insert((b.w, b.r), Reserved { pts: o, items, handles: hs, pneck: pn, octi: true });
+                    self.joint.reserved.insert((b.w, b.r), Reserved { pts: o, items, handles: hs, pneck: pn, octi: true, zones: None });
                     continue;
                 }
             }
@@ -483,9 +508,9 @@ impl<'a> Drawer<'a> {
     /// (not against a gap partner, and against something the full-width band hit too), each zone
     /// trimmed to what the checker needs where `neck_trim` is on (`Drawer::fit_neck`); no track
     /// grazes its own pad. `None` when even the floor leaves a violation that is not allowed.
-    /// `(items, (width, necked length per zone))`. O(14 checks of the band + the fit).
+    /// `(items, (width, necked length per zone), zones)`. O(14 checks of the band + the fit).
     #[allow(clippy::type_complexity)]
-    fn neck_band(&self, w: WireId, lid: u32, pts: &[Vec2], pn: &super::exact::Neck, allowed: &dyn Fn(&str) -> bool, dbg: bool) -> Option<(Vec<Item>, (f64, [f64; super::exact::NECK_ZONES]))> {
+    fn neck_band(&self, w: WireId, lid: u32, pts: &[Vec2], pn: &super::exact::Neck, allowed: &dyn Fn(&str) -> bool, dbg: bool) -> Option<(Vec<Item>, (f64, [f64; super::exact::NECK_ZONES]), super::exact::Neck)> {
         let wi = &self.st.wires[w];
         let ok = |nk: &super::exact::Neck, wn: f64| {
             let its = self.neck_items(w, lid, pts, nk, wn).0;
@@ -517,7 +542,7 @@ impl<'a> Drawer<'a> {
             *pn
         };
         let (items, ls) = self.neck_items(w, lid, pts, &nk, wn);
-        (!items.is_empty() && self.track_own_pad_ok(w, &items)).then_some((items, (wn, ls)))
+        (!items.is_empty() && self.track_own_pad_ok(w, &items)).then_some((items, (wn, ls), nk))
     }
 
     /// The signal layer of a band's track items.

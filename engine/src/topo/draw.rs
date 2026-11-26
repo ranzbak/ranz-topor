@@ -4088,6 +4088,9 @@ impl<'a> Drawer<'a> {
                 } else {
                     self.run_items(w, layer, &pts)
                 };
+                // draw-absorb A1: the zones of an adopted band the joint commit necked against a
+                // gap partner (its warnings name them; its octilinear form keeps them).
+                let a1z: Option<super::exact::Neck> = adopted.as_ref().and_then(|x| x.zones.map(|ends| super::exact::Neck { min_w: x.pneck.map_or(0.0, |p| p.0), ends }));
                 let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = if restored {
                     kept.as_ref().and_then(|k| k.4)
                 } else {
@@ -4166,8 +4169,17 @@ impl<'a> Drawer<'a> {
                         let exits = [if ps { self.pad_exit(w, 0, pts[1]) } else { None }, if pe { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
                         let got = self.octilinear(w, k0, k1, layer, &pts, wneck, exits, None);
                         let dbg = std::env::var("TOPO_OCTIDBG").is_ok();
+                        // draw-absorb A1: an adopted band necked against a gap partner takes its
+                        // octilinear form at its neck (zones and width), never wider.
+                        let real = |o_pts: &[Vec2]| match &a1z {
+                            Some(z) => {
+                                let (its, ls) = self.neck_items(w, lid, o_pts, z, z.min_w);
+                                (self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its)).then_some((its, Some((z.min_w, ls))))
+                            }
+                            None => self.realise(w, layer, lid, o_pts, &pneck),
+                        };
                         let tag = match got {
-                            Some(o) => match self.realise(w, layer, lid, &o.pts, &pneck) {
+                            Some(o) => match real(&o.pts) {
                                 Some((its, pn)) => {
                                     self.stats.octi_asis += o.asis;
                                     self.stats.octi_asis_below += o.asis_below;
@@ -4322,7 +4334,7 @@ impl<'a> Drawer<'a> {
                             out.necks.push((pts[pts.len() - 1], wn, ls[1]));
                         }
                     }
-                    if let (Some((wn, ls)), Some(pn)) = (pneck_out, &pneck) {
+                    if let (Some((wn, ls)), Some(pn)) = (pneck_out, a1z.as_ref().or(pneck.as_ref())) {
                         if wn < wi.w {
                             for (z, l) in pn.ends.iter().zip(ls) {
                                 if let (Some((c, _)), true) = (z, l > 0.0) {

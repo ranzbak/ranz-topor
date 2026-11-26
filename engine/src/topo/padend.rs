@@ -245,7 +245,9 @@ impl Drawer<'_> {
                     continue;
                 }
                 let Some(res) = self.joint.reserved.get(&(w, r)) else { continue };
-                if res.pts.len() < 2 {
+                // draw-absorb A1: a band the joint commit necked against a gap partner keeps its
+                // neck (re-anchoring draws it at full width; never wider after the neck).
+                if res.pts.len() < 2 || res.zones.is_some() {
                     continue;
                 }
                 let layer = plan.layers[r];
@@ -283,7 +285,7 @@ impl Drawer<'_> {
                 if let Some(rb) = self.erbs.get_mut(&w).and_then(|v| v.iter_mut().find(|b| b.layer == layer && (b.s - s0).len() < 1000.0 && (b.e - e0).len() < 1000.0)) {
                     rb.path = p.clone();
                 }
-                self.joint.reserved.insert((w, r), super::joint::Reserved { pts: p, items, handles: hs, pneck: None, octi: false });
+                self.joint.reserved.insert((w, r), super::joint::Reserved { pts: p, items, handles: hs, pneck: None, octi: false, zones: None });
                 self.stats.tip_anchored += 1;
                 done.insert((w, r));
                 added = true;

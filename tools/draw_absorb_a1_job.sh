@@ -13,7 +13,7 @@ EP=$(ls scratch/boards/eprom-to-kernal/*/*.kicad_pcb | head -1)
 QM=scratch/boards/qmtech-hand/qmtech-minimig.kicad_pcb; ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb; WIC=scratch/boards/wiccon-2023/2d3063e70ed5/2023.kicad_pcb
 export -f unit; export OUT C1 ON EP QM ESP WIC
 git rev-parse HEAD > $OUT/rev.txt 2>/dev/null || cat REV > $OUT/rev.txt 2>/dev/null
-hzq run --threads 4 --name $TAG-qm -- bash -c 'unit on qm $QM $C1 $ON; unit off qm $QM $C1' 9>&- &
+hzq run --threads 4 --name $TAG-qm -- bash -c 'TOPO_ABSORBDBG=1 unit on qm $QM $C1 $ON; unit off qm $QM $C1' 9>&- &
 sleep 5
 hzq run --threads 4 --name $TAG-small -- bash -c 'unit on esp $ESP $C1 $ON; unit on wic $WIC $C1 $ON; unit on ep $EP $C1 $ON; unit off esp $ESP $C1; unit off wic $WIC $C1; unit off ep $EP $C1' 9>&- &
 wait
