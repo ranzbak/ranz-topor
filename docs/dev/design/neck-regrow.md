@@ -78,7 +78,11 @@ wire be necked from the pad all the way to the junction?
 ## As built (r2, lead OK 2026-11-26)
 
 1. `exit_tight` (state.rs):
-   - skips passes whose edge has both ends on the own pad's outline;
+   - skips passes whose edge has both ends on the own pad's outline, and passes nearer to the other end than to
+     this one (on a short wire the "first two" passes from a free end were the other end's bottleneck: both ends
+     tight, the whole wire necked; topo_dvn neck_in_pad_row / neck_shared_channel, arm nrg_near);
+   - keeps the board outline at the edge clearance besides other nets' copper (a terminal 0.15 mm from the edge has
+     a tight exit; main caught it only through the previous point's bug; topo_dvn neck_edge_terminal, arm nrg_edge);
    - the cheap test on the even pass points stays the first filter;
    - then the taut path at the nominal width (`State::taut_prefix`: `gap_spans` ports of the nominal item, the
      wire's turns (junction vertices: free or node, never obstacle corners), `pack::funnel`) up to the last judged pass, relaxed round the clearance discs:
@@ -97,7 +101,7 @@ wire be necked from the pad all the way to the junction?
    (the board routes them at their existing copper's width; the crop has none, so it routed qmtech's ADV_SDA /
    ADV_SCL at 0.25 instead of 0.127: false findings).
 
-Debug arms (TOPO_FD45_OFF): nrg_join, nrg_contig, nrg_relax. Debug prints (TOPO_NECKDBG): EXITTIGHT,
+Debug arms (TOPO_FD45_OFF): nrg_join, nrg_contig, nrg_relax, nrg_near, nrg_edge. Debug prints (TOPO_NECKDBG): EXITTIGHT,
 EXITTAUT, CUTNECK, PLANNECK, NECKWHY.
 
 **Not in this branch: neck back to the T split.** The user rule (necks run from the pad back to the T split) means a
