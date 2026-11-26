@@ -63,6 +63,9 @@ case ${1:-} in
   bunits) shift; EP=$(ls scratch/boards/eprom-to-kernal/*/*.kicad_pcb | head -1); ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
     WIC=scratch/boards/wiccon-2023/2d3063e70ed5/2023.kicad_pcb
     for x in "$@"; do case $x in qm) bunit C1 qm $QM ;; ep) bunit C1 ep $EP ;; esp) bunit C1 esp $ESP ;; wic) bunit C1 wic $WIC ;; esac; done ;;
+  all)  # all TAG BASE_TAG: both (patterns T + crop, the base tag's arms joined) first, then final
+    T=$2; bash $ROOT/tools/neckrg_job.sh both $T T tip-det-s0 $3 > $OUT/u-both.log 2>&1; note "both rc $?"
+    bash $ROOT/tools/neckrg_job.sh final $T > $OUT/u-final.log 2>&1; note "final rc $?" ;;
   final)  # final TAG: xunit + two board units (det s0 C1, as dvn7s), 3 hzq units
     T=$2
     hzq run --threads 6 --name $T-x -- bash $ROOT/tools/neckrg_job.sh xunit > $OUT/u-x.log 2>&1 9>&- &
