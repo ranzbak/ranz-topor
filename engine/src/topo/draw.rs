@@ -3941,6 +3941,14 @@ impl<'a> Drawer<'a> {
                     erbs_octi = x.octi;
                     adopt = Some(x.handles);
                 }
+                if pneck.is_some() && !full.violations.is_empty() && std::env::var("TOPO_NECKDBG").is_ok() {
+                    let nm = self.model.nets.iter().find(|n| n.code == wi.net).map_or("?", |n| n.name.as_str());
+                    let vs: Vec<String> = full.violations.iter().map(|v| {
+                        let it = &items[v.item.min(items.len().saturating_sub(1))];
+                        format!("{}@L{} gap {} req {} item {} {:?}", v.against, v.layer, v.gap, v.required, v.item, it)
+                    }).collect();
+                    eprintln!("NECKWHY wire {w} net {nm} run {r} attempt {attempt} L{layer} pts {:?} full-width violations {vs:?}", pts.iter().map(|p| ((p.x / 1e3).round() / 1e3, (-p.y / 1e3).round() / 1e3)).collect::<Vec<_>>());
+                }
                 let mut rep = match &pneck {
                     _ if full.violations.is_empty() => full,
                     Some(pn) => match self.plan_neck_run(w, lid, &pts, pn) {
@@ -4938,7 +4946,8 @@ impl<'a> Drawer<'a> {
         let wi = &st.wires[w];
         let (na, nb, mid) = st.neck_runs(w);
         if std::env::var("TOPO_NECKDBG").is_ok() {
-            eprintln!("PLANNECK wire {w} n {} na {na} nb {nb} mid {mid:?} widths {:?}", wi.passes.len(), wi.passes.iter().map(|&p| st.pass_w[p]).collect::<Vec<_>>());
+            let nm = self.model.nets.iter().find(|n| n.code == wi.net).map_or("?", |n| n.name.as_str());
+            eprintln!("PLANNECK wire {w} net {nm} a ({:.3},{:.3}) b ({:.3},{:.3}) n {} na {na} nb {nb} mid {mid:?} widths {:?}", self.b.proj.pos[wi.a].x / 1e6, -self.b.proj.pos[wi.a].y / 1e6, self.b.proj.pos[wi.b].x / 1e6, -self.b.proj.pos[wi.b].y / 1e6, wi.passes.len(), wi.passes.iter().map(|&p| st.pass_w[p]).collect::<Vec<_>>());
         }
         if na == 0 && nb == 0 && mid.is_empty() {
             return None;

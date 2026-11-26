@@ -959,6 +959,9 @@ impl<'p> State<'p> {
             for sgm in pts.windows(2) {
                 for i in 0..m {
                     if seg_seg_dist(sgm[0], sgm[1], ob.poly[i], ob.poly[(i + 1) % m]) < need {
+                        if std::env::var("TOPO_NECKDBG").is_ok() {
+                            eprintln!("EXITTIGHT wire {w} end {end} obstacle {o} net {:?} centre ({:.3},{:.3}) dist {:.0} need {need:.0} stretch ({:.3},{:.3})-({:.3},{:.3})", ob.net, ob.center.x / 1e6, -ob.center.y / 1e6, seg_seg_dist(sgm[0], sgm[1], ob.poly[i], ob.poly[(i + 1) % m]), sgm[0].x / 1e6, -sgm[0].y / 1e6, sgm[1].x / 1e6, -sgm[1].y / 1e6);
+                        }
                         return true;
                     }
                 }
@@ -1056,6 +1059,9 @@ impl<'p> State<'p> {
     /// Write the widths of [`State::cut_neck_widths`] into the pass widths (narrower only).
     pub fn apply_neck_widths(&mut self, m: &BTreeMap<PassId, f64>) {
         for (&p, &wn) in m {
+            if std::env::var("TOPO_NECKDBG").is_ok() {
+                eprintln!("CUTNECK wire {} pass {p} edge {} -> {wn:.0}", self.passes[p].wire, self.passes[p].edge);
+            }
             self.pass_w[p] = self.pass_w[p].min(wn);
         }
     }
