@@ -1005,16 +1005,37 @@ impl<'p> State<'p> {
             let ob = &pr.obstacles[o];
             0.5 * wi.w + if ob.bare { ob.clear } else { ob.clear.max(wi.s) } - 1.0
         };
-        let too_close_by = |stretch: &[Vec2], slack: f64| -> Option<(ObsId, f64)> {
-            for &o in &obs {
-                let ob = &pr.obstacles[o];
-                let m = ob.poly.len();
-                for sgm in stretch.windows(2) {
-                    for i in 0..m {
-                        let d = seg_seg_dist(sgm[0], sgm[1], ob.poly[i], ob.poly[(i + 1) % m]);
-                        if d < need(o) - slack {
-                            return Some((o, d));
+        // What the exit must keep clear of: the other nets' copper (polygon sides at their
+        // clearance) and the board outline near it (its sides: constrained mesh edges between two
+        // outline vertices, at the edge clearance; neck-regrow: a terminal next to the board
+        // edge, as qmtech's crop terminals, has a tight exit too). `(a, b, need, obstacle)`,
+        // NO_OBS for the outline.
+        let mut walls: Vec<(Vec2, Vec2, f64, ObsId)> = Vec::new();
+        for &o in &obs {
+            let ob = &pr.obstacles[o];
+            let m = ob.poly.len();
+            walls.extend((0..m).map(|i| (ob.poly[i], ob.poly[(i + 1) % m], need(o), o)));
+        }
+        if !super::octi::fd45_off("nrg_edge") {
+            let mut seen: Vec<EdgeId> = Vec::new();
+            for &u in &verts {
+                for &t in &pr.vert_tris[u] {
+                    for &e in &pr.tri_edges[t] {
+                        let [x, y] = pr.edges[e];
+                        if pr.edge_constraint[e] && matches!(pr.vkind[x], VertKind::Edge) && matches!(pr.vkind[y], VertKind::Edge) && !seen.contains(&e) {
+                            seen.push(e);
+                            walls.push((pr.pos[x], pr.pos[y], 0.5 * wi.w + pr.edge_clear - 1.0, NO_OBS));
                         }
+                    }
+                }
+            }
+        }
+        let too_close_by = |stretch: &[Vec2], slack: f64| -> Option<(ObsId, f64)> {
+            for &(a, b, nd, o) in &walls {
+                for sgm in stretch.windows(2) {
+                    let d = seg_seg_dist(sgm[0], sgm[1], a, b);
+                    if d < nd - slack {
+                        return Some((o, d));
                     }
                 }
             }
@@ -1038,15 +1059,11 @@ impl<'p> State<'p> {
                 for sgm in taut.windows(2) {
                     let (p, q) = (sgm[0], sgm[1]);
                     let mut best: Option<(f64, Vec2, Vec2, f64)> = None;
-                    for &o in &obs {
-                        let ob = &pr.obstacles[o];
-                        let m = ob.poly.len();
-                        for i in 0..m {
-                            let (d, x, y) = seg_seg_closest(p, q, ob.poly[i], ob.poly[(i + 1) % m]);
-                            let r = need(o) + 1.0;
-                            if d < r - 1.0 && best.is_none_or(|b| d - r < b.0 - b.3) {
-                                best = Some((d, x, y, r));
-                            }
+                    for &(a, b, nd, _) in &walls {
+                        let (d, x, y) = seg_seg_closest(p, q, a, b);
+                        let r = nd + 1.0;
+                        if d < r - 1.0 && best.is_none_or(|bb| d - r < bb.0 - bb.3) {
+                            best = Some((d, x, y, r));
                         }
                     }
                     if let Some((d, x, y, r)) = best {
@@ -1084,8 +1101,10 @@ impl<'p> State<'p> {
             }
         }
         if std::env::var("TOPO_NECKDBG").is_ok() {
-            let ob = &pr.obstacles[o];
-            eprintln!("EXITTIGHT wire {w} end {end} obstacle {o} net {:?} centre ({:.3},{:.3}) dist {d:.0} need {:.0}", ob.net, ob.center.x / 1e6, -ob.center.y / 1e6, need(o));
+            match pr.obstacles.get(o) {
+                Some(ob) => eprintln!("EXITTIGHT wire {w} end {end} obstacle {o} net {:?} centre ({:.3},{:.3}) dist {d:.0} need {:.0}", ob.net, ob.center.x / 1e6, -ob.center.y / 1e6, need(o)),
+                None => eprintln!("EXITTIGHT wire {w} end {end} the board outline dist {d:.0} need {:.0}", 0.5 * wi.w + pr.edge_clear),
+            }
         }
         true
     }
