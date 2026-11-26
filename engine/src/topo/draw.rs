@@ -562,30 +562,38 @@ const NECK_PAD_OUT: f64 = 20_000.0;
 /// between the pad centre and the step lies wholly inside the pad, KiCad's Cleanup deletes it
 /// (`TRACKS_CLEANER::deleteTracksInPads`; the cleanup-safe tidy drops it first) and the trace
 /// ends off the centre (qmtech one cycle: U9.9, U7.3 with neck_trim). Narrower copper on the
-/// same centre line adds no violation. A run that never leaves the pad, or whose end is not in
-/// it, is left alone. O(zones x run points).
+/// same centre line adds no violation. A run that never leaves the pad (a via in the pad) is
+/// necked over its whole length when a zone covers any of it (qmtech U7.3); a run whose end is
+/// not in the pad is left alone. O(zones x run points).
 pub(super) fn neck_out_of_pad(neck: &mut super::exact::Neck, run: &[Vec2], poly: &[Vec2]) {
     use super::state::point_in_poly;
     if run.len() < 2 || poly.len() < 3 || !point_in_poly(run[0], poly) {
         return;
     }
-    let Some(j) = run.iter().position(|&p| !point_in_poly(p, poly)) else { return };
-    let (a, b) = (run[j - 1], run[j]);
-    let (mut lo, mut hi) = (0.0f64, 1.0f64);
-    for _ in 0..30 {
-        let m = 0.5 * (lo + hi);
-        if point_in_poly(a + (b - a) * m, poly) {
-            lo = m;
-        } else {
-            hi = m;
+    // The run inside the pad and `NECK_PAD_OUT` past its outline; all of it when the run never
+    // leaves the pad (a via in the pad: one width from the centre to the via).
+    let pre: Vec<Vec2> = match run.iter().position(|&p| !point_in_poly(p, poly)) {
+        None => run.to_vec(),
+        Some(j) => {
+            let (a, b) = (run[j - 1], run[j]);
+            let (mut lo, mut hi) = (0.0f64, 1.0f64);
+            for _ in 0..30 {
+                let m = 0.5 * (lo + hi);
+                if point_in_poly(a + (b - a) * m, poly) {
+                    lo = m;
+                } else {
+                    hi = m;
+                }
+            }
+            let exit = a + (b - a) * hi;
+            let l = (b - exit).len();
+            let out = if l > 1.0 { exit + (b - exit) * (NECK_PAD_OUT.min(l) / l) } else { b };
+            let mut pre: Vec<Vec2> = run[..j].to_vec();
+            pre.push(exit);
+            pre.push(out);
+            pre
         }
-    }
-    let exit = a + (b - a) * hi;
-    let l = (b - exit).len();
-    let out = if l > 1.0 { exit + (b - exit) * (NECK_PAD_OUT.min(l) / l) } else { b };
-    let mut pre: Vec<Vec2> = run[..j].to_vec();
-    pre.push(exit);
-    pre.push(out);
+    };
     for z in neck.ends.iter_mut() {
         let Some((c, r)) = *z else { continue };
         if !r.is_finite() {
@@ -5566,8 +5574,9 @@ mod tests {
 
     /// draw-via-neck r6: a neck at the run's pad end reaches past the pad's outline (no width
     /// step inside the pad, whose in-pad narrow piece KiCad's Cleanup would delete); a neck
-    /// starting inside the pad covers the pad end too; zones away from the pad, unbounded zones
-    /// and runs whose end lies outside the pad are left alone.
+    /// starting inside the pad covers the pad end too; a run that never leaves the pad is necked
+    /// to its end; zones away from the pad, unbounded zones and runs whose end lies outside the
+    /// pad are left alone.
     #[test]
     fn neck_out_of_pad_moves_the_width_step_outside_the_pad() {
         let v = |x: f64, y: f64| Vec2 { x, y };
@@ -5588,7 +5597,10 @@ mod tests {
         assert_eq!(r(&outside, 0), 100_000.0, "run end outside the pad");
         let mut inside = nk([Some((v(0.0, 0.0), 100_000.0)), None, None]);
         neck_out_of_pad(&mut inside, &[v(0.0, 0.0), v(300_000.0, 0.0)], &pad);
-        assert_eq!(r(&inside, 0), 100_000.0, "a run that never leaves the pad");
+        assert!((r(&inside, 0) - 300_001.0).abs() < 2.0, "a run that never leaves the pad (via in pad) is necked to its end: {}", r(&inside, 0));
+        let mut apart = nk([Some((v(1_500_000.0, 0.0), 100_000.0)), None, None]);
+        neck_out_of_pad(&mut apart, &[v(0.0, 0.0), v(300_000.0, 0.0)], &pad);
+        assert_eq!(r(&apart, 0), 100_000.0, "a zone off a run inside the pad stays");
     }
 
     /// draw-via-neck r5 (lead 2026-11-26): the per-wire planned-room price does not depend on
