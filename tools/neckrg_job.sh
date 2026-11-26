@@ -60,6 +60,10 @@ C1="--set optimize.runs=1 --set optimize.rounds=1 --set capacity.compass_cut_che
 bunit() { local a=$1 n=$2 pcb=$3; python -m harness.score_runs "$OUT/$a-$n" "$pcb" --only 0 --no-png --threads 4 $C1 > "$OUT/$a-$n.log" 2>&1 9>&-; note "$a-$n rc $?"; }
 case ${1:-} in
   xunit) xunit ;;
+  espdbg)  # esp det s0 C1 with TOPO_NECKDBG (the plan's exit decisions)
+    ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb; mkdir -p $OUT/espdbg
+    TOPO_NECKDBG=1 tools/route_board.sh $ESP $OUT/espdbg/s0 --no-png --set optimize.runs=1 --set optimize.rounds=1 > $OUT/espdbg/route.log 2>&1 9>&-; note "espdbg rc $?"
+    grep -E "EXITTIGHT|EXITTAUT|PLANNECK" $OUT/espdbg/route.log | sort | uniq -c | sort -rn | head -400 > $OUT/espdbg/exit.txt; gzip -9 $OUT/espdbg/route.log ;;
   esparms)  # esp det s0 C1 with one fix arm off each (which change moves esp's DRC)
     ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
     for a in nrg_join nrg_relax nrg_near nrg_edge; do TOPO_FD45_OFF=$a bunit A$a esp $ESP; done ;;
