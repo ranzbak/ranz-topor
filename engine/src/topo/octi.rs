@@ -151,6 +151,36 @@ pub struct OctiCfg {
     pub grid: Option<super::gridsnap::Lattice>,
     pub grid_mode: super::gridsnap::Mode,
     pub grid_nm: f64,
+    /// pad-centre-price (`[factors] pad_off_centre`, docs/dev/design/pad-centre-price.md): price
+    /// (nm per unit of [`pad_off_amount`]) of a run end that KiCad's Cleanup leaves off its pad's
+    /// centre. 0 = off (main's copper).
+    pub pad_off_nm: f64,
+}
+
+/// pad-centre-price: the `pad_off_centre` units of a track end `off` (nm) from its pad's centre,
+/// for a wire of pitch `pitch` (width + clearance, nm): `x + x^2`, `x = off / pitch` (0 at the
+/// centre, smooth and growing, no cutoff; the `planned_room` shape). O(1).
+pub fn pad_off_amount(off: f64, pitch: f64) -> f64 {
+    let x = off.max(0.0) / pitch.max(1.0);
+    x + x * x
+}
+
+/// pad-centre-price: the DP's price of a first (last) leg from a run end at its own pad (outline
+/// `poly`, run end `c`, `ext` its farthest outline point, pad centre `ctr`) to `j`: pad-snap's
+/// [`stub_price`] at base `stub_nm`, plus, where KiCad's Cleanup deletes the leg (the run then
+/// starts at `j`), `pad_off_nm x` [`pad_off_amount`] of `|j - ctr|`; the sum at most `cap` (0.8 x
+/// one violation unit: short > clearance > off-centre end for every weight). `pad_off_nm` 0: the
+/// stub price as before, bit for bit. O(outline).
+#[allow(clippy::too_many_arguments)]
+pub fn end_stub_price(poly: &[Vec2], c: Vec2, ext: f64, ctr: Vec2, w: f64, pitch: f64, j: Vec2, stub_nm: f64, pad_off_nm: f64, cap: f64, err: f64) -> f64 {
+    if pad_off_nm <= 0.0 || fd45_off("padoff") {
+        return stub_price(poly, c, ext, w, j, stub_nm, err);
+    }
+    let s1 = stub_price(poly, c, ext, w, j, 1.0, err);
+    if s1 <= 0.0 {
+        return 0.0;
+    }
+    (stub_nm * s1 + pad_off_nm * pad_off_amount((j - ctr).len(), pitch)).min(cap)
 }
 
 /// forced-draw: a short's violation unit costs this many clearance units in the shorts-first
@@ -298,13 +328,14 @@ impl OctiCfg {
             grid: super::gridsnap::Lattice::from_opts(o).0,
             grid_mode: super::gridsnap::Mode::parse(&o.grid_snap),
             grid_nm: super::gridsnap::price_nm(o),
+            pad_off_nm: reg.weight("pad_off_centre").unwrap_or(0.0).max(0.0) * MM,
         }
     }
 }
 
 impl Default for OctiCfg {
     fn default() -> Self {
-        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, short_leg_nm: 0.0, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, pull_range: f64::INFINITY, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST, grid: None, grid_mode: super::gridsnap::Mode::Off, grid_nm: 0.0 }
+        OctiCfg { on: false, bend_nm: 0.25 * MM, spacing_nm: 0.5 * MM, short_leg_nm: 0.0, any_nm: 15.0 * MM, any_forbidden: false, acute_nm: 50.0 * MM, acute_forbidden: false, pull: 0.3, pull_range: f64::INFINITY, room: 5.0, viol_nm: 1000.0 * MM, short_nm: 1000.0 * MM * SHORT_FIRST, grid: None, grid_mode: super::gridsnap::Mode::Off, grid_nm: 0.0, pad_off_nm: 0.0 }
     }
 }
 
@@ -1181,7 +1212,14 @@ impl Drawer<'_> {
                 && (forced || self.seg_clear_near(&nr, a, b))
         };
         let stub_nm = cfg.stub_nm(pitch);
-        let stub = |end: usize, j: Vec2| own_pad[end].map_or(0.0, |(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, stub_nm, self.model.rules.max_error as f64));
+        // pad-centre-price: the pad centre of each own-pad end (the off-centre distance of an end
+        // Cleanup leaves at the leg's far joint), and the cap of the end price.
+        let own_ctr: [Vec2; 2] = [0usize, 1].map(|end| {
+            let ob = if end == 0 { wi.pa } else { wi.pb };
+            if own_pad[end].is_some() { self.b.proj.obstacles[ob].center } else { Vec2::default() }
+        });
+        let end_cap = 2.0 * STUB_VIOL_SHARE * cfg.viol_nm;
+        let stub = |end: usize, j: Vec2| own_pad[end].map_or(0.0, |(poly, c, ext)| end_stub_price(poly, c, ext, own_ctr[end], wi.w, pitch, j, stub_nm, cfg.pad_off_nm, end_cap, self.model.rules.max_error as f64));
         // pad-snap r2b (D3b): per own-pad end and octilinear direction `k`, the leave point: the
         // nearest point on the ray from the run end whose round end sticks out of the pad by
         // [`LEAVE_NM`] ([`leave_point`]). Every own pad, also one too short for an [`Exit`].
@@ -2889,6 +2927,35 @@ mod tests {
                     assert!(cfg.viol_nm <= cfg.short_nm);
                 }
             }
+        }
+    }
+
+    /// pad-centre-price: the end price is pad-snap's stub price at weight 0 (bit for bit), and
+    /// with a weight adds `x + x^2` of the leg's far joint's distance from the PAD centre where
+    /// Cleanup deletes the leg; nothing for a leg that leaves the pad or at the centre; graded
+    /// (more off, more price); capped for every weight.
+    #[test]
+    fn end_stub_price_grades_the_off_centre_end() {
+        let poly = vec![v(-0.3e6, -0.975e6), v(0.3e6, -0.975e6), v(0.3e6, 0.975e6), v(-0.3e6, 0.975e6)];
+        let (c, w, pitch) = (v(0.0, 0.0), 0.2e6, 0.4e6);
+        let ext = (0.3e6f64).hypot(0.975e6);
+        let cap = 0.8 * 1000.0 * MM;
+        let p = |j: Vec2, wt: f64| end_stub_price(&poly, c, ext, c, w, pitch, j, STUB_NM, wt, cap, 5_000.0);
+        for j in [v(0.0, 0.3e6), v(0.0, 0.5e6), v(0.1e6, 0.4e6), v(0.0, 1.2e6), c] {
+            assert_eq!(p(j, 0.0).to_bits(), stub_price(&poly, c, ext, w, j, STUB_NM, 5_000.0).to_bits(), "weight 0 = pad-snap's price at {j:?}");
+        }
+        assert_eq!(p(c, 5.0 * MM), 0.0, "at the centre");
+        assert_eq!(p(v(0.0, 1.2e6), 5.0 * MM), 0.0, "a leg that leaves the pad");
+        let (a, b) = (p(v(0.0, 0.3e6), 5.0 * MM), p(v(0.0, 0.5e6), 5.0 * MM));
+        assert!((a - (stub_price(&poly, c, ext, w, v(0.0, 0.3e6), STUB_NM, 5_000.0) + 5.0 * MM * pad_off_amount(0.3e6, pitch))).abs() < 1e-6, "{a}");
+        assert!(b > a && a > p(v(0.0, 0.3e6), 1.0 * MM), "graded by distance and weight: {a} {b}");
+        assert!((pad_off_amount(0.4e6, pitch) - 2.0).abs() < 1e-12 && pad_off_amount(0.0, pitch) == 0.0);
+        // the off distance is from the pad centre, not from the run end (a branch end in the pad)
+        let q = v(0.0, -0.2e6);
+        let from_ctr = end_stub_price(&poly, q, ext, c, w, pitch, v(0.0, 0.3e6), STUB_NM, 5.0 * MM, cap, 5_000.0);
+        assert!(from_ctr > 0.0);
+        for wt in [1.0, 1e3, 1e9] {
+            assert!(p(v(0.0, 0.5e6), wt * MM) <= cap, "capped below one violation at weight {wt}");
         }
     }
 

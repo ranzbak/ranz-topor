@@ -9361,7 +9361,33 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                     }
                     refused.contains(&(w, end, q.x.round() as i64, q.y.round() as i64, i))
                 };
-                if let Some((gain, len_gain, i, pts)) = dr.fuse_best_legal(wo, r, &run, end == 1, &tr, ws_mm, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s), &mut skip) {
+                // pad-centre-price (`[factors] pad_off_centre`): the pad-end price of a run (from
+                // the fusing end): its T point inside a pad of the net off its centre, and its far
+                // end leg when KiCad's Cleanup deletes it inside the wire's own pad (the run then
+                // ends at the leg's far joint, off the centre), graded, capped below one violation.
+                let pitch = wi.w + wi.s;
+                let cap = 0.8 * ocfg.viol_nm;
+                let far = 1 - end;
+                let n_runs = wo.runs.len();
+                let pad_off = |pts: &[Vec2]| -> f64 {
+                    let mut nm = 0.0;
+                    if let Some(&q) = pts.first() {
+                        if let Some(o) = net_terms.get(&wi.net).and_then(|v| v.iter().map(|&o| &proj.obstacles[o]).find(|ob| ob.layers.has(layer) && ob.poly.len() >= 3 && super::state::point_in_poly(q, &ob.poly))) {
+                            nm += (ocfg.pad_off_nm * super::octi::pad_off_amount((q - o.center).len(), pitch)).min(cap);
+                        }
+                    }
+                    if pts.len() >= 2 {
+                        let (c, j) = (pts[pts.len() - 1], pts[pts.len() - 2]);
+                        let at_end = if far == 0 { r == 0 } else { r + 1 == n_runs };
+                        if let Some((poly, c0, ext)) = dr.own_pad_end(w, far, at_end, false, c) {
+                            let ob = if far == 0 { wi.pa } else { wi.pb };
+                            nm += super::octi::end_stub_price(poly, c0, ext, proj.obstacles[ob].center, wi.w, pitch, j, ocfg.stub_nm(pitch), ocfg.pad_off_nm, cap, model.rules.max_error as f64);
+                        }
+                    }
+                    nm / MM
+                };
+                let end_mm: Option<&dyn Fn(&[Vec2]) -> f64> = (ocfg.pad_off_nm > 0.0 && !super::octi::fd45_off("padoff")).then_some(&pad_off);
+                if let Some((gain, len_gain, i, pts)) = dr.fuse_best_legal(wo, r, &run, end == 1, &tr, ws_mm, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s), end_mm, &mut skip) {
                     if fdbg {
                         eprintln!("FUSE trunk wire {w} end {end} onto {u}: best legal gain {gain:.2} i {i}");
                     }

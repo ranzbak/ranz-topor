@@ -139,3 +139,32 @@ impl Factor for OffGrid {
         0.0
     }
 }
+
+/// pad-centre-price (docs/dev/design/pad-centre-price.md, user 2026-11-26): a trace end that
+/// KiCad's Cleanup leaves inside its pad off the pad's centre (KiCad keeps it, its push-and-shove
+/// router links a pad only at the centre: loose for drag). Priced by the drawing where it chooses a
+/// pad end: the octilinear DP's first / last leg that Cleanup deletes (the run then starts at the
+/// leg's far joint) and the fuse of a branch onto its trunk inside the pad (a T off the centre);
+/// `x + x^2` units for an end `x` pitches (width + clearance) off the centre. Weight 0 = off.
+pub struct PadOffCentre;
+
+impl Factor for PadOffCentre {
+    fn name(&self) -> &'static str {
+        "pad_off_centre"
+    }
+    fn doc(&self) -> &'static str {
+        "Drawing: a trace end that KiCad's Cleanup leaves inside its pad off the pad's centre (a first leg Cleanup deletes, a branch T in the pad); x + x^2 per end, x = distance from the centre / pitch (width + clearance); 0 = off."
+    }
+    fn unit(&self) -> &'static str {
+        "per off-centre pad end, times (x + x^2), x = off / pitch"
+    }
+    fn default_weight(&self) -> f64 {
+        0.0
+    }
+    fn default_report(&self) -> Report {
+        Report::Off
+    }
+    fn amount(&self, _ev: &Event) -> f64 {
+        0.0
+    }
+}

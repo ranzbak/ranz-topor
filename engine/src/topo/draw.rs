@@ -488,7 +488,12 @@ pub fn fuse_style(octilinear: bool, cfg: &super::octi::OctiCfg, pitch: f64) -> O
 /// bound as the branch leaves the trunk tangentially). The caller checks each with the full
 /// checker (every clearance against all drawn copper, [`Drawer::refit_run`]).
 /// O(run vertices x (trunk segments + shapes x run vertices)).
-pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
+/// pad-centre-price (`[factors] pad_off_centre`): `end_mm` = the pad-end price (mm) of a run (its
+/// T point off the centre of a pad of its net, its far end leg one KiCad's Cleanup deletes inside
+/// the wire's own pad); a candidate's gain loses `end_mm(new run) - end_mm(run)` (None: no such
+/// price, the gains as before).
+#[allow(clippy::type_complexity)]
+pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>, end_mm: Option<&dyn Fn(&[Vec2]) -> f64>) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
     let price = |dir: Vec2, arms: &[Vec2]| -> f64 {
         let Some(u) = dir.unit() else { return 0.0 };
         if arms.is_empty() || jw <= 0.0 {
@@ -539,7 +544,13 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, sty
                 continue;
             }
             let style_gain = if old_style.is_finite() { old_style - new_style } else { 0.0 };
-            let gain = along + old0 - d - price(pts[1] - pts[0], &arms) + style_gain;
+            let mut gain = along + old0 - d - price(pts[1] - pts[0], &arms) + style_gain;
+            if let Some(f) = end_mm {
+                let pen = f(&pts) - f(run);
+                if pen != 0.0 {
+                    gain -= pen;
+                }
+            }
             if gain > 1e-3 {
                 out.push((gain, along - d, i, pts));
             }
@@ -4592,8 +4603,8 @@ impl<'a> Drawer<'a> {
     /// [`fuse_candidates`]. Returns `(price gain, length gain mm, i, new run as drawn)`.
     /// O(candidates x checker query).
     #[allow(clippy::too_many_arguments)]
-    pub fn fuse_best_legal(&self, wo: &WireOut, r: usize, run: &[Vec2], rev: bool, trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>, skip: &mut dyn FnMut(f64, usize, &[Vec2]) -> bool) -> Option<(f64, f64, usize, Vec<Vec2>)> {
-        for (gain, len_gain, i, mut pts) in fuse_cap(fuse_candidates(run, trunk, ws_mm, jw, style), FUSE_VERTEX_CAP) {
+    pub fn fuse_best_legal(&self, wo: &WireOut, r: usize, run: &[Vec2], rev: bool, trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>, end_mm: Option<&dyn Fn(&[Vec2]) -> f64>, skip: &mut dyn FnMut(f64, usize, &[Vec2]) -> bool) -> Option<(f64, f64, usize, Vec<Vec2>)> {
+        for (gain, len_gain, i, mut pts) in fuse_cap(fuse_candidates(run, trunk, ws_mm, jw, style, end_mm), FUSE_VERTEX_CAP) {
             if skip(gain, i, &pts) {
                 continue;
             }
@@ -6109,7 +6120,7 @@ mod tests {
         let mm = 1e6;
         let trunk = [v(-10.0 * mm, 0.0), v(10.0 * mm, 0.0)];
         let run = [v(0.0, 0.0), v(1.0 * mm, 0.5 * mm), v(5.0 * mm, 0.5 * mm), v(6.0 * mm, 3.0 * mm)];
-        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None);
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None, None);
         assert!(!c.is_empty());
         let (gain, len_gain, i, pts) = &c[0];
         assert_eq!(*i, 3);
@@ -6121,7 +6132,29 @@ mod tests {
         // psi(26.6 deg) = 1.73 before, psi(90 deg) = 0.04 after: 12.39 mm.
         assert!((*gain - 12.39).abs() < 0.02, "{gain}");
         // A branch that leaves straight away has nothing to gain.
-        assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0, None).is_empty());
+        assert!(fuse_candidates(&[v(0.0, 0.0), v(0.0, 3.0 * mm)], &[&trunk], 0.45, 10.0, None, None).is_empty());
+    }
+
+    /// pad-centre-price: the fuse's pad-end price takes `end_mm(new) - end_mm(old)` off a
+    /// candidate's gain: a shortcut whose T point lands inside a pad off its centre loses its
+    /// gain by that price (gone once the price beats it), and None leaves the gains as they were.
+    #[test]
+    fn fuse_end_price_takes_the_pad_end_price_off_the_gain() {
+        let mm = 1e6;
+        let trunk = [v(-10.0 * mm, 0.0), v(10.0 * mm, 0.0)];
+        let run = [v(0.0, 0.0), v(1.0 * mm, 0.5 * mm), v(5.0 * mm, 0.5 * mm), v(6.0 * mm, 3.0 * mm)];
+        let base = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None, None);
+        let zero = |_: &[Vec2]| 0.0;
+        let same = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None, Some(&zero));
+        assert_eq!(base.iter().map(|c| c.0.to_bits()).collect::<Vec<_>>(), same.iter().map(|c| c.0.to_bits()).collect::<Vec<_>>());
+        // a pad round (6, 0): a T point inside it, 1 mm or less from (6, 0.4) as its centre, costs
+        let pad = move |p: &[Vec2]| if (p[0] - v(6.0 * mm, 0.4 * mm)).len() < 1.0 * mm { 3.0 } else { 0.0 };
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None, Some(&pad));
+        let g0 = base.iter().find(|x| x.2 == 3).map(|x| x.0).unwrap();
+        let g1 = c.iter().find(|x| x.2 == 3).map(|x| x.0).unwrap();
+        assert!((g0 - g1 - 3.0).abs() < 1e-9, "{g0} {g1}");
+        let big = move |p: &[Vec2]| if (p[0] - v(6.0 * mm, 0.4 * mm)).len() < 1.0 * mm { 1e3 } else { 0.0 };
+        assert!(fuse_candidates(&run, &[&trunk], 0.45, 10.0, None, Some(&big)).iter().all(|x| x.2 != 3), "priced out");
     }
 
     /// octi-bundle r2 (A1c: the fuse prices on the first draw's scale): a 45/90 staircase branch
@@ -6136,11 +6169,11 @@ mod tests {
         let p = |x: f64, y: f64| v(x * mm, y * mm);
         let trunk = [p(0.0, 5.0), p(0.0, 0.0)];
         let run = [p(0.0, 0.0), p(0.0, -1.0), p(1.0, -2.0), p(1.0, -3.0), p(2.0, -4.0), p(2.0, -5.0), p(3.0, -6.0)];
-        let plain = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None);
+        let plain = fuse_candidates(&run, &[&trunk], 0.45, 10.0, None, None);
         assert!(super::super::octi::any_price(&plain[0].3) > 0.0, "length only: the free-angle chord first {:?}", plain[0]);
         let cfg = super::super::octi::OctiCfg { on: true, ..Default::default() };
         let pitch = 0.45 * mm;
-        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, Some((&cfg, pitch)));
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, Some((&cfg, pitch)), None);
         assert!(!c.is_empty());
         let (gain, len_gain, _, pts) = &c[0];
         assert_eq!(super::super::octi::any_price(pts), 0.0, "{pts:?}");
@@ -6159,7 +6192,7 @@ mod tests {
         // the trunk end (6.71 mm, any_angle 15 + 13.4): the chord still gains 2.9 and is offered,
         // far below the elbow (3 + 4.24 mm, gain 30.5).
         let run = [p(0.0, 0.0), p(0.0, -20.0), p(3.0, -20.0), p(3.0, -6.0)];
-        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, Some((&cfg, pitch)));
+        let c = fuse_candidates(&run, &[&trunk], 0.45, 10.0, Some((&cfg, pitch)), None);
         let chord = c.iter().find(|x| x.2 == 3 && x.3.len() == 2).expect("the free-angle chord is offered");
         let elbow = c.iter().position(|x| x.2 == 3 && x.3.len() == 3 && super::super::octi::any_price(&x.3) == 0.0).expect("elbow");
         assert!(c[elbow].0 > chord.0, "{c:?}");
@@ -6185,7 +6218,7 @@ mod tests {
         };
         // A staircase run leaving the trunk end straight down.
         let run = [p(0.0, 0.0), p(0.0, -1.0), p(1.0, -2.0), p(1.0, -3.0), p(2.0, -4.0), p(2.0, -5.0), p(3.0, -6.0)];
-        let c = fuse_candidates(&run, &[&trunk], ws, jw, Some((&cfg, pitch)));
+        let c = fuse_candidates(&run, &[&trunk], ws, jw, Some((&cfg, pitch)), None);
         let mut checked = 0;
         for (gain, _, i, pts) in &c {
             // pts = foot, link legs (ending at run[i]), run[i+1..]
@@ -6204,7 +6237,7 @@ mod tests {
         // from the trunk arm, the chord 112 degrees (psi 0.04 / 0 / 0.0003), so a junction price
         // taken from the chord instead of the first leg gives a different gain.
         let side = [p(0.0, 0.0), p(3.0, 0.0), p(3.0, -2.0), p(5.0, -2.0)];
-        let c = fuse_candidates(&side, &[&trunk], ws, jw, Some((&cfg, pitch)));
+        let c = fuse_candidates(&side, &[&trunk], ws, jw, Some((&cfg, pitch)), None);
         let mut legs: Vec<i64> = Vec::new();
         for (gain, _, i, pts) in c.iter().filter(|x| x.2 == 3) {
             let link = &pts[..pts.len()];
@@ -6220,7 +6253,7 @@ mod tests {
         let free = [p(0.0, 0.0), p(1.0, -4.0), p(1.0, -5.0), p(3.0, -6.0)];
         let fcfg = super::super::octi::OctiCfg { any_forbidden: true, ..cfg };
         let soft = super::super::octi::OctiCfg { any_forbidden: false, ..cfg };
-        let c = fuse_candidates(&free, &[&trunk], ws, jw, Some((&fcfg, pitch)));
+        let c = fuse_candidates(&free, &[&trunk], ws, jw, Some((&fcfg, pitch)), None);
         assert!(!c.is_empty());
         for (gain, _, i, pts) in &c {
             assert!(st(&fcfg, pts).is_finite(), "forbidden pieces are never offered");
@@ -6555,7 +6588,7 @@ mod tests {
             run.push(fp(33.0, 18.0));
             let wo = fx_drawn(&mut dr, wb, run.clone());
             let tr: Vec<&[Vec2]> = vec![trunk.as_slice()];
-            let best = |skip: &mut dyn FnMut(f64, usize, &[Vec2]) -> bool| dr.fuse_best_legal(&wo, 0, &run, false, &tr, 0.45, 0.0, None, skip);
+            let best = |skip: &mut dyn FnMut(f64, usize, &[Vec2]) -> bool| dr.fuse_best_legal(&wo, 0, &run, false, &tr, 0.45, 0.0, None, None, skip);
             // Unblocked: the vertex furthest along, the pad C (i 14: its foot (33, 20), a 2 mm link).
             let (gain, _, i, pts) = best(&mut |_, _, _| false).expect("a legal fuse");
             if !blocked {
