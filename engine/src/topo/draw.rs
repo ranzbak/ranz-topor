@@ -5253,10 +5253,37 @@ impl<'a> Drawer<'a> {
         Some((wn, items, lens))
     }
 
+    /// draw-absorb A1: neck zones over the tracks of `items` (wire `w`) that the violations of
+    /// `rep` passing `keep` name: one per track round its middle, half its length plus one pitch
+    /// (the trim shrinks it to what the checker needs), the deepest first; more tracks than `free`
+    /// zones: one zone over all of them. O(violations).
+    pub(super) fn hit_zones(&self, w: WireId, items: &[Item], rep: &CheckReport, keep: &dyn Fn(&Violation) -> bool, free: usize) -> Vec<(Vec2, f64)> {
+        let wi = &self.st.wires[w];
+        let mut segs: BTreeMap<usize, (i64, Vec2, Vec2)> = BTreeMap::new();
+        for v in rep.violations.iter().filter(|v| keep(v)) {
+            let Some(Item::Track(t)) = items.get(v.item) else { continue };
+            let (a, b) = (t.prim.start(), t.prim.end());
+            let (a, b) = (Vec2 { x: f64::from(a.x), y: -f64::from(a.y) }, Vec2 { x: f64::from(b.x), y: -f64::from(b.y) });
+            let e = segs.entry(v.item).or_insert((0, a, b));
+            e.0 = e.0.max(v.required - v.gap);
+        }
+        let mut z: Vec<(i64, Vec2, Vec2)> = segs.into_values().collect();
+        z.sort_by(|p, q| q.0.cmp(&p.0));
+        let pitch = wi.w + wi.s;
+        if z.len() <= free {
+            return z.iter().map(|&(_, a, b)| ((a + b) * 0.5, 0.5 * (b - a).len() + pitch)).collect();
+        }
+        if free == 0 {
+            return Vec::new();
+        }
+        let n = z.len() as f64;
+        let c = z.iter().fold(Vec2::default(), |s, &(_, a, b)| s + (a + b) * 0.5) * (1.0 / n);
+        vec![(c, z.iter().map(|&(_, a, b)| (a - c).len().max((b - c).len())).fold(0.0, f64::max) + pitch)]
+    }
+
     /// draw-absorb A1 (`[drawing] forced_shrink`, docs/dev/design/draw-absorb.md): the forced run
     /// `pts` (its `items` all at the wire's width; violations `vs`) necked over the stretches it
-    /// violates: one zone per track violation (the deepest [`NECK_ZONES`](super::exact::NECK_ZONES),
-    /// round its middle, half its length plus one pitch), at the widest width in `[floor, nominal]`
+    /// violates ([`Drawer::hit_zones`]), at the widest width in `[floor, nominal]`
     /// whose severity key is the floor's, each zone trimmed to what the checker needs and never
     /// ending inside the run's own end pad (`neck_out_of_pads`). TopoR 6.3 manual p. 56 (minimum
     /// width in bottlenecks), p. 72 (shrinkages). `None` unless the key ([`viol_key`]: shorts,
@@ -5270,14 +5297,14 @@ impl<'a> Drawer<'a> {
         if min_w >= wi.w - 0.5 || pts.len() < 2 || items.iter().any(|i| matches!(i, Item::Track(t) if (t.width as f64) < wi.w - 0.5)) {
             return None;
         }
-        let mut zs: Vec<&Viol> = vs.iter().filter(|v| !v.via && v.kind != "connection_width").collect();
+        let rep = self.checker.check_against(&self.idx, items, &[]);
+        let zs = self.hit_zones(w, items, &rep, &|_| true, super::exact::NECK_ZONES);
         if zs.is_empty() {
             return None;
         }
-        zs.sort_by(|a, b| b.amount().total_cmp(&a.amount()));
         let mut ends = [None; super::exact::NECK_ZONES];
-        for (z, v) in ends.iter_mut().zip(&zs) {
-            *z = Some((v.at, 0.5 * v.len_nm + wi.w + wi.s));
+        for (z, v) in ends.iter_mut().zip(zs) {
+            *z = Some(v);
         }
         let nk0 = super::exact::Neck { min_w, ends };
         let eval = |nk: &super::exact::Neck, wn: f64| {

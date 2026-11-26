@@ -353,12 +353,15 @@ impl<'a> Drawer<'a> {
                     if nk.min_w >= wi.w - 0.5 {
                         continue;
                     }
-                    let hits = crate::check::CheckReport { violations: rep0.violations.iter().filter(|v| v.against.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)).is_some_and(|b| partners.contains(b))).cloned().collect(), ..Default::default() };
-                    let mut spots = self.viols_of(&bands[x].items, &hits);
-                    spots.sort_by(|p, q| q.amount().total_cmp(&p.amount()));
-                    let free: Vec<usize> = (0..super::exact::NECK_ZONES).filter(|&i| nk.ends[i].is_none()).collect();
-                    for (i, v) in free.into_iter().zip(&spots) {
-                        nk.ends[i] = Some((v.at, 0.5 * v.len_nm + wi.w + wi.s));
+                    let free = nk.ends.iter().filter(|z| z.is_none()).count();
+                    let partner_hit = |v: &crate::check::Violation| v.against.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)).is_some_and(|b| partners.contains(b));
+                    let spots = self.hit_zones(w, &bands[x].items, &rep0, &partner_hit, free);
+                    let slots: Vec<usize> = (0..super::exact::NECK_ZONES).filter(|&i| nk.ends[i].is_none()).collect();
+                    for (i, z) in slots.into_iter().zip(&spots) {
+                        nk.ends[i] = Some(*z);
+                    }
+                    if dbg {
+                        eprintln!("ABSORBDBG   spots {:?} pts {:?}", spots.iter().map(|z| ((z.0.x / 1e3).round() / 1e3, (z.0.y / 1e3).round() / 1e3, (z.1 / 1e3).round() / 1e3)).collect::<Vec<_>>(), bands[x].pts.iter().map(|p| ((p.x / 1e3).round() / 1e3, (p.y / 1e3).round() / 1e3)).collect::<Vec<_>>());
                     }
                     if nk.ends.iter().all(|z| z.is_none()) {
                         continue;
@@ -521,7 +524,8 @@ impl<'a> Drawer<'a> {
             if dbg {
                 let its = self.neck_items(w, lid, pts, pn, pn.min_w).0;
                 let rep = self.checker.check_against(&self.idx, &its, &[]);
-                eprintln!("ABSORBDBG   floor {:.0} still hits {:?}", pn.min_w, rep.violations.iter().filter(|v| !allowed(&v.against)).map(|v| (v.against.clone(), v.required - v.gap)).collect::<Vec<_>>());
+                eprintln!("ABSORBDBG   floor {:.0} still hits {:?}", pn.min_w, rep.violations.iter().filter(|v| !allowed(&v.against)).map(|v| (v.against.clone(), v.required - v.gap, v.item, match &its[v.item] { Item::Track(t) => format!("{:?} w {}", t.prim, t.width), _ => "via".into() })).collect::<Vec<_>>());
+                eprintln!("ABSORBDBG   zones {:?}", pn.ends.iter().flatten().map(|z| ((z.0.x / 1e3).round() / 1e3, (z.0.y / 1e3).round() / 1e3, (z.1 / 1e3).round() / 1e3)).collect::<Vec<_>>());
             }
             return None;
         }

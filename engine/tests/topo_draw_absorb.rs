@@ -292,3 +292,28 @@ fn a_shrink_next_to_a_pad_has_no_width_step_in_the_pad() {
         }
     }
 }
+
+/// A1 in the joint commit (erbs/gap_squeeze, smooth): two bands kept across a model gap. With the
+/// net's floor below the width (min track width 0.15 mm), forced_shrink realises one band necked
+/// over the gap against the other: the pair is resolved (`gap_shrunk`), the gap is no violation
+/// any more, the neck is warned, and nothing is narrower than the floor.
+#[test]
+fn a_gap_kept_band_is_necked_against_its_partner() {
+    let path = format!("{}/tests/fixtures/erbs/model-gap_squeeze.json", env!("CARGO_MANIFEST_DIR"));
+    let m = with(&std::fs::read_to_string(&path).unwrap(), |j| j["rules"]["min_track_width"] = serde_json::json!(150_000));
+    let mut val = serde_json::to_value(Options::default()).unwrap();
+    val["runs"] = serde_json::json!(1);
+    val["topo_rounds"] = serde_json::json!(1);
+    val["draw_style"] = serde_json::json!("smooth");
+    let o: Options = serde_json::from_value(val).unwrap();
+    let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+    let gap = |r: &RouteResult| r.violations.iter().filter(|v| v.prov.as_ref().is_some_and(|p| p.mech == "gap_kept")).count();
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(eo.gap_kept > 0 && gap(&off) > 0 && eo.gap_shrunk == 0, "{eo:?}");
+    assert!(en.gap_shrunk > 0 && en.gap_kept + en.gap_shrunk == eo.gap_kept, "{en:?}");
+    assert!(gap(&on) < gap(&off), "off {} on {}", gap(&off), gap(&on));
+    assert!(on.violations.len() < off.violations.len(), "off {:?}\non {:?}", off.violations, on.violations);
+    assert!(on.warnings.iter().any(|w| w.contains("necked from 0.250 mm")), "{:?}", on.warnings);
+    assert!(tracks(&on).iter().all(|t| t.0 >= 150_000), "{:?}", tracks(&on));
+    assert_eq!(on.routed, off.routed);
+}
