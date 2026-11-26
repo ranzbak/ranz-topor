@@ -1996,6 +1996,9 @@ impl<'a> Drawer<'a> {
                 if depth > 0.0 {
                     let x = depth / pitch;
                     tot += pitch * (x + x * x);
+                    if std::env::var_os("TOPO_VIAPLANDBG").is_some() {
+                        eprintln!("VIAPLANP wire {w} at ({:.3},{:.3}) other {o} net {} ok {ok} dist {:.3} depth {:.3}", p.x / 1e6, -p.y / 1e6, oi.net, dist / 1e6, depth / 1e6);
+                    }
                 }
             }
         }
@@ -2395,7 +2398,7 @@ impl<'a> Drawer<'a> {
                             _ => price,
                         };
                         if dbg {
-                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0} reach {reach:.2} in class {in_class}", p.x / 1e6, -p.y / 1e6, room, price);
+                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0} plan {plan_p:.0} squeeze {squeeze:.0} reach {reach:.2} in class {in_class}", p.x / 1e6, -p.y / 1e6, room, price);
                         }
                         if !in_class {
                             if oob.as_ref().is_none_or(|o| price < o.0 - 1.0 || (price <= o.0 + 1.0 && room > o.1 + 1.0)) {

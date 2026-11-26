@@ -29,7 +29,7 @@ case ${1:-} in
     wait; note "all done" ;;
   dbg)
     A=${2:-G}; shift 2 || true
-    (export TOPO_VIADBG=1 TOPO_TIPDBG=1 TOPO_NECKDBG=1 TOPO_RUNPROV=1; unit $A esp $ESP "${C1[@]}" "$@")
+    (export TOPO_VIADBG=1 TOPO_VIAPLANDBG=1 TOPO_TIPDBG=1 TOPO_NECKDBG=1 TOPO_RUNPROV=1; unit $A esp $ESP "${C1[@]}" "$@")
     find $OUT -name '*.log' -size +20M -exec gzip -9 {} + 2>/dev/null
     note "all done" ;;
   suite)
