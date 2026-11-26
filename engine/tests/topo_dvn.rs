@@ -191,24 +191,16 @@ fn neck_edge_terminal_keeps_the_widest_width() {
     assert!(thin(&r0) < 0.26, "neck_trim off: the floor ({})", thin(&r0));
 }
 
-/// draw-via-neck r6 (user 2026-11-26: every trace still connects to the MIDDLE of its pad, else
-/// KiCad's Cleanup deletes or moves it): on every dvn pattern and crop, with the defaults (the
-/// via shift off since r6, neck_trim and pad_tip_anchor on) and with the via shift on, every
-/// track end in a pad of its net lies at the pad's centre and no segment crosses such a pad
-/// without ending in it (`tidy::pad_end_breaches`), and every routed pad terminal has a track
-/// end at its centre. The tip anchor ends the run at the centre and makes the axis point past
-/// the tip a bend (padend.rs `tip_anchor_path`: `[centre, tip point, ..]`); the neck trim's
-/// width step never lies inside the pad. Listed apart (not breaches): the edge pattern's pads
-/// within the edge clearance and pads whose centre breaks a clearance at the track's width
-/// (the end moves inside the pad on purpose, edge-clear). The breaches of main's drawing
-/// (all three keys off), pinned here so they stay visible: dvn_crop_q2 U9.4 (USB_C_D-), whose
-/// drawn path leaves the centre with a 45 um jog inside the pad; the jog lies wholly in the
-/// pad, so the cleanup-safe tidy drops it as KiCad's Cleanup would (`deleteTracksInPads`) and
-/// the trace ends 45 um off the centre, still inside the pad (in every arm); dvn_crop_q3 C19.1,
-/// a width step 0.192 mm off the centre inside the pad (main's neck over the whole zone; the
-/// neck trim, on by default, removes it). No arm may add a breach to main's.
+/// draw-via-neck r7 (user's test 2026-11-26: "if the track is gone after the cleanup, it was not
+/// good"; lead: the criterion is survival of KiCad's Cleanup, the centre distance only a hint).
+/// On every dvn pattern and crop, with the defaults, the via shift on and main's drawing (all
+/// three keys off): no routed track lies in a pad of its net the way KiCad's Cleanup deletes
+/// (`TRACKS_CLEANER::deleteTracksInPads`, `geom::kicad::track_inside` at the board's maximum
+/// error), so the cleanup-safe tidy left nothing KiCad would remove there. Off-centre ends and T
+/// joins (`tidy::pad_end_breaches`, `centre_misses`) are printed as hints only: KiCad keeps them
+/// (tests/test_kicad_accepts.py, the real dialog on harness.kicad_accepts' project).
 #[test]
-fn every_track_at_a_pad_ends_at_its_centre() {
+fn no_track_survives_that_kicad_deletes_in_its_pad() {
     let pats = ["neck_in_pad_row", "neck_shared_channel", "neck_edge_terminal", "dvn_crop_q2", "dvn_crop_q3", "pad_axis_entry", "pad_side_approach", "via_interval_sliver", "via_jam_shift"];
     let f = |b: bool| serde_json::json!(b);
     let arms: [(&str, Vec<(&str, serde_json::Value)>); 3] = [
@@ -216,33 +208,31 @@ fn every_track_at_a_pad_ends_at_its_centre() {
         ("shift on", vec![("via_shift_mm", serde_json::json!(1.0))]),
         ("main drawing", vec![("neck_trim", f(false)), ("pad_tip_anchor", f(false))]),
     ];
-    let mut found: Vec<(String, String)> = Vec::new();
+    let mut bad: Vec<String> = Vec::new();
     for p in pats {
         for (arm, extra) in &arms {
             let (m, r) = route_items(p, extra);
-            let bs = topor_engine::topo::tidy::pad_end_breaches(&m, &r.items);
-            for b in bs.iter().filter(|b| b.counts()) {
-                found.push((arm.to_string(), format!("{p} {:?} {} at ({:.3},{:.3}) off {:.3}", b.kind, b.pad, b.at.0 as f64 / 1e6, b.at.1 as f64 / 1e6, b.off / 1e6)));
+            let err = m.rules.max_error as f64;
+            for it in &r.items {
+                let Item::Track(t) = it else { continue };
+                let TrackPrim::Seg { a, b } = t.prim else { continue };
+                let (a, b) = (topor_engine::geom::Vec2 { x: a.x as f64, y: -(a.y as f64) }, topor_engine::geom::Vec2 { x: b.x as f64, y: -(b.y as f64) });
+                for pad in m.pads.iter().filter(|q| q.net == t.net && (q.layers.is_empty() || q.layers.contains(&t.layer))) {
+                    let sk = m.skeleton(pad, t.layer);
+                    if topor_engine::geom::kicad::track_inside(a, b, t.width as f64, err, |q| -topor_engine::geom::dist::point_skeleton(q, &sk), 2.0) {
+                        bad.push(format!("{arm}: {p} track ({:.4},{:.4})-({:.4},{:.4}) w {} inside pad {}.{}", a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6, t.width, pad.ref_, pad.number));
+                    }
+                }
             }
-            // A pad whose centre cannot take the end (edge-clear, blocked centre) is judged by
-            // the breach's flags above, not by the centre test.
-            let exempt: Vec<&str> = bs.iter().filter(|b| b.edge || b.centre_blocked).map(|b| b.pad.as_str()).collect();
-            for miss in centre_misses(&m, &r).into_iter().filter(|(pad, _)| !exempt.contains(&pad.as_str())) {
-                found.push((arm.to_string(), format!("{p} {}", miss.1)));
+            for h in topor_engine::topo::tidy::pad_end_breaches(&m, &r.items).iter().filter(|h| h.hint()) {
+                eprintln!("HINT {arm}: {p} {:?} {} off {:.3} mm", h.kind, h.pad, h.off / 1e6);
+            }
+            for miss in centre_misses(&m, &r) {
+                eprintln!("HINT {arm}: {p} {}", miss.1);
             }
         }
     }
-    let of = |arm: &str| found.iter().filter(|x| x.0 == arm).map(|x| x.1.clone()).collect::<Vec<_>>();
-    let main = vec![
-        "dvn_crop_q2 Terminal U9.4 at (99.632,58.000) off 0.045".to_string(),
-        "dvn_crop_q2 USB_C_D- U9.4: no track end at the pad centre".to_string(),
-        "dvn_crop_q3 Junction C19.1 at (134.515,74.629) off 0.192".to_string(),
-    ];
-    assert_eq!(of("main drawing"), main, "main's drawing: the pinned pre-existing breach only");
-    for arm in ["defaults", "shift on"] {
-        let new: Vec<String> = of(arm).into_iter().filter(|x| !main.contains(x)).collect();
-        assert!(new.is_empty(), "{arm}: track ends off their pad centre that main's drawing does not have:\n{}", new.join("\n"));
-    }
+    assert!(bad.is_empty(), "tracks KiCad's Cleanup deletes as lying in their pad:\n{}", bad.join("\n"));
 }
 
 /// The pad terminals of the routed connections that no track end of their net reaches at the

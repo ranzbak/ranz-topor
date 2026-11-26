@@ -375,7 +375,7 @@ pub enum PadEndKind {
     /// A track end inside the pad off its centre that lies on the centre line of a segment of
     /// the net whose chain reaches the centre (a T onto the trace that ends there, as
     /// `fuse_branches` makes it): connected to the centre through that copper, but the trace
-    /// itself ends beside the centre. Listed, not a breach: KiCad's real Cleanup keeps such a T
+    /// itself ends beside the centre. A hint, as every kind: KiCad's real Cleanup keeps such a T
     /// (r7, user's method 2026-11-26 "if the track is gone after the cleanup, it was not good":
     /// the project `harness.kicad_accepts` pad_centre, T joins 0.17 / 0.40 / 0.75 mm off the
     /// centre on an axis host and on a 45-degree host, all kept; tests/test_kicad_accepts.py). It
@@ -413,15 +413,22 @@ pub struct PadEndBreach {
 }
 
 impl PadEndBreach {
-    /// A breach of the rule (every kind but [`PadEndKind::Tee`], which KiCad's Cleanup keeps) on
-    /// a pad whose centre takes the track's end (not an edge-clear pad, not a blocked centre).
-    pub fn counts(&self) -> bool {
-        self.kind != PadEndKind::Tee && !self.edge && !self.centre_blocked
+    /// A centre-distance HINT (r7, lead 2026-11-26 after the KiCad test project
+    /// `harness.kicad_accepts`): a track end off the centre of a pad whose centre could take it
+    /// (not an edge-clear pad, not a blocked centre), every kind. Not a failure: KiCad's real
+    /// Cleanup keeps off-centre T joins and off-centre terminals alike (user: "if the track is
+    /// gone after the cleanup, it was not good"; 2026-11-21: "off center is not detached, the
+    /// only way to know is to check the KiCad file"). The pass / fail criterion is survival of
+    /// KiCad's Cleanup (`pad_centre_check.py --cleanup`, the in-pad test [`tidy`] shares with
+    /// KiCad).
+    pub fn hint(&self) -> bool {
+        !self.edge && !self.centre_blocked
     }
 }
 
 /// draw-via-neck r6 (user 2026-11-26: "every trace still connects to the MIDDLE of its pad,
-/// otherwise KiCad Cleanup deletes it"): the pad-centre invariant on `items` (KiCad frame, as
+/// otherwise KiCad Cleanup deletes it"; r7: KiCad's real Cleanup keeps off-centre ends and T
+/// joins, so these are hints, [`PadEndBreach::hint`]): the pad-centre listing of `items` (KiCad frame, as
 /// written; the kept tracks of `model` count as copper of their net). Per pad of a net and per
 /// copper layer of the pad, the segments of the net on that layer whose copper touches the pad
 /// (copper gap <= 0) must all reach a track end at the pad's centre (within 1 um) along chains of
@@ -1054,21 +1061,21 @@ mod tests {
     /// the origin (KiCad frame), a 0.25 mm track: a trace from the centre (with a bend inside
     /// the pad) is no breach; an end off the centre is a Terminal, two there a Junction, a
     /// segment across the pad with no end in it a PassThrough, an end on the centre trace a Tee
-    /// (listed, not counted: KiCad keeps it); an end at a via in the pad, a foreign net and copper
+    /// (a hint like the others: KiCad keeps it); an end at a via in the pad, a foreign net and copper
     /// outside the pad are not judged, a segment through the pad to a via outside it is a
     /// PassThrough (r7). A narrow pad next to a pad of another net (the disc at the centre breaks the
     /// clearance) is a blocked centre and the edge band an edge-clear pad: listed, not counted.
     #[test]
     fn pad_end_breaches_classify_every_way_a_track_meets_its_pad() {
         let m = model_with_pad(1, (0, 0), 600_000, 1_950_000);
-        let kinds = |items: &[Item]| -> Vec<(PadEndKind, bool, i64)> { pad_end_breaches(&m, items).iter().map(|b| (b.kind, b.counts(), b.off.round() as i64)).collect() };
+        let kinds = |items: &[Item]| -> Vec<(PadEndKind, bool, i64)> { pad_end_breaches(&m, items).iter().map(|b| (b.kind, b.hint(), b.off.round() as i64)).collect() };
         assert!(kinds(&[seg(1, (0, 0), (0, -2_000_000))]).is_empty());
         assert!(kinds(&[seg(1, (0, 0), (0, -500_000)), seg(1, (0, -500_000), (500_000, -1_100_000))]).is_empty(), "a bend inside the pad");
         assert_eq!(kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000))]), vec![(PadEndKind::Terminal, true, 525_000)]);
         let j = kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), seg(1, (0, -525_000), (-500_000, -1_100_000))]);
         assert_eq!(j, vec![(PadEndKind::Junction, true, 525_000)], "one entry per point (dedup)");
         assert_eq!(kinds(&[seg(1, (-1_000_000, -300_000), (1_000_000, -300_000))]), vec![(PadEndKind::PassThrough, true, 300_000)]);
-        assert_eq!(kinds(&[seg(1, (0, 0), (0, -2_000_000)), seg(1, (0, -600_000), (500_000, -1_100_000))]), vec![(PadEndKind::Tee, false, 600_000)]);
+        assert_eq!(kinds(&[seg(1, (0, 0), (0, -2_000_000)), seg(1, (0, -600_000), (500_000, -1_100_000))]), vec![(PadEndKind::Tee, true, 600_000)]);
         let via = Item::Via(crate::model::ViaItem { kind: "via".into(), net: 1, at: crate::model::Pt { x: 0, y: -525_000 }, d: 600_000, drill: 300_000, layers: vec![0, 2], group: None, wire: None });
         assert!(kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), via.clone()]).is_empty());
         // r7 (verifier r6 F3): a via outside the pad does not hide a segment across the pad
@@ -1095,16 +1102,16 @@ mod tests {
         };
         let off = [seg(1, (0, -60_000), (0, -2_000_000))];
         let b = pad_end_breaches(&pads(250_000), &off);
-        assert_eq!(b.iter().map(|b| (b.kind, b.centre_blocked, b.counts())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, true, false)]);
+        assert_eq!(b.iter().map(|b| (b.kind, b.centre_blocked, b.hint())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, true, false)]);
         let b = pad_end_breaches(&pads(400_000), &off);
-        assert_eq!(b.iter().map(|b| (b.kind, b.centre_blocked, b.counts())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, false, true)], "room at the centre");
+        assert_eq!(b.iter().map(|b| (b.kind, b.centre_blocked, b.hint())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, false, true)], "room at the centre");
         // Edge-clear: the pad of `edge_model` within the edge clearance (its centre 1.26 mm from the edge).
         let em = edge_model(1_200_000, false);
         let b = pad_end_breaches(&em, &[Item::Track(TrackItem { net: 1, layer: 0, width: 250_000, prim: TrackPrim::Seg { a: iv((2_500_000, 0)), b: iv((-1_000_000, 0)) }, group: None, wire: None })]);
-        assert_eq!(b.iter().map(|b| (b.kind, b.edge, b.counts())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, true, false)]);
+        assert_eq!(b.iter().map(|b| (b.kind, b.edge, b.hint())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, true, false)]);
         let em = edge_model(500_000, false);
         let b = pad_end_breaches(&em, &[Item::Track(TrackItem { net: 1, layer: 0, width: 250_000, prim: TrackPrim::Seg { a: iv((2_500_000, 0)), b: iv((-1_000_000, 0)) }, group: None, wire: None })]);
-        assert_eq!(b.iter().map(|b| (b.kind, b.edge, b.counts())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, false, true)], "out of the edge band");
+        assert_eq!(b.iter().map(|b| (b.kind, b.edge, b.hint())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, false, true)], "out of the edge band");
     }
 
     fn edge_model(edge_clear: i64, ignored: bool) -> BoardModel {

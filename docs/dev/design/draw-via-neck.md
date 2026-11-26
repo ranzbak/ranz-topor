@@ -203,10 +203,19 @@ Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals 
   Xephyr), whatever goes was not good. `harness/kicad_accepts.py` pad_centre (kept as
   tests/fixtures/kicad_accepts, replayed in tests/test_kicad_accepts.py): of nine cases only the jog goes. T joins
   inside the pad 0.17 / 0.40 / 0.75 mm off the centre (axis and 45-degree hosts) stay, and so do off-centre ends
-  with no host. So a Tee stays listed, not counted.
+  with no host. Criterion (lead, user 2026-11-21 "off center is not detached, the only way to know is to check the
+  KiCad file"): survival of KiCad's Cleanup, not the centre distance. `pad_end_breaches` entries are hints
+  (`PadEndBreach::hint`), every kind; the engine pattern test is now
+  `topo_dvn::no_track_survives_that_kicad_deletes_in_its_pad` (no routed track in its pad as KiCad's in-pad test
+  judges it, every arm) and prints the hints.
+- The jog's cause: ADV_AVDD's wire 361 is a branch ending on its trunk at the pad centre (`end_at`), and
+  `own_pad_end` excluded branch ends, so the octi DP never priced the stub (TOPO_OCTINODES: connector corner 0.12 mm
+  into the pad, no stub term). A branch end inside its own pad now counts (`own_pad_end`); one outside does not.
+  The octi stub test is r6's true-end rule OR KiCad's polygon test, so nothing r6 priced becomes free (KiCad's
+  test alone freed an axis joint 95 um inside the tip, topo_pad_snap side_exit).
 - The board check judges the board after the real Cleanup too (F2): `pad_centre_check.py --cleanup DIR` runs the
-  dialog (tools/gui_e2e.sh --existing --cleanup) and lists what is new after it (esp real D5.1: Cleanup removes the
+  dialog (tools/gui_e2e.sh --existing --cleanup) and lists the hints new after it (esp real D5.1: Cleanup removes the
   host of the T in the USB_D+ short cascade, as on main, and the T is left an off-centre Terminal, which KiCad
-  keeps).
+  keeps: a hint, not a failure).
 - `pad_end_breaches`: a via end skips a segment only when the via lies in the pad (F3: a via outside no longer hides a
   PassThrough). `neck_out_of_pad` only at a pad on the run's layer (F6).
