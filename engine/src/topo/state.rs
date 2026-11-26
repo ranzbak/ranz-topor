@@ -975,7 +975,9 @@ impl<'p> State<'p> {
             let q = self.pass_point(wi.passes[k]);
             super::octi::fd45_off("nrg_near") || (q - pr.pos[v]).len() <= (q - other).len()
         };
-        let ks: Vec<usize> = order.into_iter().filter(|&k| !inside(k) && mine(k)).take(2).collect();
+        // Debug arm `nrg_exit`: main's test (the first two passes' even points only).
+        let legacy = super::octi::fd45_off("nrg_exit");
+        let ks: Vec<usize> = order.into_iter().filter(|&k| legacy || (!inside(k) && mine(k))).take(2).collect();
         if ks.is_empty() {
             return false;
         }
@@ -1016,7 +1018,7 @@ impl<'p> State<'p> {
             let m = ob.poly.len();
             walls.extend((0..m).map(|i| (ob.poly[i], ob.poly[(i + 1) % m], need(o), o)));
         }
-        if !super::octi::fd45_off("nrg_edge") {
+        if !super::octi::fd45_off("nrg_edge") && !legacy {
             let mut seen: Vec<EdgeId> = Vec::new();
             for &u in &verts {
                 for &t in &pr.vert_tris[u] {
@@ -1043,6 +1045,9 @@ impl<'p> State<'p> {
         };
         let too_close = |stretch: &[Vec2]| too_close_by(stretch, 0.0);
         let Some((o, d)) = too_close(&pts) else { return false };
+        if legacy {
+            return true;
+        }
         // The even pass points are no path: the wire's taut path at its nominal width through the
         // clearance spans of its passes (the drawing's shortest path), up to the last pass judged.
         // The funnel's legs between two edge ports can cut a corner of the fan they cross closer

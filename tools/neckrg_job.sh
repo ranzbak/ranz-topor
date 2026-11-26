@@ -64,9 +64,12 @@ case ${1:-} in
     ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb; mkdir -p $OUT/espdbg
     TOPO_NECKDBG=1 tools/route_board.sh $ESP $OUT/espdbg/s0 --no-png --set optimize.runs=1 --set optimize.rounds=1 > $OUT/espdbg/route.log 2>&1 9>&-; note "espdbg rc $?"
     grep -E "EXITTIGHT|EXITTAUT|PLANNECK" $OUT/espdbg/route.log | sort | uniq -c | sort -rn | head -400 > $OUT/espdbg/exit.txt; gzip -9 $OUT/espdbg/route.log ;;
+  esparms2)  # esp det s0: main's exit test (nrg_exit), plus the drawing join off, plus everything of this branch off
+    ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
+    for a in nrg_exit nrg_exit,nrg_join nrg_exit,nrg_join,nrg_contig; do TOPO_FD45_OFF=$a bunit A${a//,/+} esp $ESP; done ;;
   esparms)  # esp det s0 C1 with one fix arm off each (which change moves esp's DRC)
     ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
-    for a in nrg_join nrg_relax nrg_near nrg_edge; do TOPO_FD45_OFF=$a bunit A$a esp $ESP; done ;;
+    for a in ${ARMS:-nrg_join nrg_relax nrg_near nrg_edge}; do TOPO_FD45_OFF=$a bunit A$a esp $ESP; done ;;
   dvndbg)  # topo_dvn + topo_neck_regrow with TOPO_NECKDBG (why a neck runs the whole wire)
     cd $ROOT/engine; TOPO_NECKDBG=1 RUST_TEST_THREADS=1 cargo test --release --no-fail-fast --test topo_dvn --test topo_neck_regrow -- --nocapture > $OUT/dvndbg.log 2>&1 9>&-; note "dvndbg rc $?"
     cargo test --release --lib whole_supply > $OUT/lib-supply.log 2>&1 9>&-; note "lib supply rc $?" ;;
