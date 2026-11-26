@@ -60,6 +60,9 @@ C1="--set optimize.runs=1 --set optimize.rounds=1 --set capacity.compass_cut_che
 bunit() { local a=$1 n=$2 pcb=$3; python -m harness.score_runs "$OUT/$a-$n" "$pcb" --only 0 --no-png --threads 4 $C1 > "$OUT/$a-$n.log" 2>&1 9>&-; note "$a-$n rc $?"; }
 case ${1:-} in
   xunit) xunit ;;
+  dvndbg)  # topo_dvn + topo_neck_regrow with TOPO_NECKDBG (why a neck runs the whole wire)
+    cd $ROOT/engine; TOPO_NECKDBG=1 RUST_TEST_THREADS=1 cargo test --release --no-fail-fast --test topo_dvn --test topo_neck_regrow -- --nocapture > $OUT/dvndbg.log 2>&1 9>&-; note "dvndbg rc $?"
+    cargo test --release --lib whole_supply > $OUT/lib-supply.log 2>&1 9>&-; note "lib supply rc $?" ;;
   bunits) shift; EP=$(ls scratch/boards/eprom-to-kernal/*/*.kicad_pcb | head -1); ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
     WIC=scratch/boards/wiccon-2023/2d3063e70ed5/2023.kicad_pcb
     for x in "$@"; do case $x in qm) bunit C1 qm $QM ;; ep) bunit C1 ep $EP ;; esp) bunit C1 esp $ESP ;; wic) bunit C1 wic $WIC ;; pats) mkdir -p $P/runs; pats T ;; esac; done ;;
