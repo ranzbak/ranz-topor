@@ -1016,6 +1016,11 @@ impl<'p> State<'p> {
             None
         };
         let Some((o, d)) = too_close(&pts) else { return false };
+        // The even pass points are no path: the wire's taut path at its nominal width through the
+        // clearance spans of its passes (the drawing's shortest path), up to the last pass judged.
+        if too_close(&self.taut_prefix(w, end, *ks.last().unwrap())).is_none() {
+            return false;
+        }
         // The drawing's axis exit of an elongated pad (`octi::pad_exit`).
         if let Some((u, ext)) = pad_axis(&me.poly, me.center, pts[1] - pts[0]) {
             let c = pr.pos[v];
@@ -1029,6 +1034,68 @@ impl<'p> State<'p> {
             eprintln!("EXITTIGHT wire {w} end {end} obstacle {o} net {:?} centre ({:.3},{:.3}) dist {d:.0} need {:.0}", ob.net, ob.center.x / 1e6, -ob.center.y / 1e6, need(o));
         }
         true
+    }
+
+    /// neck-regrow: the taut path of wire `w` with its passes at the NOMINAL width (spans of
+    /// [`State::gap_spans`], funnel as [`State::taut_points`]), from its end `end` up to where it
+    /// crosses the edge of its pass `k` (the whole path when it does not). O(passes x edge load²).
+    pub fn taut_prefix(&self, w: WireId, end: usize, k: usize) -> Vec<Vec2> {
+        let pr = self.proj;
+        let wi = &self.wires[w];
+        let n = wi.passes.len();
+        let me = Item { net: wi.net, w: wi.w, s: wi.s };
+        let mut ports: Vec<(Vec2, Vec2)> = Vec::with_capacity(n + wi.turns.len() + 2);
+        ports.push((pr.pos[wi.a], pr.pos[wi.a]));
+        let mut sp = Vec::new();
+        let mut ti = 0;
+        for j in 0..n {
+            while ti < wi.turns.len() && wi.turns[ti].0 == j {
+                let v = pr.pos[wi.turns[ti].1];
+                ports.push((v, v));
+                ti += 1;
+            }
+            let p = wi.passes[j];
+            let e = self.passes[p].edge;
+            let (t1, t2) = (wi.tris[j], wi.tris[j + 1]);
+            let both = pr.allowed(t1, wi.net).map_or(0, |m| m.0) & pr.allowed(t2, wi.net).map_or(0, |m| m.0);
+            self.gap_spans(e, me, both, Some(p), &mut sp);
+            let [vp, vq] = pr.edges[e];
+            let (a, b) = (pr.pos[vp], pr.pos[vq]);
+            let len = (b - a).len().max(1.0);
+            let (lo, hi) = sp[self.order_index(p).min(sp.len() - 1)];
+            let (x, y) = (super::funnel::edge_point(a, b, lo / len), super::funnel::edge_point(a, b, hi / len));
+            let t = pr.tris[t1];
+            let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
+            ports.push(if (b - a).cross(c - a) > 0.0 { (y, x) } else { (x, y) });
+        }
+        while ti < wi.turns.len() && wi.turns[ti].0 == n {
+            let v = pr.pos[wi.turns[ti].1];
+            ports.push((v, v));
+            ti += 1;
+        }
+        ports.push((pr.pos[wi.b], pr.pos[wi.b]));
+        let mut path: Vec<Vec2> = super::pack::funnel(&ports).into_iter().map(|c| c.0).collect();
+        if end == 1 {
+            path.reverse();
+        }
+        let [vp, vq] = pr.edges[self.passes[wi.passes[k]].edge];
+        let (a, b) = (pr.pos[vp], pr.pos[vq]);
+        for i in 0..path.len().saturating_sub(1) {
+            let (u, v) = (path[i], path[i + 1]);
+            let (d1, d2) = (v - u, b - a);
+            let den = d1.cross(d2);
+            if den.abs() < 1e-9 {
+                continue;
+            }
+            let t = (a - u).cross(d2) / den;
+            let r = (a - u).cross(d1) / den;
+            if (-1e-9..=1.0 + 1e-9).contains(&t) && (-1e-9..=1.0 + 1e-9).contains(&r) {
+                path.truncate(i + 1);
+                path.push(u + d1 * t.clamp(0.0, 1.0));
+                return path;
+            }
+        }
+        path
     }
 
     /// [`State::refit_wire`] for `w` and every alive wire that shares an edge with it (its

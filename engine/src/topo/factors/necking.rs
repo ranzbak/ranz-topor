@@ -40,9 +40,15 @@ impl Factor for Necking {
     }
     fn describe(&self, ev: &Event) -> String {
         match *ev {
-            Event::Necking { from_nm, to_nm, mm, .. } => {
+            Event::Necking { from_nm, to_nm, mm, whole_supply: false, .. } => {
                 format!("necked from {:.3} mm to {:.3} mm over {:.2} mm", from_nm / 1e6, to_nm / 1e6, mm)
             }
+            Event::Necking { from_nm, to_nm, mm, whole_supply: true, .. } => format!(
+                "necked from {:.3} mm to {:.3} mm over {:.2} mm, the whole wire (both ends needed a neck; a supply-width net: its current is limited to the neck's)",
+                from_nm / 1e6,
+                to_nm / 1e6,
+                mm
+            ),
             _ => String::new(),
         }
     }

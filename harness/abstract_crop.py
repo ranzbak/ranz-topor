@@ -20,6 +20,12 @@ Writes `<out>/<NAME>/`:
   as they are inside it; pour nets (a copper zone in the window) are not split. Known limit: a pour clipped to the
   window can fall into pieces that the hand layout joins outside it; the reference's DRC then lists them as
   unconnected (zone to zone), for every engine alike.
+- Track widths: the router takes a Default-class net's width from its existing copper (toporlib.rules,
+  width_source existing_copper), which the problem has none of. So every Default-class net whose hand copper (median
+  over the whole source board, as the plugin measures it) differs from the Default class width gets a crop net class
+  `crop_w<um>` (a copy of Default with that track width) in both crops' .kicad_pro, by exact-name
+  netclass_patterns, split pieces (`NET__crop<k>`) included: the crop is routed at the board's widths
+  (`crop.json` "net_widths").
 - `reference/NAME.kicad_pcb`: the same board plus the hand copper inside the window (tracks clipped at the
   terminals, vias inside): the **reference solution**. It proves the crop is solvable; it is not a target to copy.
 - `crop.json`: source, requested and final window, terminals, net splits, the violations / points it was made for.
@@ -277,6 +283,9 @@ def crop(src: Path, window_mm: Rect, out_dir: Path, name: str, *, split_nets: bo
         if not z.GetIsRuleArea() and z.GetNetname():
             pour_nets.add(z.GetNetname())
 
+    # -- the nets' hand widths on the whole board (before any clipping): the crop's classes carry them
+    hand_w = _hand_widths(b)
+
     # -- tracks: clipped at the window shrunk by half the width; a cut end becomes a terminal
     terminals, tracks_kept, vias_kept, arcs_split = [], 0, 0, 0
     for t in list(b.GetTracks()):
@@ -360,6 +369,7 @@ def crop(src: Path, window_mm: Rect, out_dir: Path, name: str, *, split_nets: bo
     from harness.strip import strip_text
     text, _ = strip_text(ref_pcb.read_text())
     prob_pcb.write_text(text)
+    net_widths = carry_widths(src.with_suffix(".kicad_pro"), [ref_pcb, prob_pcb], hand_w, splits)
     for d in (ref_pcb, prob_pcb):
         fill(d)
     meta = {
@@ -370,12 +380,63 @@ def crop(src: Path, window_mm: Rect, out_dir: Path, name: str, *, split_nets: bo
         "reference": {"tracks": tracks_kept, "vias": vias_kept, "arcs_split": arcs_split},
         "terminals": [{k: v for k, v in tm.items() if k not in ("netcode", "layer_id")} | {"at_mm": [tm["at_nm"][0] / MM, tm["at_nm"][1] / MM]}
                       for tm in terminals],
-        "net_splits": splits, "pour_nets": sorted(pour_nets),
+        "net_splits": splits, "pour_nets": sorted(pour_nets), "net_widths": net_widths,
         "marks": list(marks),
         "problem": str(prob_pcb), "reference_pcb": str(ref_pcb),
     }
     (out_dir / "crop.json").write_text(json.dumps(meta, indent=1))
     return meta
+
+
+def _hand_widths(b) -> dict[str, int]:
+    """Median track width (nm) per net name of the board's segments and arcs: what the plugin's ``widths_before``
+    measures on the board copy (rules: width_source existing_copper). O(tracks)."""
+    import statistics
+
+    by: dict[str, list[int]] = {}
+    for t in b.GetTracks():
+        if t.GetClass() in ("PCB_TRACK", "PCB_ARC") and t.GetNetname():
+            by.setdefault(t.GetNetname(), []).append(int(t.GetWidth()))
+    return {n: int(statistics.median(v)) for n, v in by.items()}
+
+
+def carry_widths(src_pro: Path, pcbs, hand_w: dict[str, int], splits) -> dict[str, int]:
+    """Give every Default-class net (by ``toporlib.rules.netclass_of_from_pro`` of the source project) whose hand width
+    `hand_w` differs from the Default track width a crop class ``crop_w<um>`` (Default with that track width) in the
+    .kicad_pro next to each of `pcbs`, by exact-name netclass_patterns; split pieces (`splits`) take their net's
+    width. A name with a wildcard or regex character is left out (no exact pattern). Returns {net: width nm} of the
+    nets given a class. O(N + P)."""
+    from toporlib.rules import netclass_of_from_pro
+
+    if not src_pro.is_file():
+        return {}
+    pro = json.loads(src_pro.read_text())
+    ns = pro.setdefault("net_settings", {})
+    classes = ns.setdefault("classes", [])
+    dflt = next((c for c in classes if c.get("name") == "Default"), None)
+    if dflt is None:
+        return {}
+    dflt_w = round(float(dflt.get("track_width", 0.0)) * MM)
+    of = netclass_of_from_pro(pro, list(hand_w))
+    want = {n: w for n, w in hand_w.items() if of.get(n) == "Default" and abs(w - dflt_w) > 1}
+    for s in splits:
+        if s["net"] in want:
+            want[s["new"]] = want[s["net"]]
+    plain = lambda n: not any(ch in n for ch in "*?[]()|+^$\\{}")  # noqa: E731
+    want = {n: w for n, w in sorted(want.items()) if plain(n)}
+    if not want:
+        return {}
+    have = {c.get("name") for c in classes}
+    for w in sorted(set(want.values())):
+        name = f"crop_w{round(w / 1000)}um"
+        if name not in have:
+            classes.append(dict(dflt, name=name, track_width=w / MM, priority=int(dflt.get("priority", 2147483647)) - 1))
+            have.add(name)
+    pats = ns.get("netclass_patterns") or []
+    ns["netclass_patterns"] = pats + [{"netclass": f"crop_w{round(w / 1000)}um", "pattern": n} for n, w in want.items()]
+    for pcb in pcbs:
+        Path(pcb).with_suffix(".kicad_pro").write_text(json.dumps(pro, indent=2) + "\n")
+    return want
 
 
 def _split_nets(pcbnew, pcb: Path, nets) -> list[dict]:

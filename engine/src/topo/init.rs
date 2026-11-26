@@ -83,7 +83,7 @@ impl InitWeights {
             ignored_mm: reg.price(&Event::IgnoredRuleViolated { rule: String::new(), at: Vec2 { x: 0.0, y: 0.0 }, amount_nm: 0.0 }, w),
             forced_layer_mm: forced,
             junction_angle_mm: reg.price(&Event::JunctionAngle { at: Vec2 { x: 0.0, y: 0.0 }, deg: 60.0, ws_mm: 1.0 / super::factors::junction_psi(60.0) }, w),
-            neck_mm: reg.price(&Event::Necking { wire: 0, from_nm: 1.0, to_nm: 1.0, mm: 0.0 }, w),
+            neck_mm: reg.price(&Event::Necking { wire: 0, from_nm: 1.0, to_nm: 1.0, mm: 0.0, whole_supply: false }, w),
             same_layer_mm: reg.price(&Event::Overflow { wire: 0, edge: 0 }, w),
             wall_mm: 0.0,
             dangling_turn_mm: reg.price(&Event::DanglingTurn { at: Vec2 { x: 0.0, y: 0.0 }, deg: 90.0, ws_mm: 1.0 }, w),

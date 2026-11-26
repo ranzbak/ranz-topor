@@ -93,3 +93,30 @@ def test_projects_are_refused(tmp_path):
     from harness.paths import PROJECTS
     with pytest.raises(SystemExit):
         ac._refuse_projects(PROJECTS / "x" / "y.kicad_pcb")
+
+
+def test_crop_classes_carry_the_hand_widths_of_default_nets(tmp_path):
+    """A Default-class net routed narrower by hand (qmtech ADV_SDA: 0.127 against Default 0.25) keeps that width in the
+    crop, where it has no existing copper; its split piece too; a net of another class and a net at the Default width
+    get nothing (neck-regrow, lead item 5)."""
+    from toporlib.rules import netclass_of_from_pro
+
+    src = tmp_path / "src.kicad_pro"
+    src.write_text(json.dumps({"net_settings": {
+        "classes": [{"name": "Default", "track_width": 0.25, "clearance": 0.15, "priority": 2147483647},
+                    {"name": "PWR", "track_width": 0.5, "clearance": 0.2, "priority": 0}],
+        "netclass_assignments": {}, "netclass_patterns": [{"netclass": "PWR", "pattern": "VCC*"}]}}))
+    pcbs = [tmp_path / "a" / "x.kicad_pcb", tmp_path / "b" / "x.kicad_pcb"]
+    for p in pcbs:
+        p.parent.mkdir()
+    hand = {"SDA": 127_000, "VCC1": 300_000, "WIDE": 250_000, "/S/D": 127_000, "BAD*": 100_000}
+    got = ac.carry_widths(src, pcbs, hand, [{"net": "SDA", "new": "SDA__crop1", "pads": [], "copper": 0}])
+    assert got == {"/S/D": 127_000, "SDA": 127_000, "SDA__crop1": 127_000}
+    for p in pcbs:
+        pro = json.loads(p.with_suffix(".kicad_pro").read_text())
+        cls = {c["name"]: c for c in pro["net_settings"]["classes"]}
+        assert cls["crop_w127um"]["track_width"] == pytest.approx(0.127) and cls["crop_w127um"]["clearance"] == 0.15
+        of = netclass_of_from_pro(pro, ["SDA", "SDA__crop1", "/S/D", "VCC1", "WIDE"])
+        assert of == {"": "Default", "SDA": "crop_w127um,Default", "SDA__crop1": "crop_w127um,Default",
+                      "/S/D": "crop_w127um,Default", "VCC1": "PWR,Default", "WIDE": "Default"}
+    assert ac.carry_widths(tmp_path / "missing.kicad_pro", pcbs, hand, []) == {}

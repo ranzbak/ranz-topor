@@ -101,7 +101,7 @@ fn free_snap(stage: &str, drawn: &BTreeMap<WireId, WireOut>, st: &State) {
 /// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
 /// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
 #[allow(clippy::too_many_arguments)]
-fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State) {
+fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State, dflt_w: f64) {
     let o = &mut out[ci];
     o.routed = true;
     o.reason.clear();
@@ -118,7 +118,10 @@ fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci
     let pad = |ob: ObsId| if ob == super::state::NO_OBS { usize::MAX } else { b.pad_of.get(ob).copied().unwrap_or(usize::MAX) };
     o.ends = (pad(st.wires[w].pa), pad(st.wires[w].pb));
     for n in &wo.necks {
-        necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM }));
+        // neck-regrow: a neck over the whole wire (both ends needed it, joined) of a wire wider
+        // than the board's default width (a supply net) is named apart in the warning.
+        let supply = n.1 < st.wires[w].w - 0.5 && n.2 >= wo.length_nm - 1_000.0 && st.wires[w].w > dflt_w + 0.5;
+        necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM, whole_supply: supply }));
     }
     if octi {
         for (_, pts) in &wo.runs {
@@ -8577,7 +8580,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         if wo.ok {
             via_h.insert(w, vh);
             drawn_ok += 1;
-            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st, model.rules.default.width as f64);
             drawn.insert(w, wo);
         } else {
             for id in ids {
@@ -8716,13 +8719,13 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 for (bw, wb) in redrawn {
                     let cb = conn_of[wire_conn[bw]];
                     necking.retain(|(c, _)| *c != cb);
-                    settle(octi_on, &mut out, &mut necking, cb, bw, &wb, b, &st);
+                    settle(octi_on, &mut out, &mut necking, cb, bw, &wb, b, &st, model.rules.default.width as f64);
                     drawn.insert(bw, wb);
                 }
                 out[cf].reason.clear();
                 via_h.insert(f, ids[..vias_f.len().min(ids.len())].to_vec());
                 placed.insert(f, vias_f);
-                settle(octi_on, &mut out, &mut necking, cf, f, &wf, b, &st);
+                settle(octi_on, &mut out, &mut necking, cf, f, &wf, b, &st, model.rules.default.width as f64);
                 drawn.insert(f, wf);
             } else {
                 // Undo: whatever was drawn in this round goes, the old copper comes back.
@@ -8803,7 +8806,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             }
             placed.insert(w, vs);
             via_h.insert(w, vh);
-            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st, model.rules.default.width as f64);
             drawn.insert(w, wo);
         }
         dr.force = false;
@@ -8933,7 +8936,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                                 if out[ci].cause.is_empty() {
                                     out[ci].cause = "the branch reaches its junction on another layer than its trunk (joined by force)".into();
                                 }
-                                settle(octi_on, &mut out, &mut necking, ci, bw, &wo, b, &st);
+                                settle(octi_on, &mut out, &mut necking, ci, bw, &wo, b, &st, model.rules.default.width as f64);
                                 drawn.insert(bw, wo);
                                 junction_joins += 1;
                                 continue;
@@ -9142,7 +9145,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                     str_nm += wo.length_nm - len0;
                     let ci = conn_of[wire_conn[w]];
                     necking.retain(|(c, _)| *c != ci);
-                    settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+                    settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st, model.rules.default.width as f64);
                 }
                 drawn.insert(w, wo);
             }
@@ -9189,7 +9192,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         for w in changed {
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
-            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st, model.rules.default.width as f64);
         }
         warnings.push(format!(
             "via reduction after drawing: {} wires with vias, {} relabels tried in {} sweeps, {} accepted, {} vias removed ({:.1} s{}); before: {}; after: {}",
@@ -9449,7 +9452,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             }
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
-            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st, model.rules.default.width as f64);
             if let Some(sv) = saved {
                 // Where the copper changed: the stretch taken away and the new link.
                 let mut path = cut.clone();
@@ -9532,7 +9535,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 n_pol += k;
                 pol_nm += wo.length_nm - len0;
                 necking.retain(|(c, _)| *c != ci);
-                settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+                settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st, model.rules.default.width as f64);
             }
             drawn.insert(w, wo);
         }
