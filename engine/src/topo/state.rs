@@ -967,7 +967,15 @@ impl<'p> State<'p> {
         let on_pad = |x: VertId| matches!(pr.vkind[x], VertKind::Outline(o) if o == pad);
         let inside = |k: usize| pr.edges[self.passes[wi.passes[k]].edge].iter().all(|&x| on_pad(x));
         let order: Vec<usize> = if end == 0 { (0..n).collect() } else { (0..n).rev().collect() };
-        let ks: Vec<usize> = order.into_iter().filter(|&k| !inside(k)).take(2).collect();
+        // Only passes nearer to this end than to the other one are its exit (neck-regrow: on a
+        // short wire the "first two" passes from a free end can be the other end's bottleneck,
+        // which then made both ends tight and the whole wire necked).
+        let other = pr.pos[if end == 0 { wi.b } else { wi.a }];
+        let mine = |k: usize| {
+            let q = self.pass_point(wi.passes[k]);
+            super::octi::fd45_off("nrg_near") || (q - pr.pos[v]).len() <= (q - other).len()
+        };
+        let ks: Vec<usize> = order.into_iter().filter(|&k| !inside(k) && mine(k)).take(2).collect();
         if ks.is_empty() {
             return false;
         }

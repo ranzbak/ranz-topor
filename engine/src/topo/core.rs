@@ -10929,7 +10929,7 @@ mod tests {
         assert!(!f(250_000.0, 127_000.0, wire, wire, dflt), "a default-width wire");
         assert!(!f(250_000.4, 127_000.0, wire, wire, dflt), "within 0.5 nm of the default");
         assert!(f(250_400.0, 127_000.0, wire, wire, dflt), "0.4 um above the default is wider");
-        assert!(!f(500_000.0, 499_600.0, wire, wire, dflt), "no neck (within 0.5 nm of the width)");
+        assert!(!f(500_000.0, 499_999.6, wire, wire, dflt), "no neck (within 0.5 nm of the width)");
     }
 
     #[test]
