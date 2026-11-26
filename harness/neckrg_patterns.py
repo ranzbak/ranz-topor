@@ -103,21 +103,22 @@ def neck_reentry() -> Pattern:
     q = need * (SQ2 - 1)
     xr = _r(xu + need)
     yb = _r(ut - need)  # the leg back left above the upper wall
-    p2 = (1.6, _r(yb - 1.5))
+    p2 = (1.6, yb)  # straight above P1, just above the upper wall: the way back runs along the wall into P2
     neck = [p1, (_r(xf - (yf - y)), y), (xf, yf)]
-    full = [(xf, yf), (_r(xu + q), yf), (xr, _r(ub + q)), (xr, _r(ut - q)), (_r(xu + q), yb), (_r(p2[0] + (yb - p2[1])), yb), p2]
-    fps = [Fp("P1", [Pad("1", "PWR", p1, (0.3, 0.3))], "terminal"), Fp("P2", [Pad("1", "PWR", p2, (1.0, 1.0))], "terminal"), walls, cap]
+    full = [(xf, yf), (_r(xu + q), yf), (xr, _r(ub + q)), (xr, _r(ut - q)), (_r(xu + q), yb), p2]
+    fps = [Fp("P1", [Pad("1", "PWR", p1, (0.3, 0.3))], "terminal"), Fp("P2", [Pad("1", "PWR", p2, (0.4, 0.4))], "terminal"), walls, cap]
     tracks = [Track("PWR", "F.Cu", W_NECK, neck), Track("PWR", "F.Cu", W_POW, full)]
-    d_back = _r(math.dist(p1, (p2[0] + (yb - p2[1]), yb)))
+    d_back = _r(math.dist(p1, p2))
     return _base(
         "neck_reentry", "A neck out of a channel, then back past its own pad: full width after the neck, also on the way back",
         f"Two layers, B.Cu closed. PWR (POWER class, {W_POW} mm, neck floor {FLOOR} mm) from P1 {p1} (0.3 mm pad) to P2 {p2}. P1 "
         f"sits near the closed left end of a channel between two unconnected wall pads where only {W_NECK} mm fits; the lower "
         f"wall ends at x {xl}, the upper one runs on to x {xu}. P2 lies above, so PWR leaves the channel, runs under the upper "
-        f"wall, turns round its end and comes back left above it, {d_back} mm from P1's centre at the nearest.",
+        f"wall, turns round its end and comes back left along its top into P2, {d_back} mm above P1's centre.",
         f"PWR {W_NECK} mm from P1 to ({xf}, {yf}) (where the 0.5 mm wire clears the lower wall's corner and the upper wall), "
-        f"then {W_POW} mm under the upper wall, round its end and back left above it to P2. One necked stretch, at P1. The leg "
-        "back above the wall has room for full width and stays full width although it passes P1 again.",
+        f"then {W_POW} mm under the upper wall, round its end and back left along its top into P2 (0.4 mm pad). One necked "
+        "stretch, at P1. The leg back above the wall has room for full width and stays full width up to P2, although it "
+        "ends close to P1 again (a neck zone that is a circle round P1 narrows it).",
         "Solvable by construction: the walls force the neck in the channel; under and above the upper wall the room is "
         "derived from the full width; the only way to P2 is round the upper wall's right end.",
         (W, H), fps, tracks, [("PWR", "P1.1", "P2.1")], [],
