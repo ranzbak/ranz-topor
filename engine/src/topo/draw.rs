@@ -5268,7 +5268,7 @@ impl<'a> Drawer<'a> {
             e.0 = e.0.max(v.required - v.gap);
         }
         let mut z: Vec<(i64, Vec2, Vec2)> = segs.into_values().collect();
-        z.sort_by(|p, q| q.0.cmp(&p.0));
+        z.sort_by_key(|p| std::cmp::Reverse(p.0));
         let pitch = wi.w + wi.s;
         if z.len() <= free {
             return z.iter().map(|&(_, a, b)| ((a + b) * 0.5, 0.5 * (b - a).len() + pitch)).collect();
