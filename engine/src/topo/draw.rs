@@ -1978,6 +1978,12 @@ impl<'a> Drawer<'a> {
         let wi = &st.wires[w];
         let mut seen: Vec<(WireId, usize)> = Vec::new();
         let mut tot = 0.0;
+        // draw-via-neck r5 (esp RCA: +3V3's via moved onto IO8_SCL's pinned pad exit because
+        // IO6's corridor, crossing 9 small triangles, was counted 9 times): with the shift on, a
+        // neighbour's corridor counts once, at its deepest intrusion, so the price does not
+        // depend on the triangulation's density. Off: per traversal, as before.
+        let per_wire = self.opts.via_shift_mm > 0.0;
+        let mut deepest: Vec<(WireId, f64, f64)> = Vec::new();
         for &t in tris {
             for &(o, ok) in &st.tri_trav[t] {
                 let oi = &st.wires[o];
@@ -1993,16 +1999,90 @@ impl<'a> Drawer<'a> {
                 let s = oi.s.max(wi.s);
                 let pitch = (oi.w + s).max(1.0);
                 let depth = 0.5 * d + s + 0.5 * oi.w - dist;
-                if depth > 0.0 {
+                if depth > 0.0 && per_wire {
+                    // How freely the neighbour can give way there (lead r5): its packed slack
+                    // away from the via; a pinned one (pad exit, full passage) pays the whole
+                    // depth, a free one a quarter. Graded, no cutoff.
+                    let slack = self.pass_slack_away(o, ok, p);
+                    let eff = depth * (0.25 + 0.75 * depth / (depth + slack.max(0.0)));
+                    match deepest.iter_mut().find(|e| e.0 == o) {
+                        Some(e) => e.1 = e.1.max(eff),
+                        None => deepest.push((o, eff, pitch)),
+                    }
+                } else if depth > 0.0 {
                     let x = depth / pitch;
                     tot += pitch * (x + x * x);
+                }
+                if depth > 0.0 {
                     if std::env::var_os("TOPO_VIAPLANDBG").is_some() {
                         eprintln!("VIAPLANP wire {w} at ({:.3},{:.3}) other {o} net {} ok {ok} dist {:.3} depth {:.3}", p.x / 1e6, -p.y / 1e6, oi.net, dist / 1e6, depth / 1e6);
                     }
                 }
             }
         }
+        for (_, depth, pitch) in deepest {
+            let x = depth / pitch;
+            tot += pitch * (x + x * x);
+        }
         room * tot
+    }
+
+    /// draw-via-neck r5 (lead 2026-11-26, esp RCA): how far wire `o` can give way from a via at
+    /// `p` in its traversal `ok`: on the pass of that traversal nearest to `p` (its entry or exit
+    /// edge), the packed interval's room ([`Drawer::iv`], `lo..hi` along the edge) on the side
+    /// away from the via, nm. 0 where the pass is not packed or the traversal has no pass (a
+    /// wire between two terminals in one triangle: pinned). O(1).
+    fn pass_slack_away(&self, o: WireId, ok: usize, p: Vec2) -> f64 {
+        let (st, pr) = (self.st, &self.b.proj);
+        let ps = &st.wires[o].passes;
+        let mut best: Option<(f64, f64)> = None; // (distance to the lane point, slack)
+        for j in [ok.checked_sub(1), Some(ok)].into_iter().flatten().filter(|&j| j < ps.len()) {
+            let pid = ps[j];
+            let (Some(&lo), Some(&hi), Some(&nom)) = (self.iv.lo.get(pid), self.iv.hi.get(pid), self.iv.nom.get(pid)) else { continue };
+            if !(lo.is_finite() && hi.is_finite() && nom.is_finite()) {
+                continue;
+            }
+            let [a, b] = pr.edges[st.passes[pid].edge];
+            let (a, b) = (pr.pos[a], pr.pos[b]);
+            let len = (b - a).len();
+            if len < 1.0 {
+                continue;
+            }
+            let lane = a + (b - a) * nom;
+            let toward_b = (p - lane).dot(b - a) > 0.0;
+            let slack = if toward_b { (nom - lo) * len } else { (hi - nom) * len };
+            let d = (p - lane).len();
+            if best.is_none_or(|x| d < x.0) {
+                best = Some((d, slack));
+            }
+        }
+        best.map_or(0.0, |x| x.1)
+    }
+
+    /// draw-via-neck r5: [`Drawer::via_room`] against copper only (the neighbours' planned
+    /// chords are priced with their slack in [`Drawer::via_plan_price`] when the shift is on, so
+    /// the squeeze does not count them a second time). O(nearby copper).
+    fn via_room_copper(&self, w: WireId, p: Vec2, d: f64) -> f64 {
+        let wi = &self.st.wires[w];
+        let own = self.model.rules.net_rule(wi.net).clearance as f64;
+        let mut room = f64::INFINITY;
+        let mut ids = self.grid.query(bbox_of(&[p]).grow(2.0e6 + d));
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let e = &self.ents[id];
+            if !e.live || e.net == Some(wi.net) {
+                continue;
+            }
+            let dist = match &e.core {
+                Core::Poly(q) => poly_dist(p, q),
+                Core::Seg(a, b) => seg_dist(p, *a, *b),
+                Core::Pt(q) => (p - *q).len(),
+            };
+            let need = if e.fixed { e.clear } else { e.clear.max(own) };
+            room = room.min(dist - e.grow - 0.5 * d - need);
+        }
+        room
     }
 
     /// draw-via-neck A (r4, `[drawing] via_shift_mm` > 0): price of a via of wire `w` (reach
@@ -2357,7 +2437,8 @@ impl<'a> Drawer<'a> {
                         // planned corridors does not win when it squeezes the via against other
                         // copper; where nothing is planned this orders the sites by room as before.
                         let dv = (sz.d as f64).max(1.0);
-                        let xq = (dv - room).max(0.0) / dv;
+                        let room_sq = if self.opts.via_shift_mm > 0.0 { self.via_room_copper(w, p, sz.d as f64) } else { room };
+                        let xq = (dv - room_sq).max(0.0) / dv;
                         let squeeze = self.octi.room * dv * (xq + xq * xq);
                         // P6 (d): away from a planned site that was not free, graded.
                         let xm = missed.map_or(0.0, |p0| (p - p0).len() / dv);

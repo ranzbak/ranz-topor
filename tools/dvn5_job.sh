@@ -44,5 +44,15 @@ case ${1:-} in
     unit L wic $WIC & sleep 3
     unit L ep $EP &
     wait; note "all done" ;;
+  ttA)  # tip A round: targeted tests + esp / qmtech one cycle (D) at this rev
+    hzq run --threads 4 --name d5-tt -- bash $ROOT/tools/dvn5_job.sh ttAtests > $OUT/u-tt.log 2>&1 9>&- & sleep 3
+    unit D esp $ESP "${C1[@]}" & sleep 3
+    unit D qm $QM "${C1[@]}" &
+    wait; note "all done" ;;
+  ttAtests)
+    export CARGO_TARGET_DIR=$OUT/target-tt CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
+    T=""; for t in topo_dvn topo_thick_layer tw2_metric topo_vias54 topo_fit topo_m3_patterns topo_d0 topo_cm1_room topo_fx_survivors topo_exist_term; do T="$T --test $t"; done
+    (cd engine && cargo test --release --no-fail-fast $T) > $OUT/tt.log 2>&1 9>&-; note "tt rc $?"
+    grep -E '^test result|FAILED|panicked' $OUT/tt.log > $OUT/tt-summary.txt ;;
   *) echo "usage: dvn5_job.sh attr|dbg ARM [sets]|suite|ladder"; exit 2 ;;
 esac
