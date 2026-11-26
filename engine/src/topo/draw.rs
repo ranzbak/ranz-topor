@@ -550,7 +550,8 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, sty
 }
 
 /// How far past its pad's outline a neck reaches out of the pad its run ends in (nm): above
-/// KiCad's polygon error (5 um) and the tidy's in-pad tolerance (`tidy::PAD_TOL_NM`), so the
+/// KiCad's polygon error (at most ~5.6 um inside the round end at 5 um, `geom::kicad`; tidy
+/// tests the same polygon), so the
 /// narrow piece from the pad centre is never a track wholly inside the pad.
 const NECK_PAD_OUT: f64 = 20_000.0;
 
@@ -4388,7 +4389,7 @@ impl<'a> Drawer<'a> {
                             let mut zones = (*pn, wmin, self.neck_items(w, lid, &pts, pn, pn.min_w).1);
                             if vs.is_empty() {
                                 if let Some((wn, _, _)) = self.plan_neck_run(w, lid, &pts, pn) {
-                                    let tz = self.neck_out_of_pads(w, &pts, self.trim_neck(w, lid, &pts, pn, wn));
+                                    let tz = self.neck_out_of_pads(w, lid, &pts, self.trim_neck(w, lid, &pts, pn, wn));
                                     let (its, ls) = self.neck_items(w, lid, &pts, &tz, wn);
                                     if self.track_own_pad_ok(w, &its) {
                                         items = its;
@@ -5185,7 +5186,7 @@ impl<'a> Drawer<'a> {
                 nk = n;
             }
         }
-        let nk = self.neck_out_of_pads(w, pts, nk);
+        let nk = self.neck_out_of_pads(w, lid, pts, nk);
         if std::env::var("TOPO_NECKDBG").is_ok() {
             eprintln!("NECKFIT wire {w} wn {wn:.0} plan {:?} trim {:?} fit {:?}", neck.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), trimmed_dbg.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), nk.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>());
         }
@@ -5226,16 +5227,19 @@ impl<'a> Drawer<'a> {
         nk
     }
 
-    /// draw-via-neck r6 ([`neck_out_of_pad`]) at both pad ends of the run `pts` of wire `w`
-    /// (`[drawing] neck_trim` only: main's whole-zone neck is kept as it was). O(zones x run).
-    fn neck_out_of_pads(&self, w: WireId, pts: &[Vec2], mut nk: super::exact::Neck) -> super::exact::Neck {
+    /// draw-via-neck r6 ([`neck_out_of_pad`]) at both pad ends of the run `pts` of wire `w` on
+    /// the layer `lid` (`[drawing] neck_trim` only: main's whole-zone neck is kept as it was).
+    /// r7 (verifier r6 F6): only at a pad on the run's layer (a middle run from a via inside an
+    /// SMD end pad's outline on the other layer has no pad there). O(zones x run).
+    fn neck_out_of_pads(&self, w: WireId, lid: u32, pts: &[Vec2], mut nk: super::exact::Neck) -> super::exact::Neck {
         if !self.opts.neck_trim || super::octi::fd45_off("dvn_pad_out") {
             return nk;
         }
         let wi = &self.st.wires[w];
         let pr = &self.b.proj;
+        let li = self.b.signal_layers.iter().position(|&x| x == lid);
         for (end, ob) in [(0usize, wi.pa), (1, wi.pb)] {
-            if ob == super::state::NO_OBS || ob >= pr.obstacles.len() {
+            if ob == super::state::NO_OBS || ob >= pr.obstacles.len() || li.is_some_and(|l| !pr.obstacles[ob].layers.has(l)) {
                 continue;
             }
             let run: Vec<Vec2> = if end == 0 { pts.to_vec() } else { pts.iter().rev().copied().collect() };

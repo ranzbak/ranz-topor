@@ -36,10 +36,12 @@
 //! T search), O(S · P_net) for the pad test.
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// KiCad's `ERROR_INSIDE` polygon approximation of pads and track ends (default board maximum
-/// error 5 µm): a segment within this of lying wholly inside a pad is treated as inside, as the
-/// cleaner's polygon test may.
-const PAD_TOL_NM: f64 = 5_000.0;
+/// draw-via-neck r7 (verifier vfy-draw-via-neck-r6 F1): the slack (nm) of the in-pad test, which
+/// is KiCad's own (`geom::kicad::track_inside`: the track's `ERROR_INSIDE` polygon at the board's
+/// maximum error inside the pad; r6 and before: both round ends within 5 um of lying inside,
+/// which kept a 0.1407 mm jog KiCad deletes, its polygon 5.35 um inside its true round end): a
+/// polygon vertex up to this far outside the pad counts as inside (KiCad's integer coordinates).
+const PAD_SLACK_NM: f64 = 2.0;
 
 use crate::geom::dist::Skeleton;
 use crate::geom::quant::{IVec2, TrackPrim};
@@ -372,8 +374,11 @@ pub enum PadEndKind {
     PassThrough,
     /// A track end inside the pad off its centre that lies on the centre line of a segment of
     /// the net whose chain reaches the centre (a T onto the trace that ends there, as
-    /// `fuse_branches` makes it): connected to the centre through that copper (KiCad's Cleanup
-    /// keeps it), but the trace itself ends beside the centre. Listed, not a breach of the rule.
+    /// `fuse_branches` makes it): connected to the centre through that copper, but the trace
+    /// itself ends beside the centre. r7 (lead 2026-11-26, pending the user: "all traces still
+    /// connect to the middle of the pad, otherwise KiCad will delete them in cleanups"): a breach
+    /// (r6: listed only). It holds only while its host survives: KiCad's Cleanup removed the host
+    /// of esp D5.1's T in a short cascade and left the T an off-centre end (vfy r6 F2).
     Tee,
 }
 
@@ -405,10 +410,10 @@ pub struct PadEndBreach {
 }
 
 impl PadEndBreach {
-    /// A breach of the rule (every kind but [`PadEndKind::Tee`]) on a pad whose centre takes the
-    /// track's end (not an edge-clear pad, not a blocked centre).
+    /// A breach of the rule (every kind, [`PadEndKind::Tee`] included since r7) on a pad whose
+    /// centre takes the track's end (not an edge-clear pad, not a blocked centre).
     pub fn counts(&self) -> bool {
-        self.kind != PadEndKind::Tee && !self.edge && !self.centre_blocked
+        !self.edge && !self.centre_blocked
     }
 }
 
@@ -420,9 +425,11 @@ impl PadEndBreach {
 /// such segments (shared ends): a bend or a width step inside the pad on the way out from the
 /// centre is fine, the trace still ends at the centre. A touching segment that does not is a
 /// breach, by its end in the pad: [`PadEndKind::Terminal`] / [`PadEndKind::Junction`] (one /
-/// several track ends there), [`PadEndKind::Tee`] (the end lies on a reached segment: listed,
-/// see [`PadEndBreach::counts`]), or [`PadEndKind::PassThrough`] (no end in the pad). Ends at a
-/// via of the net are no trace ends (skipped). [`off_centre_pad_ends`] counts only terminal ends
+/// several track ends there), [`PadEndKind::Tee`] (the end lies on a reached segment), or
+/// [`PadEndKind::PassThrough`] (no end in the pad). Ends at a via of the net are no trace ends: a
+/// segment with no other end in the pad is skipped when one of its via ends lies in the pad (a
+/// via in the pad holds it; r7, verifier r6 F3: a via outside the pad no longer hides a
+/// PassThrough). [`off_centre_pad_ends`] counts only terminal ends
 /// in the pad. A pad no track touches is not judged (the connectivity check's job). Sorted.
 /// O(S x P_net x chain rounds) for S segments and P_net pads of their net.
 pub fn pad_end_breaches(model: &BoardModel, items: &[Item]) -> Vec<PadEndBreach> {
@@ -542,7 +549,7 @@ pub fn pad_end_breaches(model: &BoardModel, items: &[Item]) -> Vec<PadEndBreach>
                         continue;
                     }
                     let end = [a, b].into_iter().find(|&q| !vias.contains(&(net, q)) && depth(&sk, math(q)) >= 0.0);
-                    if end.is_none() && [a, b].iter().any(|&q| vias.contains(&(net, q))) {
+                    if end.is_none() && [a, b].iter().any(|&q| vias.contains(&(net, q)) && depth(&sk, math(q)) >= 0.0) {
                         continue;
                     }
                     let (kind, at) = match end {
@@ -552,7 +559,7 @@ pub fn pad_end_breaches(model: &BoardModel, items: &[Item]) -> Vec<PadEndBreach>
                         None => (PadEndKind::PassThrough, a),
                     };
                     let off = if kind == PadEndKind::PassThrough { crate::geom::dist::point_seg(c, &seg(a, b)) } else { (math(at) - c).len() };
-                    out.push(PadEndBreach { kind, net, layer, pad: format!("{}.{}", pad.ref_, pad.number), at, off, edge: near_edge(c, width), centre_blocked: kind != PadEndKind::Tee && blocked(pi, layer, width), wire });
+                    out.push(PadEndBreach { kind, net, layer, pad: format!("{}.{}", pad.ref_, pad.number), at, off, edge: near_edge(c, width), centre_blocked: blocked(pi, layer, width), wire });
                 }
             }
         }
@@ -645,6 +652,7 @@ pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) ->
             let (Some((a, b)), Item::Track(t)) = (seg_of(it), it) else { continue };
             let Some(pads) = pads_of.get(&t.net) else { continue };
             let half = 0.5 * t.width as f64;
+            let err = model.rules.max_error as f64;
             let free = |q: P| ends.get(&(t.net, t.layer, q)).copied().unwrap_or(0) <= 1 && !via_at.contains(&(t.net, q));
             for &pi in pads {
                 if !pad_on(pi, t.layer) {
@@ -652,7 +660,8 @@ pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) ->
                 }
                 let sk = pad_sk(pi, t.layer);
                 let (da, db) = (depth(&sk, math(a)), depth(&sk, math(b)));
-                let inside = da >= half - PAD_TOL_NM && db >= half - PAD_TOL_NM;
+                // KiCad's `deleteTracksInPads`: both ends in the pad and the track's polygon in it
+                let inside = da >= 0.0 && db >= 0.0 && crate::geom::kicad::track_inside(math(a), math(b), t.width as f64, err, |q| depth(&sk, q), PAD_SLACK_NM);
                 let redundant = da >= -half && db >= -half && {
                     let c = model.pads[pi].center;
                     let d = |q: P| ((q.0 - c.x) as f64).hypot((q.1 + c.y) as f64);
@@ -1042,8 +1051,9 @@ mod tests {
     /// the origin (KiCad frame), a 0.25 mm track: a trace from the centre (with a bend inside
     /// the pad) is no breach; an end off the centre is a Terminal, two there a Junction, a
     /// segment across the pad with no end in it a PassThrough, an end on the centre trace a Tee
-    /// (listed, not counted); an end at a via, a foreign net and copper outside the pad are not
-    /// judged. A narrow pad next to a pad of another net (the disc at the centre breaks the
+    /// (counted since r7, the lead's rule); an end at a via in the pad, a foreign net and copper
+    /// outside the pad are not judged, a segment through the pad to a via outside it is a
+    /// PassThrough (r7). A narrow pad next to a pad of another net (the disc at the centre breaks the
     /// clearance) is a blocked centre and the edge band an edge-clear pad: listed, not counted.
     #[test]
     fn pad_end_breaches_classify_every_way_a_track_meets_its_pad() {
@@ -1055,9 +1065,13 @@ mod tests {
         let j = kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), seg(1, (0, -525_000), (-500_000, -1_100_000))]);
         assert_eq!(j, vec![(PadEndKind::Junction, true, 525_000)], "one entry per point (dedup)");
         assert_eq!(kinds(&[seg(1, (-1_000_000, -300_000), (1_000_000, -300_000))]), vec![(PadEndKind::PassThrough, true, 300_000)]);
-        assert_eq!(kinds(&[seg(1, (0, 0), (0, -2_000_000)), seg(1, (0, -600_000), (500_000, -1_100_000))]), vec![(PadEndKind::Tee, false, 600_000)]);
+        assert_eq!(kinds(&[seg(1, (0, 0), (0, -2_000_000)), seg(1, (0, -600_000), (500_000, -1_100_000))]), vec![(PadEndKind::Tee, true, 600_000)]);
         let via = Item::Via(crate::model::ViaItem { kind: "via".into(), net: 1, at: crate::model::Pt { x: 0, y: -525_000 }, d: 600_000, drill: 300_000, layers: vec![0, 2], group: None, wire: None });
-        assert!(kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), via]).is_empty());
+        assert!(kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), via.clone()]).is_empty());
+        // r7 (verifier r6 F3): a via outside the pad does not hide a segment across the pad
+        let via_out = |x: i64| Item::Via(crate::model::ViaItem { kind: "via".into(), net: 1, at: crate::model::Pt { x, y: -300_000 }, d: 600_000, drill: 300_000, layers: vec![0, 2], group: None, wire: None });
+        assert_eq!(kinds(&[seg(1, (-2_000_000, -300_000), (2_000_000, -300_000)), via_out(2_000_000)]), vec![(PadEndKind::PassThrough, true, 300_000)]);
+        assert!(kinds(&[seg(1, (0, -300_000), (2_000_000, -300_000)), via_out(0)]).is_empty(), "the via in the pad holds it");
         assert!(kinds(&[seg(2, (0, -525_000), (500_000, -1_100_000))]).is_empty());
         assert!(kinds(&[seg(1, (0, -1_200_000), (0, -2_000_000))]).is_empty());
         // Blocked centre: a 0.2 mm pad of net 1 and one of net 2 0.25 mm beside it, clearance
@@ -1156,6 +1170,31 @@ mod tests {
         let (out, st) = run(&m, vec![seg(1, (0, 0), (400_000, 0)), seg(1, (400_000, 0), (3_000_000, 0)), seg(2, (0, 0), (100_000, 0))]);
         assert_eq!(st.in_pad, 1, "only the net-1 segment inside the net-1 pad");
         assert_eq!(segs(&out), vec![((0, 0), (100_000, 0)), ((400_000, 0), (3_000_000, 0))]);
+    }
+
+    /// draw-via-neck r7 (verifier vfy-draw-via-neck-r6 F1, qmtech one cycle ADV7511KSTZ1.29): the
+    /// 0.1407 mm 45-degree jog from the centre of a 0.3 x 1.6 mm pad to 65.011 um from its long
+    /// side. Its true round end sticks out 5.34 um, so r6's tolerance (5 um) kept it; KiCad's
+    /// polygon of it lies inside the pad and KiCad's Cleanup deleted it (track_in_pad): so does
+    /// the tidy now. 1 um further out KiCad keeps it, and so does the tidy.
+    #[test]
+    fn a_jog_inside_its_pad_by_kicads_polygon_is_dropped() {
+        let m = model_with_pad(1, (0, 0), 300_000, 1_600_000);
+        let jog = |x: i64| {
+            let mut s = [seg(1, (0, 0), (-x, x)), seg(1, (-x, x), (-x, 1_000_000))];
+            for it in s.iter_mut() {
+                if let Item::Track(t) = it {
+                    t.width = 140_700;
+                }
+            }
+            s.to_vec()
+        };
+        let (out, st) = run(&m, jog(84_989));
+        assert_eq!(st.in_pad, 1, "KiCad deletes the jog");
+        assert_eq!(segs(&out), vec![((-84_989, 84_989), (-84_989, 1_000_000))]);
+        let (out, st) = run(&m, jog(86_000));
+        assert_eq!(st.in_pad, 0, "its polygon sticks out: KiCad keeps it");
+        assert_eq!(out.len(), 2);
     }
 
     #[test]
