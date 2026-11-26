@@ -64,6 +64,16 @@ case ${1:-} in
     ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb; mkdir -p $OUT/espdbg
     TOPO_NECKDBG=1 tools/route_board.sh $ESP $OUT/espdbg/s0 --no-png --set optimize.runs=1 --set optimize.rounds=1 > $OUT/espdbg/route.log 2>&1 9>&-; note "espdbg rc $?"
     grep -E "EXITTIGHT|EXITTAUT|PLANNECK" $OUT/espdbg/route.log | sort | uniq -c | sort -rn | head -400 > $OUT/espdbg/exit.txt; gzip -9 $OUT/espdbg/route.log ;;
+  r3esp)  # r3: esp det s0 with the own-pad / taut / axis arms off each; then TOPO_NECKDBG + plan dumps of the tip and of main's exit test
+    ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
+    for a in nrg_ownpad nrg_taut nrg_axis; do TOPO_FD45_OFF=$a bunit A$a esp $ESP; done
+    for a in tip nrg_exit,nrg_join; do d=$OUT/dbg-${a//,/+}; mkdir -p $d
+      ( [ $a = tip ] || export TOPO_FD45_OFF=$a; TOPO_NECKDBG=1 TOPO_PLANDUMP=$d/plan.json tools/route_board.sh $ESP $d/s0 --no-png --set optimize.runs=1 --set optimize.rounds=1 > $d/route.log 2>&1 9>&- ); note "dbg $a rc $?"
+      grep -E "EXITTIGHT|EXITTAUT|PLANNECK" $d/route.log | sort | uniq -c | sort -rn | head -600 > $d/exit.txt; gzip -9 $d/route.log; gzip -9 $d/plan.json 2>/dev/null
+    done ;;
+  r3qm)  # r3: the qmtech crop at the tip (T) + qm det s0 C1 with main's exit test (nrg_exit + nrg_join)
+    crop T --set optimize.rounds=1
+    TOPO_FD45_OFF=nrg_exit,nrg_join bunit Anrg_exit+nrg_join qm $QM ;;
   esparms2)  # esp det s0: main's exit test (nrg_exit), plus the drawing join off, plus everything of this branch off
     ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
     for a in nrg_exit nrg_exit,nrg_join nrg_exit,nrg_join,nrg_contig; do TOPO_FD45_OFF=$a bunit A${a//,/+} esp $ESP; done ;;
