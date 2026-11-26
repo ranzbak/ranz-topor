@@ -98,6 +98,14 @@ fn free_snap(stage: &str, drawn: &BTreeMap<WireId, WireOut>, st: &State) {
 }
 
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
+/// neck-regrow: a neck to `to` (nm) over `neck_len` of a wire of nominal width `w` and drawn
+/// length `wire_len` is a whole-wire neck of a supply net when it spans the wire (within 1 um) and
+/// the wire is wider than the board's default width `dflt_w` (lead 2026-11-26: such necks get a
+/// warning of their own; POWER-NECK-MONOTONE will care about the direction from the source).
+pub(crate) fn whole_supply_neck(w: f64, to: f64, neck_len: f64, wire_len: f64, dflt_w: f64) -> bool {
+    to < w - 0.5 && neck_len >= wire_len - 1_000.0 && w > dflt_w + 0.5
+}
+
 /// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
 /// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
 #[allow(clippy::too_many_arguments)]
@@ -120,7 +128,7 @@ fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci
     for n in &wo.necks {
         // neck-regrow: a neck over the whole wire (both ends needed it, joined) of a wire wider
         // than the board's default width (a supply net) is named apart in the warning.
-        let supply = n.1 < st.wires[w].w - 0.5 && n.2 >= wo.length_nm - 1_000.0 && st.wires[w].w > dflt_w + 0.5;
+        let supply = whole_supply_neck(st.wires[w].w, n.1, n.2, wo.length_nm, dflt_w);
         necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM, whole_supply: supply }));
     }
     if octi {
@@ -10909,6 +10917,20 @@ fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, pour_on: bool,
 
 #[cfg(test)]
 mod tests {
+    /// neck-regrow (lead 2026-11-26): only a neck over the whole wire of a wire wider than the
+    /// default is a supply whole-wire neck.
+    #[test]
+    fn whole_supply_neck_needs_the_whole_wire_and_a_supply_width() {
+        use super::whole_supply_neck as f;
+        let (dflt, wire) = (250_000.0, 10_000_000.0);
+        assert!(f(500_000.0, 300_000.0, wire, wire, dflt));
+        assert!(f(500_000.0, 300_000.0, wire - 999.0, wire, dflt), "within 1 um of the wire's length");
+        assert!(!f(500_000.0, 300_000.0, wire - 1_001.0, wire, dflt), "a neck short of the wire");
+        assert!(!f(250_000.0, 127_000.0, wire, wire, dflt), "a default-width wire");
+        assert!(!f(250_400.0, 127_000.0, wire, wire, dflt), "within 0.5 nm of the default");
+        assert!(!f(500_000.0, 499_600.0, wire, wire, dflt), "no neck (within 0.5 nm of the width)");
+    }
+
     #[test]
     fn sketch_of_carries_the_violation_places_it_is_given() {
         let viols = vec![
