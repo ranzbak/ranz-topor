@@ -1115,6 +1115,8 @@ def test_progress_accept_or_cancel_while_paused_end_the_pause(app):
         assert ui.pause_wanted() is True
         _press(getattr(dlg, f"{button}_button"))
         assert ui.pause_wanted() is False and not dlg.pause_button.IsEnabled(), button
+        assert not dlg.paused_wanted, f"{button}: the dialog's pause ended"
+        assert dlg.pause_button.GetLabel().replace("&", "") == ui_wx.WORDING["progress"]["pause"], button
         assert ui.progress(_running()) is False, button
         assert not dlg.pause_button.IsEnabled(), f"{button}: Pause stays off after a stop"
         assert ui.stop_discards() is (button == "cancel")

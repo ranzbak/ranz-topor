@@ -675,8 +675,10 @@ impl TimeLimit {
     /// pause-button: the pause gate of the work threads' stop tests ([`RunControl::is_cancelled`],
     /// [`stop_requested`], [`cancelled`], the drawing's ERBS test, ...): while the run is paused,
     /// wait here (no CPU) until it resumes. Not paused: one relaxed load. Never called under a
-    /// lock another thread needs to resume or to read the progress (the progress lock, the
-    /// sketch slots): the caller's thread holds no lock here. O(1) when not paused.
+    /// lock that the resume (`pause_m` only) or the dialog's poll (the progress lock, the sketch
+    /// slots) takes. A work lock held here (a run's slot in the TopoR loop, core.rs `runs[k]`) is
+    /// fine: a thread that waits on it idles too, and no release path (Resume, Accept, Cancel,
+    /// the job's end) takes it. O(1) when not paused.
     pub fn hold(&self) {
         if !self.is_paused() {
             return;
@@ -2227,6 +2229,7 @@ mod tests {
         assert!(!ctl.limit.is_paused() && ctl.limit.paused_s() < 0.005);
         assert!(ctl.pause() && !ctl.pause(), "the second pause is a no-op");
         let (c0, n0, e0) = (ctl.limit.clock_ns(), ctl.limit.now(), ctl.limit.elapsed_s());
+        assert!(c0 >= 25_000_000 && e0 >= 0.025, "the paused clock keeps the time run so far: {c0} ns");
         std::thread::sleep(std::time::Duration::from_millis(60));
         assert_eq!(ctl.limit.clock_ns(), c0);
         assert_eq!(ctl.limit.now(), n0);
@@ -2297,20 +2300,22 @@ mod tests {
         let ctl = RunControl::new();
         ctl.limit.init(600.0);
         assert!(ctl.pause());
-        let g = Some(ctl.limit.clone());
-        let h = std::thread::spawn(move || {
-            with_gate(g, || {
-                let t = std::time::Instant::now();
-                let c = cancelled();
-                pause_point();
-                (t.elapsed().as_secs_f64(), c)
-            })
-        });
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!h.is_finished());
-        assert!(ctl.resume());
-        let (waited, c) = h.join().expect("thread");
-        assert!(waited >= 0.15 && !c, "{waited} {c}");
+        for which in ["cancelled", "pause_point"] {
+            assert!(ctl.pause() || ctl.limit.is_paused());
+            let g = Some(ctl.limit.clone());
+            let h = std::thread::spawn(move || {
+                with_gate(g, || {
+                    let t = std::time::Instant::now();
+                    let c = if which == "cancelled" { cancelled() } else { pause_point(); false };
+                    (t.elapsed().as_secs_f64(), c)
+                })
+            });
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!h.is_finished(), "{which} waits at the lane's gate");
+            assert!(ctl.resume());
+            let (waited, c) = h.join().expect("thread");
+            assert!(waited >= 0.15 && !c, "{which}: {waited} {c}");
+        }
         assert!(gate().is_none(), "the gate is the lane's only");
     }
 

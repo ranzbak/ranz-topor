@@ -979,6 +979,11 @@ def run(a) -> int:
                 time.sleep(3.0)
                 e.shot("pause-resumed", prog[1])
                 e.log(f"Resume clicked at {dt:.1f} s")
+            if prog and state.get("resumed") and not state.get("resumed_late") and not state["cancelled"] \
+                    and dt >= state["resumed"] + 15.0:
+                # lead check (3): the last-round image and the figures go on after Resume
+                state["resumed_late"] = True
+                e.shot("pause-resumed-15s", prog[1])
             if prog and a.accept_after is not None and not state["cancelled"] and dt >= a.accept_after \
                     and not state.get("paused"):
                 e.shot("before-accept", prog[1])
