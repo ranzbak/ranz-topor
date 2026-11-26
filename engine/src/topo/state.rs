@@ -977,7 +977,10 @@ impl<'p> State<'p> {
         };
         // Debug arm `nrg_exit`: main's test (the first two passes' even points only).
         let legacy = super::octi::fd45_off("nrg_exit");
-        let ks: Vec<usize> = order.into_iter().filter(|&k| legacy || (!inside(k) && mine(k))).take(2).collect();
+        // Debug arms `nrg_ownpad` (passes inside the own pad count again), `nrg_taut` (the cheap
+        // pass-point test decides, no taut path), `nrg_axis` (no pad-axis exit check).
+        let ownpad = super::octi::fd45_off("nrg_ownpad");
+        let ks: Vec<usize> = order.into_iter().filter(|&k| legacy || ((ownpad || !inside(k)) && mine(k))).take(2).collect();
         if ks.is_empty() {
             return false;
         }
@@ -1045,7 +1048,7 @@ impl<'p> State<'p> {
         };
         let too_close = |stretch: &[Vec2]| too_close_by(stretch, 0.0);
         let Some((o, d)) = too_close(&pts) else { return false };
-        if legacy {
+        if legacy || super::octi::fd45_off("nrg_taut") {
             return true;
         }
         // The even pass points are no path: the wire's taut path at its nominal width through the
@@ -1098,7 +1101,7 @@ impl<'p> State<'p> {
             return false;
         }
         // The drawing's axis exit of an elongated pad (`octi::pad_exit`).
-        if let Some((u, ext)) = pad_axis(&me.poly, me.center, pts[1] - pts[0]) {
+        if let Some((u, ext)) = pad_axis(&me.poly, me.center, pts[1] - pts[0]).filter(|_| !super::octi::fd45_off("nrg_axis")) {
             let c = pr.pos[v];
             let reach = ext + (c - me.center).dot(-u) + wi.s + 0.5 * wi.w;
             if too_close(&[c, c + u * reach]).is_none() {
