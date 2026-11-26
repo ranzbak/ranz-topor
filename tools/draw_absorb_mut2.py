@@ -22,7 +22,7 @@ MUTS = [
  ("a3_accept_all", E, ".filter(|&y| price(&es, &at, &nvs, y) >= price(&old_es, &at, &old_vs, y) - 1.0).collect();", ".filter(|&y| y == usize::MAX).collect();"),
  ("a3_no_len_guard", E, "                    e.len >= old.len - 1.0 && e.through.iter().all(|f| old.through.contains(f))", "                    e.through.iter().all(|f| old.through.contains(f))"),
  ("a3_no_through_guard", E, "                    e.len >= old.len - 1.0 && e.through.iter().all(|f| old.through.contains(f))", "                    e.len >= old.len - 1.0"),
- ("a3_side_flip", E, "            gates.push(Gate { a: x, b: x, w: s.w, src: GateSrc::Band(wl.stretch), p: root, q: root, p_left: left });\n            let dips = spoke_crossed(band, x, root);\n            cand.push((x, left,", "            gates.push(Gate { a: x, b: x, w: s.w, src: GateSrc::Band(wl.stretch), p: root, q: root, p_left: !left });\n            let dips = spoke_crossed(band, x, root);\n            cand.push((x, !left,"),
+ ("a3_side_flip", E, "        let left = wl.left;", "        let left = !wl.left;"),
  ("a3_earlier_yields", E, "let (y, p) = if (rank(a), a) > (rank(b), b) { (a, b) } else { (b, a) };", "let (y, p) = if (rank(a), a) < (rank(b), b) { (a, b) } else { (b, a) };"),
  ("a3_no_swap", E, "                let (y, p) = if failed.contains(&(y, p)) { (p, y) } else { (y, p) };", "                let (y, p) = (y, p);"),
  ("a3_no_viol_price", E, "            len + PASS_VIOL_W * v\n", "            len + 0.0 * v\n"),

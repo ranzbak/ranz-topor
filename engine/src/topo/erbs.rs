@@ -196,13 +196,14 @@ pub enum GateSrc {
 
 /// draw-absorb A3 (`[drawing] band_passes`): a segment `a b` of the ERBS of stretch `stretch`
 /// that the yielding band must keep `r` (half both widths, the larger clearance and the margin)
-/// from, on its side of the yielding band ([`band_passes`]).
+/// from, on side `left` of the yielding band's present ERBS ([`band_passes`]).
 #[derive(Clone, Copy, Debug)]
 pub struct Wall {
     pub a: Vec2,
     pub b: Vec2,
     pub r: f64,
     pub stretch: usize,
+    pub left: bool,
 }
 
 /// The obstacle behind a point: for a cut item its portal `a b` on the cut `p q` (the spokes `p a`
@@ -1408,18 +1409,10 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
     // 1d. draw-absorb A3: the gap partners' ERBS segments, grown by the pitch of the two, on the
     // partner's side (Dayan 1997 PDF p. 32: spoke creation pushes the bands apart; Su & Dai 1997
     // PDF p. 2: the neighbour flexes, the topology stays). The side is the partner's against the
-    // band's present path (`walls` come with it, [`band_passes`]); a segment crossing the band
-    // has no side (a planned crossing) and is left out.
+    // band's present ERBS (zero-width plan bands of a bundle lie on top of each other, so the
+    // partner's ERBS often crosses this band's plan band; [`band_passes`] sides it).
     for wl in walls {
-        if band.windows(2).any(|w| seg_cross(w[0], w[1], wl.a, wl.b)) {
-            continue;
-        }
-        let m = (wl.a + wl.b) * 0.5;
-        let near = [wl.a, m, wl.b].into_iter().min_by(|x, y| band_dist(band, *x).total_cmp(&band_dist(band, *y))).unwrap_or(m);
-        let (left, dn) = band_side(band, near);
-        if dn <= 1.0 {
-            continue;
-        }
+        let left = wl.left;
         for x in grown(&[wl.a, wl.b], wl.r, &dirs, grow) {
             let root = if (x - wl.a).len2() <= (x - wl.b).len2() { wl.a } else { wl.b };
             let gi = gates.len();
@@ -1693,8 +1686,16 @@ pub fn band_passes(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, opts: &Erbs
                         let sp = &sts[p];
                         let r = 0.5 * (sy.w + sp.w) + sy.s.max(sp.s) + opts.margin.max(0.0);
                         for w in le.es[ip].path.windows(2) {
-                            if dist(&ey.path, w[0], w[1]) < 2.0 * r {
-                                walls.push(Wall { a: w[0], b: w[1], r, stretch: p });
+                            // Near the band, not across it (a crossing has no side), sided by
+                            // its point nearest the band.
+                            if dist(&ey.path, w[0], w[1]) >= 2.0 * r || ey.path.windows(2).any(|q| seg_cross(q[0], q[1], w[0], w[1])) {
+                                continue;
+                            }
+                            let m = (w[0] + w[1]) * 0.5;
+                            let near = [w[0], m, w[1]].into_iter().min_by(|x, y| band_dist(&ey.path, *x).total_cmp(&band_dist(&ey.path, *y))).unwrap_or(m);
+                            let (left, dn) = band_side(&ey.path, near);
+                            if dn > 1.0 {
+                                walls.push(Wall { a: w[0], b: w[1], r, stretch: p, left });
                             }
                         }
                     }
