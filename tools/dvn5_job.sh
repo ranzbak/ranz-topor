@@ -54,5 +54,12 @@ case ${1:-} in
     T=""; for t in topo_dvn topo_thick_layer tw2_metric topo_vias54 topo_fit topo_m3_patterns topo_d0 topo_cm1_room topo_fx_survivors topo_exist_term; do T="$T --test $t"; done
     (cd engine && cargo test --release --no-fail-fast $T) > $OUT/tt.log 2>&1 9>&-; note "tt rc $?"
     grep -E '^test result|FAILED|panicked' $OUT/tt.log > $OUT/tt-summary.txt ;;
+  tdbg)  # tdbg BIN FILTER...: one release test binary's tests with the via debug lines (gzipped)
+    export CARGO_TARGET_DIR=$OUT/target-tt CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=1
+    B=$2; shift 2
+    for f in "$@"; do
+      (cd engine && TOPO_VIADBG=1 TOPO_VIAPLANDBG=1 TOPO_LEGDBG=1 cargo test --release --test $B $f -- --nocapture) 2>&1 9>&- | gzip -9 > $OUT/dbg-$B-$f.log.gz
+    done
+    note "all done" ;;
   *) echo "usage: dvn5_job.sh attr|dbg ARM [sets]|suite|ladder"; exit 2 ;;
 esac
