@@ -73,5 +73,9 @@ case ${1:-} in
     (export TOPO_VIADBG=1 TOPO_VIAREJAT="$2"; unit RS esp $ESP "${C1[@]}" --set drawing.via_shift_mm=0) &
     wait; find $OUT -name '*.log' -size +20M -exec gzip -9 {} + 2>/dev/null
     note "all done" ;;
+  dbgq)  # qmtech one cycle with the via debug lines (VIADBG + VIAPLANDBG: re-price offline)
+    (export TOPO_VIADBG=1 TOPO_VIAPLANDBG=1; unit G qm $QM "${C1[@]}")
+    find $OUT -name '*.log' -size +20M -exec gzip -9 {} + 2>/dev/null
+    note "all done" ;;
   *) echo "usage: dvn5_job.sh attr|dbg ARM [sets]|suite|ladder"; exit 2 ;;
 esac
