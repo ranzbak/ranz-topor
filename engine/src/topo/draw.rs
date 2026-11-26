@@ -2365,6 +2365,10 @@ impl<'a> Drawer<'a> {
                 // draw-via-neck A (`[drawing] via_shift_mm`): a ring of sites round the interval's
                 // taut chord, inside the interval (never past it: that breaks the plan's layer
                 // event); each priced by its shift below. They come after the interval's own sites.
+                // r5 (esp RCA, +3V3 via 0 at R11): the sites main draws from keep main's side test
+                // (own triangle); only the ring's sites, which may lie outside their traversal's
+                // triangle, take the neighbouring triangles' chords too (`via_side_ok_`'s `ring`).
+                let n_main = sites.len();
                 if self.opts.via_shift_mm > 0.0 {
                     sites.extend(self.via_shift_sites(w, ka, kb.max(ka), sz.d as f64));
                 }
@@ -2392,12 +2396,13 @@ impl<'a> Drawer<'a> {
                 // draw-via-neck A: the plan's site (free, missed or tight), where it lies in the
                 // interval: the shift's origin.
                 let plan_site = self.via_site.get(&(w, i)).filter(|s| (ka..=kb.max(ka)).contains(&s.0)).map(|s| s.1);
-                for (k, p) in sites {
+                for (si, (k, p)) in sites.into_iter().enumerate() {
                     // The first traversal with a legal site decides, unless that site takes
                     // planned room (price > 0) and a shift may find a cheaper one (draw-via-neck A).
                     if best.is_some_and(|b| b.1 != k) && (self.opts.via_shift_mm <= 0.0 || best_jam <= 1.0) {
                         break;
                     }
+                    let ring = si >= n_main;
                     if turn_at(k).is_some_and(|q| (q - p).len() > 1.0) {
                         continue;
                     }
@@ -2410,11 +2415,11 @@ impl<'a> Drawer<'a> {
                                 let item = via_item(net, p, sz, Some(w));
                                 let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
                                 let who: Vec<_> = rep.violations.iter().take(3).map(|v| (v.against.clone(), v.against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()).and_then(|id| self.idx.net_of(id)), v.gap, v.required)).collect();
-                                eprintln!("VIAREJAT wire {w} via {i} k {k} at ({:.3},{:.3}) side {} check {who:?} hole {} own {} pair {}", p.x / 1e6, -p.y / 1e6, self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]), self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net), self.pair_via_ok(w, p, sz, net));
+                                eprintln!("VIAREJAT wire {w} via {i} k {k} at ({:.3},{:.3}) side {} check {who:?} hole {} own {} pair {}", p.x / 1e6, -p.y / 1e6, self.via_side_ok_(w, k, p, plan.layers[i], plan.layers[i + 1], false, ring), self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net), self.pair_via_ok(w, p, sz, net));
                             }
                         }
                     }
-                    if !self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) {
+                    if !self.via_side_ok_(w, k, p, plan.layers[i], plan.layers[i + 1], false, ring) {
                         n_side += usize::from(Some(k) == at);
                         if dbg && Some(k) == at && std::env::var("TOPO_VIASIDE").is_ok() {
                             eprintln!("VIASIDE wire {w} via {i} k {k} at ({:.3},{:.3}) la {} lb {} entry ({:.3},{:.3}) exit ({:.3},{:.3})", p.x / 1e6, -p.y / 1e6, plan.layers[i], plan.layers[i + 1], self.chord_pt(w, k).x / 1e6, -self.chord_pt(w, k).y / 1e6, self.chord_pt(w, k + 1).x / 1e6, -self.chord_pt(w, k + 1).y / 1e6);
@@ -2856,15 +2861,16 @@ impl<'a> Drawer<'a> {
     /// leaves its run on a layer no way to its first pass but across that wire (wiccon MOSI,
     /// D2). O(traversals of the triangle x chord corners).
     pub fn via_side_ok(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
-        self.via_side_ok_(w, k, p, la, lb, false)
+        self.via_side_ok_(w, k, p, la, lb, false, false)
     }
+
 
     /// [`Drawer::via_side_ok`] on the plan's taut geometry (every wire's chord the taut path
     /// [`Packer::taut`] that the via relocation balanced the via on), not the drawing's packed
     /// nominal chords. A planned site that holds here keeps the plan's crossing order (the
     /// partners are judged by the drawing's checker).
     pub fn via_side_ok_taut(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize) -> bool {
-        self.via_side_ok_(w, k, p, la, lb, true)
+        self.via_side_ok_(w, k, p, la, lb, true, false)
     }
 
     /// Wire `o`'s packed nominal chord through traversal `ok`: [`Drawer::chord_pt`] `ok`, its turn
@@ -2927,7 +2933,8 @@ impl<'a> Drawer<'a> {
         }
     }
 
-    fn via_side_ok_(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, taut: bool) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    fn via_side_ok_(&self, w: WireId, k: usize, p: Vec2, la: usize, lb: usize, taut: bool, ring: bool) -> bool {
         if self.prov_layer.is_empty() {
             return true;
         }
@@ -2938,10 +2945,12 @@ impl<'a> Drawer<'a> {
         // labelled with the nearest traversal) leaves its runs through the neighbouring
         // triangles: the chords there are tested too (the via never lands past a crossing the
         // plan put after it, so the layer change keeps the class). A site inside is tested in
-        // its own triangle alone, as before. Only with `via_shift_mm` > 0 (r5, verifier F5: the
-        // test ran ungated and changed main's copper on topo_thick_layer's thick_dive_grouping).
+        // its own triangle alone, as before. Only for the shift's ring sites (`ring`; r5, verifier
+        // F5: ungated the test changed main's copper on topo_thick_layer's thick_dive_grouping;
+        // r5 esp RCA: gated on the option alone it refused main's own site for +3V3's via 0 at
+        // R11, 0.24 mm away the via shorted IO4).
         let pr = &self.b.proj;
-        let tris: Vec<super::state::TriId> = if self.opts.via_shift_mm <= 0.0 || super::state::point_in_poly(p, &pr.tris[t].map(|v| pr.pos[v])) {
+        let tris: Vec<super::state::TriId> = if !ring || super::state::point_in_poly(p, &pr.tris[t].map(|v| pr.pos[v])) {
             vec![t]
         } else {
             let n = wi.tris.len();
