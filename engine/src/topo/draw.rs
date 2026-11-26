@@ -4963,7 +4963,9 @@ impl<'a> Drawer<'a> {
             (pr.pos[p] - c).len().max((pr.pos[q] - c).len()) + wi.w + wi.s
         };
         let mut ends = [None; super::exact::NECK_ZONES];
-        if na == n {
+        // neck-regrow (user 2026-11-26, option a): necks at both ends are drawn as one over the
+        // whole wire (never narrow-wide-narrow); the plan keeps the middle's full-width room.
+        if na == n || (na > 0 && nb > 0 && !super::octi::fd45_off("nrg_join")) {
             let c = pr.pos[wi.a];
             ends[0] = Some((c, f64::INFINITY));
             return Some(super::exact::Neck { min_w, ends });

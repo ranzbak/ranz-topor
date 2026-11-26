@@ -80,14 +80,16 @@ wire be necked from the pad all the way to the junction?
 1. `exit_tight` (state.rs):
    - skips passes whose edge has both ends on the own pad's outline;
    - the cheap test on the even pass points stays the first filter;
-   - then the taut path at the nominal width (`State::taut_prefix`: `gap_spans` ports of the nominal item, turn
-     corners at the clearance miter, `pack::funnel`) up to the last judged pass, relaxed round the clearance discs:
+   - then the taut path at the nominal width (`State::taut_prefix`: `gap_spans` ports of the nominal item, the
+     wire's turns (junction vertices: free or node, never obstacle corners), `pack::funnel`) up to the last judged pass, relaxed round the clearance discs:
      a funnel leg between two edge ports can cut a fan corner closer than w/2 + s (neck_reentry: 0.40 mm against
      0.45 at the upper wall's corner), the drawing wraps it at w/2 + s, so the leg is bent out at its nearest point
      (6 passes, a rubber band). Tight only if the relaxed path is still too close (1 um slack): it was pushed into
      other copper;
    - then the drawing's axis exit of an elongated pad (`pad_axis`, as `octi::pad_exit`).
-2. Join (refit_wire, cut_neck_widths): two end necks become one over the whole wire. A whole-wire neck on a wire
+2. Join (user 2026-11-26, option a): the plan keeps a neck at each end and the middle's full-width room
+   (neighbours laid out as without the join; r1 joined in refit_wire / cut_neck_widths and so freed room, qmtech DRC
+   223 -> 255); the drawing (`Draw::plan_neck`) necks the whole wire when both ends are necked. A whole-wire neck on a wire
    wider than the board default warns apart (`Necking { whole_supply }`, "the whole wire (both ends needed a neck;
    a supply-width net ...)"), for POWER-NECK-MONOTONE.
 3. `neck_items`: end zones narrow only the contiguous stretch from their own end.
@@ -95,7 +97,7 @@ wire be necked from the pad all the way to the junction?
    (the board routes them at their existing copper's width; the crop has none, so it routed qmtech's ADV_SDA /
    ADV_SCL at 0.25 instead of 0.127: false findings).
 
-Debug arms (TOPO_FD45_OFF): nrg_join, nrg_contig, nrg_turnport, nrg_relax. Debug prints (TOPO_NECKDBG): EXITTIGHT,
+Debug arms (TOPO_FD45_OFF): nrg_join, nrg_contig, nrg_relax. Debug prints (TOPO_NECKDBG): EXITTIGHT,
 EXITTAUT, CUTNECK, PLANNECK, NECKWHY.
 
 **Not in this branch: neck back to the T split.** The user rule (necks run from the pad back to the T split) means a

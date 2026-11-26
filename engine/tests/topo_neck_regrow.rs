@@ -78,9 +78,11 @@ fn a_row_pad_without_room_on_its_axis_is_a_tight_exit() {
 
 /// (2) R-a: a 0.4 mm wire from A to B whose both ends leave through 0.7 mm gaps between walls
 /// (0.8 mm needed at the nominal width, 0.6 at the 0.2 mm floor), with ample room in between: the
-/// necks from both ends join into one over the whole wire, never narrow-wide-narrow.
+/// plan necks both ends and keeps the middle's full-width room (user 2026-11-26, option a: the
+/// neighbours are laid out as without the join); the drawing necks the whole wire (end to end:
+/// `neck_both_ends_is_one_neck_over_the_whole_wire`).
 #[test]
-fn necks_at_both_ends_join_into_one_over_the_whole_wire() {
+fn necks_at_both_ends_keep_the_full_width_room_in_the_middle_of_the_plan() {
     let pads = vec![
         ("A", 1, 3.0, 10.0, 0.4, 0.4, 0),
         ("B", 1, 27.0, 10.0, 0.4, 0.4, 0),
@@ -108,7 +110,8 @@ fn necks_at_both_ends_join_into_one_over_the_whole_wire() {
     let n = ws.len();
     let (na, nb, mid) = st.neck_runs(w);
     assert!(n > 6, "the middle is crossed by several edges ({n} passes)");
-    assert_eq!((na, nb, mid.len()), (n, 0, 0), "one neck over the whole wire, widths {ws:?}");
+    assert!(na > 0 && nb > 0 && na + nb < n && mid.is_empty(), "a neck at each end, widths {ws:?}");
+    assert!(ws[na..n - nb].iter().all(|&x| (x - 0.4).abs() < 1e-9), "full-width room in the middle, widths {ws:?}");
 }
 
 // ------------------------------------------------------------------------------ end to end

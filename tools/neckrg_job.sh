@@ -39,7 +39,7 @@ xunit() {  # clippy, targeted release tests, the crop tool's tests, arm and sour
   cargo clippy --release --all-targets > $OUT/clippy.log 2>&1 9>&-; note "clippy rc $?"
   RUST_TEST_THREADS=4 cargo test --release --no-fail-fast $TESTS > $OUT/tests.log 2>&1 9>&-; note "tests rc $?"
   cd $ROOT; python -m pytest -q -p no:cacheprovider tests/test_abstract_crop.py > $OUT/pytest-crop.log 2>&1; note "pytest crop rc $?"; cd $ROOT/engine
-  for a in nrg_join nrg_contig nrg_turnport nrg_relax; do
+  for a in nrg_join nrg_contig nrg_relax; do
     TOPO_FD45_OFF=$a cargo test --release --test topo_neck_regrow > $OUT/mut-$a.log 2>&1 9>&-; note "mutant arm $a rc $? (want != 0)"
   done
   M=$OUT/mut; mkdir -p $M; cp -r $ROOT/engine $M/; cp $ROOT/Cargo.* $M/ 2>/dev/null
@@ -51,7 +51,7 @@ xunit() {  # clippy, targeted release tests, the crop tool's tests, arm and sour
     cp $ROOT/engine/$f $M/engine/$f
   }
   mut ownpad src/topo/state.rs 's/filter(|\&k| !inside(k))/filter(|\&k| { let _ = inside(k); true })/' --test topo_neck_regrow
-  mut taut src/topo/state.rs 's/if too_close(\&self.taut_prefix(/if false \&\& too_close(\&self.taut_prefix(/' --test topo_neck_regrow
+  mut taut src/topo/state.rs 's/        if tc.is_none() {/        if false \&\& tc.is_none() {/' --test topo_neck_regrow
   mut axis src/topo/state.rs 's/pad_axis(\&me.poly, me.center, pts\[1\] - pts\[0\])/pad_axis(\&me.poly, me.center, pts[1] - pts[0]).filter(|_| false)/' --test topo_neck_regrow
   mut supply src/topo/core.rs 's/ \&\& w > dflt_w + 0.5//' --lib whole_supply
   mut supdesc src/topo/factors/necking.rs 's/, the whole wire (both ends/ (both ends/' --lib describe_names
@@ -62,7 +62,7 @@ case ${1:-} in
   xunit) xunit ;;
   bunits) shift; EP=$(ls scratch/boards/eprom-to-kernal/*/*.kicad_pcb | head -1); ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
     WIC=scratch/boards/wiccon-2023/2d3063e70ed5/2023.kicad_pcb
-    for x in "$@"; do case $x in qm) bunit C1 qm $QM ;; ep) bunit C1 ep $EP ;; esp) bunit C1 esp $ESP ;; wic) bunit C1 wic $WIC ;; esac; done ;;
+    for x in "$@"; do case $x in qm) bunit C1 qm $QM ;; ep) bunit C1 ep $EP ;; esp) bunit C1 esp $ESP ;; wic) bunit C1 wic $WIC ;; pats) mkdir -p $P/runs; pats T ;; esac; done ;;
   all)  # all TAG BASE_TAG: both (patterns T + crop, the base tag's arms joined) first, then final
     T=$2; bash $ROOT/tools/neckrg_job.sh both $T T tip-det-s0 $3 > $OUT/u-both.log 2>&1; note "both rc $?"
     bash $ROOT/tools/neckrg_job.sh final $T > $OUT/u-final.log 2>&1; note "final rc $?" ;;
@@ -70,7 +70,7 @@ case ${1:-} in
     T=$2
     hzq run --threads 6 --name $T-x -- bash $ROOT/tools/neckrg_job.sh xunit > $OUT/u-x.log 2>&1 9>&- &
     hzq run --threads 4 --name $T-b1 -- bash $ROOT/tools/neckrg_job.sh bunits qm ep > $OUT/u-b1.log 2>&1 9>&- &
-    hzq run --threads 4 --name $T-b2 -- bash $ROOT/tools/neckrg_job.sh bunits esp wic > $OUT/u-b2.log 2>&1 9>&- &
+    hzq run --threads 4 --name $T-b2 -- bash $ROOT/tools/neckrg_job.sh bunits esp wic pats > $OUT/u-b2.log 2>&1 9>&- &
     wait; note "all done" ;;
   crop) shift; crop "$@" ;;
   both)  # both TAG ARM LABEL [BASE_TAG]: patterns (pu) and the crop (TOPO_NECKDBG) as two hzq units; BASE_TAG: copy
