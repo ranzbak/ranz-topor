@@ -197,30 +197,98 @@ fn opts_shrink(base: &Options, on: bool) -> Options {
     serde_json::from_value(val).unwrap()
 }
 
+/// Track widths (nm) and lengths (nm) of the routed copper.
+fn tracks(r: &RouteResult) -> Vec<(i64, f64)> {
+    r.items
+        .iter()
+        .filter_map(|it| match it {
+            topor_engine::model::Item::Track(t) => {
+                let (a, b) = (t.prim.start(), t.prim.end());
+                Some((t.width, ((a.x as f64 - b.x as f64).powi(2) + (a.y as f64 - b.y as f64).powi(2)).sqrt()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A1 pattern `wide_bottleneck_neck` on fx_narrow_gap: the 0.25 mm track's only way is a gap
+/// that fits it only at 0.1 mm over the gap (the net's floor: min track width 0.1 mm). Main
+/// (forced_shrink off) draws it forced at full width, 2 clearance violations of 75 um. On: the
+/// forced run is necked over the gap only, no violation, one neck warning; the rest of the track
+/// (and both pad ends) keeps 0.25 mm.
 #[test]
-fn explore_a1() {
-    let path = format!("{}/tests/fixtures/erbs/model-gap_squeeze.json", env!("CARGO_MANIFEST_DIR"));
-    let src = std::fs::read_to_string(&path).unwrap();
-    for floor in [250_000i64, 150_000] {
-        let m = with(&src, |j| j["rules"]["min_track_width"] = serde_json::json!(floor));
-        let mut val = serde_json::to_value(Options::default()).unwrap();
-        val["runs"] = serde_json::json!(1);
-        val["topo_rounds"] = serde_json::json!(1);
-        val["draw_style"] = serde_json::json!("smooth");
-        let o: Options = serde_json::from_value(val).unwrap();
-        for on in [false, true] {
-            let r = route(&m, &opts_shrink(&o, on));
-            let e = r.erbs.as_ref().unwrap();
-            eprintln!("GAP floor {floor} on {on}: viols {} gap_kept {} shrunk {} necks {:?}", r.violations.len(), e.gap_kept, e.gap_shrunk, r.warnings.iter().filter(|w| w.contains("neck") || w.contains("narrow")).count());
+fn a_forced_run_shrinks_over_the_gap_instead_of_violating() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
+    let off = route(&m, &opts_shrink(&opts(), false));
+    assert_eq!(off.violations.len(), 2, "main: the forced run at full width: {:?}", off.violations);
+    assert!(tracks(&off).iter().all(|t| t.0 == 250_000));
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!((on.routed, on.violations.len()), (1, 0), "{:?}", on.violations);
+    let necks: Vec<&String> = on.warnings.iter().filter(|w| w.contains("necked from 0.250 mm to 0.100 mm")).collect();
+    assert_eq!(necks.len(), 1, "one shrinkage warning: {:?}", on.warnings);
+    let ts = tracks(&on);
+    assert!(ts.iter().all(|t| t.0 >= 100_000 && t.0 <= 250_000), "{ts:?}");
+    let thin: f64 = ts.iter().filter(|t| t.0 < 250_000).map(|t| t.1).sum();
+    let all: f64 = ts.iter().map(|t| t.1).sum();
+    // The gap's walls are 1 mm long (x 14.5 .. 15.5): the neck covers them and about one pitch more.
+    assert!(thin > 1.0 * MM && thin < 3.0 * MM && thin < 0.2 * all, "necked {thin} of {all}");
+    let ends = |r: &RouteResult| r.items.iter().filter_map(|it| match it {
+        topor_engine::model::Item::Track(t) => Some((t.prim.start(), t.prim.end(), t.width)),
+        _ => None,
+    }).filter(|(a, b, _)| [a, b].iter().any(|p| (p.x as f64 - 3.0 * MM).abs() < 1e3 || (p.x as f64 - 27.0 * MM).abs() < 1e3)).map(|x| x.2).collect::<Vec<_>>();
+    assert!(ends(&on).iter().all(|&w| w == 250_000), "pad ends at full width: {:?}", ends(&on));
+}
+
+/// The floor is the nominal width (min track width 0.25 mm): nothing to shrink, the copper is
+/// main's whether forced_shrink is on or off.
+#[test]
+fn no_floor_below_the_width_no_shrink() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(250_000));
+    let (off, on) = (route(&m, &opts_shrink(&opts(), false)), route(&m, &opts_shrink(&opts(), true)));
+    assert_eq!(off.items, on.items);
+    assert_eq!(off.violations.len(), on.violations.len());
+}
+
+/// A gap too narrow even for the floor (the fixture's 0.2 mm: 50 um short per side after necking): the
+/// shrink is graded, it is taken where it makes the violations shallower, never deeper.
+#[test]
+fn a_shrink_that_cannot_clear_still_shallows() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(200_000));
+    let (off, on) = (route(&m, &opts_shrink(&opts(), false)), route(&m, &opts_shrink(&opts(), true)));
+    let d = |r: &RouteResult| r.violations.iter().map(|v| v.depth_nm).max().unwrap_or(0);
+    assert!(!on.violations.is_empty() && d(&on) < d(&off), "off {:?} on {:?}", off.violations, on.violations);
+    assert!(tracks(&on).iter().all(|t| t.0 >= 200_000));
+}
+
+/// A1 pattern `neck_not_at_pad`: as above with the gap 0.6 mm from pad A1's edge (walls at x
+/// 4.1 .. 5.1, the pad's edge at 3.5). The neck may reach back to the pad (neck from pad), but no
+/// width step lies inside the pad (KiCad's Cleanup would delete the narrow piece as a track in the
+/// pad), and the track still ends at the pad's centre.
+#[test]
+fn a_shrink_next_to_a_pad_has_no_width_step_in_the_pad() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| {
+        j["rules"]["min_track_width"] = serde_json::json!(100_000);
+        for p in j["pads"].as_array_mut().unwrap() {
+            if p["ref"].as_str().unwrap().starts_with('W') {
+                p["center"][0] = serde_json::json!(4_600_000);
+            }
         }
-    }
-    let src = include_str!("fixtures/fx-narrow-gap.json");
-    for floor in [250_000i64, 100_000] {
-        let m = with(src, |j| j["rules"]["min_track_width"] = serde_json::json!(floor));
-        for on in [false, true] {
-            let r = route(&m, &opts_shrink(&opts(), on));
-            let amt: f64 = r.violations.len() as f64;
-            eprintln!("NARROW floor {floor} on {on}: viols {amt} {:?} warn {:?}", r.violations.iter().map(|v| (v.kind.clone(), v.depth_nm)).collect::<Vec<_>>(), r.warnings.iter().filter(|w| w.to_lowercase().contains("neck")).collect::<Vec<_>>());
+    });
+    assert!(!route(&m, &opts_shrink(&opts(), false)).violations.is_empty(), "main: forced at full width");
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!((on.routed, on.violations.len()), (1, 0), "{:?}", on.violations);
+    let segs: Vec<(f64, f64, i64)> = on.items.iter().filter_map(|it| match it {
+        topor_engine::model::Item::Track(t) => Some((t.prim.start().x as f64 / MM, t.prim.end().x as f64 / MM, t.width)),
+        _ => None,
+    }).collect();
+    assert!(segs.iter().any(|s| s.2 < 250_000), "necked: {segs:?}");
+    assert!(segs.iter().any(|s| (s.0 - 3.0).abs() < 1e-3 || (s.1 - 3.0).abs() < 1e-3), "ends at the pad centre: {segs:?}");
+    // A width step = the joint of two tracks of different width; none inside the pad (x < 3.5).
+    for a in &segs {
+        for b in &segs {
+            if a.2 != b.2 && (a.1 - b.0).abs() < 1e-6 {
+                assert!(a.1 > 3.5, "width step inside pad A1 at x {}: {segs:?}", a.1);
+            }
         }
     }
 }

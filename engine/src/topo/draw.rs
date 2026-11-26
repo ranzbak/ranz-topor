@@ -5163,7 +5163,7 @@ impl<'a> Drawer<'a> {
     /// Track items of the polyline `pts` with the parts inside the zones of `neck` at width
     /// `wn` (each segment cut where it crosses a zone's circle) and the rest at the wire's width;
     /// with the necked length per zone. O(segments x zones).
-    fn neck_items(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> (Vec<Item>, [f64; super::exact::NECK_ZONES]) {
+    pub(super) fn neck_items(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> (Vec<Item>, [f64; super::exact::NECK_ZONES]) {
         let wi = &self.st.wires[w];
         let mut items = Vec::new();
         let mut lens = [0.0; super::exact::NECK_ZONES];
@@ -5353,7 +5353,7 @@ impl<'a> Drawer<'a> {
     /// ([`Drawer::via_plan_price`] per sample, over the wire's pitch): the neck reaches further
     /// only where another trace needs that room (TopoR 6.3 manual p. 56, the minimum width only
     /// where needed). Graded, no cutoff. O(zones x 14 checks of the run + zones x 65 x segments).
-    fn fit_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
+    pub(super) fn fit_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
         let wi = &self.st.wires[w];
         let ext = |c: Vec2| pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0;
         let len_of = |n: &super::exact::Neck| self.neck_items(w, lid, pts, n, wn).1.iter().sum::<f64>();

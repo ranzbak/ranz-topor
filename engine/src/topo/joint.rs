@@ -309,15 +309,18 @@ impl<'a> Drawer<'a> {
         // drawn second. A deeper one, or a predicted conflict, goes to the selector.
         let gap_max = (self.opts.erbs_gap_keep_max_mm.max(0.0) * 1e6).round() as i64;
         // draw-absorb A1 (`[drawing] forced_shrink`): before a model-gap pair is kept with its
-        // gap as a violation, the band the plan necks is realised again with that neck against
-        // the other band (the first realise saw only the static copper, which the full width
-        // clears; TopoR 6.3 manual p. 56: the minimum width in the bottleneck). The band that
-        // would yield by key first, then the other. A band that comes out legal against every
-        // item takes part in no conflict any more (its other pairs go too); one that does not
-        // keeps its copper as it was. Only ever narrower (realise takes the widest width that
-        // passes, never above the reserved one).
+        // gap as a violation, a band the plan necks is realised again with that neck against the
+        // other band (the first realise saw only the static copper, which the full width clears;
+        // TopoR 6.3 manual p. 56: the minimum width in the bottleneck). The band that would yield
+        // by key first, then the other. The neck is taken at the widest width at which the band
+        // breaks no rule against its gap partners and hits nothing its full width did not
+        // ([`Drawer::neck_band`]); its pairs are then measured again from both sides. A band
+        // whose neck does not clear keeps its copper. Only ever narrower than the reserved band.
         if self.opts.forced_shrink {
-            let pairs: Vec<(usize, usize)> = deep.iter().filter(|(&(a, c), &(d, _, _))| (bands[a].gap || bands[c].gap) && d <= gap_max).map(|(k, _)| *k).collect();
+            let dbg = std::env::var_os("TOPO_ABSORBDBG").is_some();
+            let gapb: Vec<bool> = bands.iter().map(|b| b.gap).collect();
+            let is_gap = |deep: &BTreeMap<(usize, usize), Overlap>, a: usize, c: usize| deep.get(&(a.min(c), a.max(c))).is_some_and(|&(d, _, _)| (gapb[a] || gapb[c]) && d <= gap_max);
+            let pairs: Vec<(usize, usize)> = deep.keys().filter(|&&(a, c)| is_gap(&deep, a, c)).copied().collect();
             for (a, c) in pairs {
                 if !deep.contains_key(&(a, c)) {
                     continue;
@@ -326,21 +329,29 @@ impl<'a> Drawer<'a> {
                 let (yi, oi) = if (ka, bands[a].w, bands[a].r) > (kc, bands[c].w, bands[c].r) { (a, c) } else { (c, a) };
                 for x in [yi, oi] {
                     let w = bands[x].w;
-                    let Some(pn) = self.plan_neck(w) else { continue };
+                    let pn = self.plan_neck(w);
+                    let partners: BTreeSet<usize> = deep.keys().filter(|&&(p, q)| (p == x || q == x) && is_gap(&deep, p, q)).map(|&(p, q)| if p == x { q } else { p }).collect();
+                    if dbg {
+                        let net = |b: usize| self.st.wires[bands[b].w].net;
+                        eprintln!("ABSORBDBG pair (w{} net {}, w{} net {}) depth {:?} x w{w} pneck {} partners {:?}", bands[a].w, net(a), bands[c].w, net(c), deep.get(&(a, c)).map(|d| d.0), pn.as_ref().map_or("none".to_string(), |n| format!("min {:.0} zones {:?}", n.min_w, n.ends.iter().flatten().map(|z| ((z.0.x / 1e3).round() / 1e3, (-z.0.y / 1e3).round() / 1e3, (z.1 / 1e3).round() / 1e3)).collect::<Vec<_>>())), partners.iter().map(|&q| (bands[q].w, net(q))).collect::<Vec<_>>());
+                    }
+                    let Some(pn) = pn else { continue };
                     let layer = self.layer_of_band(&bands[x].items);
                     let lid = self.layer_id(layer);
+                    // What the reserved band hits now (labels; its own items are its net's).
+                    let old: BTreeSet<String> = self.checker.check_against(&self.idx, &bands[x].items, &[]).violations.into_iter().map(|v| v.against).collect();
                     let cur = self.joint.cur.replace(w);
                     for h in std::mem::take(&mut handles[x]) {
                         of_id.remove(&self.handles[h].0);
                         self.uncommit(h);
                     }
                     self.joint.cur = cur;
-                    let pneck = Some(pn);
-                    let got = self.realise(w, layer, lid, &bands[x].pts, &pneck).filter(|(its, _)| !its.is_empty());
+                    let partner_of = |lbl: &str| lbl.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)).is_some_and(|b| partners.contains(b));
+                    let got = self.neck_band(w, lid, &bands[x].pts, &pn, &|lbl: &str| !partner_of(lbl) && old.contains(lbl), dbg);
                     let ok = got.is_some();
                     if let Some((its, pnr)) = got {
                         bands[x].items = its;
-                        bands[x].pneck = pnr;
+                        bands[x].pneck = Some(pnr);
                     }
                     let hs: Vec<usize> = bands[x].items.iter().map(|it| self.commit(it)).collect();
                     for &h in &hs {
@@ -351,17 +362,17 @@ impl<'a> Drawer<'a> {
                     }
                     handles[x] = hs;
                     if ok {
-                        // Its own check is clean; a partner's check against it (another net's
-                        // rule can be wider) decides whether that pair stays.
-                        let partners: Vec<usize> = deep.keys().filter(|&&(p, q)| p == x || q == x).map(|&(p, q)| if p == x { q } else { p }).collect();
+                        // Every pair of x measured again, from both sides (another net's rule can
+                        // be wider).
+                        let others: BTreeSet<usize> = deep.keys().filter(|&&(p, q)| p == x || q == x).map(|&(p, q)| if p == x { q } else { p }).collect();
                         deep.retain(|&(p, q), _| p != x && q != x);
-                        for o in partners {
-                            let rep = self.checker.check_against(&self.idx, &bands[o].items, &[]);
+                        let add = |deep: &mut BTreeMap<(usize, usize), Overlap>, from: usize, items: &[Item], rep: &crate::check::CheckReport, want: &dyn Fn(usize) -> bool| {
                             for v in &rep.violations {
-                                if v.against.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)) != Some(&x) {
+                                let Some(&bj) = v.against.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)) else { continue };
+                                if bj == from || !want(bj) {
                                     continue;
                                 }
-                                let at = match bands[o].items.get(v.item) {
+                                let at = match items.get(v.item) {
                                     Some(Item::Track(t)) => {
                                         let (s, e) = (t.prim.start(), t.prim.end());
                                         ((s.x as i64 + e.x as i64) / 2, (s.y as i64 + e.y as i64) / 2)
@@ -369,12 +380,21 @@ impl<'a> Drawer<'a> {
                                     _ => (0, 0),
                                 };
                                 let d = v.required - v.gap;
-                                let e = deep.entry((o.min(x), o.max(x))).or_insert((d, at, v.layer));
+                                let e = deep.entry((from.min(bj), from.max(bj))).or_insert((d, at, v.layer));
                                 if d > e.0 {
                                     *e = (d, at, v.layer);
                                 }
                             }
+                        };
+                        let rep = self.checker.check_against(&self.idx, &bands[x].items, &[]);
+                        add(&mut deep, x, &bands[x].items, &rep, &|_| true);
+                        for o in others {
+                            let rep = self.checker.check_against(&self.idx, &bands[o].items, &[]);
+                            add(&mut deep, o, &bands[o].items, &rep, &|b| b == x);
                         }
+                    }
+                    if dbg {
+                        eprintln!("ABSORBDBG   x w{w}: neck {}, pair now {:?}", if ok { "taken" } else { "none" }, deep.get(&(a, c)));
                     }
                     if !deep.contains_key(&(a, c)) {
                         break;
@@ -456,6 +476,48 @@ impl<'a> Drawer<'a> {
             };
             self.joint.class.insert((b.w, b.r), class);
         }
+    }
+
+    /// draw-absorb A1: band `pts` of wire `w` (layer id `lid`) with the plan's neck zones `pn`,
+    /// at the widest width in `[floor, nominal]` at which every violation it has is `allowed`
+    /// (not against a gap partner, and against something the full-width band hit too), each zone
+    /// trimmed to what the checker needs where `neck_trim` is on (`Drawer::fit_neck`); no track
+    /// grazes its own pad. `None` when even the floor leaves a violation that is not allowed.
+    /// `(items, (width, necked length per zone))`. O(14 checks of the band + the fit).
+    #[allow(clippy::type_complexity)]
+    fn neck_band(&self, w: WireId, lid: u32, pts: &[Vec2], pn: &super::exact::Neck, allowed: &dyn Fn(&str) -> bool, dbg: bool) -> Option<(Vec<Item>, (f64, [f64; super::exact::NECK_ZONES]))> {
+        let wi = &self.st.wires[w];
+        let ok = |nk: &super::exact::Neck, wn: f64| {
+            let its = self.neck_items(w, lid, pts, nk, wn).0;
+            let rep = self.checker.check_against(&self.idx, &its, &[]);
+            rep.violations.iter().all(|v| allowed(&v.against))
+        };
+        if !ok(pn, pn.min_w) {
+            if dbg {
+                let its = self.neck_items(w, lid, pts, pn, pn.min_w).0;
+                let rep = self.checker.check_against(&self.idx, &its, &[]);
+                eprintln!("ABSORBDBG   floor {:.0} still hits {:?}", pn.min_w, rep.violations.iter().filter(|v| !allowed(&v.against)).map(|v| (v.against.clone(), v.required - v.gap)).collect::<Vec<_>>());
+            }
+            return None;
+        }
+        let (mut lo, mut hi) = (pn.min_w, wi.w);
+        for _ in 0..12 {
+            let mid = 0.5 * (lo + hi);
+            if ok(pn, mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let wn = lo.floor().max(pn.min_w);
+        let nk = if self.opts.neck_trim {
+            let f = self.fit_neck(w, lid, pts, pn, wn);
+            if ok(&f, wn) { f } else { *pn }
+        } else {
+            *pn
+        };
+        let (items, ls) = self.neck_items(w, lid, pts, &nk, wn);
+        (!items.is_empty() && self.track_own_pad_ok(w, &items)).then_some((items, (wn, ls)))
     }
 
     /// The signal layer of a band's track items.
