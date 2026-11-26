@@ -10,7 +10,10 @@ The engine runs in the plugin's own Python process: `topor_engine.route_async` i
 dialog runs on the main thread of that same process (run.py polls `job.progress()` every 0.25 s).
 So process signals are ruled out: SIGSTOP stops the whole process, and the dialog with it (no
 Resume, no Cancel). No other process uses CPU during the engine phase. The kicad-cli phases
-(pre-flight DRC, the DRC loop, preview) are short subprocesses, and Pause is disabled there.
+(pre-flight DRC, the DRC loop, preview) are short subprocesses of their own: there Pause stops the
+running `kicad-cli` with SIGSTOP and Resume continues it with SIGCONT (never the plugin process
+itself). Its `kicad_cli_timeout_s` excludes the stopped time. Between two steps (no engine job, no
+kicad-cli running) the button is greyed out.
 
 ## Mechanism: a cooperative pause gate in the run's clock
 - `TimeLimit` (shared by every run of a call, already reachable from every stop test: `RunControl`,
@@ -60,7 +63,7 @@ Resume, no Cancel). No other process uses CPU during the engine phase. The kicad
   (`Progress.pausable`).
 - Pressing it toggles the label between Pause and Resume.
 - While paused, the phase line says "Paused: the router uses no CPU and the time limit stands still.
-  Resume goes on with the run". The elapsed and "ends" figures stand still.
+  Resume goes on with the run". The elapsed figure stands still; the "ends" (Optimizing ends) time moves later by the paused time.
 - `UiPort.pause_wanted()` is optional; headless UIs have none, and ScriptedUi gets a script for
   tests. run.py syncs it to `job.pause()`/`job.resume()` at each poll and writes a log line.
 

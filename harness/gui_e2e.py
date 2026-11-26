@@ -55,6 +55,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 X_TIMEOUT_S = 30.0  # one xdotool / wmctrl / xwd call; a hung X tool must not hang the run
+DRC_WAIT_S = 180.0  # cap on waiting for KiCad's DRC dialog to finish (gui_drc)
+DRC_SETTLE_S = 3.0  # the dialog must stay pixel-identical this long after its status line shows text
 REPLAY_TIMEOUT_S = 600.0  # harness.cleanup_check replay in its own pcbnew
 #: time-limit-fix r2: room after the optimizing time limit for the final drawing (not counted: qmtech about 50-360 s),
 #: KiCad's DRC and the preview export, before the harness gives up waiting for the preview
@@ -467,12 +469,21 @@ class E2E:
             time.sleep(0.5)
         self.click_abs(dx + 628, dy + 473)
         time.sleep(1)
-        for _ in range(120):
+        # wait for KiCad's DRC to finish before the grab: the status line has text AND the whole dialog stays
+        # pixel-identical for DRC_SETTLE_S seconds (the counts and the "Tests Running" page change while it runs);
+        # time cap DRC_WAIT_S, no process matching (a pgrep on our own command line would match itself)
+        t_end, last, same_since = time.monotonic() + DRC_WAIT_S, None, None
+        while time.monotonic() < t_end:
             time.sleep(1)
             subprocess.run(f"xwd -id {dlg[1]} -display {self.display} | convert xwd:- {img}", shell=True,
                        timeout=X_TIMEOUT_S)
-            if self._dlg_text(img):
+            cur = img.read_bytes() if img.exists() else b""
+            if cur != last:
+                last, same_since = cur, time.monotonic()
+            elif self._dlg_text(img) and time.monotonic() - same_since >= DRC_SETTLE_S:
                 break
+        else:
+            self.log(f"DRC dialog not settled after {DRC_WAIT_S:g} s: the screenshot may show a running DRC")
         self.n += 1
         txt_shot = self.shots / f"{self.n:02d}-drc-{tag}.png"
         shutil.copy(img, txt_shot)

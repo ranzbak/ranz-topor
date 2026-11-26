@@ -77,9 +77,9 @@ fn main() {
             };
             let n = samples.len();
             let mut lat = None;
-            for i in 0..n {
+            for (i, smp) in samples.iter().enumerate() {
                 if (i..n).all(|k| rate(k).is_none_or(|r| r < 0.1)) {
-                    lat = Some(samples[i].0);
+                    lat = Some(smp.0);
                     break;
                 }
             }
