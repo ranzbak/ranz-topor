@@ -4094,7 +4094,7 @@ impl<'a> Drawer<'a> {
                 // the plan's neck takes its octilinear form at that neck too (never wider).
                 let a1b = adopted.as_ref().is_some_and(|x| x.zones.is_none() && self.opts.reserved_keep_neck && x.pneck.is_some_and(|p| p.0 < wi.w) && pneck.is_some());
                 let a1z: Option<super::exact::Neck> = adopted.as_ref().and_then(|x| {
-                    x.zones.map(|ends| super::exact::Neck { min_w: x.pneck.map_or(0.0, |p| p.0), ends }).or_else(|| match (a1b, x.pneck, &pneck) {
+                    x.zones.map(|ends| super::exact::Neck { min_w: x.pneck.map_or(0.0, |p| p.0), ends }).or(match (a1b, x.pneck, &pneck) {
                         (true, Some((wn, _)), Some(n)) => Some(super::exact::Neck { min_w: wn, ends: n.ends }),
                         _ => None,
                     })
