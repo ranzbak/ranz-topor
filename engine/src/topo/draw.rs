@@ -4183,10 +4183,23 @@ impl<'a> Drawer<'a> {
                         // draw-absorb A1: an adopted band necked against a gap partner takes its
                         // octilinear form at its neck (zones and width), never wider.
                         let real = |o_pts: &[Vec2]| match &a1z {
+                            // A1b: main's realise, unless it draws the band wider than reserved
+                            // (full width, or a wider neck); then the reserved neck where legal.
+                            Some(z) if a1b => {
+                                let main = self.realise(w, layer, lid, o_pts, &pneck);
+                                if main.as_ref().is_some_and(|(_, pn)| pn.is_some_and(|p| p.0 <= z.min_w + 0.5)) {
+                                    return main;
+                                }
+                                let (its, ls) = self.kept_neck_items(w, layer, o_pts, z);
+                                if ls.iter().sum::<f64>() > 0.0 && self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its) {
+                                    Some((its, Some((z.min_w, ls))))
+                                } else {
+                                    main
+                                }
+                            }
                             Some(z) => {
-                                let (its, ls) = if a1b { self.kept_neck_items(w, layer, o_pts, z) } else { self.neck_items(w, lid, o_pts, z, z.min_w) };
-                                let pn = (ls.iter().sum::<f64>() > 0.0 || !a1b).then_some((z.min_w, ls));
-                                (self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its)).then_some((its, pn))
+                                let (its, ls) = self.neck_items(w, lid, o_pts, z, z.min_w);
+                                (self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its)).then_some((its, Some((z.min_w, ls))))
                             }
                             None => self.realise(w, layer, lid, o_pts, &pneck),
                         };
@@ -4194,13 +4207,19 @@ impl<'a> Drawer<'a> {
                             Some(o) => match real(&o.pts) {
                                 Some((its, pn)) => {
                                     if attempt < 0 && adopted_neck > 0.0 {
+                                        // A1b meter: an octilinear form necked wider than reserved.
+                                        if let (Some((w2, _)), Some(wn)) = (pn, adopted_wn) {
+                                            if w2 > wn + 0.5 && !a1b {
+                                                self.joint.unnecked.push((w, r, adopted_neck, 0.0, "octi_wider"));
+                                            }
+                                        }
                                         if pn.is_none() {
                                             let room = match (&pneck, adopted_wn) {
                                                 (Some(n), Some(wn)) => self.room_taken(w, &o.pts, n, wn),
                                                 _ => 0.0,
                                             };
                                             self.joint.unnecked.push((w, r, adopted_neck, room, "octi"));
-                                        } else if a1b {
+                                        } else if a1b && pn.is_some_and(|p| adopted_wn.is_some_and(|wn| p.0 <= wn + 0.5)) {
                                             self.joint.kept_neck += 1;
                                         }
                                     }

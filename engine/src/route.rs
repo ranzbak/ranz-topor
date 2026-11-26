@@ -394,7 +394,8 @@ pub struct ErbsUnnecked {
     /// Of the full-width redraw, the length (mm) inside the plan's neck zones where the full
     /// width takes planned room of traces not drawn yet that the reserved width left free.
     pub room_mm: f64,
-    /// `tip` (pad-tip re-anchor) or `octi` (the adopted band's octilinear form).
+    /// `tip` (pad-tip re-anchor), `octi` (the adopted band's octilinear form at full width) or
+    /// `octi_wider` (that form necked wider than reserved).
     pub at: String,
 }
 

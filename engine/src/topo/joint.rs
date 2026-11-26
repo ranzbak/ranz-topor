@@ -156,7 +156,7 @@ pub struct JointState {
     /// width (no `[drawing] reserved_keep_neck`): (wire, run, necked length dropped nm, length of
     /// the full-width copper in the plan's zones that takes planned room of undrawn wires nm
     /// ([`Drawer::room_taken`]), where: "tip" = the pad-tip re-anchor, "octi" = the adopted
-    /// band's octilinear form).
+    /// band's octilinear form, "octi_wider" = that form necked, but wider than reserved).
     pub unnecked: Vec<(WireId, usize, f64, f64, &'static str)>,
     /// With `reserved_keep_neck`: the redraws that kept the band's neck (re-anchor, octilinear form).
     pub kept_neck: usize,

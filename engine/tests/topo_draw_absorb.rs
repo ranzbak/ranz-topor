@@ -328,3 +328,100 @@ fn a_forced_shrink_takes_the_widest_width_that_clears() {
     let thin = tracks(&on).iter().map(|t| t.0).min().unwrap();
     assert!(thin > 90_000 && thin <= 100_000, "neck width {thin}");
 }
+
+// ---- draw-absorb A1b (`[drawing] reserved_keep_neck`) and A3 (`[drawing] band_passes`) ----
+
+fn opts_with(base: &Options, kv: &[(&str, serde_json::Value)]) -> Options {
+    let mut val = serde_json::to_value(base).unwrap();
+    for (k, v) in kv {
+        val[*k] = v.clone();
+    }
+    serde_json::from_value(val).unwrap()
+}
+
+fn one_cycle(style: &str) -> Options {
+    opts_with(&Options::default(), &[("runs", serde_json::json!(1)), ("topo_rounds", serde_json::json!(1)), ("draw_style", serde_json::json!(style))])
+}
+
+fn fixture(dir: &str, p: &str) -> BoardModel {
+    let path = format!("{}/tests/fixtures/{dir}/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
+    BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+/// A1b on the Q3 crop (ADV7511 row, default options, one cycle): main re-anchors a reserved band
+/// the plan had necked (wire 36) at its pad's tip at full width, dropping 1.1 mm of neck of which
+/// a stretch takes planned room of a trace not drawn yet (the meter's `room_mm`). With
+/// reserved_keep_neck the re-anchored band keeps its neck there: no unnecked redraw, the neck is
+/// counted as kept, more copper stays necked and no violation is added.
+#[test]
+fn a_reanchored_band_keeps_its_reserved_neck() {
+    let m = fixture("dvn", "dvn_crop_q3");
+    let o = one_cycle("octilinear");
+    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
+    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    let tip: Vec<_> = eo.unnecked_list.iter().filter(|u| u.at == "tip").collect();
+    assert!(!tip.is_empty() && tip.iter().any(|u| u.mm > 0.5 && u.room_mm > 0.0), "main drops a reserved neck holding planned room: {:?}", eo.unnecked_list);
+    assert_eq!((eo.unnecked, eo.kept_neck), (eo.unnecked_list.len(), 0), "{eo:?}");
+    assert!(en.unnecked_list.iter().all(|u| u.at != "tip") && en.kept_neck >= 1, "{:?} kept {}", en.unnecked_list, en.kept_neck);
+    let thin = |r: &RouteResult| tracks(r).iter().filter(|t| t.0 < 280_000).map(|t| t.1).sum::<f64>();
+    assert!(thin(&on) > thin(&off) + 0.3 * MM, "necked {} -> {}", thin(&off) / MM, thin(&on) / MM);
+    assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
+    assert_eq!(on.routed, off.routed);
+}
+
+/// A1b off is main's copper on a crop with no reserved neck to keep (Q2): same items.
+#[test]
+fn keep_neck_without_a_dropped_neck_is_main() {
+    let m = fixture("dvn", "dvn_crop_q2");
+    let o = one_cycle("octilinear");
+    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
+    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
+    assert!(off.erbs.as_ref().unwrap().unnecked_list.is_empty());
+    assert_eq!(off.items, on.items);
+}
+
+/// A3 on erbs/qfn_fan (smooth, one cycle): the ERBS check finds one model gap between two fan-out
+/// bands; main keeps both across the gap (a clearance violation). One band pass realises the
+/// later band again with its partner as a sided wall: the gap is gone before any copper (no gap
+/// kept, no violation), the band only a little longer (no detour), all routed.
+#[test]
+fn a_band_pass_pushes_a_model_gap_apart() {
+    let m = fixture("erbs", "qfn_fan");
+    let o = one_cycle("smooth");
+    let off = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
+    let on = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(1))]));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(eo.gap_kept >= 1 && !off.violations.is_empty() && eo.band_passes == 0, "{eo:?}");
+    assert!(en.band_pass_moved >= 1 && en.band_pass_gaps_after < en.band_pass_gaps_before, "{en:?}");
+    assert_eq!((en.gap_kept, on.violations.len(), on.routed), (0, 0, off.routed), "{:?}", on.violations);
+    let len = |r: &RouteResult| tracks(r).iter().map(|t| t.1).sum::<f64>();
+    assert!(len(&on) < 1.01 * len(&off), "length {} -> {}", len(&off) / MM, len(&on) / MM);
+}
+
+/// A3 keeps the topology: on erbs/serpentine_bundle (smooth) a wall-pushed realise of the
+/// serpentine found a path 60 mm shorter through the pads (another class); the pass refuses a
+/// band shorter than its first realise (the walls only add obstacles) or one through a new
+/// feature, so the drawing is no worse than main's.
+#[test]
+fn a_band_pass_never_changes_the_class() {
+    let m = fixture("erbs", "serpentine_bundle");
+    let o = one_cycle("smooth");
+    let off = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
+    let on = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(3))]));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert_eq!(en.rejected_static, eo.rejected_static, "{en:?}");
+    assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
+    assert_eq!(on.routed, off.routed);
+}
+
+/// A3 off (0 passes) on a fixture with model gaps is main's copper.
+#[test]
+fn no_band_pass_is_main() {
+    let m = fixture("erbs", "river_wrap");
+    let o = one_cycle("smooth");
+    let a = route(&m, &o);
+    let b = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
+    assert_eq!(a.items, b.items);
+    assert_eq!(a.erbs.as_ref().unwrap().band_pass_gaps_before, 0);
+}

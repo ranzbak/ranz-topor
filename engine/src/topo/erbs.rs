@@ -1636,8 +1636,8 @@ pub const PASS_VIOL_W: f64 = 10.0;
 /// (Dayan 1997 PDF p. 32; Su & Dai 1997 PDF p. 2: the neighbour flexes, the topology stays;
 /// passes until nothing changes, Su & Dai PDF p. 4). A new ERBS is kept when its price (length +
 /// [`PASS_VIOL_W`] x the depth of every violation it takes part in) drops; the others are put
-/// back, to a fixpoint. Up to `opts.band_passes` passes, fewer when no gap is left or no stretch
-/// moved. Order-free within a pass (every yielding stretch sees the partners of the pass before;
+/// back, to a fixpoint; a pair whose yielding band was put back lets its partner yield in the
+/// next pass. Up to `opts.band_passes` passes, fewer when no gap is left or no pair has a try left. Order-free within a pass (every yielding stretch sees the partners of the pass before;
 /// the realises run on lanes). O(passes x (yielding stretches x [`erbs_stretch`] + reverts x
 /// [`check_layer`])).
 pub fn band_passes(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, opts: &ErbsOpts, le: &mut LayerErbs, vs: &mut Vec<Violation>, rank: &dyn Fn(usize) -> usize) -> PassStats {
@@ -1661,6 +1661,9 @@ pub fn band_passes(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, opts: &Erbs
             len + PASS_VIOL_W * v
         };
         let dist = |a: &[Vec2], b0: Vec2, b1: Vec2| a.windows(2).map(|w| seg_seg_dist(w[0], w[1], b0, b1)).fold(f64::INFINITY, f64::min);
+        // (yielding, partner) tries that were not kept: the next pass lets the partner yield
+        // (design note §4 A1: the band that yields by key first, then the other).
+        let mut failed: BTreeSet<(usize, usize)> = BTreeSet::new();
         for _ in 0..opts.band_passes {
             if opts.expired().is_some() {
                 break;
@@ -1674,7 +1677,10 @@ pub fn band_passes(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, opts: &Erbs
             let mut yields: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
             for (a, b) in pairs {
                 let (y, p) = if (rank(a), a) > (rank(b), b) { (a, b) } else { (b, a) };
-                yields.entry(y).or_default().insert(p);
+                let (y, p) = if failed.contains(&(y, p)) { (p, y) } else { (y, p) };
+                if !failed.contains(&(y, p)) {
+                    yields.entry(y).or_default().insert(p);
+                }
             }
             let jobs: Vec<(usize, Vec<Wall>)> = yields
                 .iter()
@@ -1734,8 +1740,11 @@ pub fn band_passes(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, opts: &Erbs
                 cand.retain(|(y, _)| !worse.contains(y));
             }
             st.moved += cand.len();
-            if cand.is_empty() {
-                break;
+            let kept: BTreeSet<usize> = cand.iter().map(|(y, _)| *y).collect();
+            for (y, ps) in &yields {
+                if !kept.contains(y) {
+                    failed.extend(ps.iter().map(|&p| (*y, p)));
+                }
             }
         }
     }
