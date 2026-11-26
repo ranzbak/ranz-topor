@@ -471,6 +471,10 @@ pub fn fuse_style(octilinear: bool, cfg: &super::octi::OctiCfg, pitch: f64) -> O
     octilinear.then_some((cfg, pitch))
 }
 
+/// pad-centre-price: the pad-end price of a fused run in mm (`[factors] pad_off_centre`, new
+/// minus old run comes off the gain); `None` = off (main's gain).
+pub type EndPrice<'a> = Option<&'a dyn Fn(&[Vec2]) -> f64>;
+
 /// Shortcuts of a branch run onto its trunk (D6b fuse; TopoR's FreeStyle auto move of T-points,
 /// black-box E8c-E8e): `run` starts on the trunk's copper (`trunk`, the trunk's polylines on the
 /// run's layer, math frame); leaving the trunk at the foot `q` of a later vertex `run[i]`
@@ -493,7 +497,7 @@ pub fn fuse_style(octilinear: bool, cfg: &super::octi::OctiCfg, pitch: f64) -> O
 /// the wire's own pad); a candidate's gain loses `end_mm(new run) - end_mm(run)` (None: no such
 /// price, the gains as before).
 #[allow(clippy::type_complexity)]
-pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>, end_mm: Option<&dyn Fn(&[Vec2]) -> f64>) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
+pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>, end_mm: EndPrice) -> Vec<(f64, f64, usize, Vec<Vec2>)> {
     let price = |dir: Vec2, arms: &[Vec2]| -> f64 {
         let Some(u) = dir.unit() else { return 0.0 };
         if arms.is_empty() || jw <= 0.0 {
@@ -4603,7 +4607,7 @@ impl<'a> Drawer<'a> {
     /// [`fuse_candidates`]. Returns `(price gain, length gain mm, i, new run as drawn)`.
     /// O(candidates x checker query).
     #[allow(clippy::too_many_arguments)]
-    pub fn fuse_best_legal(&self, wo: &WireOut, r: usize, run: &[Vec2], rev: bool, trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>, end_mm: Option<&dyn Fn(&[Vec2]) -> f64>, skip: &mut dyn FnMut(f64, usize, &[Vec2]) -> bool) -> Option<(f64, f64, usize, Vec<Vec2>)> {
+    pub fn fuse_best_legal(&self, wo: &WireOut, r: usize, run: &[Vec2], rev: bool, trunk: &[&[Vec2]], ws_mm: f64, jw: f64, style: Option<(&super::octi::OctiCfg, f64)>, end_mm: EndPrice, skip: &mut dyn FnMut(f64, usize, &[Vec2]) -> bool) -> Option<(f64, f64, usize, Vec<Vec2>)> {
         for (gain, len_gain, i, mut pts) in fuse_cap(fuse_candidates(run, trunk, ws_mm, jw, style, end_mm), FUSE_VERTEX_CAP) {
             if skip(gain, i, &pts) {
                 continue;

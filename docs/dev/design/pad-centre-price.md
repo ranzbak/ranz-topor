@@ -24,8 +24,11 @@ path made each one; that table goes into the report.
    end (constant across the DP's choices, so not priced).
 2. The DP's `stub(end, j)` price = pad-snap's stub price + `weight x (x + x^2)`, the sum capped at 0.8 x one violation
    unit (`STUB_VIOL_SHARE` rule: short > clearance > off-centre end holds for every weight). Costly, not failed: no
-   shape is removed. Other drawing paths that leave such a leg (from the diagnosis) get the same price or are listed
-   as open items.
+   shape is removed.
+2b. The D6b fuse (`draw::fuse_candidates`, called from `core` `best_of` through `Drawer::fuse_best_legal`) takes the
+   same price off a shortcut's gain (`end_mm`, new minus old run): the T point when it lies inside a pad of the net
+   (graded from that pad's centre) and the run's far end leg (`end_stub_price`, as the DP). Weight 0: `end_mm` is
+   `None`, the gain is main's.
 3. Warning count (every run, any weight): `pad_off_centre: N trace ends inside a pad of their net off its centre
    (Terminal a, Junction b, Tee c, PassThrough d), largest x mm`, from `tidy::pad_end_breaches` hints on the written
    copper (KiCad keeps them: a hint, not a failure). The old `pad ends off centre` line stays.
@@ -42,3 +45,12 @@ centred. Boards det s0 4 boards weight 0 (hash = main) and 2-3 weights; default 
 **Literature.** KiCad 10.0 as the spec: `tracks_cleaner.cpp` `deleteTracksInPads` (the leg Cleanup deletes),
 `pns_node.cpp` `NODE::addSolid` (PNS links a pad at its anchor only: why the centre matters for drag). Price shape:
 Bast, Brosi & Storandt 2020 sec. 4.3 (graded prices in the octilinear DP), as `planned_room`.
+
+**Not reached by the drawing price (r1 measurements, lead 2026-11-26).** The price changes only the drawing's choice
+between shapes it already has. Left off centre at every weight: (a) PassThrough / Junction (a trunk through its own
+pad: no hook); (b) a straight run whose planned line is offset from both pad centres of its connection: the price
+only moves the jog to the other pad (qmtech R12.2 -> C65.2 0.106 mm, L2.1 -> C9.1, R18.1 -> U6.15, L3.1 -> C42.1);
+(c) entries along long thin pins (QFP 0.6-0.72 mm) and forced runs where no legal centred shape exists; (d) post-passes
+not attributed (straighten / polish / via reduction). (b) and (c) belong in the plan: the topological terminal of a
+connection is the pad centre and the plan's line through a pad pair should be priced by its distance from both
+centres where it is decided (pad exit / escape point, TopoR way: decide early), not in the drawing.

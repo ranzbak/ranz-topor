@@ -9386,7 +9386,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                     }
                     nm / MM
                 };
-                let end_mm: Option<&dyn Fn(&[Vec2]) -> f64> = (ocfg.pad_off_nm > 0.0 && !super::octi::fd45_off("padoff")).then_some(&pad_off);
+                let end_mm: draw::EndPrice = (ocfg.pad_off_nm > 0.0 && !super::octi::fd45_off("padoff")).then_some(&pad_off);
                 if let Some((gain, len_gain, i, pts)) = dr.fuse_best_legal(wo, r, &run, end == 1, &tr, ws_mm, jw, draw::fuse_style(octi_on, &ocfg, wi.w + wi.s), end_mm, &mut skip) {
                     if fdbg {
                         eprintln!("FUSE trunk wire {w} end {end} onto {u}: best legal gain {gain:.2} i {i}");
