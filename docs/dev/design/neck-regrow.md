@@ -112,3 +112,19 @@ runs: a separate plan item.
 
 **Known limit.** exact.rs pieces and the octi pricing still use the circle zones of the drawing's neck plan for
 pricing (search approximation only; the copper uses `neck_items`).
+
+## As built (r4, lead 2026-11-27): the taut exit test behind `[search] exit_taut`
+
+- `[search] exit_taut` (default **false**) selects `State::exit_tight`'s test. false = main's test
+  (the stretch through the even points of the first two passes). true = the taut test of r2/r3:
+  own-pad passes skipped, nearer-end passes only, the relaxed taut path, the board outline as a wall,
+  the pad-axis exit.
+- Why off: on esp and qmtech the truer exits (9 exits on esp that main called tight have room)
+  reshuffle the plan into vias without a legal site and into crossing-vs-length flips. Both are
+  priced too low today: unsited vias go to via-plan r3 (site truth), the flips to CROSS-VS-LENGTH.
+  The taut test becomes the default once via-plan r3's site truth has landed.
+- On by default (regrow): the plan keeps both end necks with full-width room in the middle and
+  the drawing necks the whole wire (option a); end zones narrow only their contiguous stretch; the
+  whole-supply warning; crop widths; crop_q3 checks the hook geometry.
+- Debug arms (TOPO_FD45_OFF): nrg_exit (main's test even with the key on), nrg_ownpad, nrg_taut,
+  nrg_axis, nrg_near, nrg_edge, nrg_relax, nrg_join, nrg_contig.
