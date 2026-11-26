@@ -60,6 +60,9 @@ C1="--set optimize.runs=1 --set optimize.rounds=1 --set capacity.compass_cut_che
 bunit() { local a=$1 n=$2 pcb=$3; python -m harness.score_runs "$OUT/$a-$n" "$pcb" --only 0 --no-png --threads 4 $C1 > "$OUT/$a-$n.log" 2>&1 9>&-; note "$a-$n rc $?"; }
 case ${1:-} in
   xunit) xunit ;;
+  esparms)  # esp det s0 C1 with one fix arm off each (which change moves esp's DRC)
+    ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
+    for a in nrg_join nrg_relax nrg_near nrg_edge; do TOPO_FD45_OFF=$a bunit A$a esp $ESP; done ;;
   dvndbg)  # topo_dvn + topo_neck_regrow with TOPO_NECKDBG (why a neck runs the whole wire)
     cd $ROOT/engine; TOPO_NECKDBG=1 RUST_TEST_THREADS=1 cargo test --release --no-fail-fast --test topo_dvn --test topo_neck_regrow -- --nocapture > $OUT/dvndbg.log 2>&1 9>&-; note "dvndbg rc $?"
     cargo test --release --lib whole_supply > $OUT/lib-supply.log 2>&1 9>&-; note "lib supply rc $?" ;;
