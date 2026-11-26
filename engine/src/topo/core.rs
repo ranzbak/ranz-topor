@@ -3819,6 +3819,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         }
     }
     st.neck_from_pad = opts.neck_from_pad;
+    st.exit_taut = opts.exit_taut;
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let tier_of = |i: usize| dec.connections[i].tier;
     // 4.3 `[optimize] initial = "once"`: a crossing on one layer is a violation (very high price,
