@@ -155,6 +155,25 @@ The undo primitives exist: `uncommit` (`draw.rs:3308`) and `restore_wire` (`draw
 - **Cost.** 1 det s0 unit (esp + qmtech).
 - **Patterns.** None; this is a meter. Unit tests: every forced candidate source is reported.
 
+**A0 as built (branch draw-absorb, 2026-11-26).**
+- The drawing tags each violation when it writes the copper (`draw::ViolSrc`, not part of `Viol`'s equality, read
+  by nothing in the drawing):
+  - the writer: `forced_run`, `forced_via`, `gap_kept` (a band kept across a model gap, drawn second),
+    `junction_join` or `diff_pair`;
+  - the forced candidate (`relaxed`, `funnel`, `erbs`, `erbs_kept`, `attempt0..5`), the octilinear form, and the
+    run's band status (`CutClass` name, `kept` for a gap-kept band);
+  - the width, its floor (`State::w_min`) and the narrowest drawn track;
+  - the hit: the router wire that owns the indexed item (`item:N`, live handle -> `ent_wire`), whether it was a
+    reserved band, and that wire's packed room away from the violation (`iv`, at its nearest pass).
+- result.json `violations[].prov` carries all of this. `compass::absorb_meter` adds the drawn compass class (a port
+  of `toporlib/compass.py` `classify_violation`) and the fault class (`compass::fault_class`).
+- `route.draw_absorb` counts them: per fault class and connection, writer, candidate, band status, forced runs per
+  band status, re-taut room (hit slack >= depth) and shrink room (drawn width - floor >= 2 x depth).
+- compass.py joins the KiCad items per fault class and checks the engine's class against its own
+  (`absorb.class_mismatch`, must be 0). metrics.json `draw_absorb`; `tools/draw_absorb_classify.py` shows both.
+- Rule: F1/F2 = a forced via (static/movable hit); else by compass class: F3 `neck_loss`; F4/F5 `drawing_loss`,
+  `overfull_nearby`, `edge_overpredict` (movable/static); F7 `pad_exit`; F6 every other plan class.
+
 ### A1. Shrink before violate (TopoR shrinkage in the forced path)
 - **What.** In `pick_forced` (`draw.rs:3024`), add one candidate: the best forced path, necked over the hit stretch to
   the width that clears the hit copper.

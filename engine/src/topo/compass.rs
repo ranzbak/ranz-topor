@@ -768,6 +768,7 @@ mod absorb_tests {
         assert_eq!(drawn_class("clearance", at, "F.Cu", &[&sh], &[&o], r), "overfull_nearby", "over-full nearby before the neck");
         let fp = item("forced_path", &[0], far, &[]);
         assert_eq!(drawn_class("clearance", at, "F.Cu", &[&sh, &fp], &[], r), "forced_path", "forced path before the neck");
+        assert_eq!(drawn_class("clearance", at, "F.Cu", &[&fp], &[&o], r), "overfull_nearby", "over-full nearby before the forced path");
     }
 
     #[test]

@@ -37,7 +37,7 @@ fn a_forced_run_against_pads_is_a_static_hit() {
     for v in &r.violations {
         let p = v.prov.as_ref().unwrap();
         assert_eq!((p.mech.as_str(), p.hit.as_str(), p.hit_wire), ("forced_run", "static", None), "{p:?}");
-        assert!(["relaxed", "funnel", "erbs", "erbs_kept"].contains(&p.cand.as_str()) || p.cand.starts_with("attempt"), "{p:?}");
+        assert!(["relaxed", "funnel", "erbs", "erbs_kept", "attempt0", "attempt1", "attempt3", "attempt4", "attempt5"].contains(&p.cand.as_str()), "{p:?}");
         assert_eq!(p.w_nm, 250_000, "{p:?}");
         assert!(p.w_min_nm > 0 && p.w_min_nm <= p.w_nm && p.drawn_w_nm > 0, "{p:?}");
         assert_eq!(p.fclass, topor_engine::topo::compass::fault_class("forced_run", &p.class, false), "{p:?}");
@@ -159,4 +159,26 @@ fn a_forced_via_names_its_writer_and_the_wire_it_hits() {
         }
     }
     assert!(vs.iter().any(|x| x.src.hit_wire == Some(7)), "{vs:?}");
+}
+
+/// tests/tw2_metric.rs `model_gaps_keep_both_bands_and_report_the_violation` (erbs/gap_squeeze):
+/// two bands kept across a model gap; the band drawn second carries the gap as its violation,
+/// tagged `gap_kept` / `band` / `kept`, against the other band's copper (a movable hit).
+#[test]
+fn a_band_kept_across_a_model_gap_is_tagged_gap_kept() {
+    let path = format!("{}/tests/fixtures/erbs/model-gap_squeeze.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut val = serde_json::to_value(Options::default()).unwrap();
+    val["runs"] = serde_json::json!(1);
+    val["topo_rounds"] = serde_json::json!(1);
+    val["draw_style"] = serde_json::json!("smooth");
+    let r = route(&m, &serde_json::from_value(val).unwrap());
+    assert!(r.erbs.as_ref().is_some_and(|e| e.gap_kept > 0), "{:?}", r.erbs);
+    check_counts(&r);
+    let g: Vec<_> = r.violations.iter().filter_map(|v| v.prov.as_ref()).filter(|p| p.mech == "gap_kept").collect();
+    assert!(!g.is_empty(), "{:?}", r.violations);
+    for p in g {
+        assert_eq!((p.cand.as_str(), p.cut.as_str(), p.hit.as_str()), ("band", "kept", "movable"), "{p:?}");
+        assert!(p.hit_wire.is_some(), "{p:?}");
+    }
 }
