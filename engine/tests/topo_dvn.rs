@@ -325,3 +325,25 @@ fn centre_misses(m: &BoardModel, r: &topor_engine::route::RouteResult) -> Vec<(S
     }
     out
 }
+
+/// neck-regrow r4: the B patterns keep their answers with `[search] exit_taut` on (the taut exit
+/// test, off by default until the plan's via-site truth lands). Its nearer-end rule keeps the
+/// free end of neck_in_pad_row / neck_shared_channel from judging the other end's bottleneck, and
+/// its board-outline walls make neck_edge_terminal's exit tight (arms nrg_near / nrg_edge).
+#[test]
+fn neck_answers_hold_with_the_taut_exit_test() {
+    let taut = [("exit_taut", serde_json::json!(true))];
+    let r = route("neck_in_pad_row", &taut);
+    assert_eq!((r.unrouted, r.violations), (0, 0));
+    let (y, _) = necked(&r, "PWR", 0.5, |_| true);
+    assert!(y > 4.4 && y < 4.8, "neck_in_pad_row: neck ends at y {y}, expected about 4.686");
+    let r = route("neck_shared_channel", &taut);
+    assert_eq!((r.unrouted, r.violations), (0, 0));
+    let (y, _) = necked(&r, "PWR", 0.5, |_| true);
+    assert!(y > 6.4 && y < 7.15, "neck_shared_channel: neck ends at y {y}");
+    let r = route("neck_edge_terminal", &taut);
+    assert_eq!(r.unrouted, 0);
+    let thin = r.segs.iter().filter(|s| s.net == "PWR" && s.w < 0.5 - 1e-4).map(|s| s.w).fold(f64::INFINITY, f64::min);
+    assert!(thin > 0.29, "neck_edge_terminal: PWR necked to {thin}");
+    assert_eq!(r.violations, 1, "neck_edge_terminal: only the terminal's edge clearance");
+}

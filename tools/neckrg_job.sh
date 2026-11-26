@@ -39,7 +39,7 @@ xunit() {  # clippy, targeted release tests, the crop tool's tests, arm and sour
   cargo clippy --release --all-targets > $OUT/clippy.log 2>&1 9>&-; note "clippy rc $?"
   RUST_TEST_THREADS=4 cargo test --release --no-fail-fast $TESTS > $OUT/tests.log 2>&1 9>&-; note "tests rc $?"
   cd $ROOT; python -m pytest -q -p no:cacheprovider tests/test_abstract_crop.py tests/test_engine_surface.py tests/test_docs_links.py tests/plugin/test_config_docs.py > $OUT/pytest-crop.log 2>&1; note "pytest crop rc $?"; cd $ROOT/engine
-  for a in nrg_join nrg_contig nrg_relax nrg_near nrg_edge; do
+  for a in nrg_join nrg_contig nrg_relax nrg_near nrg_edge nrg_ownpad nrg_taut nrg_axis; do
     TOPO_FD45_OFF=$a cargo test --release --test topo_neck_regrow --test topo_dvn > $OUT/mut-$a.log 2>&1 9>&-; note "mutant arm $a rc $? (want != 0)"
   done
   M=$OUT/mut; mkdir -p $M; cp -r $ROOT/engine $M/; cp $ROOT/Cargo.* $M/ 2>/dev/null
@@ -50,7 +50,7 @@ xunit() {  # clippy, targeted release tests, the crop tool's tests, arm and sour
     (cd $M/engine && CARGO_TARGET_DIR=/root/nrg-mut-target cargo test --release "$@" > $OUT/mut-$n.log 2>&1 9>&-); note "mutant $n rc $? (want != 0)"
     cp $ROOT/engine/$f $M/engine/$f
   }
-  mut ownpad src/topo/state.rs 's/legacy || (!inside(k) \&\& mine(k))/legacy || mine(k)/' --test topo_neck_regrow
+  mut ownpad src/topo/state.rs 's/(ownpad || !inside(k))/true/' --test topo_neck_regrow
   mut taut src/topo/state.rs 's/        if tc.is_none() {/        if false \&\& tc.is_none() {/' --test topo_neck_regrow
   mut axis src/topo/state.rs 's/pad_axis(\&me.poly, me.center, pts\[1\] - pts\[0\])/pad_axis(\&me.poly, me.center, pts[1] - pts[0]).filter(|_| false)/' --test topo_neck_regrow
   mut supply src/topo/core.rs 's/ \&\& w > dflt_w + 0.5//' --lib whole_supply
@@ -71,6 +71,10 @@ case ${1:-} in
       ( [ $a = tip ] || export TOPO_FD45_OFF=$a; TOPO_NECKDBG=1 TOPO_PLANDUMP=$d/plan.json tools/route_board.sh $ESP $d/s0 --no-png --set optimize.runs=1 --set optimize.rounds=1 > $d/route.log 2>&1 9>&- ); note "dbg $a rc $?"
       grep -E "EXITTIGHT|EXITTAUT|PLANNECK" $d/route.log | sort | uniq -c | sort -rn | head -600 > $d/exit.txt; gzip -9 $d/route.log; gzip -9 $d/plan.json 2>/dev/null
     done ;;
+  r4arms)  # r4: which regrow fix moves esp / qm copper (nrg_join, nrg_contig off each), then the arm + source mutants
+    ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
+    for a in nrg_join nrg_contig; do TOPO_FD45_OFF=$a bunit A$a esp $ESP; TOPO_FD45_OFF=$a bunit A$a qm $QM; done
+    xunit ;;
   r3qm)  # r3: the qmtech crop at the tip (T) + qm det s0 C1 with main's exit test (nrg_exit + nrg_join)
     crop T --set optimize.rounds=1
     TOPO_FD45_OFF=nrg_exit,nrg_join bunit Anrg_exit+nrg_join qm $QM ;;
