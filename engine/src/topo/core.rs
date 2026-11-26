@@ -8480,6 +8480,8 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 live.reverse();
             }
             dr.reserve_bands(&live, &plans, &placed, &skip, &key, mode);
+            // draw-via-neck C r5: the reserved end runs' tip anchors, before any run is drawn.
+            dr.tip_anchor_reserved(&plans);
             // fd45 r10 (mechanism C), debug arm `TOPO_FD45_ON=loserfirst`, off by default: the
             // wires the joint check rejected (no reserved copper) draw first, against the kept
             // bands only. It fixes tw2 swap_vias under the sweep order (X2: drawn after its kept

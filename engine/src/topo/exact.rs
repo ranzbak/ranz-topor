@@ -2522,8 +2522,9 @@ mod tests {
 
     /// pad-snap r3 (M1, mutants V2 and V3): ONE predicate, [`Drawer::own_pad_end`], decides whether
     /// a run end is an own-pad end, for the DP's stub price and for `run_pad_stubs`. An end anchored
-    /// elsewhere (`end_at`) is none (V2); neither is a pad carrying a kept lead (V3), a continued
-    /// lead, an end short of the run's end, or an end outside the pad.
+    /// elsewhere (`end_at` outside the pad) is none (V2); neither is a pad carrying a kept lead (V3),
+    /// a continued lead, an end short of the run's end, or an end outside the pad. r7: a branch end
+    /// on its trunk inside the pad (`end_at` in the pad, qmtech ADV7511KSTZ1.29) is one.
     #[test]
     fn own_pad_end_predicate_is_one() {
         let m = BoardModel::from_json(&pad_stub_json()).unwrap();
@@ -2531,7 +2532,7 @@ mod tests {
         let checker = Checker::new(&m, &opts);
         let (a, j, b) = (Vec2 { x: 2.0 * MM, y: -12.0 * MM }, Vec2 { x: 2.0 * MM, y: -11.8 * MM }, Vec2 { x: 8.0 * MM, y: -11.8 * MM });
         let pts = vec![a, j, b];
-        for arm in ["base", "end_at", "kept_lead"] {
+        for arm in ["base", "end_at", "kept_lead", "branch_in_pad"] {
             let mut bd = board::build(&m, &BuildOpts::default()).unwrap();
             let conns = bd.connections(&m);
             let mut st = State::new(&bd.proj);
@@ -2544,10 +2545,13 @@ mod tests {
             let mut dr = Drawer::new(&m, &opts, &bd, &st, &checker);
             dr.octi = crate::topo::octi::OctiCfg { on: true, ..dr.octi };
             if arm == "end_at" {
+                dr.end_at.insert((0, 0), b);
+            }
+            if arm == "branch_in_pad" {
                 dr.end_at.insert((0, 0), a);
             }
             let k1 = dr.st.wires[0].passes.len();
-            let priced = arm == "base";
+            let priced = arm == "base" || arm == "branch_in_pad";
             assert_eq!(dr.own_pad_end(0, 0, true, false, a).is_some(), priced, "{arm}");
             assert_eq!(dr.run_pad_stubs(0, 0, k1, &pts), [priced, false], "{arm}");
             // the DP: priced -> repriced form; else the all-octilinear run stays as it is

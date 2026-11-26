@@ -549,6 +549,67 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, sty
     out
 }
 
+/// How far past its pad's outline a neck reaches out of the pad its run ends in (nm): above
+/// KiCad's polygon error (at most ~5.6 um inside the round end at 5 um, `geom::kicad`; tidy
+/// tests the same polygon), so the
+/// narrow piece from the pad centre is never a track wholly inside the pad.
+const NECK_PAD_OUT: f64 = 20_000.0;
+
+/// draw-via-neck r6 (user 2026-11-26: every trace connects to the MIDDLE of its pad): the neck
+/// zones of a run that ends in its own pad (`run` from that end outwards, `poly` the pad
+/// outline) grown so no width step lies inside the pad. A zone that covers any part of the run
+/// inside the pad (or the first `NECK_PAD_OUT` past its outline) is widened to cover all of it,
+/// so the run is narrow from its end to `NECK_PAD_OUT` outside the pad. Otherwise the piece
+/// between the pad centre and the step lies wholly inside the pad, KiCad's Cleanup deletes it
+/// (`TRACKS_CLEANER::deleteTracksInPads`; the cleanup-safe tidy drops it first) and the trace
+/// ends off the centre (qmtech one cycle: U9.9, U7.3 with neck_trim). Narrower copper on the
+/// same centre line adds no violation. A run that never leaves the pad (a via in the pad) is
+/// necked over its whole length when a zone covers any of it (qmtech U7.3); a run whose end is
+/// not in the pad is left alone. O(zones x run points).
+pub(super) fn neck_out_of_pad(neck: &mut super::exact::Neck, run: &[Vec2], poly: &[Vec2]) {
+    use super::state::point_in_poly;
+    if run.len() < 2 || poly.len() < 3 || !point_in_poly(run[0], poly) {
+        return;
+    }
+    // The run inside the pad and `NECK_PAD_OUT` past its outline; all of it when the run never
+    // leaves the pad (a via in the pad: one width from the centre to the via).
+    let pre: Vec<Vec2> = match run.iter().position(|&p| !point_in_poly(p, poly)) {
+        None => run.to_vec(),
+        Some(j) => {
+            let (a, b) = (run[j - 1], run[j]);
+            let (mut lo, mut hi) = (0.0f64, 1.0f64);
+            for _ in 0..30 {
+                let m = 0.5 * (lo + hi);
+                if point_in_poly(a + (b - a) * m, poly) {
+                    lo = m;
+                } else {
+                    hi = m;
+                }
+            }
+            let exit = a + (b - a) * hi;
+            let l = (b - exit).len();
+            let out = if l > 1.0 { exit + (b - exit) * (NECK_PAD_OUT.min(l) / l) } else { b };
+            let mut pre: Vec<Vec2> = run[..j].to_vec();
+            pre.push(exit);
+            pre.push(out);
+            pre
+        }
+    };
+    for z in neck.ends.iter_mut() {
+        let Some((c, r)) = *z else { continue };
+        if !r.is_finite() {
+            continue;
+        }
+        if !pre.windows(2).any(|s| seg_dist(c, s[0], s[1]) <= r) {
+            continue;
+        }
+        let need = pre.iter().map(|&p| (p - c).len()).fold(r, f64::max);
+        if need > r {
+            *z = Some((c, need + 1.0));
+        }
+    }
+}
+
 pub fn seg_seg_dist(a1: Vec2, b1: Vec2, a2: Vec2, b2: Vec2) -> f64 {
     seg_seg(a1, b1, a2, b2).0
 }
@@ -646,6 +707,8 @@ pub type ClassCrossings = std::collections::BTreeSet<(usize, i32, i32)>;
 pub struct DrawStats {
     /// Runs accepted from the exact taut path.
     pub exact_ok: usize,
+    /// draw-via-neck C: runs re-anchored at their pad's tip when drawn (`[drawing] pad_tip_anchor`).
+    pub tip_anchored: usize,
     /// Attempts where the exact search found no path (or hit its cap).
     pub exact_none: usize,
     /// Runs accepted only by S2a's funnel + repair fallback.
@@ -1943,6 +2006,31 @@ impl<'a> Drawer<'a> {
     /// points, vias included §7; §8 p. 6: a non-linear force function bounds a quantity without
     /// a hard limit). O(traversals of the interval's triangles x turns).
     pub fn via_plan_price(&self, w: WireId, k0: usize, k1: usize, p: Vec2, d: f64) -> f64 {
+        let wi = &self.st.wires[w];
+        let tris: Vec<TriId> = (k0..=k1.min(wi.tris.len().saturating_sub(1))).map(|k| wi.tris[k]).collect();
+        self.via_plan_price_in(w, &tris, p, d)
+    }
+
+    /// draw-via-neck A (r4, `[drawing] via_shift_mm` > 0): [`Drawer::via_plan_price`] over the
+    /// interval's triangles and every triangle sharing a vertex with the site's own (traversal
+    /// `k`): a site near its triangle's side reaches into the corridors of wires that pass the
+    /// next triangles, outside the interval (qmtech: SDRAM_A2's via shifted 1 mm onto
+    /// SDRAM_A1's corridor next to its interval; the price saw nothing). O((interval + ring
+    /// triangles) x traversals).
+    fn via_plan_price_near(&self, w: WireId, k0: usize, k1: usize, k: usize, p: Vec2, d: f64) -> f64 {
+        let pr = &self.b.proj;
+        let wi = &self.st.wires[w];
+        let n = wi.tris.len();
+        let mut tris: Vec<TriId> = (k0..=k1.min(n.saturating_sub(1))).map(|j| wi.tris[j]).collect();
+        if let Some(&t) = wi.tris.get(k) {
+            tris.extend(pr.tris[t].iter().flat_map(|&v| pr.vert_tris[v].iter().copied()));
+        }
+        tris.sort_unstable();
+        tris.dedup();
+        self.via_plan_price_in(w, &tris, p, d)
+    }
+
+    fn via_plan_price_in(&self, w: WireId, tris: &[TriId], p: Vec2, d: f64) -> f64 {
         let room = self.octi.room;
         if room <= 0.0 {
             return 0.0;
@@ -1950,9 +2038,15 @@ impl<'a> Drawer<'a> {
         let st = self.st;
         let wi = &st.wires[w];
         let mut seen: Vec<(WireId, usize)> = Vec::new();
-        let mut tot = 0.0;
-        for k in k0..=k1.min(wi.tris.len().saturating_sub(1)) {
-            for &(o, ok) in &st.tri_trav[wi.tris[k]] {
+        // draw-via-neck r5 (esp RCA: +3V3's via moved onto IO8_SCL's pinned pad exit because
+        // IO6's corridor, crossing 9 small triangles, was counted 9 times): with the shift on, a
+        // neighbour's corridor counts once, at its deepest intrusion, so the price does not
+        // depend on the triangulation's density ([`neighbour_room_price`]). Off: per traversal,
+        // as before.
+        let per_wire = self.opts.via_shift_mm > 0.0;
+        let mut hits: Vec<RoomHit> = Vec::new();
+        for &t in tris {
+            for &(o, ok) in &st.tri_trav[t] {
                 let oi = &st.wires[o];
                 if o == w || !oi.alive || oi.net == wi.net || self.drawn_once[o] || seen.contains(&(o, ok)) {
                     continue;
@@ -1967,9 +2061,110 @@ impl<'a> Drawer<'a> {
                 let pitch = (oi.w + s).max(1.0);
                 let depth = 0.5 * d + s + 0.5 * oi.w - dist;
                 if depth > 0.0 {
-                    let x = depth / pitch;
-                    tot += pitch * (x + x * x);
+                    // How freely the neighbour can give way there (lead r5): its packed slack
+                    // away from the via (only read with the shift on).
+                    let slack = if per_wire { self.pass_slack_away(o, ok, p) } else { 0.0 };
+                    if std::env::var_os("TOPO_VIAPLANDBG").is_some() {
+                        eprintln!("VIAPLANP wire {w} at ({:.3},{:.3}) other {o} net {} ok {ok} dist {:.3} depth {:.3} slack {:.3} pitch {:.3}", p.x / 1e6, -p.y / 1e6, oi.net, dist / 1e6, depth / 1e6, slack / 1e6, pitch / 1e6);
+                    }
+                    hits.push(RoomHit { wire: o, depth, slack, pitch });
                 }
+            }
+        }
+        room * neighbour_room_price(&hits, per_wire)
+    }
+
+    /// draw-via-neck r5 (lead 2026-11-26, esp RCA): how far wire `o` can give way from a via at
+    /// `p` in its traversal `ok`: on the pass of that traversal nearest to `p` (its entry or exit
+    /// edge), the packed interval's room ([`Drawer::iv`], `lo..hi` along the edge) on the side
+    /// away from the via, nm. 0 where the pass is not packed or the traversal has no pass (a
+    /// wire between two terminals in one triangle: pinned). O(1).
+    fn pass_slack_away(&self, o: WireId, ok: usize, p: Vec2) -> f64 {
+        let (st, pr) = (self.st, &self.b.proj);
+        let ps = &st.wires[o].passes;
+        let mut best: Option<(f64, f64)> = None; // (distance to the lane point, slack)
+        for j in [ok.checked_sub(1), Some(ok)].into_iter().flatten().filter(|&j| j < ps.len()) {
+            let pid = ps[j];
+            let (Some(&lo), Some(&hi), Some(&nom)) = (self.iv.lo.get(pid), self.iv.hi.get(pid), self.iv.nom.get(pid)) else { continue };
+            if !(lo.is_finite() && hi.is_finite() && nom.is_finite()) {
+                continue;
+            }
+            let [a, b] = pr.edges[st.passes[pid].edge];
+            let (a, b) = (pr.pos[a], pr.pos[b]);
+            let len = (b - a).len();
+            if len < 1.0 {
+                continue;
+            }
+            let lane = a + (b - a) * nom;
+            let toward_b = (p - lane).dot(b - a) > 0.0;
+            let slack = if toward_b { (nom - lo) * len } else { (hi - nom) * len };
+            let d = (p - lane).len();
+            if best.is_none_or(|x| d < x.0) {
+                best = Some((d, slack));
+            }
+        }
+        best.map_or(0.0, |x| x.1)
+    }
+
+    /// draw-via-neck r5: [`Drawer::via_room`] against copper only (the neighbours' planned
+    /// chords are priced with their slack in [`Drawer::via_plan_price`] when the shift is on, so
+    /// the squeeze does not count them a second time). O(nearby copper).
+    fn via_room_copper(&self, w: WireId, p: Vec2, d: f64) -> f64 {
+        let wi = &self.st.wires[w];
+        let own = self.model.rules.net_rule(wi.net).clearance as f64;
+        let mut room = f64::INFINITY;
+        let mut ids = self.grid.query(bbox_of(&[p]).grow(2.0e6 + d));
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let e = &self.ents[id];
+            if !e.live || e.net == Some(wi.net) {
+                continue;
+            }
+            let dist = match &e.core {
+                Core::Poly(q) => poly_dist(p, q),
+                Core::Seg(a, b) => seg_dist(p, *a, *b),
+                Core::Pt(q) => (p - *q).len(),
+            };
+            let need = if e.fixed { e.clear } else { e.clear.max(own) };
+            room = room.min(dist - e.grow - 0.5 * d - need);
+        }
+        room
+    }
+
+    /// draw-via-neck A (r4, `[drawing] via_shift_mm` > 0): price of a via of wire `w` (reach
+    /// diameter `d`) at `p` for the planned via sites (`via_site`) of the other nets' wires not
+    /// drawn yet: per site, the depth by which the two reach discs plus the clearance overlap,
+    /// priced like [`Drawer::via_plan_price`] (`room x pitch x (x + x^2)`, `x = depth / pitch`,
+    /// `pitch` = the other via's reach diameter plus the clearance): graded, no wall. Why: a via
+    /// shifted 0.14 mm took the planned site of the next wire's via (qmtech ADV_SDA / ADV_SCL at
+    /// U7: ADV_SCL's via then had no legal site), and `via_plan_price` sees only the corridors.
+    /// O(planned via sites).
+    fn via_site_price(&self, w: WireId, p: Vec2, d: f64) -> f64 {
+        let room = self.octi.room;
+        if room <= 0.0 {
+            return 0.0;
+        }
+        let st = self.st;
+        let wi = &st.wires[w];
+        let mut tot = 0.0;
+        for (&(o, _), &(_, q)) in &self.via_site {
+            let oi = &st.wires[o];
+            if o == w || !oi.alive || oi.net == wi.net || self.drawn_once[o] {
+                continue;
+            }
+            let s = oi.s.max(wi.s);
+            let dist = (p - q).len();
+            if dist >= 0.5 * d + s + 2.0e6 {
+                continue;
+            }
+            let Some(&sz) = via_sizes(&self.model.rules, oi.net, self.opts).first() else { continue };
+            let dor = 2.0 * crate::vias::via_reach(&self.model.rules, oi.net, sz);
+            let depth = 0.5 * d + s + 0.5 * dor - dist;
+            if depth > 0.0 {
+                let pitch = (dor + s).max(1.0);
+                let x = depth / pitch;
+                tot += pitch * (x + x * x);
             }
         }
         room * tot
@@ -2048,6 +2243,47 @@ impl<'a> Drawer<'a> {
             room = room.min(dist - e.grow - 0.5 * d - need);
         }
         room
+    }
+
+    /// draw-via-neck A (`[drawing] via_shift_mm`; TopoR 6.3 manual p. 179: vias shifted into free
+    /// room; Dayan & Dai 1991 UCSC-CRL-91-40 pp. 2-6): extra via sites for via `i` of wire `w`
+    /// inside its interval `ka..=kb`: a ring of 12 directions at 0.5, 1, 1.5 and 2 via diameters
+    /// (up to the shift distance) round the middle of the interval's taut chord, each in the
+    /// interval's traversal whose triangle holds it. Never outside the interval (lead 2026-11-24):
+    /// the interval runs between two layer events of the plan (`layers.rs`: a crossing, an SMD
+    /// pad, a one-layer triangle, a gap that fits one layer), so a site past it puts the run on the
+    /// wrong layer at the bounding event; widening the interval is the plan's job.
+    /// O(48 x interval traversals).
+    fn via_shift_sites(&self, w: WireId, ka: usize, kb: usize, dv: f64) -> Vec<(usize, Vec2)> {
+        let (st, pr) = (self.st, &self.b.proj);
+        let wi = &st.wires[w];
+        let n = wi.tris.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let lim = self.opts.via_shift_mm * 1e6;
+        let kb = kb.min(n - 1);
+        let chord: Vec<Vec2> = (ka..=kb).flat_map(|k| self.taut_chord(w, k)).collect();
+        if chord.is_empty() {
+            return Vec::new();
+        }
+        let mid = chord[chord.len() / 2];
+        let tri_of = |p: Vec2| (ka..=kb).find(|&k| super::state::point_in_poly(p, &pr.tris[wi.tris[k]].map(|v| pr.pos[v])));
+        let mut out: Vec<(usize, Vec2)> = Vec::new();
+        for r in [0.5, 1.0, 1.5, 2.0] {
+            let rr = r * dv;
+            if rr > lim {
+                break;
+            }
+            for j in 0..12 {
+                let a = j as f64 * std::f64::consts::PI / 6.0;
+                let p = mid + Vec2 { x: rr * a.cos(), y: rr * a.sin() };
+                if let Some(k) = tri_of(p) {
+                    out.push((k, p));
+                }
+            }
+        }
+        out
     }
 
     /// Place the vias of wire `w` (ids of the indexed items in `ids`), or the reason it cannot be.
@@ -2187,6 +2423,12 @@ impl<'a> Drawer<'a> {
                     let (far, close): (Vec<_>, Vec<_>) = sites.into_iter().partition(|&(_, p)| !near(p));
                     sites = far.into_iter().chain(close).collect();
                 }
+                // draw-via-neck A (`[drawing] via_shift_mm`): a ring of sites round the interval's
+                // taut chord, inside the interval (never past it: that breaks the plan's layer
+                // event); each priced by its shift below. They come after the interval's own sites.
+                if self.opts.via_shift_mm > 0.0 {
+                    sites.extend(self.via_shift_sites(w, ka, kb.max(ka), sz.d as f64));
+                }
                 // Of the valid sites (side test, clearance) in the first triangle that has one
                 // (the planned one first: the plan fixed which crossings lie on which side of
                 // the via, and its packing kept the disc's room there), the one that takes the
@@ -2199,17 +2441,39 @@ impl<'a> Drawer<'a> {
                 // the first triangle it is 47.
                 let mut best: Option<(f64, usize, Vec2)> = None;
                 let mut best_price = f64::INFINITY;
+                let mut best_jam = 0.0f64;
                 let dbg = std::env::var("TOPO_VIADBG").is_ok();
                 let (mut n_side, mut n_check) = (0usize, 0usize);
                 // In a traversal where the wire turns at a junction, only the junction itself:
                 // elsewhere in it the via could stand on the wrong side of the tee (D6b).
                 let turn_at = |k: usize| self.st.wires[w].turns.iter().find(|x| x.0 == k).map(|x| self.b.proj.pos[x.1]);
+                // draw-via-neck A: the first traversal's first legal site (the shift price's
+                // origin).
+                let mut first_pick: Option<(usize, Vec2)> = None;
+                // draw-via-neck A: the plan's site (free, missed or tight), where it lies in the
+                // interval: the shift's origin.
+                let plan_site = self.via_site.get(&(w, i)).filter(|s| (ka..=kb.max(ka)).contains(&s.0)).map(|s| s.1);
                 for (k, p) in sites {
-                    if best.is_some_and(|b| b.1 != k) {
+                    // The first traversal with a legal site decides, unless that site takes
+                    // planned room (price > 0) and a shift may find a cheaper one (draw-via-neck A).
+                    if best.is_some_and(|b| b.1 != k) && (self.opts.via_shift_mm <= 0.0 || best_jam <= 1.0) {
                         break;
                     }
                     if turn_at(k).is_some_and(|q| (q - p).len() > 1.0) {
                         continue;
+                    }
+                    if dbg {
+                        // RCA aid: TOPO_VIAREJAT="x,y;x,y" (KiCad mm): every test of the sites within
+                        // 0.06 mm of that point, with the blocking item's net.
+                        let pts: Vec<(f64, f64)> = std::env::var("TOPO_VIAREJAT").unwrap_or_default().split(';').filter_map(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)))).collect();
+                        {
+                            if pts.iter().any(|&(qx, qy)| (p.x / 1e6 - qx).hypot(-p.y / 1e6 - qy) < 0.06) {
+                                let item = via_item(net, p, sz, Some(w));
+                                let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
+                                let who: Vec<_> = rep.violations.iter().take(3).map(|v| (v.against.clone(), v.against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()).and_then(|id| self.idx.net_of(id)), v.gap, v.required)).collect();
+                                eprintln!("VIAREJAT wire {w} via {i} k {k} at ({:.3},{:.3}) side {} check {who:?} hole {} own {} pair {}", p.x / 1e6, -p.y / 1e6, self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]), self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net), self.pair_via_ok(w, p, sz, net));
+                            }
+                        }
                     }
                     if !self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) {
                         n_side += usize::from(Some(k) == at);
@@ -2233,21 +2497,49 @@ impl<'a> Drawer<'a> {
                         // planned corridors does not win when it squeezes the via against other
                         // copper; where nothing is planned this orders the sites by room as before.
                         let dv = (sz.d as f64).max(1.0);
-                        let xq = (dv - room).max(0.0) / dv;
+                        let room_sq = if self.opts.via_shift_mm > 0.0 { self.via_room_copper(w, p, sz.d as f64) } else { room };
+                        let xq = (dv - room_sq).max(0.0) / dv;
                         let squeeze = self.octi.room * dv * (xq + xq * xq);
                         // P6 (d): away from a planned site that was not free, graded.
                         let xm = missed.map_or(0.0, |p0| (p - p0).len() / dv);
                         let squeeze = squeeze + self.octi.room * dv * (xm + xm * xm);
                         // 5.4 task 1: the via as its reach disc (the hole rule included).
                         let dr = 2.0 * crate::vias::via_reach(&self.model.rules, net, sz);
-                        let price = self.via_plan_price(w, ka, kb.max(ka), p, dr) + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
+                        let plan_p = if self.opts.via_shift_mm > 0.0 { self.via_plan_price_near(w, ka, kb.max(ka), k, p, dr) + self.via_site_price(w, p, dr) } else { self.via_plan_price(w, ka, kb.max(ka), p, dr) };
+                        // draw-via-neck A: what the site takes from its neighbours (their planned
+                        // room, its own squeeze): while the best site takes some, later traversals
+                        // and shifted sites still compete.
+                        let jam = plan_p + squeeze;
+                        let price = plan_p + self.via_pair_price(w, out.last().copied(), &xs, k, p, sz) + squeeze;
                         // In the plan's class only; the reach's violations priced like the squeeze
                         // (one via diameter of squeeze per violation unit, graded).
                         let (in_class, reach) = self.via_reach_for_price(w, k, p, plan.layers[i], plan.layers[i + 1], &crossed);
                         // `[vias] reach_price` (default off): the reach's violations priced too.
                         let price = price + self.reach_cost(reach, self.octi.room * dv);
+                        // draw-via-neck A: a site past the first traversal with a legal site is
+                        // never more than `via_shift_mm` from the plan's site (free, missed or
+                        // tight; without one, that first legal site, today's pick), and pays its
+                        // distance from it, graded (half the squeeze price per via diameter; from
+                        // a missed planned site the P6 (d) price above already does): it wins
+                        // only by the room it gives back. r4: priced by the distance from the
+                        // plan's taut path, a site far along the path was free (qmtech JS1_9 and
+                        // SDRAM_A2 moved 1.4-1.5 mm into their neighbours' room).
+                        let price = match first_pick {
+                            Some((k1, p1)) if self.opts.via_shift_mm > 0.0 && k != k1 => {
+                                let sh = (p - plan_site.unwrap_or(p1)).len();
+                                if sh > self.opts.via_shift_mm * 1e6 {
+                                    if dbg {
+                                        eprintln!("VIAFAR wire {w} via {i} k {k} at ({:.3},{:.3}) shift {:.3} mm", p.x / 1e6, -p.y / 1e6, sh / 1e6);
+                                    }
+                                    continue;
+                                }
+                                let xs_ = if missed.is_some() { 0.0 } else { sh / dv };
+                                price + 0.5 * self.octi.room * dv * (xs_ + xs_ * xs_)
+                            }
+                            _ => price,
+                        };
                         if dbg {
-                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0} reach {reach:.2} in class {in_class}", p.x / 1e6, -p.y / 1e6, room, price);
+                            eprintln!("VIACAND wire {w} via {i} k {k} at ({:.3},{:.3}) room {:.0} price {:.0} plan {plan_p:.0} squeeze {squeeze:.0} reach {reach:.2} in class {in_class}", p.x / 1e6, -p.y / 1e6, room, price);
                         }
                         if !in_class {
                             if oob.as_ref().is_none_or(|o| price < o.0 - 1.0 || (price <= o.0 + 1.0 && room > o.1 + 1.0)) {
@@ -2258,6 +2550,10 @@ impl<'a> Drawer<'a> {
                         if best.is_none_or(|b| price < best_price - 1.0 || (price <= best_price + 1.0 && room > b.0 + 1.0)) {
                             best = Some((room, k, p));
                             best_price = price;
+                            best_jam = jam;
+                            if first_pick.is_none_or(|f| f.0 == k) {
+                                first_pick = Some((k, p));
+                            }
                         }
                     }
                 }
@@ -2699,6 +2995,22 @@ impl<'a> Drawer<'a> {
         let st = self.st;
         let wi = &st.wires[w];
         let t = wi.tris[k];
+        // draw-via-neck A: a site outside its traversal's triangle (an offset or shifted site
+        // labelled with the nearest traversal) leaves its runs through the neighbouring
+        // triangles: the chords there are tested too (the via never lands past a crossing the
+        // plan put after it, so the layer change keeps the class). A site inside is tested in
+        // its own triangle alone, as before. Only with `via_shift_mm` > 0 (r5, verifier F5: the
+        // test ran ungated and changed main's copper on topo_thick_layer's thick_dive_grouping).
+        let pr = &self.b.proj;
+        let tris: Vec<super::state::TriId> = if self.opts.via_shift_mm <= 0.0 || super::state::point_in_poly(p, &pr.tris[t].map(|v| pr.pos[v])) {
+            vec![t]
+        } else {
+            let n = wi.tris.len();
+            let mut v: Vec<super::state::TriId> = (k.saturating_sub(2)..=(k + 2).min(n - 1)).map(|j| wi.tris[j]).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
         let chord_layer = |o: WireId, ok: usize| -> i32 {
             let ps = &st.wires[o].passes;
             let a = if ok > 0 { self.prov_layer[ps[ok - 1]] } else { -2 };
@@ -2709,7 +3021,7 @@ impl<'a> Drawer<'a> {
                 _ => -1,
             }
         };
-        for &(o, ok) in &st.tri_trav[t] {
+        for &(o, ok) in tris.iter().flat_map(|&t| st.tri_trav[t].iter()) {
             let oi = &st.wires[o];
             if o == w || !oi.alive || oi.net == wi.net || self.polys[o].is_empty() {
                 continue;
@@ -3485,6 +3797,46 @@ impl<'a> Drawer<'a> {
             for h in res.iter().flat_map(|x| &x.handles) {
                 self.joint.owner.remove(h);
             }
+            // draw-via-neck C (`[drawing] pad_tip_anchor`, r3): a band that reaches its own
+            // elongated pad through the pad's side is re-anchored at the tip here, when the run
+            // is drawn: the wires drawn before it are in the index as drawn (their octilinear
+            // shapes, which leave their bands), the others as the joint commit reserved them, so
+            // the anchor takes no room their copper holds (r2 decided it before the joint commit
+            // from the bands alone: esp IO8_SCL lost its reserved band). The run's reservation
+            // (the old tail) goes; the anchored band is then checked like any attempt -1.
+            let band = match band {
+                // r5: a reserved run's anchor was decided before any run was drawn
+                // (`tip_anchor_reserved`, order-free); only runs without a reservation here.
+                Some(b) if self.opts.pad_tip_anchor && res.is_none() && b.len() >= 2 && (r == 0 || r == plan.layers.len() - 1) => {
+                    let mut skip: Vec<usize> = res.iter().flat_map(|x| &x.handles).map(|&h| self.handles[h].0).collect();
+                    skip.sort_unstable();
+                    let mut p = b.clone();
+                    let mut moved = false;
+                    for end in [0usize, 1] {
+                        if (end == 0 && r != 0) || (end == 1 && r != plan.layers.len() - 1) {
+                            continue;
+                        }
+                        if let Some(np) = self.tip_anchor_path(w, end, layer, &p, &skip) {
+                            p = np;
+                            moved = true;
+                        }
+                    }
+                    if moved {
+                        for h in res.take().map(|x| x.handles).into_iter().flatten() {
+                            self.uncommit(h);
+                        }
+                        self.stats.tip_anchored += 1;
+                        // The wires drawn after it read its band (corridors, class test) as drawn.
+                        if let Some(rb) = self.erbs.get_mut(&w).and_then(|v| v.iter_mut().find(|b| b.layer == layer && (b.s - s).len() < 1000.0 && (b.e - e).len() < 1000.0)) {
+                            rb.path = p.clone();
+                        }
+                        Some(p)
+                    } else {
+                        Some(b)
+                    }
+                }
+                other => other,
+            };
             let mut adopt: Option<Vec<usize>> = None;
             let (mut erbs_octi, mut octi_vs_band) = (false, false);
             let cut = self.cut_class(w, r, band.is_some());
@@ -3598,7 +3950,12 @@ impl<'a> Drawer<'a> {
                             CheckReport::default()
                         }
                         None => {
-                            items = self.neck_items(w, lid, &pts, pn, pn.min_w).0;
+                            // draw-via-neck B: no width passes (a violation the width cannot
+                            // remove): the widest width that adds none to the floor's, necked
+                            // only where that changes something.
+                            let wn = if self.opts.neck_trim { self.plan_neck_widest(w, lid, &pts, pn) } else { pn.min_w };
+                            let nk = if self.opts.neck_trim { self.fit_neck(w, lid, &pts, pn, wn) } else { *pn };
+                            items = self.neck_items(w, lid, &pts, &nk, wn).0;
                             self.checker.check_against(&self.idx, &items, &[])
                         }
                     },
@@ -4032,12 +4389,25 @@ impl<'a> Drawer<'a> {
                             let mut zones = (*pn, wmin, self.neck_items(w, lid, &pts, pn, pn.min_w).1);
                             if vs.is_empty() {
                                 if let Some((wn, _, _)) = self.plan_neck_run(w, lid, &pts, pn) {
-                                    let tz = self.trim_neck(w, lid, &pts, pn, wn);
+                                    let tz = self.neck_out_of_pads(w, lid, &pts, self.trim_neck(w, lid, &pts, pn, wn));
                                     let (its, ls) = self.neck_items(w, lid, &pts, &tz, wn);
                                     if self.track_own_pad_ok(w, &its) {
                                         items = its;
                                         zones = (tz, wn, ls);
                                     }
+                                }
+                            } else if self.opts.neck_trim {
+                                // draw-via-neck B: a forced run keeps its violations, but at the
+                                // widest width that adds none to the floor's
+                                // (`plan_neck_widest`) and necked only where narrowing adds
+                                // nothing to them (`fit_neck` against the plan zones' count).
+                                let wn = if wmin <= pn.min_w + 0.5 { self.plan_neck_widest(w, lid, &pts, pn) } else { wmin };
+                                let nk = self.fit_neck(w, lid, &pts, pn, wn);
+                                let (its, ls) = self.neck_items(w, lid, &pts, &nk, wn);
+                                let n_old = self.checker.check_against(&self.idx, &items, &[]).violations.len();
+                                if self.track_own_pad_ok(w, &its) && self.checker.check_against(&self.idx, &its, &[]).violations.len() <= n_old {
+                                    items = its;
+                                    zones = (nk, wn, ls);
                                 }
                             }
                             let (z, wn, ls) = zones;
@@ -4690,8 +5060,137 @@ impl<'a> Drawer<'a> {
             }
         }
         let wn = lo.floor().max(neck.min_w);
-        let (items, lens) = self.neck_items(w, lid, pts, neck, wn);
+        let nk = if self.opts.neck_trim { self.fit_neck(w, lid, pts, neck, wn) } else { *neck };
+        let (items, lens) = self.neck_items(w, lid, pts, &nk, wn);
         Some((wn, items, lens))
+    }
+
+    /// draw-via-neck B (`[drawing] neck_trim`, lead 2026-11-24): the neck width of the run `pts`
+    /// with the plan's zones `neck` when no width passes the checker ([`Drawer::plan_neck_run`]
+    /// is `None`: a violation the width cannot remove, e.g. a terminal closer to the board edge
+    /// than the edge clearance). The widest width in `[floor, nominal]` that adds no violation to
+    /// the floor's: every object it violates (the same pad, track, via, hole or edge on the same
+    /// layer) is one the floor violates too. Graded, not by count: the floor's violations only
+    /// deepen by the width step itself (half the extra width; the run's centre line is fixed), so
+    /// the unavoidable one does not grow past what the width costs, and nothing new is hit. The
+    /// floor when even a little more width hits something new. TopoR 6.3 manual p. 56: the
+    /// minimum width only where needed. O(14 checks of the run).
+    fn plan_neck_widest(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck) -> f64 {
+        let wi = &self.st.wires[w];
+        let hit = |wn: f64| -> std::collections::BTreeSet<(String, u32)> {
+            let its = self.neck_items(w, lid, pts, neck, wn).0;
+            self.checker.check_against(&self.idx, &its, &[]).violations.into_iter().map(|v| (v.against, v.layer)).collect()
+        };
+        let floor = hit(neck.min_w);
+        let ok = |wn: f64| hit(wn).is_subset(&floor);
+        if ok(wi.w) {
+            return wi.w;
+        }
+        let (mut lo, mut hi) = (neck.min_w, wi.w);
+        for _ in 0..12 {
+            let mid = 0.5 * (lo + hi);
+            if ok(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        if std::env::var("TOPO_NECKDBG").is_ok() {
+            eprintln!("NECKWIDEST wire {w} floor {:.0} -> {:.0} (violated objects {})", neck.min_w, lo.floor(), floor.len());
+        }
+        lo.floor().max(neck.min_w)
+    }
+
+    /// draw-via-neck B (`[drawing] neck_trim`): the plan's neck zones of the run `pts` (necked to
+    /// `wn`) cut to where the room ends. Each zone first shrinks to the smallest radius the checker
+    /// accepts ([`Drawer::trim_neck`]; a zone over the whole wire is tried from either end, the
+    /// shorter neck wins); then, between that radius and the plan's, the radius of least price
+    /// `necked length + sum over the full-width part of (room price at full width - at wn)` is
+    /// taken, the room price being the planned room of the wires not drawn yet
+    /// ([`Drawer::via_plan_price`] per sample, over the wire's pitch): the neck reaches further
+    /// only where another trace needs that room (TopoR 6.3 manual p. 56, the minimum width only
+    /// where needed). Graded, no cutoff. O(zones x 14 checks of the run + zones x 65 x segments).
+    fn fit_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
+        let wi = &self.st.wires[w];
+        let ext = |c: Vec2| pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0;
+        let len_of = |n: &super::exact::Neck| self.neck_items(w, lid, pts, n, wn).1.iter().sum::<f64>();
+        // A zone over the whole wire: from the end where the shorter neck does.
+        let mut base = *neck;
+        if let Some(i) = neck.ends.iter().position(|z| z.is_some_and(|(_, r)| !r.is_finite())) {
+            let pr = &self.b.proj;
+            let mut best: Option<(f64, super::exact::Neck)> = None;
+            for c in [pr.pos[wi.a], pr.pos[wi.b]] {
+                let mut n = *neck;
+                n.ends[i] = Some((c, ext(c)));
+                let t = self.trim_neck(w, lid, pts, &n, wn);
+                let l = len_of(&t);
+                if best.as_ref().is_none_or(|b| l < b.0 - 1.0) {
+                    best = Some((l, n));
+                }
+            }
+            base = best.map_or(base, |b| b.1);
+        }
+        let mut nk = self.trim_neck(w, lid, pts, &base, wn);
+        let trimmed_dbg = nk;
+        let room = self.octi.room;
+        let nv = |n: &super::exact::Neck| self.checker.check_against(&self.idx, &self.neck_items(w, lid, pts, n, wn).0, &[]).violations.len();
+        let nv0 = nv(&nk);
+        let ok = |n: &super::exact::Neck| nv(n) <= nv0;
+        let last = wi.tris.len().saturating_sub(1);
+        let pitch = (wi.w + wi.s).max(1.0);
+        // Room price of the full width over the necked width at `q`, per nm of track.
+        let extra = |q: Vec2| ((self.via_plan_price(w, 0, last, q, wi.w) - self.via_plan_price(w, 0, last, q, wn)) / pitch).max(0.0);
+        for i in 0..super::exact::NECK_ZONES {
+            let (Some((c, r1)), Some((_, r0))) = (base.ends[i], nk.ends[i]) else { continue };
+            let r1 = if r1.is_finite() { r1 } else { ext(c) };
+            if room <= 0.0 || r1 <= r0 + 1.0 {
+                continue;
+            }
+            // Debug arm `TOPO_FD45_OFF=dvn_growth` (proposed pattern neck_between_signals): trim only.
+            if super::octi::fd45_off("dvn_growth") {
+                continue;
+            }
+            // Samples of the run between the trimmed and the plan's circle (50 um apart).
+            let mut samples: Vec<(f64, f64)> = Vec::new(); // (distance to c, price x length)
+            for s in pts.windows(2) {
+                let l = (s[1] - s[0]).len();
+                let n = ((l / 5.0e4).ceil() as usize).max(1);
+                for j in 0..n {
+                    let q = s[0] + (s[1] - s[0]) * ((j as f64 + 0.5) / n as f64);
+                    let d = (q - c).len();
+                    if d > r0 && d <= r1 {
+                        samples.push((d, extra(q) * l / n as f64));
+                    }
+                }
+            }
+            if samples.iter().all(|s| s.1 <= 0.0) {
+                continue;
+            }
+            let mut pick = (f64::INFINITY, r0);
+            // Radii 25 um apart (at most 64 steps): only lengths, no checker.
+            let steps = (((r1 - r0) / 2.5e4).ceil() as usize).clamp(1, 64);
+            for j in 0..=steps {
+                let r = r0 + (r1 - r0) * j as f64 / steps as f64;
+                let mut n = nk;
+                n.ends[i] = Some((c, r));
+                let necked = self.neck_items(w, lid, pts, &n, wn).1[i];
+                let full: f64 = samples.iter().filter(|s| s.0 > r).map(|s| s.1).sum();
+                let price = necked + room * full;
+                if price < pick.0 - 1.0 {
+                    pick = (price, r);
+                }
+            }
+            let mut n = nk;
+            n.ends[i] = Some((c, pick.1));
+            if pick.1 > r0 && ok(&n) {
+                nk = n;
+            }
+        }
+        let nk = self.neck_out_of_pads(w, lid, pts, nk);
+        if std::env::var("TOPO_NECKDBG").is_ok() {
+            eprintln!("NECKFIT wire {w} wn {wn:.0} plan {:?} trim {:?} fit {:?}", neck.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), trimmed_dbg.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), nk.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>());
+        }
+        nk
     }
 
     /// `neck` with each zone shrunk to the smallest radius at which the run `pts` necked to `wn`
@@ -4701,10 +5200,11 @@ impl<'a> Drawer<'a> {
     /// bottleneck. O(zones x 13 checks of the run).
     fn trim_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
         let mut nk = *neck;
-        let ok = |n: &super::exact::Neck| {
-            let its = self.neck_items(w, lid, pts, n, wn).0;
-            self.checker.check_against(&self.idx, &its, &[]).violations.is_empty()
-        };
+        // No more violations than with the plan's zones (none for a legal run; a run that keeps
+        // some elsewhere, e.g. a forced one, is still trimmed where the neck adds nothing).
+        let nv = |n: &super::exact::Neck| self.checker.check_against(&self.idx, &self.neck_items(w, lid, pts, n, wn).0, &[]).violations.len();
+        let base = nv(neck);
+        let ok = |n: &super::exact::Neck| nv(n) <= base;
         for i in 0..super::exact::NECK_ZONES {
             let Some((c, r)) = nk.ends[i] else { continue };
             let r = if r.is_finite() { r } else { pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0 };
@@ -4723,6 +5223,27 @@ impl<'a> Drawer<'a> {
                 }
             }
             nk.ends[i] = Some((c, hi));
+        }
+        nk
+    }
+
+    /// draw-via-neck r6 ([`neck_out_of_pad`]) at both pad ends of the run `pts` of wire `w` on
+    /// the layer `lid` (`[drawing] neck_trim` only: main's whole-zone neck is kept as it was).
+    /// r7 (verifier r6 F6): only at a pad on the run's layer (a middle run from a via inside an
+    /// SMD end pad's outline on the other layer has no pad there). O(zones x run).
+    fn neck_out_of_pads(&self, w: WireId, lid: u32, pts: &[Vec2], mut nk: super::exact::Neck) -> super::exact::Neck {
+        if !self.opts.neck_trim || super::octi::fd45_off("dvn_pad_out") {
+            return nk;
+        }
+        let wi = &self.st.wires[w];
+        let pr = &self.b.proj;
+        let li = self.b.signal_layers.iter().position(|&x| x == lid);
+        for (end, ob) in [(0usize, wi.pa), (1, wi.pb)] {
+            if ob == super::state::NO_OBS || ob >= pr.obstacles.len() || li.is_some_and(|l| !pr.obstacles[ob].layers.has(l)) {
+                continue;
+            }
+            let run: Vec<Vec2> = if end == 0 { pts.to_vec() } else { pts.iter().rev().copied().collect() };
+            neck_out_of_pad(&mut nk, &run, &pr.obstacles[ob].poly);
         }
         nk
     }
@@ -5006,9 +5527,113 @@ impl<'a> Drawer<'a> {
     }
 }
 
+/// draw-via-neck r5: one traversal of a neighbour's planned corridor that a via site reaches into
+/// ([`Drawer::via_plan_price_in`]): the wire, how deep (nm), its packed slack away from the via
+/// (nm, [`Drawer::pass_slack_away`]) and its pitch (width + clearance, nm).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoomHit {
+    pub wire: WireId,
+    pub depth: f64,
+    pub slack: f64,
+    pub pitch: f64,
+}
+
+/// draw-via-neck r5 (lead 2026-11-26): how much more an intrusion into a pinned neighbour (no
+/// packed slack away from the via: a pad exit, a full passage) costs than one into a free
+/// neighbour, as a factor on the depth: `depth x (1 + PINNED_DEPTH x depth / (depth + slack))`.
+/// A free neighbour (slack >> depth) pays its depth (it moves that far: its detour); a pinned
+/// one pays 3x the depth (it cannot move: the room comes out of the next wire or the
+/// clearance). Graded, no cutoff. Measured on the pocket pattern (via_interval_sliver: X's
+/// pinned traversal, depth 0.39 mm, slack 0.014: the per-wire depth alone, factor 0, keeps the
+/// via 1 mm along the wire; 1-3 put it into the pocket) and on esp's one-cycle via sites (re-priced
+/// from the debug lines: 1 and 2 keep every pick, 3 moves IO8_SCL's via 0): 2.
+pub(crate) const PINNED_DEPTH: f64 = 2.0;
+
+/// The planned-room price (nm, before the `room` weight) of a via site's [`RoomHit`]s,
+/// `pitch x (x + x^2)` with `x = depth / pitch`. `per_wire` (the shift on): each neighbour
+/// once, at its deepest slack-weighted intrusion (`PINNED_DEPTH`): independent of how many
+/// triangles its corridor crosses near the site. Off: every traversal at its depth (main).
+pub(crate) fn neighbour_room_price(hits: &[RoomHit], per_wire: bool) -> f64 {
+    let f = |e: f64, pitch: f64| {
+        let x = e / pitch;
+        pitch * (x + x * x)
+    };
+    if !per_wire {
+        return hits.iter().filter(|h| h.depth > 0.0).map(|h| f(h.depth, h.pitch)).sum();
+    }
+    let mut deepest: Vec<(WireId, f64, f64)> = Vec::new();
+    for h in hits.iter().filter(|h| h.depth > 0.0) {
+        let e = h.depth * (1.0 + PINNED_DEPTH * h.depth / (h.depth + h.slack.max(0.0)));
+        match deepest.iter_mut().find(|x| x.0 == h.wire) {
+            Some(x) => x.1 = x.1.max(e),
+            None => deepest.push((h.wire, e, h.pitch)),
+        }
+    }
+    deepest.iter().map(|&(_, e, p)| f(e, p)).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// draw-via-neck r6: a neck at the run's pad end reaches past the pad's outline (no width
+    /// step inside the pad, whose in-pad narrow piece KiCad's Cleanup would delete); a neck
+    /// starting inside the pad covers the pad end too; a run that never leaves the pad is necked
+    /// to its end; zones away from the pad, unbounded zones and runs whose end lies outside the
+    /// pad are left alone.
+    #[test]
+    fn neck_out_of_pad_moves_the_width_step_outside_the_pad() {
+        let v = |x: f64, y: f64| Vec2 { x, y };
+        let pad = [v(-500_000.0, -150_000.0), v(500_000.0, -150_000.0), v(500_000.0, 150_000.0), v(-500_000.0, 150_000.0)];
+        let run = [v(0.0, 0.0), v(300_000.0, 0.0), v(2_000_000.0, 0.0)];
+        let nk = |z: [Option<(Vec2, f64)>; 3]| super::super::exact::Neck { min_w: 100_000.0, ends: [z[0], z[1], z[2], None, None, None] };
+        let mut n = nk([Some((v(0.0, 0.0), 100_000.0)), Some((v(300_000.0, 0.0), 50_000.0)), Some((v(1_500_000.0, 0.0), 200_000.0))]);
+        neck_out_of_pad(&mut n, &run, &pad);
+        let r = |n: &super::super::exact::Neck, i: usize| n.ends[i].unwrap().1;
+        assert!((r(&n, 0) - (500_000.0 + NECK_PAD_OUT + 1.0)).abs() < 2.0, "end zone past the outline: {}", r(&n, 0));
+        assert!((r(&n, 1) - 300_001.0).abs() < 2.0, "inner zone covers the pad end: {}", r(&n, 1));
+        assert_eq!(r(&n, 2), 200_000.0, "a zone away from the pad stays");
+        let mut inf = nk([Some((v(0.0, 0.0), f64::INFINITY)), None, None]);
+        neck_out_of_pad(&mut inf, &run, &pad);
+        assert!(r(&inf, 0).is_infinite());
+        let mut outside = nk([Some((v(600_000.0, 0.0), 100_000.0)), None, None]);
+        neck_out_of_pad(&mut outside, &[v(600_000.0, 0.0), v(2_000_000.0, 0.0)], &pad);
+        assert_eq!(r(&outside, 0), 100_000.0, "run end outside the pad");
+        let mut inside = nk([Some((v(0.0, 0.0), 100_000.0)), None, None]);
+        neck_out_of_pad(&mut inside, &[v(0.0, 0.0), v(300_000.0, 0.0)], &pad);
+        assert!((r(&inside, 0) - 300_001.0).abs() < 2.0, "a run that never leaves the pad (via in pad) is necked to its end: {}", r(&inside, 0));
+        let mut apart = nk([Some((v(1_500_000.0, 0.0), 100_000.0)), None, None]);
+        neck_out_of_pad(&mut apart, &[v(0.0, 0.0), v(300_000.0, 0.0)], &pad);
+        assert_eq!(r(&apart, 0), 100_000.0, "a zone off a run inside the pad stays");
+    }
+
+    /// draw-via-neck r5 (lead 2026-11-26): the per-wire planned-room price does not depend on
+    /// the triangulation: a neighbour's corridor split over 1, 3 or 9 triangles near the site
+    /// (the same depth and slack in each) prices the same; per traversal (shift off, main) it
+    /// grows with the split. A pinned neighbour (slack 0) costs more than a free one (slack
+    /// 10 mm) at the same depth, and a deeper intrusion more than a shallower one (graded).
+    #[test]
+    fn neighbour_room_price_is_split_invariant_and_graded_by_slack() {
+        let mm = 1e6;
+        let hit = |wire: WireId, depth: f64, slack: f64| RoomHit { wire, depth: depth * mm, slack: slack * mm, pitch: 0.45 * mm };
+        let split = |n: usize| (0..n).map(|_| hit(3, 0.3, 0.5)).chain(std::iter::once(hit(4, 0.1, 0.0))).collect::<Vec<_>>();
+        let one = neighbour_room_price(&split(1), true);
+        for n in [3, 9] {
+            assert!((neighbour_room_price(&split(n), true) - one).abs() < 1e-6, "split {n}");
+            assert!(neighbour_room_price(&split(n), false) > neighbour_room_price(&split(1), false) * 1.5, "per traversal grows with the split {n}");
+        }
+        // the deepest traversal of a wire counts, not their sum
+        let two = [hit(3, 0.3, 0.5), hit(3, 0.1, 0.5)];
+        assert!((neighbour_room_price(&two, true) - neighbour_room_price(&two[..1], true)).abs() < 1e-6);
+        // pinned costs much more than free at the same depth; free pays at least its depth's price
+        let (pinned, free) = (neighbour_room_price(&[hit(3, 0.2, 0.0)], true), neighbour_room_price(&[hit(3, 0.2, 10.0)], true));
+        assert!(pinned > 3.0 * free, "pinned {pinned} free {free}");
+        assert!((free - neighbour_room_price(&[hit(3, 0.2, 0.0)], false)) / free < 0.1, "free ~ its depth: {free}");
+        // graded: more slack, cheaper; deeper, dearer; nothing without depth
+        let at = |d: f64, s: f64| neighbour_room_price(&[hit(3, d, s)], true);
+        assert!(at(0.2, 0.0) > at(0.2, 0.1) && at(0.2, 0.1) > at(0.2, 1.0) && at(0.3, 0.5) > at(0.2, 0.5));
+        assert_eq!(at(-0.1, 0.0), 0.0);
+    }
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }
