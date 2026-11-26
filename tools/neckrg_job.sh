@@ -24,7 +24,8 @@ P=$OUT/pats
 NAMES="neck_both_ends neck_reentry"
 pats() {  # pats ARM [sets]: the proposed patterns, kept copper, runs 1 rounds 1 (det s0), then PNGs of every arm present
   local A=$1; shift
-  [ -d $P/boards ] || { python -m harness.neckrg_patterns $P/boards --drc > $P-gen.log 2>&1; note "pats gen rc $?"; }
+  mkdir -p $P/fixtures; [ -d $P/boards ] || { python -m harness.neckrg_patterns $P/boards --drc > $P-gen.log 2>&1; note "pats gen rc $?"
+    for n in $NAMES; do python -c "import sys; from pathlib import Path; from harness.radii_patterns import model_fixture as f; f(sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]))" $n $P/boards/$n/problem/$n.kicad_pcb $P/fixtures/model-$n.json >> $P-gen.log 2>&1; note "fixture $n rc $?"; done; }
   for n in $NAMES; do
     tools/route_board.sh $P/boards/$n/problem/$n.kicad_pcb $P/runs/$A/$n/$n/s0 --keep-copper --no-png --set optimize.runs=1 --set optimize.rounds=1 "$@" > $P/$A-$n.txt 2>&1 9>&-
     note "pat $A $n rc $?"
@@ -33,6 +34,11 @@ pats() {  # pats ARM [sets]: the proposed patterns, kept copper, runs 1 rounds 1
 }
 case ${1:-} in
   crop) shift; crop "$@" ;;
+  both)  # both TAG ARM LABEL: patterns (pu) and the crop (TOPO_NECKDBG) as two hzq units
+    T=$2; A=$3; L=$4; gen
+    bash $ROOT/tools/neckrg_job.sh pu $T $A $L > $OUT/u-pu.log 2>&1 &
+    hzq run --threads 2 --name $T-crop -- bash $ROOT/tools/neckrg_job.sh crop $A --set optimize.rounds=1 > $OUT/u-crop.log 2>&1 9>&- &
+    wait ;;
   pats) shift; mkdir -p $P/runs; pats "$@" ;;
   pu)  # pu TAG ARM LABEL [sets]: pats as one hzq unit, then "all done"
     T=$2; A=$3; L=$4; shift 4; mkdir -p $P/runs

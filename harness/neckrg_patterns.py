@@ -81,7 +81,7 @@ def neck_both_ends() -> Pattern:
         "ends set the current anyway (user 2026-11-05).",
         "Solvable by construction: the straight line is the only shortest path; the channels force the neck width.",
         (W, H), fps, tracks, [("PWR", "P1.1", "P2.1")], [],
-        {"neck_stretches": 1, "neck_width": W_NECK, "whole_wire_neck": True})
+        {"neck_stretches": 1, "neck_width": W_NECK, "whole_wire_neck": True, "neck_len": _r(math.dist(p1, p2))})
 
 
 # ------------------------------------------------------------------------------------------------ 2. neck_reentry
@@ -122,7 +122,7 @@ def neck_reentry() -> Pattern:
         "Solvable by construction: the walls force the neck in the channel; under and above the upper wall the room is "
         "derived from the full width; the only way to P2 is round the upper wall's right end.",
         (W, H), fps, tracks, [("PWR", "P1.1", "P2.1")], [],
-        {"neck_stretches": 1, "neck_width": W_NECK, "neck_to": [xf, yf], "back_leg_y": yb})
+        {"neck_stretches": 1, "neck_width": W_NECK, "neck_to": [xf, yf], "back_leg_y": yb, "neck_len": _r(_len(neck))})
 
 
 PATTERNS = {f.__name__: f for f in (neck_both_ends, neck_reentry)}

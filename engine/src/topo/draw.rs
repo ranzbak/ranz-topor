@@ -4995,11 +4995,18 @@ impl<'a> Drawer<'a> {
 
     /// Track items of the polyline `pts` with the parts inside the zones of `neck` at width
     /// `wn` (each segment cut where it crosses a zone's circle) and the rest at the wire's width;
-    /// with the necked length per zone. O(segments x zones).
+    /// with the necked length per zone. neck-regrow: an end zone (0: the wire's end `a`, 1: `b`,
+    /// finite radius) is the contiguous stretch from its own end: it narrows only a run that
+    /// starts (ends) at that end of the wire, from there up to where the run first leaves the
+    /// circle; a run that comes back into the circle, or another run of the wire passing within
+    /// it, keeps the full width (user 2026-11-26: never widen again downstream of a neck).
+    /// O(segments x zones).
     fn neck_items(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> (Vec<Item>, [f64; super::exact::NECK_ZONES]) {
         let wi = &self.st.wires[w];
         let mut items = Vec::new();
         let mut lens = [0.0; super::exact::NECK_ZONES];
+        // Pieces of the run, cut at every finite zone circle.
+        let mut pieces: Vec<(Vec2, Vec2)> = Vec::new();
         for p in pts.windows(2) {
             let (a, b) = (p[0], p[1]);
             let d = b - a;
@@ -5031,13 +5038,45 @@ impl<'a> Drawer<'a> {
                 if (v - u).len2() <= 1.0 {
                     continue;
                 }
-                let m = (u + v) * 0.5;
-                let zone = neck.ends.iter().position(|z| z.is_some_and(|(cc, r)| (m - cc).len() <= r));
-                if let Some(zi) = zone {
-                    lens[zi] += (v - u).len();
-                }
-                items.push(track_item(wi.net, lid, if zone.is_some() { wn } else { wi.w }, u, v, Some(w)));
+                pieces.push((u, v));
             }
+        }
+        // End zones: the prefix (zone 0) / suffix (zone 1) of the pieces inside the circle, for a
+        // run that starts (ends) at the wire's own end; the old rule (every piece inside) with
+        // the debug arm `TOPO_FD45_OFF=nrg_contig`.
+        let contig = !super::octi::fd45_off("nrg_contig");
+        let near = |p: Vec2, end: usize| (p - self.run_end(w, end)).len() <= 1000.0 || (p - self.b.proj.pos[if end == 0 { wi.a } else { wi.b }]).len() <= 1000.0;
+        let inside = |x: &(Vec2, Vec2), i: usize| neck.ends[i].is_some_and(|(cc, r)| ((x.0 + x.1) * 0.5 - cc).len() <= r);
+        let np = pieces.len();
+        // A whole-wire zone (unbounded) and the zones in between (only without `neck_from_pad`).
+        let mut zone_of: Vec<Option<usize>> = pieces.iter().map(|x| (0..super::exact::NECK_ZONES).find(|&i| inside(x, i) && (i >= 2 || neck.ends[i].is_some_and(|z| !z.1.is_finite())))).collect();
+        if contig {
+            if pts.first().is_some_and(|&p| near(p, 0)) {
+                for (k, x) in pieces.iter().enumerate() {
+                    if !inside(x, 0) {
+                        break;
+                    }
+                    zone_of[k] = zone_of[k].or(Some(0));
+                }
+            }
+            if pts.last().is_some_and(|&p| near(p, 1)) {
+                for k in (0..np).rev() {
+                    if !inside(&pieces[k], 1) {
+                        break;
+                    }
+                    zone_of[k] = zone_of[k].or(Some(1));
+                }
+            }
+        } else {
+            for (k, x) in pieces.iter().enumerate() {
+                zone_of[k] = (0..super::exact::NECK_ZONES).find(|&i| inside(x, i));
+            }
+        }
+        for (k, &(u, v)) in pieces.iter().enumerate() {
+            if let Some(zi) = zone_of[k] {
+                lens[zi] += (v - u).len();
+            }
+            items.push(track_item(wi.net, lid, if zone_of[k].is_some() { wn } else { wi.w }, u, v, Some(w)));
         }
         (items, lens)
     }

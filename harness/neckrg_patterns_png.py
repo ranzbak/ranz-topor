@@ -4,7 +4,7 @@ view and scale; thin copper (below the net class width) outlined, its stretches 
     python -m harness.neckrg_patterns_png RUNS OUT [name ...]
 RUNS/<cfg>/<name>/<name>/s0/<name>-topor/<name>.kicad_pcb, one panel per cfg dir; RUNS/labels.json {cfg: label} optional.
 'matches expected' = no via, length within 5 %, exactly the expected number of necked stretches along PWR's path from P1
-to P2, no width rise after a drop except at the far end's own neck (none for neck_both_ends: whole wire)."""
+to P2 (no width rise after a drop), the necked length within 0.3 mm of the expected one."""
 from __future__ import annotations
 
 import glob
@@ -50,6 +50,8 @@ def _reach(pat, segs, vias) -> dict:
     ok = len(vias) == e["vias"] and ln <= 1.05 * e["ref_len"] and stretches == e["neck_stretches"]
     if e.get("whole_wire_neck"):
         ok = ok and all(thin)
+    # the necked length within 0.3 mm of the expected (no neck where the full width has room)
+    ok = ok and abs(out["necked_len"] - e["neck_len"]) <= 0.3
     out["matches_expected"] = ok
     return out
 
