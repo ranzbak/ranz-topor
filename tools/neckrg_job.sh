@@ -38,7 +38,7 @@ xunit() {  # clippy, targeted release tests, the crop tool's tests, arm and sour
   rustup component add clippy > $OUT/rustup.log 2>&1
   cargo clippy --release --all-targets > $OUT/clippy.log 2>&1 9>&-; note "clippy rc $?"
   RUST_TEST_THREADS=4 cargo test --release --no-fail-fast $TESTS > $OUT/tests.log 2>&1 9>&-; note "tests rc $?"
-  cd $ROOT; python -m pytest -q -p no:cacheprovider tests/test_abstract_crop.py > $OUT/pytest-crop.log 2>&1; note "pytest crop rc $?"; cd $ROOT/engine
+  cd $ROOT; python -m pytest -q -p no:cacheprovider tests/test_abstract_crop.py tests/test_engine_surface.py tests/test_docs_links.py tests/plugin/test_config_docs.py > $OUT/pytest-crop.log 2>&1; note "pytest crop rc $?"; cd $ROOT/engine
   for a in nrg_join nrg_contig nrg_relax nrg_near nrg_edge; do
     TOPO_FD45_OFF=$a cargo test --release --test topo_neck_regrow --test topo_dvn > $OUT/mut-$a.log 2>&1 9>&-; note "mutant arm $a rc $? (want != 0)"
   done
