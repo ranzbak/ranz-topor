@@ -1999,11 +1999,12 @@ impl<'a> Drawer<'a> {
                 let s = oi.s.max(wi.s);
                 let pitch = (oi.w + s).max(1.0);
                 let depth = 0.5 * d + s + 0.5 * oi.w - dist;
+                let mut slack = f64::NAN;
                 if depth > 0.0 && per_wire {
                     // How freely the neighbour can give way there (lead r5): its packed slack
                     // away from the via; a pinned one (pad exit, full passage) pays the whole
                     // depth, a free one a quarter. Graded, no cutoff.
-                    let slack = self.pass_slack_away(o, ok, p);
+                    slack = self.pass_slack_away(o, ok, p);
                     let eff = depth * (0.25 + 0.75 * depth / (depth + slack.max(0.0)));
                     match deepest.iter_mut().find(|e| e.0 == o) {
                         Some(e) => e.1 = e.1.max(eff),
@@ -2015,7 +2016,7 @@ impl<'a> Drawer<'a> {
                 }
                 if depth > 0.0 {
                     if std::env::var_os("TOPO_VIAPLANDBG").is_some() {
-                        eprintln!("VIAPLANP wire {w} at ({:.3},{:.3}) other {o} net {} ok {ok} dist {:.3} depth {:.3}", p.x / 1e6, -p.y / 1e6, oi.net, dist / 1e6, depth / 1e6);
+                        eprintln!("VIAPLANP wire {w} at ({:.3},{:.3}) other {o} net {} ok {ok} dist {:.3} depth {:.3} slack {:.3} pitch {:.3}", p.x / 1e6, -p.y / 1e6, oi.net, dist / 1e6, depth / 1e6, slack / 1e6, pitch / 1e6);
                     }
                 }
             }

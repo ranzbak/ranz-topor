@@ -61,5 +61,10 @@ case ${1:-} in
       (cd engine && TOPO_VIADBG=1 TOPO_VIAPLANDBG=1 TOPO_LEGDBG=1 cargo test --release --test $B $f -- --nocapture) 2>&1 9>&- | gzip -9 > $OUT/dbg-$B-$f.log.gz
     done
     note "all done" ;;
+  dbgs)  # tdbg of the pocket test + esp one cycle with the via debug lines (slack-price RCA)
+    (export CARGO_TARGET_DIR=$OUT/target-tt CARGO_BUILD_JOBS=4; cd engine && TOPO_VIADBG=1 TOPO_VIAPLANDBG=1 cargo test --release --test topo_dvn via_interval_sliver_shifts_into_the_pocket -- --nocapture) 2>&1 9>&- | gzip -9 > $OUT/dbg-pocket.log.gz &
+    (export TOPO_VIADBG=1 TOPO_VIAPLANDBG=1; unit G esp $ESP "${C1[@]}")
+    wait; find $OUT -name '*.log' -size +20M -exec gzip -9 {} + 2>/dev/null
+    note "all done" ;;
   *) echo "usage: dvn5_job.sh attr|dbg ARM [sets]|suite|ladder"; exit 2 ;;
 esac
