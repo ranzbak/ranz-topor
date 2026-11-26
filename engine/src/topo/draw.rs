@@ -549,6 +549,58 @@ pub fn fuse_candidates(run: &[Vec2], trunk: &[&[Vec2]], ws_mm: f64, jw: f64, sty
     out
 }
 
+/// How far past its pad's outline a neck reaches out of the pad its run ends in (nm): above
+/// KiCad's polygon error (5 um) and the tidy's in-pad tolerance (`tidy::PAD_TOL_NM`), so the
+/// narrow piece from the pad centre is never a track wholly inside the pad.
+const NECK_PAD_OUT: f64 = 20_000.0;
+
+/// draw-via-neck r6 (user 2026-11-26: every trace connects to the MIDDLE of its pad): the neck
+/// zones of a run that ends in its own pad (`run` from that end outwards, `poly` the pad
+/// outline) grown so no width step lies inside the pad. A zone that covers any part of the run
+/// inside the pad (or the first `NECK_PAD_OUT` past its outline) is widened to cover all of it,
+/// so the run is narrow from its end to `NECK_PAD_OUT` outside the pad. Otherwise the piece
+/// between the pad centre and the step lies wholly inside the pad, KiCad's Cleanup deletes it
+/// (`TRACKS_CLEANER::deleteTracksInPads`; the cleanup-safe tidy drops it first) and the trace
+/// ends off the centre (qmtech one cycle: U9.9, U7.3 with neck_trim). Narrower copper on the
+/// same centre line adds no violation. A run that never leaves the pad, or whose end is not in
+/// it, is left alone. O(zones x run points).
+pub(super) fn neck_out_of_pad(neck: &mut super::exact::Neck, run: &[Vec2], poly: &[Vec2]) {
+    use super::state::point_in_poly;
+    if run.len() < 2 || poly.len() < 3 || !point_in_poly(run[0], poly) {
+        return;
+    }
+    let Some(j) = run.iter().position(|&p| !point_in_poly(p, poly)) else { return };
+    let (a, b) = (run[j - 1], run[j]);
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..30 {
+        let m = 0.5 * (lo + hi);
+        if point_in_poly(a + (b - a) * m, poly) {
+            lo = m;
+        } else {
+            hi = m;
+        }
+    }
+    let exit = a + (b - a) * hi;
+    let l = (b - exit).len();
+    let out = if l > 1.0 { exit + (b - exit) * (NECK_PAD_OUT.min(l) / l) } else { b };
+    let mut pre: Vec<Vec2> = run[..j].to_vec();
+    pre.push(exit);
+    pre.push(out);
+    for z in neck.ends.iter_mut() {
+        let Some((c, r)) = *z else { continue };
+        if !r.is_finite() {
+            continue;
+        }
+        if !pre.windows(2).any(|s| seg_dist(c, s[0], s[1]) <= r) {
+            continue;
+        }
+        let need = pre.iter().map(|&p| (p - c).len()).fold(r, f64::max);
+        if need > r {
+            *z = Some((c, need + 1.0));
+        }
+    }
+}
+
 pub fn seg_seg_dist(a1: Vec2, b1: Vec2, a2: Vec2, b2: Vec2) -> f64 {
     seg_seg(a1, b1, a2, b2).0
 }
@@ -4328,7 +4380,7 @@ impl<'a> Drawer<'a> {
                             let mut zones = (*pn, wmin, self.neck_items(w, lid, &pts, pn, pn.min_w).1);
                             if vs.is_empty() {
                                 if let Some((wn, _, _)) = self.plan_neck_run(w, lid, &pts, pn) {
-                                    let tz = self.trim_neck(w, lid, &pts, pn, wn);
+                                    let tz = self.neck_out_of_pads(w, &pts, self.trim_neck(w, lid, &pts, pn, wn));
                                     let (its, ls) = self.neck_items(w, lid, &pts, &tz, wn);
                                     if self.track_own_pad_ok(w, &its) {
                                         items = its;
@@ -5125,6 +5177,7 @@ impl<'a> Drawer<'a> {
                 nk = n;
             }
         }
+        let nk = self.neck_out_of_pads(w, pts, nk);
         if std::env::var("TOPO_NECKDBG").is_ok() {
             eprintln!("NECKFIT wire {w} wn {wn:.0} plan {:?} trim {:?} fit {:?}", neck.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), trimmed_dbg.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>(), nk.ends.iter().flatten().map(|z| z.1.round()).collect::<Vec<_>>());
         }
@@ -5161,6 +5214,24 @@ impl<'a> Drawer<'a> {
                 }
             }
             nk.ends[i] = Some((c, hi));
+        }
+        nk
+    }
+
+    /// draw-via-neck r6 ([`neck_out_of_pad`]) at both pad ends of the run `pts` of wire `w`
+    /// (`[drawing] neck_trim` only: main's whole-zone neck is kept as it was). O(zones x run).
+    fn neck_out_of_pads(&self, w: WireId, pts: &[Vec2], mut nk: super::exact::Neck) -> super::exact::Neck {
+        if !self.opts.neck_trim || super::octi::fd45_off("dvn_pad_out") {
+            return nk;
+        }
+        let wi = &self.st.wires[w];
+        let pr = &self.b.proj;
+        for (end, ob) in [(0usize, wi.pa), (1, wi.pb)] {
+            if ob == super::state::NO_OBS || ob >= pr.obstacles.len() {
+                continue;
+            }
+            let run: Vec<Vec2> = if end == 0 { pts.to_vec() } else { pts.iter().rev().copied().collect() };
+            neck_out_of_pad(&mut nk, &run, &pr.obstacles[ob].poly);
         }
         nk
     }
@@ -5492,6 +5563,33 @@ pub(crate) fn neighbour_room_price(hits: &[RoomHit], per_wire: bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// draw-via-neck r6: a neck at the run's pad end reaches past the pad's outline (no width
+    /// step inside the pad, whose in-pad narrow piece KiCad's Cleanup would delete); a neck
+    /// starting inside the pad covers the pad end too; zones away from the pad, unbounded zones
+    /// and runs whose end lies outside the pad are left alone.
+    #[test]
+    fn neck_out_of_pad_moves_the_width_step_outside_the_pad() {
+        let v = |x: f64, y: f64| Vec2 { x, y };
+        let pad = [v(-500_000.0, -150_000.0), v(500_000.0, -150_000.0), v(500_000.0, 150_000.0), v(-500_000.0, 150_000.0)];
+        let run = [v(0.0, 0.0), v(300_000.0, 0.0), v(2_000_000.0, 0.0)];
+        let nk = |z: [Option<(Vec2, f64)>; 3]| super::super::exact::Neck { min_w: 100_000.0, ends: [z[0], z[1], z[2], None, None, None] };
+        let mut n = nk([Some((v(0.0, 0.0), 100_000.0)), Some((v(300_000.0, 0.0), 50_000.0)), Some((v(1_500_000.0, 0.0), 200_000.0))]);
+        neck_out_of_pad(&mut n, &run, &pad);
+        let r = |n: &super::super::exact::Neck, i: usize| n.ends[i].unwrap().1;
+        assert!((r(&n, 0) - (500_000.0 + NECK_PAD_OUT + 1.0)).abs() < 2.0, "end zone past the outline: {}", r(&n, 0));
+        assert!((r(&n, 1) - 300_001.0).abs() < 2.0, "inner zone covers the pad end: {}", r(&n, 1));
+        assert_eq!(r(&n, 2), 200_000.0, "a zone away from the pad stays");
+        let mut inf = nk([Some((v(0.0, 0.0), f64::INFINITY)), None, None]);
+        neck_out_of_pad(&mut inf, &run, &pad);
+        assert!(r(&inf, 0).is_infinite());
+        let mut outside = nk([Some((v(600_000.0, 0.0), 100_000.0)), None, None]);
+        neck_out_of_pad(&mut outside, &[v(600_000.0, 0.0), v(2_000_000.0, 0.0)], &pad);
+        assert_eq!(r(&outside, 0), 100_000.0, "run end outside the pad");
+        let mut inside = nk([Some((v(0.0, 0.0), 100_000.0)), None, None]);
+        neck_out_of_pad(&mut inside, &[v(0.0, 0.0), v(300_000.0, 0.0)], &pad);
+        assert_eq!(r(&inside, 0), 100_000.0, "a run that never leaves the pad");
+    }
 
     /// draw-via-neck r5 (lead 2026-11-26): the per-wire planned-room price does not depend on
     /// the triangulation: a neighbour's corridor split over 1, 3 or 9 triangles near the site
