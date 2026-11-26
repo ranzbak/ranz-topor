@@ -1,6 +1,6 @@
-"""PROPOSED test patterns for neck-regrow (docs/dev/design/neck-regrow.md): a trace never widens again after a neck.
+"""Test patterns for neck-regrow (both APPROVED by the user 2026-11-26) (docs/dev/design/neck-regrow.md): a trace never widens again after a neck.
 
-NOT in the test suite: the user approves patterns first (AGENT_RULES). Built like harness/dvn_patterns.py (reference copper
+In the engine tests as fixtures (engine/tests/topo_neck_regrow.rs, engine/tests/fixtures/neckrg). Built like harness/dvn_patterns.py (reference copper
 first, pads around it, a shapely clearance check, KiCad DRC with --drc). Two layers, B.Cu closed. PWR is POWER class
 0.5 / 0.2 with a 0.2 mm neck floor (.kicad_dru, as dvn_patterns); the walls are unconnected pads.
 
@@ -25,7 +25,7 @@ from harness.fit_patterns import CLEAR, DEFAULT_CLASS, Fp, Keepout, Pad, Pattern
 from harness.fx_survivors import clearance_report
 from harness.radii_patterns import EPS
 
-STATUS: dict[str, str] = {}
+STATUS: dict[str, str] = {"neck_both_ends": "APPROVED (user 2026-11-26)", "neck_reentry": "APPROVED (user 2026-11-26)"}
 SQ2 = math.sqrt(2.0)
 W_NECK = 0.3  # the widest wire between the walls: wall gap 0.3 + 2 x (CLEAR + EPS)
 WALL_T = 0.3  # wall pad thickness (y)
