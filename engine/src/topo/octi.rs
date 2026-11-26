@@ -165,13 +165,23 @@ pub struct OctiCfg {
 pub const SHORT_FIRST: f64 = 1e4;
 
 /// pad-snap (A1b, docs/dev/design/pad-snap.md): how far the round end of a pad exit's axis leg
-/// sticks out of its pad at the *leave point* (nm). More than tidy's `PAD_TOL_NM` (5 um) and
-/// KiCad's default maximum error (5 um, `ERROR_INSIDE` polygons), so neither topor's tidy nor
-/// KiCad's Cleanup (`deleteTracksInPads`: the track polygon minus the pad polygon empty) sees the
-/// centre stub as lying wholly inside the pad.
+/// sticks out of its pad at the *leave point* (nm). More than KiCad's polygon of the round end
+/// lies inside the true one at the default maximum error (5 um: at most ~5.6 um,
+/// `geom::kicad`), so neither topor's tidy nor KiCad's Cleanup (`deleteTracksInPads`: the track
+/// polygon minus the pad polygon empty) sees the centre stub as lying wholly inside the pad.
 pub const LEAVE_NM: f64 = 20_000.0;
 
-/// pad-snap: tidy's tolerance for a segment wholly inside a pad (`tidy.rs` `PAD_TOL_NM`).
+/// draw-via-neck r7 (verifier vfy-draw-via-neck-r6 F1): a stub counts as wholly inside its pad
+/// by KiCad's own test (`geom::kicad::track_inside`, as tidy), with a polygon vertex up to this
+/// far (nm) outside the pad still counted as inside: a joint whose stub KiCad keeps by less than
+/// 1 um is priced like one it deletes (r6: the true round end within 5 um, which let the DP draw
+/// qmtech ADV7511KSTZ1.29's 0.12 mm jog that KiCad deletes, its polygon 5.35 um inside the round
+/// end).
+const STUB_SLACK_NM: f64 = 1_000.0;
+
+/// pad-snap: a stub whose far joint lies at least `w / 2` less this from its pad's outline (its
+/// true round end within this of the pad) is priced as lying inside it (r6's whole rule; r7 adds
+/// KiCad's polygon test, [`stub_price`]).
 const STUB_TOL_NM: f64 = 5_000.0;
 
 /// pad-snap: price of a first (last) leg of a run whose far (near) end lies so deep inside the
@@ -188,10 +198,20 @@ pub const STUB_NM: f64 = 1.0e6;
 const STUB_VIOL_SHARE: f64 = 0.4;
 
 /// pad-snap: the [`STUB_NM`] price of a stub from `c` (a run end at its own pad `poly`, `ext` =
-/// the farthest outline point from `c`) to `j`, for a track of width `w`: 0 unless `j` lies in the
-/// pad at least `w / 2` (less tidy's tolerance) from its outline. O(outline).
-pub fn stub_price(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2, base: f64) -> f64 {
-    if (j - c).len2() < 1.0 || !point_in_poly(j, poly) || super::padend::boundary_dist(j, poly) < 0.5 * w - STUB_TOL_NM {
+/// the farthest outline point from `c`) to `j`, for a track of width `w`: 0 unless the stub may
+/// lie wholly inside the pad: `j` at least `w / 2` less [`STUB_TOL_NM`] from the outline (its true
+/// round end within 5 um of the pad, as before), or (r7) KiCad's Cleanup deletes it as a track
+/// inside the pad (its polygon at the board's maximum error `err` inside the outline,
+/// [`STUB_SLACK_NM`]): the polygon lies up to ~5.6 um inside the round end, so a stub whose round
+/// end sticks out by 5.35 um was free and KiCad deleted it (qmtech ADV7511KSTZ1.29). The union
+/// keeps every stub r6 priced. O(outline).
+pub fn stub_price(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2, base: f64, err: f64) -> f64 {
+    if (j - c).len2() < 1.0 || !point_in_poly(j, poly) {
+        return 0.0;
+    }
+    let bd = super::padend::boundary_dist(j, poly);
+    let depth = |q: Vec2| if point_in_poly(q, poly) { super::padend::boundary_dist(q, poly) } else { -super::padend::boundary_dist(q, poly) };
+    if bd < 0.5 * w - STUB_TOL_NM && !crate::geom::kicad::track_inside(c, j, w, err, depth, STUB_SLACK_NM) {
         return 0.0;
     }
     base * (1.0 + (j - c).len() / ext.max(1.0))
@@ -608,7 +628,7 @@ impl Drawer<'_> {
         [0usize, 1].map(|end| {
             let at_end = if end == 0 { k0 == 0 } else { k1 == wi.passes.len() };
             let (c, j) = if end == 0 { (pts[0], pts[1]) } else { (pts[n - 1], pts[n - 2]) };
-            self.own_pad_end(w, end, at_end, false, c).is_some_and(|(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, 1.0) > 0.0)
+            self.own_pad_end(w, end, at_end, false, c).is_some_and(|(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, 1.0, self.model.rules.max_error as f64) > 0.0)
         })
     }
 
@@ -617,13 +637,21 @@ impl Drawer<'_> {
     /// neither a kept lead on that pad nor `lead_cont`), the pad is an obstacle and not anchored
     /// elsewhere (`end_at`), and `c` lies in the pad outline. Gives (outline, `c`, the farthest
     /// outline point from `c`). Used by the DP's price and by [`Drawer::run_pad_stubs`].
+    /// draw-via-neck r7: a branch end on its trunk (`end_at`) that lies inside the wire's own pad
+    /// counts too: the branch's first leg from the junction is deleted by KiCad's Cleanup when it
+    /// lies wholly inside the pad, and the branch then ends off the centre (qmtech one cycle
+    /// ADV7511KSTZ1.29: ADV_AVDD's branch from the trunk at the pad centre drew a 0.12 mm jog the
+    /// DP did not price, vfy-draw-via-neck-r6 F1). A junction outside the pad is not priced.
     pub(super) fn own_pad_end(&self, w: WireId, end: usize, at_end: bool, lead_cont: bool, c: Vec2) -> Option<(&[Vec2], Vec2, f64)> {
         let wi = &self.st.wires[w];
         let ob = if end == 0 { wi.pa } else { wi.pb };
-        if !at_end || lead_cont || ob == NO_OBS || ob >= self.b.proj.obstacles.len() || self.end_at.contains_key(&(w, end)) || self.b.kept_ends.iter().any(|k| k.obs == ob && k.lead.is_some()) {
+        if !at_end || lead_cont || ob == NO_OBS || ob >= self.b.proj.obstacles.len() || self.b.kept_ends.iter().any(|k| k.obs == ob && k.lead.is_some()) {
             return None;
         }
         let poly: &[Vec2] = &self.b.proj.obstacles[ob].poly;
+        if self.end_at.get(&(w, end)).is_some_and(|&q| fd45_off("dvn_branch_stub") || poly.len() < 3 || !point_in_poly(q, poly)) {
+            return None;
+        }
         if poly.len() < 3 || !point_in_poly(c, poly) {
             return None;
         }
@@ -892,6 +920,7 @@ impl Drawer<'_> {
         // copper, not from a continued lead): (outline, the run's end point, farthest outline
         // point from it). A first (last) leg that leaves a stub wholly inside it pays
         // [`stub_price`].
+        let merr = self.model.rules.max_error as f64;
         let own_pad: [Option<(&[Vec2], Vec2, f64)>; 2] = [0usize, 1].map(|end| {
             let (at_end, lead_cont) = if end == 0 { (k0 == 0, lead_in.is_some()) } else { (k1 == n_pass, lead_out.is_some()) };
             let c = if end == 0 { taut[0] } else { taut[taut.len() - 1] };
@@ -930,7 +959,7 @@ impl Drawer<'_> {
                     // joint that tidy and KiCad's Cleanup delete, an end off its centre (bend_mm
                     // 0 prices the stub at 0; topo_pad_snap side_exit).
                     let q = sg[0] + d * f;
-                    if !fd45_off("padc") && own_pad.iter().flatten().any(|&(poly, c, ext)| stub_price(poly, c, ext, wi.w, q, 1.0) > 0.0) {
+                    if !fd45_off("padc") && own_pad.iter().flatten().any(|&(poly, c, ext)| stub_price(poly, c, ext, wi.w, q, 1.0, merr) > 0.0) {
                         continue;
                     }
                     nodes.push((q, cum[i] + f * l, None, true));
@@ -1152,7 +1181,7 @@ impl Drawer<'_> {
                 && (forced || self.seg_clear_near(&nr, a, b))
         };
         let stub_nm = cfg.stub_nm(pitch);
-        let stub = |end: usize, j: Vec2| own_pad[end].map_or(0.0, |(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, stub_nm));
+        let stub = |end: usize, j: Vec2| own_pad[end].map_or(0.0, |(poly, c, ext)| stub_price(poly, c, ext, wi.w, j, stub_nm, self.model.rules.max_error as f64));
         // pad-snap r2b (D3b): per own-pad end and octilinear direction `k`, the leave point: the
         // nearest point on the ray from the run end whose round end sticks out of the pad by
         // [`LEAVE_NM`] ([`leave_point`]). Every own pad, also one too short for an [`Exit`].
@@ -2705,7 +2734,7 @@ mod tests {
     }
 
     fn stub_price_d(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2) -> f64 {
-        stub_price(poly, c, ext, w, j, STUB_NM)
+        stub_price(poly, c, ext, w, j, STUB_NM, 5_000.0)
     }
 
     /// pad-snap: the stub price is 0 for a joint outside the pad, on its outline or within half the
@@ -2878,8 +2907,13 @@ mod tests {
         assert!((deep - STUB_NM * (1.0 + 0.5e6 / ext)).abs() < 1e-6, "{deep}");
         let deeper = stub_price_d(&poly, c, ext, w, v(0.0, 0.8e6));
         assert!(deeper > deep, "graded by the distance from the centre: {deeper} vs {deep}");
-        // within tidy's tolerance of half the width: inside (tidy drops it), so priced
+        // within 5 um of half the width (the true round end): priced, as in r6
         assert!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + 0.5 * STUB_TOL_NM)) > 0.0);
+        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + 2.0 * STUB_TOL_NM)), 0.0);
+        // the qmtech ADV7511KSTZ1.29 jog (0.3 x 1.6 mm pad, a 0.1407 mm track 45 degrees to
+        // 65.011 um from the long side: its true end 5.34 um out, r6 priced it 0): priced
+        let adv = vec![v(-0.15e6, -0.8e6), v(0.15e6, -0.8e6), v(0.15e6, 0.8e6), v(-0.15e6, 0.8e6)];
+        assert!(stub_price_d(&adv, c, (0.15e6f64).hypot(0.8e6), 140_700.0, v(-84_989.0, 84_989.0)) > 0.0);
     }
 
     /// pad-snap r2b: the leave point lies on the ray where the round end of a stub from the centre
@@ -3114,6 +3148,7 @@ impl Drawer<'_> {
         let w = wo.wire;
         let wi = &self.st.wires[w];
         let (net, ww, pitch, own) = (wi.net, wi.w, wi.w + wi.s, [wi.pa, wi.pb]);
+        let merr = self.model.rules.max_error as f64;
         let leff = jog_leg(&cfg, pitch);
         let tol = 0.05 * pitch + 1_000.0;
         let plen = |p: &[Vec2]| p.windows(2).map(|x| (x[1] - x[0]).len()).sum::<f64>();
@@ -3163,7 +3198,7 @@ impl Drawer<'_> {
             let ends = [cur[0], cur[cur.len() - 1]];
             let pads: [Option<(Vec<Vec2>, Vec2, f64)>; 2] = [0usize, 1].map(|end| self.own_pad_end(w, end, if end == 0 { r == 0 } else { r + 1 == n_runs }, false, ends[end]).map(|(poly, c, ext)| (poly.to_vec(), c, ext)));
             let padc = !fd45_off("padc");
-            let pad_leave_lost = |end: usize, old: Vec2, new: Vec2| -> bool { padc && pads[end].as_ref().is_some_and(|(poly, c, ext)| stub_price(poly, *c, *ext, ww, new, 1.0) > 0.0 && stub_price(poly, *c, *ext, ww, old, 1.0) <= 0.0) };
+            let pad_leave_lost = |end: usize, old: Vec2, new: Vec2| -> bool { padc && pads[end].as_ref().is_some_and(|(poly, c, ext)| stub_price(poly, *c, *ext, ww, new, 1.0, merr) > 0.0 && stub_price(poly, *c, *ext, ww, old, 1.0, merr) <= 0.0) };
             let mut i = 0;
             while i + 2 < cur.len() {
                 crate::control::pause_point(); // pause-button: refit trials per corner, no stop test

@@ -6,6 +6,7 @@ pub const MIN_CHORD_NM: f64 = 10.0;
 pub mod dist;
 pub mod predicates;
 pub mod grid;
+pub mod kicad;
 pub mod prim;
 pub mod quant;
 pub mod tangent;
