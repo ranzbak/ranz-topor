@@ -121,6 +121,74 @@ pub struct ViolationReport {
     /// `foreign_copper` (other routed copper in a passage too narrow), `static` (other pads,
     /// holes, the board edge).
     pub class: String,
+    /// draw-absorb A0 (topological core): where the violating copper comes from, what it hits,
+    /// its drawn compass class and fault class ([`ViolProv`]); `None` for other engines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prov: Option<ViolProv>,
+}
+
+/// draw-absorb A0 (docs/dev/design/draw-absorb.md §4 A0): the provenance of one drawn violation,
+/// recorded by the drawing when it wrote the copper ([`crate::topo::draw::ViolSrc`]) plus its
+/// drawn compass class and fault class ([`crate::topo::compass::absorb_meter`]). Measurement only.
+#[derive(Clone, Debug, Serialize, Default, PartialEq)]
+pub struct ViolProv {
+    /// `forced_run`, `forced_via`, `gap_kept`, `junction_join`, `diff_pair` (empty: not recorded).
+    pub mech: String,
+    /// The forced candidate: `relaxed`, `funnel`, `erbs`, `erbs_kept`, `attempt0`..`attempt5`;
+    /// `via`, `band` (gap kept), `join`.
+    pub cand: String,
+    /// The forced run's octilinear form: `ok`, `rejected`, `none`, `skip`.
+    pub form: String,
+    /// The run's band status: `static` / `predicted` / `gap` (its band lost in the joint commit),
+    /// `no_band`, `junction`, `redrawn` (a kept band that no longer fit), `kept` (gap kept).
+    pub cut: String,
+    /// Run index (a via: the via's index).
+    pub run: usize,
+    /// The run's last legal attempt failed on the via-side topology test.
+    pub wrong_side: bool,
+    /// The plan necks the wire.
+    pub plan_neck: bool,
+    /// The wire's width, its floor (net class / board minimum) and the narrowest drawn track of
+    /// the violating run (nm; 0 for a via).
+    pub w_nm: i64,
+    pub w_min_nm: i64,
+    pub drawn_w_nm: i64,
+    /// `movable` (another router wire's track or via), `static` (pad, kept copper, board, shape).
+    pub hit: String,
+    /// The hit router wire and its connection id ([`ConnReport::id`]; `None`: not drawn at the end).
+    pub hit_wire: Option<usize>,
+    pub hit_conn: Option<usize>,
+    /// The hit copper was a band reserved by the joint commit (its wire not drawn yet).
+    pub hit_reserved: bool,
+    /// The hit wire's packed room away from the violation at its nearest pass (nm).
+    pub hit_slack_nm: Option<i64>,
+    /// The drawn compass class (the rule of `toporlib/compass.py` `classify_violation`).
+    pub class: String,
+    /// The fault class of the note (F1-F7, [`crate::topo::compass::fault_class`]).
+    pub fclass: String,
+}
+
+/// draw-absorb A0: per-class counts of the drawn violations ([`ViolProv`]).
+#[derive(Clone, Debug, Serialize, Default, PartialEq)]
+pub struct DrawAbsorb {
+    pub violations: usize,
+    /// Drawn violations per fault class, and the connections with one.
+    pub by_fclass: BTreeMap<String, usize>,
+    pub conns_by_fclass: BTreeMap<String, usize>,
+    /// Per writer, forced candidate, band status, drawn compass class and hit.
+    pub by_mech: BTreeMap<String, usize>,
+    pub by_cand: BTreeMap<String, usize>,
+    pub by_cut: BTreeMap<String, usize>,
+    pub by_class: BTreeMap<String, usize>,
+    pub by_hit: BTreeMap<String, usize>,
+    /// Forced runs (connection, run) per band status: rejected in the joint commit (`static`,
+    /// `predicted`, `gap`) or kept / without a band (the A2-vs-A3 question of the note).
+    pub forced_runs_by_cut: BTreeMap<String, usize>,
+    /// Per fault class: violations whose hit wire has packed room away from it at least as deep
+    /// as the violation (a re-taut inside its sleeve could clear it, A2), and track violations
+    /// whose run could narrow to its floor by at least twice the depth (a neck clears it, A1).
+    pub retaut_room: BTreeMap<String, usize>,
+    pub shrink_room: BTreeMap<String, usize>,
 }
 
 /// The class of a violation (see [`ViolationReport::class`]) from what it is against, its cause
@@ -297,6 +365,10 @@ pub struct RouteResult {
     /// TW2: how the ERBS drawing drew its runs (`[drawing] realise = "erbs"`; `None` otherwise).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub erbs: Option<ErbsRunReport>,
+    /// draw-absorb A0: per-class counts of the drawn violations (topological core; `None`
+    /// otherwise). Each violation's own tags are in `violations[].prov`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draw_absorb: Option<DrawAbsorb>,
 }
 
 /// TW2: two bands kept across a model gap ([`ErbsRunReport::gap_kept_list`]): the yielding band
@@ -759,6 +831,8 @@ fn finish_copper(model: &BoardModel, opts: &Options, r: &mut RouteResult) {
         "pad ends off centre: {n} track ends end inside a pad of their net off its centre (KiCad connects them, but its interactive router links a pad only at its centre: loose for drag and footprint moves), largest {:.3} mm",
         worst / 1e6
     ));
+    // draw-absorb A0: the drawn compass and fault class of every violation, and their counts
+    crate::topo::compass::absorb_meter(r);
 }
 
 /// Decompose `model` on its routable layers and report every connection as failed with
@@ -905,6 +979,7 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
         limit: None,
         bests: Vec::new(),
         erbs: None,
+        draw_absorb: None,
     }
 }
 

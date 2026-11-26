@@ -31,6 +31,11 @@ Absorbable verdict (a hypothesis per item, read with the compass class):
            step there; a drawing can only spread the shortfall
   partial  drawing_loss / overfull_nearby / neck_loss / pad_exit with a movable hit: room may exist next door
   checker  unjoined (KiCad only) or ERBS-fallback copper the engine believes legal
+Fault class (note §1): F1 forced via + static hit, F2 forced via + movable, F3 neck_loss, F4 drawing_loss /
+overfull_nearby / edge_overpredict + movable, F5 the same + static, F6 other plan classes, F7 pad_exit, "-" KiCad
+only. ``fclass`` = this script's (mechanism from the connection's cause, hit from the `against` text); ``e_fclass``
+= the engine's A0 meter (``violations[].prov``: the writer of that violation's copper, the router wire it hits),
+when the run has it. ``summary.f_vs_engine`` crosses the two.
 O(K x V) for K KiCad items, V drawn violations.
 """
 import argparse
@@ -86,6 +91,21 @@ def verdict(cls, hit):
     return "plan"
 
 
+def fault_class(mech, cls, hit):
+    """The note's fault class of (mechanism, compass class, hit); the engine's rule (compass.rs fault_class)."""
+    if mech == "unjoined":
+        return "-"
+    if mech == "forced_via":
+        return "F2" if hit == "movable" else "F1"
+    if cls == "neck_loss":
+        return "F3"
+    if cls in ("drawing_loss", "overfull_nearby", "edge_overpredict"):
+        return "F4" if hit == "movable" else "F5"
+    if cls == "pad_exit":
+        return "F7"
+    return "F6"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run")
@@ -132,7 +152,15 @@ def main(argv=None):
             hit = hit_kind(v.get("against"))
             row.update(mechanism=mechanism(cause), sub=re.sub(r"-?[0-9.]+", "#", cause)[:70], cls=c["class"],
                        hit=hit, verdict=verdict(c["class"], hit), conn=v.get("conn"), wire=v.get("name"),
-                       against=v.get("against"))
+                       against=v.get("against"), viol=best[1])
+            pv = v.get("prov")
+            if pv:
+                row.update(e_mech=pv.get("mech"), e_cand=pv.get("cand"), e_cut=pv.get("cut"), e_class=pv.get("class"),
+                           e_hit=pv.get("hit"), e_fclass=pv.get("fclass"), e_hit_conn=pv.get("hit_conn"),
+                           e_hit_slack_nm=pv.get("hit_slack_nm"), e_depth_nm=v.get("depth_nm"))
+        row["fclass"] = fault_class(row["mechanism"], row["cls"], row["hit"])
+        if row["mechanism"] == "unjoined":
+            row["e_fclass"] = "-"
         rows.append(row)
     C = collections.Counter
     summary = {
@@ -149,6 +177,10 @@ def main(argv=None):
         "engine_by_class_hit": dict(C(f"{d['class']}/{hit_kind(v.get('against'))}" for v, d in zip(viols, drawn)).most_common()),
         "erbs": {k: v for k, v in route.get("erbs", {}).items() if not isinstance(v, list)},
         "unconnected_new": res.get("drc", {}).get("incomplete", {}).get("unconnected_new"),
+        "by_fclass": dict(sorted(C(r["fclass"] for r in rows).items())),
+        "by_e_fclass": dict(sorted(C(r.get("e_fclass") or "n/a" for r in rows).items())),
+        "f_vs_engine": {f"{a}->{b}": n for (a, b), n in sorted(C((r["fclass"], r.get("e_fclass") or "n/a") for r in rows).items())},
+        "engine_draw_absorb": route.get("draw_absorb"),
     }
     out = {"summary": summary, "rows": rows}
     if a.json:

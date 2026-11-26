@@ -195,15 +195,19 @@ def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reac
         reaches.append((v.get("at") or [0, 0], v.get("layer", ""), reach))
         if model_gap and cls == "drawing_loss" and i in model_gap:
             cls, sub = "model_gap", model_gap[i]
+        pv = v.get("prov") or {}
         drawn_rows.append({"i": i, "conn": c, "name": v.get("name"), "from": v.get("from"), "to": v.get("to"),
                            "layer": v.get("layer"), "at_mm": [round(v["at"][0] / MM, 3), round(v["at"][1] / MM, 3)],
                            "kind": v.get("kind"), "engine_class": v.get("class"), "class": cls, "sub": sub,
-                           "half_len_mm": round(0.5 * (v.get("length_nm") or 0) / MM, 3)})
+                           "half_len_mm": round(0.5 * (v.get("length_nm") or 0) / MM, 3),
+                           "fclass": pv.get("fclass"), "mech": pv.get("mech"), "hit": pv.get("hit"),
+                           "engine_compass": pv.get("class")})
     # KiCad's DRC items: the class of the nearest drawn violation within drc_radius_mm (with join_nets: of a net the
     # KiCad item names, on a layer it names), else "KiCad only". Not 1:1: one drawn stretch below the rule can be
     # several KiCad items (one per pair of items), and several drawn violations can share one KiCad item.
     kicad = Counter()
     kicad_only = Counter()
+    kicad_f = Counter()  # draw-absorb A0: KiCad items per fault class of the joined drawn violation
     if drc_new is not None:
         rad = drc_radius_mm * MM
         for dv in drc_new:
@@ -218,12 +222,14 @@ def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reac
                 at = (r["at_mm"][0] * MM, r["at_mm"][1] * MM)
                 d = min((math.hypot(px - at[0], py - at[1]) for px, py in pts), default=math.inf) - r["half_len_mm"] * MM
                 if d <= rad and (best is None or d < best[0]):
-                    best = (d, r["class"])
+                    best = (d, r["class"], r.get("fclass"))
             if best is None:
                 kicad["kicad_only"] += 1
                 kicad_only[_drc_type(dv)] += 1
+                kicad_f["kicad_only"] += 1
             else:
                 kicad[best[1]] += 1
+                kicad_f[best[2] or "-"] += 1
     pred = (cp or {}).get("predicted") or {}
     drawn = Counter(r["class"] for r in drawn_rows)
     drawn_conns = defaultdict(set)
@@ -299,11 +305,29 @@ def build(route: dict, drc_new=None, unconnected_new: int | None = None, *, reac
         "violations": drawn_rows,
         "connections": connection_rows(route),
         "flags": flags,
+        "absorb": absorb_summary(route, drawn_rows, kicad_f if drc_new is not None else None),
     })
     if cp is not None and out["loop_predicted"] is not None and out["loop_predicted"] != out["predicted_violations"]:
         out["notes"].append(f"the TopoR loop's pick predicted {out['loop_predicted']} violations, the plan handed to "
                             f"the drawing {out['predicted_violations']}: the plan changed between the pick and the drawing")
     return out
+
+
+def absorb_summary(route: dict, drawn_rows: list, kicad_f: Counter | None) -> dict | None:
+    """draw-absorb A0 (docs/dev/design/draw-absorb.md): the engine's fault classes F1-F7 of the drawn violations
+    (``route.draw_absorb``, ``violations[].prov.fclass``) with the KiCad items joined to them (``kicad``, None without
+    DRC) and ``class_mismatch``: drawn violations whose engine compass class (the engine's port of
+    ``classify_violation``) differs from this module's (must be 0). None without the engine's meter. O(rows)."""
+    da = route.get("draw_absorb")
+    if da is None:
+        return None
+    mism = [r["i"] for r in drawn_rows if r.get("engine_compass") is not None and r["engine_compass"] != r["class"]]
+    return {"drawn": dict(sorted((da.get("by_fclass") or {}).items())),
+            "drawn_conns": dict(sorted((da.get("conns_by_fclass") or {}).items())),
+            "kicad": None if kicad_f is None else dict(sorted(kicad_f.items())),
+            "retaut_room": da.get("retaut_room") or {}, "shrink_room": da.get("shrink_room") or {},
+            "forced_runs_by_cut": da.get("forced_runs_by_cut") or {},
+            "class_mismatch": len(mism), "class_mismatch_rows": mism[:20]}
 
 
 def connection_rows(route: dict) -> list:
@@ -435,6 +459,11 @@ def columns(cp: dict | None) -> dict:
         out[f"d_{r['class']}"] = r["drawn"]
         out[f"k_{r['class']}"] = r["kicad"]
     cs = cp.get("connections") or []
+    ab = cp.get("absorb") or {}
+    for f in ("F1", "F2", "F3", "F4", "F5", "F6", "F7"):
+        if ab:
+            out[f"d_{f}"] = (ab.get("drawn") or {}).get(f, 0)
+            out[f"k_{f}"] = None if ab.get("kicad") is None else ab["kicad"].get(f, 0)
     out["detour_gt_1_5"] = sum(1 for c in cs if (c.get("detour") or 0) > DETOUR_FLAG)
     out["vias_plan_ne_drawn"] = sum(1 for c in cs if "vias planned != drawn" in c["flags"])
     return out

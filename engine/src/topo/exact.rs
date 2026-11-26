@@ -1196,7 +1196,7 @@ mod tests {
                 let mut graze = dr.graze_viols(wire, &items);
                 assert_eq!(vs0, graze);
                 if g.int(0, 1) == 0 {
-                    let fake = Viol { kind: "connection_width", at: p, layer, depth_nm: 1000.0, len_nm: w, against: "own-net pad or via".into(), via: false };
+                    let fake = Viol { kind: "connection_width", at: p, layer, depth_nm: 1000.0, len_nm: w, against: "own-net pad or via".into(), via: false, src: crate::topo::draw::ViolSrc::default() };
                     vs0.push(fake.clone());
                     graze.push(fake);
                 }

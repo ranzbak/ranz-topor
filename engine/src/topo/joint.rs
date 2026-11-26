@@ -54,6 +54,20 @@ pub enum CutClass {
     Redrawn,
 }
 
+impl CutClass {
+    /// Its snake-case name (draw-absorb A0 provenance, result.json `violations[].prov.cut`).
+    pub fn name(self) -> &'static str {
+        match self {
+            CutClass::Static => "static",
+            CutClass::Predicted => "predicted",
+            CutClass::Gap => "gap",
+            CutClass::NoBand => "no_band",
+            CutClass::Junction => "junction",
+            CutClass::Redrawn => "redrawn",
+        }
+    }
+}
+
 /// How a drawn run came about (one per [`WireOut::runs`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RunSrc {
