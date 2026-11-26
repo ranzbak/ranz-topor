@@ -323,14 +323,26 @@ fn thick_dive_grouping_one_side_move() {
 /// M3 end sites (`site_planned` on, `site_lanes` off, `site_slack` 0) and ω off: only the end site (via 3, between F4 and B2
 /// in one traversal) is measured on the taut tracks; it has no room there (predicted), so the
 /// TopoR loop reroutes P (its via 3 moves above the crossers' ends of room): 1 drawn clearance
-/// item (B2 against P, 0.05 mm) instead of main's 6 (2 shorts). Without the option: main's 6.
+/// item (B2 against P, 0.05 mm) instead of main's 6 (2 shorts). Without the option and with the
+/// draw-via-neck keys off (main's drawing): main's 6. draw-via-neck r5 (verifier F5): the
+/// drawing's via shift (`via_shift_mm`, default 1) also takes the off arm's vias out of the
+/// crossers (1 item left, a B2 short), so the control arm pins the keys off; the on arm keeps
+/// the defaults and stays free of shorts.
 #[test]
 fn thick_dive_grouping_end_sites_only() {
     let m = thick_dive_grouping();
-    let o = |on: bool| route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(on)), ("via_site_slack", serde_json::json!(0.0))]);
-    let (on, off) = (o(true), o(false));
+    let dvn_off = [("via_shift_mm", serde_json::json!(0.0)), ("neck_trim", serde_json::json!(false)), ("pad_tip_anchor", serde_json::json!(false))];
+    let o = |on: bool, main_draw: bool| {
+        let mut v = vec![("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(on)), ("via_site_slack", serde_json::json!(0.0))];
+        if main_draw {
+            v.extend(dvn_off.iter().cloned());
+        }
+        route(&m, &v)
+    };
+    let (on, on_main, off) = (o(true, false), o(true, true), o(false, true));
     let shorts = |r: &RouteResult| r.violations.iter().filter(|v| v.kind == "short").count();
     assert_eq!((off.violations.len(), shorts(&off)), (6, 2), "main: {:?}", off.violations);
+    assert!(on_main.violations.len() < off.violations.len() && shorts(&on_main) == 0, "{:?}", on_main.violations);
     assert!(on.violations.len() < off.violations.len() && shorts(&on) == 0, "{:?}", on.violations);
 }
 

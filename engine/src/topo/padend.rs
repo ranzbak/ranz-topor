@@ -218,6 +218,82 @@ impl Drawer<'_> {
     /// not in the index yet: the class is kept); else, or with no legal `t`, `None` (the run
     /// stays). The octilinear stage's axis exit then applies (its previous node lies past the
     /// tip). O(9 tries x (checker query + live objects + bands)).
+    /// draw-via-neck C r5 (verifier F4, tw2_metric reverse_draw_order): the tip anchors of the
+    /// reserved end runs, decided once after the joint commit and before any run is drawn, so the
+    /// draw order decides nothing (TopoR way: decide early; the drawing only realises). r3 decided
+    /// each anchor when its run was drawn, against the anchors already drawn: of three diagonals
+    /// into a pad row the middle one anchored only when its right neighbour had been drawn (and
+    /// anchored) before it. Here every reserved end run (`r` = 0 or the last run of the plan) is
+    /// tried in (wire, run) order against the index as the joint commit left it (the reserved
+    /// bands, the anchors taken so far) and the bands not reserved; an anchor replaces the run's
+    /// reservation (its copper at the full width, as r3's attempt -1 drew it). Sweeps repeat until
+    /// none adds an anchor (an anchor frees the next pad's tip; at most 4 sweeps), so the set is a
+    /// fixpoint of the order-free rule. Runs without a reservation are still decided when drawn.
+    /// O(sweeps x reserved end runs x `tip_anchor_path`).
+    pub fn tip_anchor_reserved(&mut self, plans: &std::collections::BTreeMap<WireId, super::draw::Plan>) {
+        if !self.opts.pad_tip_anchor {
+            return;
+        }
+        let mut done: std::collections::BTreeSet<(WireId, usize)> = std::collections::BTreeSet::new();
+        for _ in 0..4 {
+            let mut added = false;
+            let keys: Vec<(WireId, usize)> = self.joint.reserved.keys().copied().filter(|k| !done.contains(k)).collect();
+            for (w, r) in keys {
+                let Some(plan) = plans.get(&w) else { continue };
+                let n = plan.layers.len();
+                if r != 0 && r + 1 != n {
+                    continue;
+                }
+                let Some(res) = self.joint.reserved.get(&(w, r)) else { continue };
+                if res.pts.len() < 2 {
+                    continue;
+                }
+                let layer = plan.layers[r];
+                let mut skip: Vec<usize> = res.handles.iter().map(|&h| self.handles[h].0).collect();
+                skip.sort_unstable();
+                let (s0, e0) = (res.pts[0], res.pts[res.pts.len() - 1]);
+                let mut p = res.pts.clone();
+                let mut moved = false;
+                for end in [0usize, 1] {
+                    if (end == 0 && r != 0) || (end == 1 && r + 1 != n) {
+                        continue;
+                    }
+                    if let Some(np) = self.tip_anchor_path(w, end, layer, &p, &skip) {
+                        p = np;
+                        moved = true;
+                    }
+                }
+                if !moved {
+                    continue;
+                }
+                let items = self.run_items(w, layer, &p);
+                let old = self.joint.reserved.remove(&(w, r)).expect("reserved");
+                let cur = self.joint.cur.replace(w);
+                for h in old.handles {
+                    self.uncommit(h);
+                }
+                self.joint.cur = cur;
+                let hs: Vec<usize> = items.iter().map(|it| self.commit(it)).collect();
+                for &h in &hs {
+                    let id = self.handles[h].0;
+                    self.joint.owner.insert(h, w);
+                    self.joint.band_ids.insert(id, (w, h));
+                }
+                // The band the drawing reads (attempt -1, the later wires' corridors) is the anchored one.
+                if let Some(rb) = self.erbs.get_mut(&w).and_then(|v| v.iter_mut().find(|b| b.layer == layer && (b.s - s0).len() < 1000.0 && (b.e - e0).len() < 1000.0)) {
+                    rb.path = p.clone();
+                }
+                self.joint.reserved.insert((w, r), super::joint::Reserved { pts: p, items, handles: hs, pneck: None, octi: false });
+                self.stats.tip_anchored += 1;
+                done.insert((w, r));
+                added = true;
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+
     pub(super) fn tip_anchor_path(&self, w: WireId, end: usize, layer: usize, path: &[Vec2], skip: &[usize]) -> Option<Vec<Vec2>> {
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];

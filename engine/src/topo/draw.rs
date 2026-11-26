@@ -2855,9 +2855,10 @@ impl<'a> Drawer<'a> {
         // labelled with the nearest traversal) leaves its runs through the neighbouring
         // triangles: the chords there are tested too (the via never lands past a crossing the
         // plan put after it, so the layer change keeps the class). A site inside is tested in
-        // its own triangle alone, as before.
+        // its own triangle alone, as before. Only with `via_shift_mm` > 0 (r5, verifier F5: the
+        // test ran ungated and changed main's copper on topo_thick_layer's thick_dive_grouping).
         let pr = &self.b.proj;
-        let tris: Vec<super::state::TriId> = if super::state::point_in_poly(p, &pr.tris[t].map(|v| pr.pos[v])) {
+        let tris: Vec<super::state::TriId> = if self.opts.via_shift_mm <= 0.0 || super::state::point_in_poly(p, &pr.tris[t].map(|v| pr.pos[v])) {
             vec![t]
         } else {
             let n = wi.tris.len();
@@ -3660,7 +3661,9 @@ impl<'a> Drawer<'a> {
             // from the bands alone: esp IO8_SCL lost its reserved band). The run's reservation
             // (the old tail) goes; the anchored band is then checked like any attempt -1.
             let band = match band {
-                Some(b) if self.opts.pad_tip_anchor && b.len() >= 2 && (r == 0 || r == plan.layers.len() - 1) => {
+                // r5: a reserved run's anchor was decided before any run was drawn
+                // (`tip_anchor_reserved`, order-free); only runs without a reservation here.
+                Some(b) if self.opts.pad_tip_anchor && res.is_none() && b.len() >= 2 && (r == 0 || r == plan.layers.len() - 1) => {
                     let mut skip: Vec<usize> = res.iter().flat_map(|x| &x.handles).map(|&h| self.handles[h].0).collect();
                     skip.sort_unstable();
                     let mut p = b.clone();
