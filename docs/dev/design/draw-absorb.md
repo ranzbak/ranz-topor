@@ -228,6 +228,39 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
   (`a_shrink_next_to_a_pad_has_no_width_step_in_the_pad`), plus the joint commit, the graded shallow case and the
   no-floor case.
 
+**A1b as built (2026-11-27): `[drawing] reserved_keep_neck`**, default false (since 0.5.0, unreleased); off = main
+copper (hash on 4 boards).
+
+- **RCA (does main draw wider than the plan?).** Yes, on two paths. Both are legal, and on the measured boards none
+  takes planned room:
+  - **Re-anchor** (`padend.rs` `tip_anchor_reserved`). It fires only when the full width passes the checker over the
+    whole band against statics, vias and every reserved band. The neck it drops belongs to the plan's hook into the
+    pad side (draw-via-neck Q3), not to the tip path it draws. The user-approved Q3 expectation is "the bar ends
+    straight on the pad's axis leg below the tip at 0.28", near full width.
+  - **Adopted band's octilinear form** (`draw.rs`, the `real` closure). Main's `realise` necks the octi points at the
+    widest width that passes. That width can be above the reserved neck width.
+  - The meter is `route.erbs.unnecked_list` (`at` = `tip` / `octi` / `octi_wider`, `room_mm` = the length where the
+    wider copper raises `via_plan_price` over the reserved width).
+
+  | board (det s0 C1) | tip | octi_wider | room taken |
+  |---|---|---|---|
+  | qmtech | 1 (1.07 mm) | 5 (11.06 mm) | 0 mm |
+  | esp | 0 | 1 (1.01 mm) | 0 mm |
+- **Key on:**
+  - The re-anchor draws the band's necked items (`kept_neck_items`: the plan zones at the reserved width, trimmed and
+    grown by `fit_neck_with`).
+  - The octilinear form keeps main's form when it is no wider than reserved. Otherwise it takes the kept-neck items
+    if they are legal.
+  - Counted: `kept_neck`.
+- **Measured (det s0 C1, r2 4c440a4e, vs off):**
+  - unnecked 6 -> 0 on qmtech and 1 -> 0 on esp.
+  - esp: DRC 17 -> 14 (F5 8 -> 4, F7 3 -> 4).
+  - qmtech: DRC 223 -> 226 and F4 26 -> 31. A new 6-item clearance cluster on ADV_TXC+/- / ADV_TX0- at
+    (134.91, 68.84) appears and a 3-item one at ADV_TX2 goes. The cause is ADV_AVDD's kept neck: the HDMI pairs drawn
+    after it take other forms, and USB1 TX0-/TX1-/TXC- detour goes 1.06 -> 1.36.
+  - The key stays off. It contradicts Q3 at the tip, and the planned room main's wider copper would take is 0 on
+    these boards.
+
 ### A2. Re-taut neighbours of a forced wire (local rubber-band update, RBU)
 - **What.** Before a wire W is forced:
   1. Take N = the drawn wires that W's best candidate hits, the movable hits from `viols_of`. They are ordered by
@@ -268,6 +301,26 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
 - **Via-plan.** Vias are sleeve features with fixed points. Better planned points (plan moves) mean fewer conflicts.
 - **Patterns.** `band_conflict_pair`: two wires through two consecutive gaps where the per-portal radii disagree.
   Main: one band rejected, then drawn with a detour or forced. Expected: both taut, side by side.
+
+**Why no over-full cut predicted the qmtech gap pairs (Goal 3 RCA, 2026-11-27; no code).**
+- Method: `TOPO_ERBS_DUMP` of off qmtech det s0 C1 (the dump now carries every cut with its slack), then
+  `tools/draw_absorb_gap_rca.py`.
+- The cut test was right: there was room.
+  - 24 ERBS model gaps: 22 `common_cut_fits`, 2 `at_terminal`.
+  - For each `common_cut_fits` gap, a cut carrying both bands lies within 0.041 mm of the gap. Its slack is
+    0.345-33.7 mm (median 5.17 mm), and none is below one pitch.
+  - The gaps are shallow: median 0.103 mm, max 0.467 mm.
+- The fault is the realisation between cuts:
+  - Each stretch's ERBS is computed on its own through its own spoke tips. Portals overlap on slack cuts.
+  - The spacing holds along each cut, but not perpendicular to an oblique segment near a neighbour's bend.
+  - Dayan's spacing claim (p. 26) assumes per-portal consistent radii, and that is not proven for our inflated
+    sketch (§2.5).
+- How the joint commit's gap pairs relate to the ERBS gaps:
+  - 15 of the 24 pairs are ERBS gaps.
+  - 9 are copper-only, from octi / realise shapes.
+  - Of A1's 9 remaining pairs, 7 are `common_cut_fits` and 2 are copper-only.
+- Plan-side item for later: a per-pair spacing check in the ERBS with order-aware portals, i.e. a joint sweep over a
+  band component (A4 / Staepelaere's joint layer pass). A cut-count test cannot see this fault.
 
 ### A4. Joint octilinear form per band component (only if A0 shows it is needed)
 - **What.** Replace the per-wire octi DP for a component of bands that share passes with Staepelaere's joint
