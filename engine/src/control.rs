@@ -21,7 +21,7 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Progress snapshot of a run. Monotone over a run: `iteration` is cumulative over the
@@ -242,6 +242,13 @@ pub struct Progress {
     /// summed over the threads that built one (0 while sketches are off).
     #[serde(default)]
     pub sketch_build_s: f64,
+    /// pause-button: the run is paused (the progress dialog's Pause), and the seconds it was paused
+    /// so far (left out of every time the limit counts; the plugin leaves them out of its router
+    /// time). Read live by [`RunControl::snapshot`].
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub paused_s: f64,
 }
 
 /// last-preview: a picture of one result for the progress dialog's board image (user 2026-11-19):
@@ -441,7 +448,20 @@ pub struct TimeLimit {
     /// `LIMIT_NONE` = not (yet). From then on the limit's clock stands still and the limit no
     /// longer applies: no deadline, never passed, nothing cut.
     draw_ns: AtomicU64,
+    /// pause-button (user 2026-11-26): the run's clock and its pause gate ([`TimeLimit::pause`]).
+    /// One atomic, so a reader never sees a torn pair: with [`CLOCK_FROZEN`] set, the clock value
+    /// (ns since `start`) it stands still at; else the paused nanoseconds so far (the clock =
+    /// wall ns since `start` minus them).
+    clock: AtomicU64,
+    /// The pause gate's lock and wake-up: [`TimeLimit::hold`] waits on it while paused.
+    pause_m: Mutex<()>,
+    pause_cv: Condvar,
+    /// Times a work thread waited at the gate ([`TimeLimit::hold`]; tests and the log).
+    holds: AtomicU64,
 }
+
+/// [`TimeLimit`]'s `clock`: the clock is frozen (paused); the other bits hold its value.
+const CLOCK_FROZEN: u64 = 1 << 63;
 
 /// What the soft time limit lets finish (operate.md, `timeout_mode`): with `[optimize] loop =
 /// "topor"` the initial routing (plane stubs, projection, topological search, layer assignment and
@@ -571,7 +591,7 @@ const LIMIT_NONE: u64 = u64::MAX - 1;
 
 impl Default for TimeLimit {
     fn default() -> TimeLimit {
-        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0), harden_ns: AtomicU64::new(LIMIT_NONE), draw_ns: AtomicU64::new(LIMIT_NONE) }
+        TimeLimit { start: Instant::now(), ns: AtomicU64::new(LIMIT_UNSET), changed: AtomicBool::new(false), hard: AtomicBool::new(false), cap_ns: AtomicU64::new(LIMIT_NONE), capped: AtomicBool::new(false), cut: AtomicU8::new(0), grace_ns: AtomicU64::new(LIMIT_NONE), grace_hit: AtomicBool::new(false), wait_ns: AtomicU64::new(0), wait_runs: AtomicU64::new(0), cycle_dropped: AtomicBool::new(false), soft: Mutex::new(Vec::new()), whole_cycle: AtomicBool::new(false), cut_in_wait: AtomicBool::new(false), draw_grace_ns: AtomicU64::new(LIMIT_NONE), draw_grace_hit: AtomicBool::new(false), draw_grace_erbs: AtomicU64::new(0), harden_ns: AtomicU64::new(LIMIT_NONE), draw_ns: AtomicU64::new(LIMIT_NONE), clock: AtomicU64::new(0), pause_m: Mutex::new(()), pause_cv: Condvar::new(), holds: AtomicU64::new(0) }
     }
 }
 
@@ -584,6 +604,91 @@ impl TimeLimit {
         }
         let ns = seconds * 1e9;
         if ns >= (LIMIT_NONE - 1) as f64 { LIMIT_NONE - 1 } else { (ns as u64).max(1) }
+    }
+
+    /// Wall nanoseconds since `start`. O(1).
+    fn wall_ns(&self) -> u64 {
+        self.start.elapsed().as_nanos().min(u128::from(CLOCK_FROZEN - 1)) as u64
+    }
+
+    /// pause-button: nanoseconds on the run's clock since `start`: wall time less the paused time;
+    /// it stands still while the run is paused ([`TimeLimit::pause`]). Every time the limit
+    /// counts (the limit, its grace, the drawing bound, the overrun cap, the optimizing and
+    /// drawing seconds) is on this clock. O(1), lock-free.
+    pub fn clock_ns(&self) -> u64 {
+        let s = self.clock.load(Ordering::Acquire);
+        if s & CLOCK_FROZEN != 0 { s & !CLOCK_FROZEN } else { self.wall_ns().saturating_sub(s) }
+    }
+
+    /// The run's clock as an instant (`start` + [`TimeLimit::clock_ns`]): what every limit instant
+    /// ([`TimeLimit::deadline`], [`TimeLimit::draw_bound`], [`TimeLimit::cap_instant`]) and the
+    /// core's own instants compared with them (the round's 1 s floor, the loop's share, the drawing's
+    /// start) are measured against, never `Instant::now()`. Stands still while paused. O(1).
+    pub fn now(&self) -> Instant {
+        self.start + Duration::from_nanos(self.clock_ns())
+    }
+
+    /// pause-button: pause the run. The clock stands still from now on and every work thread waits
+    /// at its next stop test ([`TimeLimit::hold`]) until [`TimeLimit::resume`]. `false` when it was
+    /// paused already. O(1), any thread.
+    pub fn pause(&self) -> bool {
+        let _g = self.pause_m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let s = self.clock.load(Ordering::Acquire);
+        if s & CLOCK_FROZEN != 0 {
+            return false;
+        }
+        let v = self.wall_ns().saturating_sub(s);
+        self.clock.store(v | CLOCK_FROZEN, Ordering::Release);
+        true
+    }
+
+    /// pause-button: go on after [`TimeLimit::pause`]: the clock runs again from where it stood
+    /// and the waiting threads wake. `false` when it was not paused. A stop request (Accept,
+    /// Cancel) and the job's end resume by themselves ([`RunControl::request_stop`]). O(1).
+    pub fn resume(&self) -> bool {
+        let _g = self.pause_m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let s = self.clock.load(Ordering::Acquire);
+        if s & CLOCK_FROZEN == 0 {
+            return false;
+        }
+        let paused = self.wall_ns().saturating_sub(s & !CLOCK_FROZEN);
+        self.clock.store(paused, Ordering::Release);
+        self.pause_cv.notify_all();
+        true
+    }
+
+    /// The run is paused. O(1).
+    pub fn is_paused(&self) -> bool {
+        self.clock.load(Ordering::Relaxed) & CLOCK_FROZEN != 0
+    }
+
+    /// Seconds the run was paused so far (wall less the run's clock). O(1).
+    pub fn paused_s(&self) -> f64 {
+        self.wall_ns().saturating_sub(self.clock_ns()) as f64 * 1e-9
+    }
+
+    /// Times a work thread waited at the pause gate. O(1).
+    pub fn holds(&self) -> u64 {
+        self.holds.load(Ordering::Relaxed)
+    }
+
+    /// pause-button: the pause gate of the work threads' stop tests ([`RunControl::is_cancelled`],
+    /// [`stop_requested`], [`cancelled`], the drawing's ERBS test, ...): while the run is paused,
+    /// wait here (no CPU) until it resumes. Not paused: one relaxed load. Never called under a
+    /// lock that the resume (`pause_m` only) or the dialog's poll (the progress lock, the sketch
+    /// slots) takes. A work lock held here (a run's slot in the TopoR loop, core.rs `runs[k]`) is
+    /// fine: a thread that waits on it idles too, and no release path (Resume, Accept, Cancel,
+    /// the job's end) takes it. O(1) when not paused.
+    pub fn hold(&self) {
+        if !self.is_paused() {
+            return;
+        }
+        self.holds.fetch_add(1, Ordering::Relaxed);
+        let mut g = self.pause_m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.is_paused() {
+            // a bounded wait: a resume between the test and the wait is seen within 100 ms anyway
+            g = self.pause_cv.wait_timeout(g, Duration::from_millis(100)).unwrap_or_else(std::sync::PoisonError::into_inner).0;
+        }
     }
 
     /// The run's own limit (`Options::wall_clock_s`, 0 = none), only when nobody set one yet. O(1).
@@ -673,7 +778,7 @@ impl TimeLimit {
     /// Only a step that began before the limit counts: a run idle at the limit (waiting at the
     /// draw gate) whose drawing begins later has no wait of its own.
     fn soft_enter(&self, run: u32, round: u32, stage: &str) {
-        let now = self.start.elapsed().as_nanos().min(u128::from(LIMIT_NONE - 1)) as u64;
+        let now = self.clock_ns().min(LIMIT_NONE - 1);
         let key = (!stage.is_empty()).then(|| (round, soft_key(stage, self.whole_cycle.load(Ordering::Relaxed))));
         let Ok(mut v) = self.soft.lock() else { return };
         let i = run as usize;
@@ -700,7 +805,7 @@ impl TimeLimit {
 
     fn note_wait(&self) {
         if let Some(d) = self.deadline() {
-            let ns = Instant::now().saturating_duration_since(d).as_nanos().min(u128::from(u64::MAX / 2)) as u64;
+            let ns = self.now().saturating_duration_since(d).as_nanos().min(u128::from(u64::MAX / 2)) as u64;
             self.wait_ns.fetch_max(ns, Ordering::Relaxed);
         }
     }
@@ -807,7 +912,7 @@ impl TimeLimit {
     /// The stop test of an optional pass of the drawing: the limit passed and the drawing bound
     /// ([`TimeLimit::draw_bound`]) with it; noted for the report when true. O(1).
     pub fn draw_grace_over(&self, draw_start: Instant) -> bool {
-        let over = self.passed() && self.draw_bound(draw_start).is_some_and(|b| Instant::now() >= b);
+        let over = self.passed() && self.draw_bound(draw_start).is_some_and(|b| self.now() >= b);
         if over {
             self.draw_grace_hit.store(true, Ordering::Relaxed);
         }
@@ -853,7 +958,7 @@ impl TimeLimit {
     /// seconds): the limit acts as the hard one from now on ([`TimeLimit::is_hard`]). O(1).
     pub fn harden(&self) {
         self.capped.store(true, Ordering::Relaxed);
-        let ns = (self.start.elapsed().as_nanos() as u64).min(LIMIT_NONE - 1);
+        let ns = self.clock_ns().min(LIMIT_NONE - 1);
         let _ = self.harden_ns.compare_exchange(LIMIT_NONE, ns, Ordering::Relaxed, Ordering::Relaxed);
     }
 
@@ -912,14 +1017,15 @@ impl TimeLimit {
     /// start when it began off the clock ([`TimeLimit::enter_drawing`]), else since the start. O(1).
     pub fn elapsed_s(&self) -> f64 {
         match self.draw_ns.load(Ordering::Relaxed) {
-            LIMIT_NONE => self.start.elapsed().as_secs_f64(),
+            LIMIT_NONE => self.clock_ns() as f64 * 1e-9,
             ns => ns as f64 * 1e-9,
         }
     }
 
-    /// Wall seconds since the start, the drawing included. O(1).
+    /// Seconds on the run's clock since the start, the drawing included (pause-button: the paused
+    /// time left out, [`TimeLimit::clock_ns`]). O(1).
     pub fn wall_s(&self) -> f64 {
-        self.start.elapsed().as_secs_f64()
+        self.clock_ns() as f64 * 1e-9
     }
 
     /// time-limit-fix r2: the optimizing phase has ended and the final drawing begins now (the
@@ -927,7 +1033,7 @@ impl TimeLimit {
     /// the limit no longer applies to what follows (the drawing of the picked variants, their via
     /// reduction and pour stitching): the drawing is not counted. The first call counts. O(1).
     pub fn enter_drawing(&self) {
-        let ns = (self.start.elapsed().as_nanos() as u64).clamp(1, LIMIT_NONE - 1);
+        let ns = self.clock_ns().clamp(1, LIMIT_NONE - 1);
         let _ = self.draw_ns.compare_exchange(LIMIT_NONE, ns, Ordering::Relaxed, Ordering::Relaxed);
     }
 
@@ -968,7 +1074,7 @@ impl TimeLimit {
 
     /// The limit has passed (as it stands now). O(1).
     pub fn passed(&self) -> bool {
-        self.deadline().is_some_and(|d| Instant::now() >= d)
+        self.deadline().is_some_and(|d| self.now() >= d)
     }
 
     /// The limit is reached now (M2.TL, the plugin's CPU clock: it reached its own limit and the
@@ -1061,6 +1167,23 @@ impl RunControl {
         let ok = ok.unwrap_or_else(|| self.progress.lock().is_ok_and(|p| p.stable));
         let _ = self.stop_kind.compare_exchange(0, if ok { STOP_OK } else { STOP_CANCEL }, Ordering::SeqCst, Ordering::SeqCst);
         self.cancel.store(true, Ordering::SeqCst);
+        // pause-button: a stop ends a pause (Accept while paused draws the best so far, Cancel while
+        // paused frees the threads within seconds); after the flag, so a woken thread sees it
+        self.limit.resume();
+    }
+
+    /// pause-button (user 2026-11-26): the progress dialog's Pause. The run's clock stands still
+    /// (no paused time counts toward the limit, its grace, the drawing bound or the overrun cap) and
+    /// every work thread waits at its next stop test, so the engine uses no CPU within about a
+    /// second; [`RunControl::resume`] goes on with the same run (the same copper as without the
+    /// pause). A stop request resumes by itself. `false` = it was paused already. O(1).
+    pub fn pause(&self) -> bool {
+        self.limit.pause()
+    }
+
+    /// pause-button: go on after [`RunControl::pause`]; `false` = it was not paused. O(1).
+    pub fn resume(&self) -> bool {
+        self.limit.resume()
     }
 
     /// The dialog's Cancel (limit-p3p4, user rule: Cancel takes no results): the caller abandons
@@ -1076,6 +1199,7 @@ impl RunControl {
 
     /// [`RunControl::request_discard`] was called: nothing is to be drawn or judged. O(1).
     pub fn is_discarded(&self) -> bool {
+        self.limit.hold(); // pause-button: a stop test of the work threads (the drawing's)
         self.discard.load(Ordering::SeqCst)
     }
 
@@ -1085,7 +1209,11 @@ impl RunControl {
         self.cancel.load(Ordering::SeqCst) && self.stop_kind.load(Ordering::SeqCst) == STOP_OK
     }
 
+    /// The stop test of the work threads: a stop was requested. pause-button: while paused it
+    /// waits here first ([`TimeLimit::hold`]); the caller (the progress snapshot, a Python call)
+    /// that must never wait reads [`RunControl::cancel`] itself. O(1) when not paused.
     pub fn is_cancelled(&self) -> bool {
+        self.limit.hold();
         self.cancel.load(Ordering::Relaxed)
     }
 
@@ -1101,6 +1229,7 @@ impl RunControl {
 
     /// The run's wall-clock limit has passed (read live at every check). O(1).
     pub fn over_limit(&self) -> bool {
+        self.limit.hold(); // pause-button: a stop test of the work threads
         self.limit.passed()
     }
 
@@ -1115,6 +1244,7 @@ impl RunControl {
     /// The run's time limit has passed: the step that runs finishes and no new one starts (M2.TL
     /// soft limit). Records the step that ran when it passed ([`Progress::limit_step`]). O(1).
     pub fn limit_reached(&self) -> bool {
+        self.limit.hold(); // pause-button: a stop test of the work threads (before any lock)
         let passed = self.limit.passed();
         if passed {
             self.with_progress(|p| {
@@ -1131,7 +1261,9 @@ impl RunControl {
     /// [`Progress::notice`]) are read live. O(1).
     pub fn snapshot(&self) -> Progress {
         let mut p = self.progress.lock().map(|p| p.clone()).unwrap_or_default();
-        p.limit_reached = self.limit.passed() && !self.is_cancelled() && p.phase != "done";
+        // never waits at the pause gate: read by the caller's thread (the plugin's poll)
+        p.limit_reached = self.limit.passed() && !self.cancel.load(Ordering::Relaxed) && p.phase != "done";
+        (p.paused, p.paused_s) = (self.limit.is_paused(), self.limit.paused_s());
         // time-limit-fix r2: the limit's clock (optimizing time) and the final drawing apart
         (p.optimize_s, p.draw_s, p.drawing) = (self.limit.elapsed_s(), self.limit.drawing_s(), self.limit.in_drawing());
         if p.limit_reached {
@@ -1264,16 +1396,34 @@ impl RunControl {
     }
 }
 
+/// What [`cancelled`] reads: the cancel flag and (pause-button) the run's clock with its pause gate.
+type CancelState = (Arc<AtomicBool>, Option<Arc<TimeLimit>>);
+
 thread_local! {
-    static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    static CANCEL: RefCell<Option<CancelState>> = const { RefCell::new(None) };
 }
 
-/// Whether the run of the current thread was cancelled. O(1).
+/// Whether the run of the current thread was cancelled. pause-button: with the run's limit
+/// installed ([`with_cancel_of`]) it waits at the pause gate first. O(1) when not paused.
 pub fn cancelled() -> bool {
-    CANCEL.with(|c| {
-        c.borrow()
-            .as_ref()
-            .is_some_and(|f| f.load(Ordering::Relaxed))
+    // hold() touches no thread-local: waiting inside the borrow is fine (no clone on this hot path)
+    let r = CANCEL.with(|c| {
+        c.borrow().as_ref().map(|(f, l)| {
+            if let Some(l) = l {
+                l.hold();
+            }
+            f.load(Ordering::Relaxed)
+        })
+    });
+    // pause-button: the projection's code also runs in the drawing (the sheets of cutflow::measure),
+    // with no cancel flag but a lane gate (`with_gate`): its cancel tests are pause points there
+    r.unwrap_or_else(|| {
+        GATE.with(|g| {
+            if let Some(l) = g.borrow().as_ref() {
+                l.hold();
+            }
+        });
+        false
     })
 }
 
@@ -1281,7 +1431,17 @@ pub fn cancelled() -> bool {
 /// before comes back after `f`, also when it panics. cancel-fix: the projection of the board
 /// (`[capacity] model = "cuts"`: minutes on a large board) has no `RunControl` to ask. O(1) + `f`.
 pub fn with_cancel<R>(flag: Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<Arc<AtomicBool>>);
+    with_cancel_state((flag, None), f)
+}
+
+/// [`with_cancel`] with `ctl`'s cancel flag and its limit's pause gate (pause-button: the
+/// projection pauses at its cancel tests too). O(1) + `f`.
+pub fn with_cancel_of<R>(ctl: &RunControl, f: impl FnOnce() -> R) -> R {
+    with_cancel_state((ctl.cancel.clone(), Some(ctl.limit.clone())), f)
+}
+
+fn with_cancel_state<R>(flag: CancelState, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<CancelState>);
     impl Drop for Restore {
         fn drop(&mut self) {
             let prev = self.0.take();
@@ -1347,7 +1507,54 @@ pub fn test_mark(point: &str) {
 /// work loops that have no `RunControl` (the topology and label moves of P3/P4 and their cut
 /// prices, M0). Cheap: one atomic load, and a clock read only with a limit set. O(1).
 pub fn stop_requested() -> bool {
-    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always, _)| f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut()) || (LOOP_SCOPE.with(|s| s.get()) && l.grace_over())))
+    // pause-button: wait at the pause gate first (hold() touches no thread-local)
+    STOP.with(|c| c.borrow().as_ref().is_some_and(|(f, l, always, _)| { l.hold(); f.load(Ordering::Relaxed) || ((*always || l.is_hard()) && l.passed() && l.note_cut()) || (LOOP_SCOPE.with(|s| s.get()) && l.grace_over()) }))
+}
+
+thread_local! {
+    /// pause-button: the pause gate of a pool lane ([`with_gate`]): the lanes of the drawing's units
+    /// ([`crate::topo::par`]) run without the run's thread-locals, so they get its gate here.
+    static GATE: RefCell<Option<Arc<TimeLimit>>> = const { RefCell::new(None) };
+}
+
+/// pause-button: wait at the pause gate of this thread's run while it is paused ([`TimeLimit::hold`]),
+/// without any stop test: the pause point of long work loops that have no stop test of their own
+/// (the capacity model build, the drawing's band order, the octilinear DP's nodes). The gate is the
+/// run's ([`with_control`], [`with_cancel_of`]) or the lane's ([`with_gate`]); none: nothing. Never
+/// call it under a lock (see [`TimeLimit::hold`]). O(1) when not paused.
+pub fn pause_point() {
+    if STOP.with(|c| c.borrow().as_ref().map(|s| s.1.hold()).is_some()) {
+        return;
+    }
+    if GATE.with(|g| g.borrow().as_ref().map(|l| l.hold()).is_some()) {
+        return;
+    }
+    CANCEL.with(|c| {
+        if let Some((_, Some(l))) = c.borrow().as_ref() {
+            l.hold();
+        }
+    });
+}
+
+/// pause-button: this thread's pause gate (the one [`pause_point`] waits at), for the lanes it starts. O(1).
+pub fn gate() -> Option<Arc<TimeLimit>> {
+    STOP.with(|c| c.borrow().as_ref().map(|s| s.1.clone()))
+        .or_else(|| GATE.with(|g| g.borrow().clone()))
+        .or_else(|| CANCEL.with(|c| c.borrow().as_ref().and_then(|s| s.1.clone())))
+}
+
+/// pause-button: runs `f` with `gate` as this thread's pause gate (a pool lane of the run that made
+/// it, [`gate`]); the gate before comes back after `f`, also when it panics. O(1) + `f`.
+pub fn with_gate<R>(gate: Option<Arc<TimeLimit>>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<TimeLimit>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            GATE.with(|g| *g.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(GATE.with(|g| g.replace(gate)));
+    f()
 }
 
 thread_local! {
@@ -2011,4 +2218,105 @@ mod tests {
         ctl.limit.note_cycle_dropped();
         assert!(ctl.limit.cycle_dropped());
     }
+
+    /// pause-button: the run's clock stands still while paused (now, elapsed, the limit), the
+    /// paused seconds add up over pauses, and pause / resume are idempotent.
+    #[test]
+    fn a_pause_freezes_the_run_clock_and_adds_up() {
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(!ctl.limit.is_paused() && ctl.limit.paused_s() < 0.005);
+        assert!(ctl.pause() && !ctl.pause(), "the second pause is a no-op");
+        let (c0, n0, e0) = (ctl.limit.clock_ns(), ctl.limit.now(), ctl.limit.elapsed_s());
+        assert!(c0 >= 25_000_000 && e0 >= 0.025, "the paused clock keeps the time run so far: {c0} ns");
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(ctl.limit.clock_ns(), c0);
+        assert_eq!(ctl.limit.now(), n0);
+        assert_eq!(ctl.limit.elapsed_s(), e0);
+        assert!(ctl.limit.paused_s() >= 0.055, "{}", ctl.limit.paused_s());
+        let p = ctl.snapshot();
+        assert!(p.paused && p.paused_s >= 0.055);
+        assert!(ctl.resume() && !ctl.resume(), "the second resume is a no-op");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(ctl.limit.clock_ns() > c0, "the clock goes on after Resume");
+        assert!(ctl.pause());
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert!(ctl.resume());
+        let ps = ctl.limit.paused_s();
+        assert!((0.095..0.5).contains(&ps), "two pauses add up: {ps}");
+        assert!((ctl.limit.wall_ns() - ctl.limit.clock_ns()) as f64 * 1e-9 >= 0.095);
+        assert!(!ctl.snapshot().paused);
+    }
+
+    /// pause-button: a limit does not pass while paused; it passes on the run's clock after Resume.
+    #[test]
+    fn the_limit_does_not_pass_while_paused() {
+        let ctl = RunControl::new();
+        ctl.limit.init(0.05);
+        assert!(ctl.pause());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!ctl.limit.passed(), "the limit does not pass while paused"); // (limit_reached would wait at the gate)
+        assert!(ctl.resume());
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(ctl.limit.passed());
+    }
+
+    /// pause-button: the stop tests wait at the gate while paused (no spin) and go on at Resume; a
+    /// stop request ends the pause (Accept and Cancel never wait for Resume).
+    #[test]
+    fn the_stop_tests_wait_while_paused_and_a_stop_ends_the_pause() {
+        for stop in [0, 1] {
+            let ctl = RunControl::new();
+            ctl.limit.init(600.0);
+            assert!(ctl.pause());
+            let c2 = ctl.clone();
+            let h = std::thread::spawn(move || {
+                let t = std::time::Instant::now();
+                let cancelled = c2.is_cancelled();
+                (t.elapsed().as_secs_f64(), cancelled)
+            });
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            assert!(!h.is_finished(), "the stop test waits while paused");
+            assert!(ctl.limit.holds() >= 1);
+            if stop == 0 {
+                assert!(ctl.resume());
+            } else {
+                ctl.request_stop(Some(false));
+                assert!(!ctl.limit.is_paused(), "a stop request ends the pause");
+            }
+            let (waited, cancelled) = h.join().expect("thread");
+            assert!((0.2..2.0).contains(&waited), "waited {waited}");
+            assert_eq!(cancelled, stop == 1);
+        }
+    }
+
+    /// pause-button: pause_point and the projection's cancel test wait at a lane's gate
+    /// (`with_gate`), and do nothing without one.
+    #[test]
+    fn a_lane_gate_makes_the_cancel_test_a_pause_point() {
+        assert!(!cancelled());
+        pause_point();
+        let ctl = RunControl::new();
+        ctl.limit.init(600.0);
+        assert!(ctl.pause());
+        for which in ["cancelled", "pause_point"] {
+            assert!(ctl.pause() || ctl.limit.is_paused());
+            let g = Some(ctl.limit.clone());
+            let h = std::thread::spawn(move || {
+                with_gate(g, || {
+                    let t = std::time::Instant::now();
+                    let c = if which == "cancelled" { cancelled() } else { pause_point(); false };
+                    (t.elapsed().as_secs_f64(), c)
+                })
+            });
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!h.is_finished(), "{which} waits at the lane's gate");
+            assert!(ctl.resume());
+            let (waited, c) = h.join().expect("thread");
+            assert!(waited >= 0.15 && !c, "{which}: {waited} {c}");
+        }
+        assert!(gate().is_none(), "the gate is the lane's only");
+    }
+
 }

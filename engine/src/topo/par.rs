@@ -125,12 +125,14 @@ pub fn map_leased<T: Sync, R: Send>(lease: lanes::Lease, items: &[T], f: impl Fn
         c.set(k.wrapping_add(1));
         k % 16 == 0
     });
+    // pause-button: the lanes wait at the caller's pause gate (their pause points, the ERBS stop test)
+    let gate = crate::control::gate();
     let unit = |i: usize| {
         if rev && i < 8 {
             std::thread::sleep(std::time::Duration::from_millis(8 - i as u64));
         }
         // a unit runs without the drawing's mode: it never fans out again
-        with_mode(None, false, || f(i, &items[i]))
+        crate::control::with_gate(gate.clone(), || with_mode(None, false, || f(i, &items[i])))
     };
     let k = lease.lanes().min(n).max(1);
     UNITS_LANED.fetch_add(n, Ordering::Relaxed);
@@ -315,10 +317,12 @@ pub fn crew<J: Send + Sync, U: Send, R>(lease: lanes::Lease, unit: impl Fn(&J, u
         cv: std::sync::Condvar::new(),
     };
     let unit_ref: &(dyn Fn(&J, usize) -> U + Sync) = &unit;
+    let gate = crate::control::gate(); // pause-button: the lanes wait at the caller's pause gate
     let r = rayon::in_place_scope(|s| {
         for _ in 1..k {
             let sh = &sh;
-            s.spawn(move |_| crew_lane(sh, unit_ref));
+            let g = gate.clone();
+            s.spawn(move |_| crate::control::with_gate(g, || crew_lane(sh, unit_ref)));
         }
         // the lanes leave when `body` ends, also when it panics
         struct Stop<'b, J, U>(&'b CrewShared<J, U>);

@@ -169,13 +169,15 @@ WORDING: dict[str, dict[str, str]] = {
         "limit_hint": "The limit counts optimizing time; the drawing after it is not counted. 0 = no limit. A limit "
                       "below the time spent ends the optimizing now, keeping the best result.",
         # one short line; the full text is its tooltip (user 2026-11-11)
-        "cancel_hint": "Accept keeps the best result so far. Cancel takes nothing.",
+        "cancel_hint": "Accept keeps the best result so far. Cancel takes nothing. Pause frees the CPU.",
         "cancel_hint_tip": "Accept stops the run and takes the best result so far (the best shown here is exactly the "
                            "board you get; the DRC and the preview follow, and you can still reject it there). Cancel "
                            "stops at once and takes no result: the board stays exactly as it was. \"Routes stable\" "
                            "does not stop the run: waiting longer may still find small gains. The time limit counts "
                            "optimizing time only and is an emergency stop: the drawing after it, KiCad's DRC and the "
-                           "preview come on top.",
+                           "preview come on top. Pause stops the router within about a second so the computer is free "
+                           "for other work; Resume goes on with the same run and gives the same result. Paused time "
+                           "does not count toward the time limit. Accept and Cancel also work while paused.",
         "score_waiting": "Waiting for round 1…",
         "cancel": "Cancel",
         # two buttons for the whole run (user 2026-11-22): Accept = stop and take the best so far, Cancel = stop at
@@ -185,6 +187,13 @@ WORDING: dict[str, dict[str, str]] = {
         "phase_stable": "Routes stable",
         "title_stable": "Topor — Routing {board} — Routes stable",
         "phase_finishing": "Accept pressed: finishing the current stage{stage}… {s} s",
+        # pause-button (user 2026-11-26): Pause frees the CPU; Resume goes on with the same run (same result)
+        "pause": "Pause",
+        "resume": "Resume",
+        "pause_tip": "Pause: the router stops within about a second and uses no CPU, so you can use the computer for "
+                     "other work. Paused time does not count toward the time limit. Resume goes on with the same run "
+                     "(the same result as without the pause); Accept and Cancel also work while paused.",
+        "phase_paused": "Paused {t}: no CPU used, the time limit stands still. Resume goes on.",
         "round_value": "{round}",
         "gain_label": "Gain",
         "gain_value": "{gain} % / {window} rounds",
@@ -1262,7 +1271,7 @@ class ProgressDialog(_Base):
     run's clock; 0 = no limit; below the time spent = stop now). A change is kept in ``limit_request`` until the run
     flow takes it (``WxUi.time_limit_request``); the run reports the limit it applies back in ``Progress.limit_s``."""
     _wk = "progress"
-    TAB_ORDER = ("limit", "limit_set", "limit_add5", "limit_add15", "cancel", "accept")
+    TAB_ORDER = ("limit", "limit_set", "limit_add5", "limit_add15", "pause", "cancel", "accept")
     LIMIT_MAX_S = 86400.0  # schema range of run.timeout_s
 
     def __init__(self, board: str, timeout_s: float = 0.0, iteration_cap: int | None = None, stable_window: int = 4,
@@ -1292,6 +1301,11 @@ class ProgressDialog(_Base):
         self.accepted = False  # Accept: stop and take the best so far
         self.discarded = False  # Cancel: stop at once, take nothing (also after an Accept, which it overrides)
         self.cancelled_at: float | None = None
+        # pause-button: the user wants the run paused (Pause pressed, not yet Resume / Accept / Cancel); the run flow
+        # reads it (WxUi.pause_wanted) and pauses the engine job or kicad-cli; `pausable`: a step that can pause runs
+        self.paused_wanted = False
+        self.paused_at: float | None = None
+        self.pausable = False
         W = WORDING["progress"]
 
         # the phase never widens the dialog: a fixed width, a long stage name ends in "…" (full text: tooltip)
@@ -1366,6 +1380,17 @@ class ProgressDialog(_Base):
             self.root.Add(self.button_row(("accept", "accept", "a"), ("cancel", "cancel", "c")), 0, wx.EXPAND)
         self.cancel_button = self.buttons["cancel"]
         self.accept_button = self.buttons["accept"]
+        # pause-button: [Pause] right before [Cancel] [Accept] (the same bar), tab order before Cancel
+        self.pause_button = wx.Button(self, wx.ID_ANY, _mn(W["pause"], "p"), name="pause")
+        self.pause_button.SetMinSize(wx.Size(max(self.FromDIP(88), self.pause_button.GetBestSize().width,
+                                                 self.pause_button.GetTextExtent(W["resume"] + "MM").width), -1))
+        self.pause_button.SetToolTip(W["pause_tip"])
+        self.buttons["pause"] = self.pause_button
+        bar_row = self.root.GetChildren()[-1].GetSizer()
+        bar_row.Insert(bar_row.GetItemCount() - 1, self.pause_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.row)
+        self.pause_button.MoveBeforeInTabOrder(self.cancel_button)
+        self.pause_button.Bind(wx.EVT_BUTTON, self._on_pause)
+        self.pause_button.Disable()  # enabled once a step that can pause runs (update: Progress.pausable)
         self.cancel_button.Bind(wx.EVT_BUTTON, self._on_cancel)
         self.accept_button.Bind(wx.EVT_BUTTON, self._on_accept)
         self.Bind(wx.EVT_CLOSE, self._on_cancel)  # the window's close box = Cancel
@@ -1653,6 +1678,11 @@ class ProgressDialog(_Base):
         return st
 
     def set_phase(self, phase: str, stage: str = "", notice: str = "") -> None:
+        if self.paused_wanted and not self.cancelled:
+            # pause-button: the line says the run is paused, and for how long (the dialog's own clock)
+            t = _fmt_time(time.monotonic() - (self.paused_at or time.monotonic()))
+            self._phase_label(WORDING["progress"]["phase_paused"].format(t=t))
+            return
         if notice and not self.cancelled and phase in ("setup", "route"):
             # M2.TL: the time limit is reached; the engine finishes the step that runs (Cancel stops now)
             self._phase_label(WORDING["progress"]["phase_limit"].format(notice=notice[:1].upper() + notice[1:]))
@@ -1688,6 +1718,24 @@ class ProgressDialog(_Base):
     def _on_accept(self, evt) -> None:
         self.accept()
 
+    def _on_pause(self, evt) -> None:
+        self.toggle_pause()
+
+    def toggle_pause(self) -> None:
+        """pause-button: Pause <-> Resume. Pause: the run flow pauses the engine job (or kicad-cli) at its next poll:
+        no CPU, the time limit stands still; Resume goes on with the same run. Nothing after Accept / Cancel or while
+        no step that can pause runs."""
+        if self.cancelled or not self.pausable:
+            return
+        self._set_paused(not self.paused_wanted)
+        self.set_phase(self._phase, getattr(getattr(self, "_last", None), "stage", "") or "")
+
+    def _set_paused(self, on: bool) -> None:
+        W = WORDING["progress"]
+        self.paused_wanted = on
+        self.paused_at = time.monotonic() if on else None
+        self.pause_button.SetLabel(_mn(W["resume" if on else "pause"], "r" if on else "p"))
+
     def _on_key(self, evt) -> None:
         """Esc = Cancel. Enter never presses Accept or Cancel (user 2026-11-22: Enter = Accept only if it cannot fire by
         accident, and during an unattended run it can): in the limit field it sets the limit, on a focused limit button
@@ -1713,7 +1761,11 @@ class ProgressDialog(_Base):
             stage=f" ({stage})" if stage and not self.discarded else "", s=s))
 
     def _stop(self) -> None:
-        """The first stop request (Accept or Cancel): the run flow ends the run at its next ``progress`` call."""
+        """The first stop request (Accept or Cancel): the run flow ends the run at its next ``progress`` call. A pause
+        ends with it (pause-button: Accept while paused draws the best, Cancel while paused drops the run)."""
+        if self.paused_wanted:
+            self._set_paused(False)
+        self.pause_button.Disable()
         self.cancelled = True
         self.cancelled_at = time.monotonic()
         self._sync_limit_controls()
@@ -1751,6 +1803,13 @@ class ProgressDialog(_Base):
 
     def update(self, p: Progress) -> None:
         W = WORDING["progress"]
+        # pause-button: Pause acts only while a step that can pause runs (an engine job, a kicad-cli step); when none
+        # runs any more (the job ended) the pause is over
+        self.pausable = bool(getattr(p, "pausable", False)) and not self.cancelled
+        if not self.pausable and self.paused_wanted:
+            self._set_paused(False)
+        if self.pause_button.IsEnabled() != self.pausable:
+            self.pause_button.Enable(self.pausable)
         self.set_stable(bool(getattr(p, "stable", False)))
         self.set_phase(p.phase, getattr(p, "stage", ""), getattr(p, "notice", "") if getattr(p, "limit_reached", False) else "")
         if self.cancelled or not (p.phase == "route" and p.total > 0):
@@ -2343,6 +2402,12 @@ class WxUi:
         pressed (or no progress dialog). The run flow sends it to the engine, which latches it. O(1)."""
         dlg = self._progress
         return dlg.ok_at_press if dlg is not None and dlg.cancelled else None
+
+    def pause_wanted(self) -> bool:
+        """pause-button: the user has the run paused (Pause pressed, no Resume / Accept / Cancel since). The run flow
+        pauses the engine job or kicad-cli while it is True. O(1)."""
+        dlg = self._progress
+        return bool(dlg is not None and dlg.paused_wanted and not dlg.cancelled)
 
     def stop_discards(self) -> bool:
         """True once Cancel was pressed (sticky, also after an Accept): the run flow drops the run at once and takes

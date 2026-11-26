@@ -652,8 +652,10 @@ pub fn flow_items(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64) 
 /// [`flow_items`] gives them (stretch, band segment, then wraps), with the caller's scratch: the
 /// planner's per-edit walk (shopping list 3.1). O(band segments x cuts along them + wraps).
 pub fn flow_items_into(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], via_r: f64, sc: &mut SegScratch, out: &mut Vec<(usize, FlowItem)>) {
+    // pause-button: one pause point per stretch (the drawing's band order of a layer: seconds on a large board)
     out.clear();
     for &si in mine {
+        crate::control::pause_point();
         let s = &sts[si];
         if s.band.len() < 2 {
             continue;

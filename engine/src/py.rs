@@ -117,7 +117,8 @@ fn via_sizes(rules_json: String, net: i32, options_json: String) -> PyResult<Str
 }
 
 /// A routing run on its own thread: `progress()` (JSON of `control::Progress`), `cancel(ok=None)`,
-/// `reach_limit()` (M2.TL: the caller's clock reached the limit),
+/// `reach_limit()` (M2.TL: the caller's clock reached the limit), `pause()` / `resume()` / `paused()`
+/// (pause-button: no CPU and the clock stands still while paused),
 /// `set_time_limit(seconds)` / `time_limit()` (the live wall-clock limit, seconds since the job
 /// started, `0` / `None` = no limit; `control::TimeLimit`), `done()`, `wait()` (blocks with the GIL
 /// released; the `RouteResult` JSON, idempotent).
@@ -176,6 +177,25 @@ impl RouteJob {
         self.ctl.limit.harden();
     }
 
+    /// pause-button (user 2026-11-26, the progress dialog's Pause): the engine's work threads wait
+    /// at their next stop test (no CPU within about a second) and the job's clock stands still
+    /// (paused time counts toward no limit, grace or bound); `resume()` goes on with the same run,
+    /// giving the same copper. `cancel` / `discard` end a pause by themselves. `progress()` says
+    /// `paused` and `paused_s`. Returns whether the state changed. O(1).
+    fn pause(&self) -> bool {
+        self.ctl.pause()
+    }
+
+    /// pause-button: go on after `pause()`; returns whether it was paused. O(1).
+    fn resume(&self) -> bool {
+        self.ctl.resume()
+    }
+
+    /// pause-button: the job is paused. O(1).
+    fn paused(&self) -> bool {
+        self.ctl.limit.is_paused()
+    }
+
     /// The wall-clock limit now (seconds since the job started); `None` = no limit.
     fn time_limit(&self) -> Option<f64> {
         self.ctl.limit.seconds()
@@ -232,9 +252,20 @@ fn route_async(model_json: String, options_json: String) -> PyResult<RouteJob> {
     let c2 = ctl.clone();
     let job = Job::spawn(move || {
         let res = crate::route::route_with(&model, &opts, &c2);
+        c2.limit.resume(); // pause-button: a pause never outlives its job (the clock runs again)
         result_json(&res)
     });
     Ok(RouteJob { ctl, job })
+}
+
+/// pause-button: a job dropped while paused (nobody can resume it any more) is discarded, so its
+/// threads end instead of waiting at the pause gate for ever. Not paused: nothing changes. O(1).
+impl Drop for RouteJob {
+    fn drop(&mut self) {
+        if self.ctl.limit.is_paused() {
+            self.ctl.request_discard();
+        }
+    }
 }
 
 /// TEST HOOK, not part of the plugin API: `topor` never calls it and nothing in `topor.toml` or the

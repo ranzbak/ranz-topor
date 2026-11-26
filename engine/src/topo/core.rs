@@ -300,7 +300,7 @@ pub fn route_topo(model: &BoardModel, opts: &Options, ctl: &RunControl, post: &m
     let t_fx = Instant::now();
     // Cancel / OK during the projection (cancel-fix; the cut room of `[capacity] model = "cuts"`
     // took 150-200 s on qmtech and did not look at Cancel): the sheets stop at once and no run begins.
-    let fx = crate::control::with_cancel(ctl.cancel.clone(), || Fixed::build(model, opts, &stubs));
+    let fx = crate::control::with_cancel_of(ctl, || Fixed::build(model, opts, &stubs));
     if std::env::var_os("TOPO_TIMES").is_some() {
         eprintln!("[topo call] projection built once (decomposition, triangulation, cut room): {:.3} s", t_fx.elapsed().as_secs_f64());
     }
@@ -3495,8 +3495,18 @@ fn existing_plane_vias(model: &BoardModel) -> Vec<planes::PlaneVia> {
 /// TW3 `draw_row`: a draw-only round: no initial routing, no rip-up rounds, no loop; the row's
 /// state and its run's pre-loop decisions ([`PreLoop`]) are restored and drawn (a run draws the
 /// rows of the call's four bests that no other run draws, [`DrawGate::assign`]).
+///
+/// pause-button: the round's thread has the run's pause gate ([`crate::control::with_gate`]), so
+/// the pause points of its work without a stop test of their own (the via relocation, the
+/// octilinear straightening, the sheets' cancel tests) wait there while paused, also outside a
+/// step's `with_control` (the drawing of a pick).
 #[allow(clippy::type_complexity)]
 fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective, &dyn Fn(&LiveLoop)), draw_row: Option<&Assigned>) -> (RoundOut, Hints, Memory) {
+    crate::control::with_gate(Some(ctl.limit.clone()), || route_round_in(model, opts, ctl, hints, mem, round, stubs, fx, fluct0, gate, draw_row))
+}
+
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(usize, usize, f64)], mem: &Memory, round: usize, stubs: &PlaneStubs, fx: &Fixed, fluct0: f64, gate: (usize, &DrawGate, &Objective, &dyn Fn(&LiveLoop)), draw_row: Option<&Assigned>) -> (RoundOut, Hints, Memory) {
     // TOPO_TIMES=1 (debug): phase times on stderr; never part of the result.
     let times = std::env::var_os("TOPO_TIMES").is_some();
     let tlog = |what: &str, t: Instant| {
@@ -3507,7 +3517,9 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     };
     let hist0: &[f64] = &mem.edge;
     let t0 = Instant::now();
-    let floor = t0 + std::time::Duration::from_secs(1); // a round gets at least 1 s, also past the limit
+    // pause-button: the floor is on the run's clock (`TimeLimit::now`: paused time left out), as the
+    // limit instants it is compared with
+    let floor = ctl.limit.now() + std::time::Duration::from_secs(1); // a round gets at least 1 s, also past the limit
     // `[optimize] loop = "topor"`: after the loop the one drawing runs through an OK / Cancel (only
     // the time limit cuts it), so the loop's picked variant always reaches the copper.
     let draw_through = std::cell::Cell::new(false);
@@ -3527,7 +3539,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     // begins), so the report names what the limit cut.
     let cut_step = std::cell::Cell::new(CutStep::Plan);
     let stop_now = || cancelled() || ctl.is_cancelled();
-    let limit_cut = || !draw_exempt.get() && !soft() && ctl.deadline().is_some_and(|d| Instant::now() >= d.max(floor)) && ctl.limit.note_cut_in(cut_step.get());
+    let limit_cut = || !draw_exempt.get() && !soft() && ctl.deadline().is_some_and(|d| ctl.limit.now() >= d.max(floor)) && ctl.limit.note_cut_in(cut_step.get());
     // limit-p3p4 (F10): the layer assignment, rip-up and moves of the initial plan (P3/P4, from the
     // first layering until the TopoR loop) are bounded like the TopoR loop step: with the soft
     // limit, past the limit plus `[run] limit_grace_s` their stop checks end them and the plan so
@@ -4674,6 +4686,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     if topor {
         use super::optimise::{criteria_of, evaluation, foreign_copper, foreign_copper_only, k_osc, layers_now, layers_now_only, optimise_shared, reroute_set, LoopReport, Shared, wire_amp, CycleCtx, CycleStats, Emphasis, Gen, LoopParams, Predicted, Rerouter, Space, VIA_FACTORS};
         let t_loop = Instant::now();
+        let t_loop_c = ctl.limit.now(); // pause-button: the loop's share counts on the run's clock
         /// TW5 (a): the factor index of the violation weight's own oscillation (apart from the
         /// registry's factors).
         const VIOL_FACTOR: usize = 1 << 20;
@@ -4684,7 +4697,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // time-limit-fix r2: share >= 1 (the default) = no extra stop, the loop runs to the limit (the
         // final drawing after it is not counted, `[run] timeout_scope = "optimizing"`).
         let share = opts.loop_time_share.clamp(0.05, 1.0);
-        let loop_deadline = || if share >= 1.0 { None } else { ctl.deadline().map(|d| t_loop + d.saturating_duration_since(t_loop).mul_f64(share)) };
+        let loop_deadline = || if share >= 1.0 { None } else { ctl.deadline().map(|d| t_loop_c + d.saturating_duration_since(t_loop_c).mul_f64(share)) };
         let n_sig = if b.n_signal == 0 { proj.n_layers } else { b.n_signal };
         let tiers: Vec<u8> = (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect();
         // 5.2 (price = criterion): the predicted violations of a state with its layering, the one
@@ -7273,7 +7286,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         // (no new step begins); inside a cycle only Cancel / OK stops it with the soft limit (the
         // cycle finishes and is offered), with `hard` the limits too. A cycle Cancel cut short is
         // not offered (Cancel = the best variant kept so far).
-        let loop_over = || loop_deadline().is_some_and(|d| Instant::now() >= d);
+        let loop_over = || loop_deadline().is_some_and(|d| ctl.limit.now() >= d);
         // Fair slots (sync-wait; user 2026-11-17 "free the slot"): before each cycle the run gives
         // its compute slot to a waiting run that is behind it (not begun yet, or fewer cycles
         // finished, [`Slots::turn`]) and goes on when it is the lowest waiter again; with fewer
@@ -7730,6 +7743,8 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
     }
     let lr = lr;
     let t_draw = Instant::now();
+    // pause-button: the drawing's start on the run's clock (the drawing bound, `drawing_grace_s`)
+    let t_draw_c = ctl.limit.now();
     // par-draw phase A: the drawing's order-free units run on `[drawing] draw_lanes` lanes (results
     // folded in unit order: the copper does not depend on the lanes), until this round returns.
     let _par = super::par::set_mode(Some(super::refine_par::lanes::mode_of(opts.draw_lanes)), opts.draw_test_reverse);
@@ -8378,7 +8393,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
             deadline: if erbs_soft { None } else { ctl.deadline().map(|d| d.max(floor)) },
             stop: (!draw_through.get()).then(|| ctl.cancel.clone()),
             limit: Some(ctl.limit.clone()),
-            draw_start: erbs_soft.then_some(t_draw),
+            draw_start: erbs_soft.then_some(t_draw_c),
             floor: Some(floor),
             fail_first: ctl.test_point("fail erbs sleeve"),
             octi_order: super::erbs::OctiOrder::parse(&opts.octi_order).unwrap_or_else(|| {
@@ -9155,7 +9170,7 @@ fn route_round(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &[(u
         ctl.test_point("via reduction begin");
         let grace_stop = std::cell::Cell::new(false);
         let draw_grace_over = || {
-            let over = !ctl.is_cancelled() && ctl.limit.draw_grace_over(t_draw);
+            let over = !ctl.is_cancelled() && ctl.limit.draw_grace_over(t_draw_c);
             if over {
                 grace_stop.set(true);
             }
