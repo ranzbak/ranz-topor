@@ -115,7 +115,7 @@ fn necks_at_both_ends_keep_the_full_width_room_in_the_middle_of_the_plan() {
 }
 
 // ------------------------------------------------------------------------------ end to end
-// The PROPOSED patterns of harness/neckrg_patterns.py (models: harness.radii_patterns.model_fixture,
+// The patterns of harness/neckrg_patterns.py (APPROVED, user 2026-11-26) (models: harness.radii_patterns.model_fixture,
 // engine/tests/fixtures/neckrg); PWR is 0.5 mm with a 0.2 mm floor.
 
 use topor_engine::control::RunControl;
