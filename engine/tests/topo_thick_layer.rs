@@ -325,7 +325,7 @@ fn thick_dive_grouping_one_side_move() {
 /// TopoR loop reroutes P (its via 3 moves above the crossers' ends of room): 1 drawn clearance
 /// item (B2 against P, 0.05 mm) instead of main's 6 (2 shorts). Without the option and with the
 /// draw-via-neck keys off (main's drawing): main's 6. draw-via-neck r5 (verifier F5): the
-/// drawing's via shift (`via_shift_mm`, default 1) also takes the off arm's vias out of the
+/// drawing's via shift (`via_shift_mm`, default 1 until r6, opt-in since) also takes the off arm's vias out of the
 /// crossers (1 item left, a B2 short), so the control arm pins the keys off; the on arm keeps
 /// the defaults and stays free of shorts.
 #[test]

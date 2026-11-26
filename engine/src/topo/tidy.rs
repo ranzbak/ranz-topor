@@ -357,6 +357,211 @@ pub fn off_centre_pad_ends(model: &BoardModel, items: &[Item]) -> (usize, f64) {
     (n, worst)
 }
 
+/// How a track meets a pad of its net off the pad's centre ([`pad_end_breaches`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PadEndKind {
+    /// A track end with nothing else of the net at that point lies inside the pad off its
+    /// centre: the trace ends there.
+    Terminal,
+    /// Two or more track ends meet inside the pad off its centre (a bend or a width step inside
+    /// the pad) and no chain of segments joins that point to a track end at the centre.
+    Junction,
+    /// A segment's copper touches the pad (its centre line crosses it, or its round end overlaps
+    /// it) with no end inside it and no chain to the centre: KiCad may connect it, but the trace
+    /// does not end at the pad's centre.
+    PassThrough,
+    /// A track end inside the pad off its centre that lies on the centre line of a segment of
+    /// the net whose chain reaches the centre (a T onto the trace that ends there, as
+    /// `fuse_branches` makes it): connected to the centre through that copper (KiCad's Cleanup
+    /// keeps it), but the trace itself ends beside the centre. Listed, not a breach of the rule.
+    Tee,
+}
+
+/// One breach of the pad-centre invariant ([`pad_end_breaches`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PadEndBreach {
+    pub kind: PadEndKind,
+    pub net: i32,
+    pub layer: u32,
+    /// `ref.number` of the pad.
+    pub pad: String,
+    /// The track end (KiCad frame, nm); for [`PadEndKind::PassThrough`] the segment's start.
+    pub at: (i64, i64),
+    /// Distance from the pad centre (nm).
+    pub off: f64,
+    /// The pad centre lies within the board-edge clearance (0 included) plus half the track's
+    /// width of the outline: the drawing's pad anchor (padend.rs) and [`pad_ends_off_edge`] move
+    /// such an end off the centre on purpose (edge-clear), still inside the pad.
+    pub edge: bool,
+    /// The track's round end at the pad centre breaks the clearance to a pad of another net or
+    /// to a hole (a track wider than the room round its pad, e.g. a QFN pad next to its
+    /// neighbours): the drawing's pad anchor (padend.rs `pad_anchor`, edge-clear) moves the end
+    /// inside the pad on purpose. The stub from the centre to the moved end would lie wholly in
+    /// the pad, and KiCad's Cleanup deletes such a stub (`TRACKS_CLEANER::deleteTracksInPads`,
+    /// emulated by [`tidy`]), so the end stays where the anchor put it.
+    pub centre_blocked: bool,
+    /// The wire of the track (`TrackItem::wire`).
+    pub wire: Option<usize>,
+}
+
+impl PadEndBreach {
+    /// A breach of the rule (every kind but [`PadEndKind::Tee`]) on a pad whose centre takes the
+    /// track's end (not an edge-clear pad, not a blocked centre).
+    pub fn counts(&self) -> bool {
+        self.kind != PadEndKind::Tee && !self.edge && !self.centre_blocked
+    }
+}
+
+/// draw-via-neck r6 (user 2026-11-26: "every trace still connects to the MIDDLE of its pad,
+/// otherwise KiCad Cleanup deletes it"): the pad-centre invariant on `items` (KiCad frame, as
+/// written; the kept tracks of `model` count as copper of their net). Per pad of a net and per
+/// copper layer of the pad, the segments of the net on that layer whose copper touches the pad
+/// (copper gap <= 0) must all reach a track end at the pad's centre (within 1 um) along chains of
+/// such segments (shared ends): a bend or a width step inside the pad on the way out from the
+/// centre is fine, the trace still ends at the centre. A touching segment that does not is a
+/// breach, by its end in the pad: [`PadEndKind::Terminal`] / [`PadEndKind::Junction`] (one /
+/// several track ends there), [`PadEndKind::Tee`] (the end lies on a reached segment: listed,
+/// see [`PadEndBreach::counts`]), or [`PadEndKind::PassThrough`] (no end in the pad). Ends at a
+/// via of the net are no trace ends (skipped). [`off_centre_pad_ends`] counts only terminal ends
+/// in the pad. A pad no track touches is not judged (the connectivity check's job). Sorted.
+/// O(S x P_net x chain rounds) for S segments and P_net pads of their net.
+pub fn pad_end_breaches(model: &BoardModel, items: &[Item]) -> Vec<PadEndBreach> {
+    // (net, layer) -> segments (a, b, wire, width, drawn); arcs by their chord
+    type L = (P, P, Option<usize>, i64, bool);
+    let mut links: HashMap<(i32, u32), Vec<L>> = HashMap::new();
+    let mut count: HashMap<(i32, u32, P), usize> = HashMap::new();
+    let mut vias: HashSet<(i32, P)> = model.vias.iter().map(|v| (v.net, (v.at.x, -v.at.y))).collect();
+    let mut add = |net: i32, layer: u32, a: P, b: P, wire: Option<usize>, width: i64, drawn: bool| {
+        links.entry((net, layer)).or_default().push((a, b, wire, width, drawn));
+        for q in [a, b] {
+            *count.entry((net, layer, q)).or_insert(0) += 1;
+        }
+    };
+    for it in items {
+        match it {
+            Item::Track(t) => {
+                let (a, b) = match t.prim {
+                    TrackPrim::Seg { a, b } => (p_of(a), p_of(b)),
+                    TrackPrim::Arc { start, end, .. } => (p_of(start), p_of(end)),
+                };
+                add(t.net, t.layer, a, b, t.wire, t.width, true);
+            }
+            Item::Via(v) => {
+                vias.insert((v.net, (v.at.x, v.at.y)));
+            }
+        }
+    }
+    for k in &model.kept {
+        let (a, b) = match k.prim {
+            TrackPrim::Seg { a, b } => (a, b),
+            TrackPrim::Arc { start, end, .. } => (start, end),
+        };
+        let f = |q: IVec2| (i64::from(q.x), -i64::from(q.y));
+        add(k.net, k.layer, f(a), f(b), None, k.width, false);
+    }
+    let mut pads_of: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (pi, pad) in model.pads.iter().enumerate() {
+        if pad.net != 0 {
+            pads_of.entry(pad.net).or_default().push(pi);
+        }
+    }
+    // Edge-clear pads: the end's round copper at the centre comes closer to the outline than the
+    // edge clearance (0 included: the copper would stick out of the board), so the drawing's pad
+    // anchor (padend.rs) or `pad_ends_off_edge` moves the end inside the pad on purpose.
+    let ec = (model.rules.edge_clear() as f64).max(0.0);
+    let edge_on = !model.outline.is_empty() && !model.rules.ignored_checks.iter().any(|c| c == "copper_edge_clearance");
+    let outline = if edge_on { super::board::outline_segments(model) } else { Vec::new() };
+    let near_edge = |c: Vec2, width: i64| edge_on && outline.iter().map(|&(a, b)| super::draw::seg_dist(c, a, b)).fold(f64::INFINITY, f64::min) < ec + 0.5 * width as f64 + 2_000.0;
+    let seg = |a: P, b: P| crate::geom::prim::Seg { a: math(a), b: math(b) };
+    // Blocked centre: the end's disc (width `width`) at the pad centre comes closer than the
+    // required clearance (less 1 um) to a pad of another net on the layer or to a hole.
+    let blocked = |pi: usize, layer: u32, width: i64| {
+        let pad = &model.pads[pi];
+        let c = pad.center.to_vec2();
+        let t = crate::geom::dist::Track { prim: crate::geom::prim::Prim::Seg(crate::geom::prim::Seg { a: c, b: c }), w: width as f64 };
+        let reach = 0.5 * width as f64 + 5_000_000.0;
+        let pads = model.pads.iter().filter(|q| q.net != pad.net && (q.layers.is_empty() || q.layers.contains(&layer)) && (q.center.to_vec2() - c).len() < reach).any(|q| {
+            crate::geom::dist::copper_gap_skeleton(&t, &model.skeleton(q, layer)) < model.required_clearance(pad.net, q) - 1_000.0
+        });
+        let hc = model.rules.hole_clearance.max(0) as f64;
+        let holes = model.holes.iter().any(|h| {
+            let hc2 = h.at.to_vec2();
+            (hc2 - c).len() > 1_000.0 && (hc2 - c).len() - 0.5 * (h.d as f64) - 0.5 * (width as f64) < hc - 1_000.0
+        });
+        pads || holes
+    };
+    let mut out = Vec::new();
+    let mut groups: Vec<(i32, u32)> = links.keys().copied().filter(|k| k.0 != 0).collect();
+    groups.sort_unstable();
+    for (net, layer) in groups {
+        let ls = &links[&(net, layer)];
+        for &pi in pads_of.get(&net).map_or(&[][..], |v| &v[..]) {
+            let pad = &model.pads[pi];
+            if !(pad.layers.is_empty() || pad.layers.contains(&layer)) {
+                continue;
+            }
+            let sk = model.skeleton(pad, layer);
+            let c = pad.center.to_vec2();
+            // The segments whose copper touches the pad.
+            let touch: Vec<usize> = (0..ls.len())
+                .filter(|&i| {
+                    let (a, b, _, w, _) = ls[i];
+                    let t = crate::geom::dist::Track { prim: crate::geom::prim::Prim::Seg(seg(a, b)), w: w as f64 };
+                    crate::geom::dist::copper_gap_skeleton(&t, &sk) <= 0.0
+                })
+                .collect();
+            if !touch.is_empty() {
+                let at_c = |q: P| (math(q) - c).len() <= 1_000.0;
+                let mut reached = vec![false; touch.len()];
+                let mut pts: HashSet<P> = HashSet::new();
+                for (k, &i) in touch.iter().enumerate() {
+                    let (a, b, ..) = ls[i];
+                    if at_c(a) || at_c(b) {
+                        reached[k] = true;
+                        pts.insert(a);
+                        pts.insert(b);
+                    }
+                }
+                let mut grew = true;
+                while grew {
+                    grew = false;
+                    for (k, &i) in touch.iter().enumerate() {
+                        let (a, b, ..) = ls[i];
+                        if !reached[k] && (pts.contains(&a) || pts.contains(&b)) {
+                            reached[k] = true;
+                            pts.insert(a);
+                            pts.insert(b);
+                            grew = true;
+                        }
+                    }
+                }
+                let on_reached = |q: P| touch.iter().enumerate().any(|(k, &i)| reached[k] && crate::geom::dist::point_seg(math(q), &seg(ls[i].0, ls[i].1)) <= 1_000.0);
+                for (k, &i) in touch.iter().enumerate() {
+                    let (a, b, wire, width, drawn) = ls[i];
+                    if reached[k] || !drawn {
+                        continue;
+                    }
+                    let end = [a, b].into_iter().find(|&q| !vias.contains(&(net, q)) && depth(&sk, math(q)) >= 0.0);
+                    if end.is_none() && [a, b].iter().any(|&q| vias.contains(&(net, q))) {
+                        continue;
+                    }
+                    let (kind, at) = match end {
+                        Some(q) if on_reached(q) => (PadEndKind::Tee, q),
+                        Some(q) if count[&(net, layer, q)] == 1 => (PadEndKind::Terminal, q),
+                        Some(q) => (PadEndKind::Junction, q),
+                        None => (PadEndKind::PassThrough, a),
+                    };
+                    let off = if kind == PadEndKind::PassThrough { crate::geom::dist::point_seg(c, &seg(a, b)) } else { (math(at) - c).len() };
+                    out.push(PadEndBreach { kind, net, layer, pad: format!("{}.{}", pad.ref_, pad.number), at, off, edge: near_edge(c, width), centre_blocked: kind != PadEndKind::Tee && blocked(pi, layer, width), wire });
+                }
+            }
+        }
+    }
+    out.sort_by(|x, y| (x.kind, x.net, x.layer, x.at, &x.pad).cmp(&(y.kind, y.net, y.layer, y.at, &y.pad)));
+    out.dedup();
+    out
+}
+
 /// Make `items` (KiCad frame, with `conn[i]` the connection of item `i`) stable under KiCad's
 /// Cleanup Tracks & Vias (module doc). O(see module).
 pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) -> TidyStats {
@@ -831,6 +1036,58 @@ mod tests {
         assert_eq!(off_centre_pad_ends(&m, &foreign).0, 0);
         let outside = vec![seg(1, (0, -1_200_000), (0, -2_000_000))];
         assert_eq!(off_centre_pad_ends(&m, &outside).0, 0);
+    }
+
+    /// draw-via-neck r6: every kind of [`pad_end_breaches`] on one 0.6 x 1.95 mm pad of net 1 at
+    /// the origin (KiCad frame), a 0.25 mm track: a trace from the centre (with a bend inside
+    /// the pad) is no breach; an end off the centre is a Terminal, two there a Junction, a
+    /// segment across the pad with no end in it a PassThrough, an end on the centre trace a Tee
+    /// (listed, not counted); an end at a via, a foreign net and copper outside the pad are not
+    /// judged. A narrow pad next to a pad of another net (the disc at the centre breaks the
+    /// clearance) is a blocked centre and the edge band an edge-clear pad: listed, not counted.
+    #[test]
+    fn pad_end_breaches_classify_every_way_a_track_meets_its_pad() {
+        let m = model_with_pad(1, (0, 0), 600_000, 1_950_000);
+        let kinds = |items: &[Item]| -> Vec<(PadEndKind, bool, i64)> { pad_end_breaches(&m, items).iter().map(|b| (b.kind, b.counts(), b.off.round() as i64)).collect() };
+        assert!(kinds(&[seg(1, (0, 0), (0, -2_000_000))]).is_empty());
+        assert!(kinds(&[seg(1, (0, 0), (0, -500_000)), seg(1, (0, -500_000), (500_000, -1_100_000))]).is_empty(), "a bend inside the pad");
+        assert_eq!(kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000))]), vec![(PadEndKind::Terminal, true, 525_000)]);
+        let j = kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), seg(1, (0, -525_000), (-500_000, -1_100_000))]);
+        assert_eq!(j, vec![(PadEndKind::Junction, true, 525_000)], "one entry per point (dedup)");
+        assert_eq!(kinds(&[seg(1, (-1_000_000, -300_000), (1_000_000, -300_000))]), vec![(PadEndKind::PassThrough, true, 300_000)]);
+        assert_eq!(kinds(&[seg(1, (0, 0), (0, -2_000_000)), seg(1, (0, -600_000), (500_000, -1_100_000))]), vec![(PadEndKind::Tee, false, 600_000)]);
+        let via = Item::Via(crate::model::ViaItem { kind: "via".into(), net: 1, at: crate::model::Pt { x: 0, y: -525_000 }, d: 600_000, drill: 300_000, layers: vec![0, 2], group: None, wire: None });
+        assert!(kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), via]).is_empty());
+        assert!(kinds(&[seg(2, (0, -525_000), (500_000, -1_100_000))]).is_empty());
+        assert!(kinds(&[seg(1, (0, -1_200_000), (0, -2_000_000))]).is_empty());
+        // Blocked centre: a 0.2 mm pad of net 1 and one of net 2 0.25 mm beside it, clearance
+        // 0.24 mm: the 0.25 mm disc at the centre comes 0.225 mm near the other pad.
+        let pads = |gap: i64| {
+            let j = serde_json::json!({
+                "layers": [{"id": 0, "name": "F.Cu"}],
+                "pads": [{"net": 1, "center": [0, 0], "layers": [0], "shapes": {"0": {"kind": "rect", "w": 200_000, "h": 1_000_000}}},
+                         {"net": 2, "center": [200_000 + gap, 0], "layers": [0], "shapes": {"0": {"kind": "rect", "w": 200_000, "h": 1_000_000}}}],
+            });
+            let mut base = serde_json::to_value(BoardModel::default()).expect("model json");
+            for (k, v) in j.as_object().expect("object") {
+                base[k] = v.clone();
+            }
+            let mut m = BoardModel::from_json(&base.to_string()).expect("model");
+            m.rules.min_clearance = 240_000;
+            m
+        };
+        let off = [seg(1, (0, -60_000), (0, -2_000_000))];
+        let b = pad_end_breaches(&pads(250_000), &off);
+        assert_eq!(b.iter().map(|b| (b.kind, b.centre_blocked, b.counts())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, true, false)]);
+        let b = pad_end_breaches(&pads(400_000), &off);
+        assert_eq!(b.iter().map(|b| (b.kind, b.centre_blocked, b.counts())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, false, true)], "room at the centre");
+        // Edge-clear: the pad of `edge_model` within the edge clearance (its centre 1.26 mm from the edge).
+        let em = edge_model(1_200_000, false);
+        let b = pad_end_breaches(&em, &[Item::Track(TrackItem { net: 1, layer: 0, width: 250_000, prim: TrackPrim::Seg { a: iv((2_500_000, 0)), b: iv((-1_000_000, 0)) }, group: None, wire: None })]);
+        assert_eq!(b.iter().map(|b| (b.kind, b.edge, b.counts())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, true, false)]);
+        let em = edge_model(500_000, false);
+        let b = pad_end_breaches(&em, &[Item::Track(TrackItem { net: 1, layer: 0, width: 250_000, prim: TrackPrim::Seg { a: iv((2_500_000, 0)), b: iv((-1_000_000, 0)) }, group: None, wire: None })]);
+        assert_eq!(b.iter().map(|b| (b.kind, b.edge, b.counts())).collect::<Vec<_>>(), vec![(PadEndKind::Terminal, false, true)], "out of the edge band");
     }
 
     fn edge_model(edge_clear: i64, ignored: bool) -> BoardModel {
