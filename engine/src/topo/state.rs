@@ -1018,7 +1018,13 @@ impl<'p> State<'p> {
         let Some((o, d)) = too_close(&pts) else { return false };
         // The even pass points are no path: the wire's taut path at its nominal width through the
         // clearance spans of its passes (the drawing's shortest path), up to the last pass judged.
-        if too_close(&self.taut_prefix(w, end, *ks.last().unwrap())).is_none() {
+        let taut = self.taut_prefix(w, end, *ks.last().unwrap());
+        let tc = too_close(&taut);
+        if std::env::var("TOPO_NECKDBG").is_ok() {
+            let p: Vec<String> = taut.iter().map(|q| format!("({:.3},{:.3})", q.x / 1e6, -q.y / 1e6)).collect();
+            eprintln!("EXITTAUT wire {w} end {end} ks {ks:?} turns {:?} taut [{}] close {tc:?}", wi.turns, p.join(", "));
+        }
+        if tc.is_none() {
             return false;
         }
         // The drawing's axis exit of an elongated pad (`octi::pad_exit`).
