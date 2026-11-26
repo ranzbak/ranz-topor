@@ -156,3 +156,23 @@ Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals 
   from the plan's site: the first legal traversal is not bounded (as with A off). Open: why the redraw, and whether the
   first pick should be kept. JS2_6, JS1_4, SDRAM_A1, MAX_LRCLK back to
   the all-off value.
+
+**r5 (2026-11-26, verifier vfy-via-shift-free-r1; lead: this part verifiable against main on its own).**
+- Defaults vs main: the three keys are new on this branch, all on by default (`via_shift_mm` 1.0, `neck_trim` true,
+  `pad_tip_anchor` true); all three off = main's copper (eprom/wiccon/esp hash, verifier).
+- C (tip anchor) is decided once, before drawing: `Drawer::tip_anchor_reserved` re-anchors every reserved end run at its
+  own pad's tip right after `reserve_bands` (up to 4 sweeps, items, handles, owner and ERBS band updated); the draw-time
+  re-anchor runs only for runs without a reservation. Before, the drawing order decided it (tw2_metric copper changed
+  with the order; mutants A1 / A2).
+- The neighbouring-triangle side test (sites outside their traversal's triangle) is gated on `via_shift_mm` (verifier
+  F5: ungated it changed main's copper on thick_dive_grouping; mutant A3). A ring-only gate (main's own candidates on
+  main's test) was tried and reverted: the pocket pattern's past-X site is one of main's candidates (offset site), it
+  passed and won. Cost on esp: +3V3's via 0 at R11 loses main's site (side false), see the r4 report.
+- Planned-room price (`via_plan_price_in`, shift on): each neighbour wire once, at its deepest slack-weighted
+  intrusion (`neighbour_room_price`): `depth x (1 + PINNED_DEPTH x depth / (depth + slack))`, slack = the packed
+  interval's room on the side away from the via (`pass_slack_away`), PINNED_DEPTH 2. A free neighbour pays its depth (it
+  moves that far), a pinned one (pad exit, full passage) 3x; graded, no cutoff, no per-net rule (lead r5). Counted per
+  traversal (main, shift off) a corridor through 9 small triangles paid 9 times (esp +3V3 via 1 went onto IO8_SCL's
+  pinned pad exit). Unit test: split invariance and slack grading. The quarter-depth floor first tried (free = 0.25 x
+  depth) priced free neighbours below their own move: the pocket test and via_passage_line failed.
+- Squeeze with the shift on: the copper-only room (`via_room_copper`); the planned corridors are in the price above.
