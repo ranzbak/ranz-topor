@@ -19,6 +19,11 @@ fn pair_board() -> BoardModel {
 
 /// [`pair_board`] with the two pads of a pair `dy` mm apart.
 fn pair_board_pitch(dy: f64) -> BoardModel {
+    pair_board_pads(dy, 0.4, false)
+}
+
+/// [`pair_board`] with the pads `dy` mm apart, `pad` mm square, through-hole (both layers, drill pad / 2) when `tht`.
+fn pair_board_pads(dy: f64, pad: f64, tht: bool) -> BoardModel {
     let p = |v: f64| (v * MM).round() as i64;
     let c = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)];
     let segs: Vec<String> = (0..4)
@@ -33,13 +38,14 @@ fn pair_board_pitch(dy: f64) -> BoardModel {
         .iter()
         .enumerate()
         .map(|(i, &(r, num, net, x, y))| {
+            let (attr, layers, drill) = if tht { ("pth", "[0,2]", format!(r#"{{"w":{0},"h":{0}}}"#, p(0.5 * pad))) } else { ("smd", "[0]", "null".to_string()) };
+            let sh = format!(r#"{{"kind":"rect","w":{0},"h":{0}}}"#, p(pad));
+            let shapes = if tht { format!(r#"{{"0":{sh},"2":{sh}}}"#) } else { format!(r#"{{"0":{sh}}}"#) };
             format!(
-                r#"{{"uuid":"p{i}","ref":"{r}","number":"{num}","net":{net},"attr":"smd","center":[{},{}],
-                    "rotation_deg":0.0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{},"h":{}}}}},"drill":null}}"#,
+                r#"{{"uuid":"p{i}","ref":"{r}","number":"{num}","net":{net},"attr":"{attr}","center":[{},{}],
+                    "rotation_deg":0.0,"layers":{layers},"shapes":{shapes},"drill":{drill}}}"#,
                 p(x),
-                p(y),
-                p(0.4),
-                p(0.4)
+                p(y)
             )
         })
         .collect();
@@ -188,4 +194,118 @@ fn one_point_run_with_one_neighbour_is_centred_once() {
     };
     let (yp, yn) = (leg(&rz.p_items), leg(&rz.n_items));
     assert!(((yp + yn) * 0.5 - 5.6 * MM).abs() < 5_000.0, "legs at {yp} / {yn}, pair middle 5.6 mm");
+}
+
+/// One realised pair connection on the pad field: `kind` "both" = F.Cu point, B.Cu run, F.Cu point;
+/// "head" / "tail" = the same with only the first / last point run.
+fn onepoint(dy: f64, pad: f64, tht: bool, kind: &str, centre: bool) -> (BoardModel, diffpair::Realised) {
+    use topor_engine::check::Checker;
+    use topor_engine::geom::Vec2;
+    let model = pair_board_pads(dy, pad, tht);
+    let opts = Options::default();
+    let mut dec = topor_engine::decompose::decompose(&model, &opts, &[0, 2]);
+    let pairs = diffpair::plan(&model, &mut dec);
+    let cp = &pairs.coupled[0];
+    let checker = Checker::new(&model, &opts);
+    let ctx = diffpair::Ctx { model: &model, opts: &opts, checker: &checker, octi: true };
+    let at = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+    let padc = |i: usize| model.pads[i].center.to_vec2();
+    let long = diffpair::pad_long(&model.pads[0]);
+    let (ea, eb) = (diffpair::Ends { p: padc(0), n: padc(1), long }, diffpair::Ends { p: padc(2), n: padc(3), long });
+    let runs = match kind {
+        "both" => vec![(0u32, vec![at(2.0, 5.0)]), (2u32, vec![at(2.0, 5.0), at(18.0, 5.0)]), (0u32, vec![at(18.0, 5.0)])],
+        "head" => vec![(0u32, vec![at(2.0, 5.0)]), (2u32, vec![at(2.0, 5.0), at(18.0, 5.0)])],
+        _ => vec![(2u32, vec![at(2.0, 5.0), at(18.0, 5.0)]), (0u32, vec![at(18.0, 5.0)])],
+    };
+    let idx = topor_engine::check::ItemIndex::new(checker.cell());
+    let rz = diffpair::realise(&ctx, cp, &runs, ea, eb, &idx, centre);
+    (model, rz)
+}
+
+/// The y (mm, board orientation) of the long B.Cu leg of `items`.
+fn bcu_leg_y(items: &[topor_engine::model::Item]) -> f64 {
+    use topor_engine::geom::TrackPrim;
+    use topor_engine::model::Item;
+    items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Track(t) if t.layer == 2 => match t.prim {
+                TrackPrim::Seg { a, b } if a.y == b.y && (b.x - a.x).abs() > 5_000_000 => Some(-f64::from(a.y) / MM),
+                _ => None,
+            },
+            _ => None,
+        })
+        .next()
+        .expect("a long B.Cu leg")
+}
+
+/// Through-hole end pads already reach the B.Cu run: the one-point run is dropped as before, no via
+/// pair lands on the pad holes (KiCad: holes_co_located / hole_to_hole, Cleanup redundant_via).
+#[test]
+fn one_point_run_at_through_hole_pads_adds_no_via() {
+    use topor_engine::check::Checker;
+    for &(dy, pad) in &[(1.2, 0.8), (0.65, 0.4)] {
+        for kind in ["both", "head", "tail"] {
+            let (model, rz) = onepoint(dy, pad, true, kind, true);
+            assert_eq!((rz.p_vias.len(), rz.n_vias.len()), (0, 0), "dy {dy} {kind}: no via pair on a through-hole pad");
+            let all = [rz.p_items.clone(), rz.n_items.clone()].concat();
+            assert!(!all.is_empty(), "{kind}: the B.Cu run is still drawn");
+            let rep = Checker::new(&model, &Options::default()).check_items(&all);
+            assert!(rep.violations.is_empty(), "{:?}", rep.violations);
+        }
+    }
+}
+
+/// The kept one-point run is a straight pad -> via stub on its layer, never pad -> past the via -> back
+/// (KiCad Cleanup would delete such stubs as tracks inside the pad), and where the via centre lies
+/// inside the pad there is no stub at all.
+#[test]
+fn one_point_run_is_a_straight_stub_to_the_via() {
+    use topor_engine::geom::TrackPrim;
+    use topor_engine::model::Item;
+    for &(dy, pad, via_in_pad) in &[(1.2, 0.4, false), (0.65, 0.4, true), (0.5, 0.3, true)] {
+        let (model, rz) = onepoint(dy, pad, false, "both", true);
+        assert_eq!(rz.p_vias.len(), 2, "dy {dy}");
+        for (items, vias, pads) in [(&rz.p_items, &rz.p_vias, [0usize, 2]), (&rz.n_items, &rz.n_vias, [1usize, 3])] {
+            let fcu: Vec<_> = items.iter().filter_map(|it| match it {
+                Item::Track(t) if t.layer == 0 => match t.prim {
+                    TrackPrim::Seg { a, b } => Some((a, b)),
+                    _ => None,
+                },
+                _ => None,
+            }).collect();
+            if via_in_pad {
+                assert!(fcu.is_empty(), "dy {dy}: via centre inside the pad, no F.Cu stub: {fcu:?}");
+                continue;
+            }
+            // One stub per pad: two segments in all, each from a pad centre to its via centre.
+            assert_eq!(fcu.len(), 2, "dy {dy}: one straight stub per pad, got {fcu:?}");
+            for &pi in &pads {
+                let c = model.pads[pi].center.to_vec2();
+                let near = |q: topor_engine::geom::quant::IVec2| ((f64::from(q.x) - c.x).powi(2) + (-f64::from(q.y) - c.y).powi(2)).sqrt() < 2.0;
+                let (a, b) = *fcu.iter().find(|(a, b)| near(*a) || near(*b)).expect("a stub at the pad centre");
+                let far = if near(a) { b } else { a };
+                assert!(vias.iter().any(|(v, _)| ((f64::from(far.x) - v.x).powi(2) + (-f64::from(far.y) - v.y).powi(2)).sqrt() < 2.0), "dy {dy}: the stub ends at its via centre");
+            }
+        }
+    }
+}
+
+/// The one-point run is the LAST of two runs: the real run is centred once on the pair middle,
+/// from the start leg as well (mutant: the start leg left on the P pad's line).
+#[test]
+fn one_point_run_at_the_end_of_two_runs_is_centred() {
+    let (_m, rz) = onepoint(1.2, 0.4, false, "tail", true);
+    assert_eq!((rz.p_vias.len(), rz.n_vias.len()), (1, 1), "one via pair at the tail point");
+    let (yp, yn) = (bcu_leg_y(&rz.p_items), bcu_leg_y(&rz.n_items));
+    assert!(((yp + yn) * 0.5 - 5.6).abs() < 0.005, "legs at {yp} / {yn}, pair middle 5.6 mm");
+}
+
+/// `centre = false`: the legs stay on the lead's centre line (y 5.0), the via pair is still kept.
+#[test]
+fn one_point_run_without_centring_keeps_the_centre_line() {
+    let (_m, rz) = onepoint(1.2, 0.4, false, "both", false);
+    assert_eq!((rz.p_vias.len(), rz.n_vias.len()), (2, 2));
+    let (yp, yn) = (bcu_leg_y(&rz.p_items), bcu_leg_y(&rz.n_items));
+    assert!(((yp + yn) * 0.5 - 5.0).abs() < 0.005, "legs at {yp} / {yn}, centre line 5.0 mm");
 }

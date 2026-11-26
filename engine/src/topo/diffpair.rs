@@ -646,13 +646,22 @@ pub struct ConnStats {
 /// run (`POINT_RUN_NM` long) points along that leg, so the via pair sits square to the pair and the
 /// stubs run from the via to the pad as for any other run. A one-point run in the middle, or the only
 /// run, is still dropped (a layer change there has no run to carry it).
-fn expand_point_runs(runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: bool) -> (Vec<(u32, Vec<Vec2>)>, bool) {
+fn expand_point_runs(model: &BoardModel, runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: bool) -> (Vec<(u32, Vec<Vec2>)>, bool, bool, bool) {
     let mut cl: Vec<(u32, Vec<Vec2>)> = runs.iter().map(|(l, pts)| (*l, clean(pts))).collect();
     let n = cl.len();
     let mid = |e: Ends| (e.p + e.n) * 0.5;
     // The one-point end runs that have a real neighbour run.
-    let head = n >= 2 && cl[0].1.len() == 1 && cl[1].1.len() >= 2;
-    let tail = n >= 2 && cl[n - 1].1.len() == 1 && cl[n - 2].1.len() >= 2 && !(head && n == 2);
+    // A through-hole (or any) end pad that already reaches the neighbour run's layer needs no layer
+    // change: the old drop is right there (a via pair would land on the pad's holes).
+    let reaches = |e: Ends, layer: u32| {
+        let on = |c: Vec2| {
+            let mut it = model.pads.iter().filter(|pd| (pd.center.to_vec2() - c).len() < 1_000.0).peekable();
+            it.peek().is_some() && it.all(|pd| pd.layers.contains(&layer))
+        };
+        on(e.p) && on(e.n)
+    };
+    let head = n >= 2 && cl[0].1.len() == 1 && cl[1].1.len() >= 2 && !reaches(start, cl[1].0);
+    let tail = n >= 2 && cl[n - 1].1.len() == 1 && cl[n - 2].1.len() >= 2 && !(head && n == 2) && !reaches(end, cl[n - 2].0);
     if centre {
         // Each neighbour is moved once, both ends together (a single leg moves by the mean of both).
         let mut shift: BTreeMap<usize, (f64, f64)> = BTreeMap::new();
@@ -700,7 +709,7 @@ fn expand_point_runs(runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, centre: 
             out.push((l, vec![q[m - 1], q[m - 1] + unit(q[m - 1] - q[m - 2]) * POINT_RUN_NM]));
         }
     }
-    (out, done)
+    (out, done, head, tail)
 }
 
 /// Length of the tiny run that keeps a one-point layer change ([`expand_point_runs`]): 0.02 mm.
@@ -753,7 +762,7 @@ fn tracks(net: i32, layer: u32, w: f64, pts: &[Vec2]) -> Vec<Item> {
 pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, end: Ends, idx: &ItemIndex, centre: bool) -> Realised {
     let r = &cp.rule;
     let (w, p) = (r.width as f64, cp.pitch());
-    let (runs, centred) = expand_point_runs(runs, start, end, centre);
+    let (runs, centred, hook_head, hook_tail) = expand_point_runs(ctx.model, runs, start, end, centre);
     let centre = centre && !centred;
     let mut st = ConnStats::default();
     let (mut p_items, mut n_items) = (Vec::new(), Vec::new());
@@ -801,6 +810,31 @@ pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, 
     let nr = runs.len();
     for (k, (layer, pts0)) in runs.iter().enumerate() {
         let (sa, ea) = anchors[k];
+        if (k == 0 && hook_head) || (k + 1 == nr && hook_tail) {
+            // A kept one-point layer change: no coupled line, only a straight stub from each pad to
+            // its via (the tiny run only gives the via pair its direction). A stub whose via centre
+            // lies inside the pad is left out: KiCad Cleanup deletes a track inside a pad, and the via
+            // on the pad connects it.
+            let head = k == 0;
+            let (pad, via) = if head { (sa, ea) } else { (ea, sa) };
+            let mut stub = [0.0f64; 2];
+            for (i, (pp, vv, net)) in [(pad.p, via.p, r.p), (pad.n, via.n, r.n)].into_iter().enumerate() {
+                if via_inside_pad(ctx.model, pp, vv, *layer) {
+                    continue;
+                }
+                let tr = tracks(net, *layer, w, &[pp, vv]);
+                stub[i] = (vv - pp).len();
+                if i == 0 { p_items.extend(tr) } else { n_items.extend(tr) }
+            }
+            st.length_p += stub[0];
+            st.length_n += stub[1];
+            if head {
+                st.fan_start = stub;
+            } else {
+                st.fan_end = stub;
+            }
+            continue;
+        }
         let pts = &if centre {
             let mid = |e: Ends| (e.p + e.n) * 0.5;
             let da = if k == 0 { (mid(start) - pts0[0]).dot(unit(pts0[1] - pts0[0]).perp()) } else { 0.0 };
@@ -872,6 +906,22 @@ pub fn realise(ctx: &Ctx, cp: &Coupled, runs: &[(u32, Vec<Vec2>)], start: Ends, 
     st.gap_dev_len = dl;
     st.gap_dev_max = dm;
     Realised { p_items, n_items, p_vias, n_vias, stats: st }
+}
+
+/// Whether the via at `v` has its centre inside the pad at `c` (on `layer`): a stub from the pad
+/// centre to it would lie wholly inside the pad. Convex pad shapes only (a polygon pad: false). O(pads).
+fn via_inside_pad(model: &BoardModel, c: Vec2, v: Vec2, layer: u32) -> bool {
+    use crate::model::PadShape;
+    let Some(pd) = model.pads.iter().find(|pd| (pd.center.to_vec2() - c).len() < 1_000.0) else { return false };
+    let Some(sh) = pd.shapes.get(&layer).or_else(|| pd.shapes.values().next()) else { return false };
+    let (sin, cos) = pd.rotation_deg.to_radians().sin_cos();
+    let d = v - c;
+    let (x, y) = (d.x * cos + d.y * sin, -d.x * sin + d.y * cos);
+    match sh {
+        PadShape::Circle { d } => (v - c).len() <= 0.5 * *d as f64,
+        PadShape::Rect { w, h } | PadShape::RoundRect { w, h, .. } | PadShape::Oval { w, h } => x.abs() <= 0.5 * *w as f64 && y.abs() <= 0.5 * *h as f64,
+        PadShape::Poly { .. } => false,
+    }
 }
 
 /// `pts` with its first leg moved sideways by `da` and its last by `db` (left positive), the
