@@ -1554,6 +1554,7 @@ impl Drawer<'_> {
             #[allow(clippy::type_complexity)]
             let mut nodes_loop = |mut crew: Option<&mut super::par::Crew<'_, OJob, (Vec<Vec<(usize, f64, (Vec2, f64, f64), (usize, usize, Vec<Leg>))>>, Memo)>>| {
                 for i in 0..n {
+                    crate::control::pause_point(); // pause-button: the DP's node loop (the lanes idle between rounds)
                     let fin: Vec<(usize, f64, Vec2, f64, f64)> = (0..ND).filter(|&d| dist[i][d].is_finite()).map(|d| (d, dist[i][d], last[i][d].0, last[i][d].1, last[i][d].2)).collect();
                     if fin.is_empty() {
                         continue;
@@ -3119,6 +3120,7 @@ impl Drawer<'_> {
         let dbg = std::env::var_os("TOPO_STRDBG").is_some();
         let mut n = 0;
         for r in 0..wo.runs.len() {
+            crate::control::pause_point(); // pause-button: refit trials per corner, no stop test
             let mut cur = drop_collinear(&wo.runs[r].1);
             if cur.len() < 4 {
                 continue;
@@ -3164,6 +3166,7 @@ impl Drawer<'_> {
             let pad_leave_lost = |end: usize, old: Vec2, new: Vec2| -> bool { padc && pads[end].as_ref().is_some_and(|(poly, c, ext)| stub_price(poly, *c, *ext, ww, new, 1.0) > 0.0 && stub_price(poly, *c, *ext, ww, old, 1.0) <= 0.0) };
             let mut i = 0;
             while i + 2 < cur.len() {
+                crate::control::pause_point(); // pause-button: refit trials per corner, no stop test
                 let mut done = false;
                 let full_old = full(&cur);
                 for j in (i + 2..cur.len()).rev() {

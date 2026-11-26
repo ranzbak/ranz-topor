@@ -203,6 +203,19 @@ class E2E:
         _, _, w, h = self.geom(win)
         self.click_rel(win, w - 68, h - 30)
 
+    def click_pause(self, win: str) -> None:
+        """pause-button: click the progress dialog's Pause / Resume button (left of Cancel, which is left of Accept:
+        three buttons of at least 88 DIP side by side at the bottom right)."""
+        _, _, w, h = self.geom(win)
+        self.click_rel(win, w - 272, h - 30)
+
+    def plugin_pid(self):
+        """The plugin's Python process (KiCad starts it from the test home's plugin environment), or None."""
+        env = self.home / ".cache/kicad/10.0/python-environments/org.topor.router/bin/python"
+        r = subprocess.run(["pgrep", "-f", f"^{env}"], capture_output=True, text=True, timeout=X_TIMEOUT_S)
+        pids = r.stdout.split()
+        return int(pids[0]) if pids else None
+
     def key(self, win: str, *keys: str) -> None:
         self.x("xdotool", "windowactivate", "--sync", win)
         time.sleep(0.3)
@@ -945,7 +958,29 @@ def run(a) -> int:
                 time.sleep(0.3)
                 e.shot("accept-pressed", prog[1])
                 e.log(f"Routes stable at {dt:.1f} s: Accept pressed")
-            if prog and a.accept_after is not None and not state["cancelled"] and dt >= a.accept_after:
+            if prog and a.pause_at is not None and not state["cancelled"] and not state.get("paused") \
+                    and not state.get("resumed") and dt >= a.pause_at:
+                # pause-button: running -> Pause -> the plugin uses no CPU, the dialog says paused -> Resume
+                e.shot("pause-running", prog[1])
+                e.click_pause(prog[1])
+                state["paused"], state["pause_t"] = True, dt
+                time.sleep(2.0)  # the engine waits at its next stop test within about a second
+                pid = e.plugin_pid()
+                c0 = e.cpu_ticks(pid) if pid else 0
+                time.sleep(2.0)
+                cores = ((e.cpu_ticks(pid) - c0) / 100.0 / 2.0) if pid else None
+                state["paused_cores"] = cores
+                e.shot("pause-paused", prog[1])
+                e.log(f"Pause clicked at {dt:.1f} s; plugin CPU while paused: {cores} cores (pid {pid})")
+            if prog and state.get("paused") and dt >= state["pause_t"] + a.resume_after:
+                e.shot("pause-before-resume", prog[1])
+                e.click_pause(prog[1])
+                state["paused"], state["resumed"] = False, dt
+                time.sleep(3.0)
+                e.shot("pause-resumed", prog[1])
+                e.log(f"Resume clicked at {dt:.1f} s")
+            if prog and a.accept_after is not None and not state["cancelled"] and dt >= a.accept_after \
+                    and not state.get("paused"):
                 e.shot("before-accept", prog[1])
                 e.click_accept(prog[1])
                 state["cancelled"] = True
@@ -977,6 +1012,15 @@ def run(a) -> int:
                 break  # Cancel: the dialog closed and no result window follows
             time.sleep(0.5)
         result["route_wall_s"] = round(time.monotonic() - t_route, 1)
+        if a.pause_at is not None:
+            rds = sorted((e.home / ".cache/kicad/10.0/topor").glob(f"{live.stem}/*/log.txt"))
+            lg = rds[-1].read_text() if rds else ""
+            cores = state.get("paused_cores")
+            e.check("Pause: the plugin used about no CPU while paused", cores is not None and cores < 0.1,
+                    f"{cores} cores")
+            e.check("Pause / Resume reached the engine (log.txt)", "Pause pressed at" in lg and "Resume pressed" in lg,
+                    str(rds[-1]) if rds else "no log.txt")
+            result["paused_cores"] = cores
         if a.preview_check:
             hashes = [h for _, h in state["imgs"]]
             result["progress_images"] = state["imgs"]
@@ -1170,6 +1214,9 @@ def main(argv=None) -> int:
                     help="press Cancel (Esc) this many seconds after Route: the run ends at once, nothing is taken, the board is unchanged")
     ap.add_argument("--accept-after", type=float, default=None,
                     help="click Accept this many seconds after Route: stop, keep the best, the preview follows")
+    ap.add_argument("--pause-at", type=float, default=None, metavar="S",
+                    help="pause-button: click Pause S seconds into the routing, check the plugin's CPU, then Resume")
+    ap.add_argument("--resume-after", type=float, default=10.0, metavar="S", help="seconds paused (with --pause-at)")
     ap.add_argument("--reject", action="store_true", help="press Esc (Reject) in the preview and check the board is untouched")
     ap.add_argument("--ok-at-stable", action="store_true",
                     help="press Accept as soon as the progress dialog says Routes stable (M-B0) and check the result")

@@ -47,6 +47,7 @@ from toporlib import rules as rules_mod
 from toporlib import edge_zero as edge_zero_mod
 from toporlib.drc import classify, new_routing, run_drc
 from toporlib.drcloop import DrcJudgement
+from toporlib import kicad_cli
 from toporlib.kicad_cli import KicadCliCancelled, KicadCliTimeout
 
 from . import grid as grid_mod
@@ -790,10 +791,18 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
             state["discard"] = True
             raise RunDiscarded()
 
-    def emit(phase: str) -> None:
+    def pause_wanted() -> bool:
+        """pause-button: the user has the run paused (``ui.pause_wanted``; headless UIs have none). Never after a
+        stop request: Accept and Cancel end a pause. O(1)."""
+        f = getattr(ui, "pause_wanted", None)
+        return callable(f) and not state["cancel"] and bool(f())
+
+    def emit(phase: str, pausable: bool = False) -> None:
+        # pause-button: a kicad-cli step can pause (its poll, `pausable`); the engine poll sets its own progress
         q = replace(state["last"], phase=phase, elapsed_s=state["router_s"], cpu_s=state["router_cpu_s"],
                     optimize_s=state["opt_s"], opt_cpu_s=state["opt_cpu_s"], draw_s=state["draw_s"],
-                    wall_s=time.monotonic() - t0, limit_s=state.get("limit"))
+                    wall_s=time.monotonic() - t0, limit_s=state.get("limit"), pausable=pausable,
+                    paused=pausable and state.get("cli_paused", False))
         if ui.progress(q) is False:
             state["cancel"] = True
         check_discard()  # raised inside a kicad-cli poll too: run_cli kills the process on any exception
@@ -840,8 +849,16 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         limit = float(cfg.get("run", "kicad_cli_timeout_s") or 0)
 
         def poll():
-            emit(phase)
-            return not (cancellable and state["cancel"])
+            emit(phase, pausable=True)
+            if cancellable and state["cancel"]:
+                return False
+            # pause-button: kicad-cli is stopped while the user has the run paused (its timeout stands still)
+            want = pause_wanted()
+            if want != state.get("cli_paused", False):
+                state["cli_paused"] = want
+                log.line(f"{'Pause' if want else 'Resume'} pressed during {phase}: kicad-cli "
+                         + ("stopped (no CPU; its timeout stands still)" if want else "goes on"))
+            return kicad_cli.PAUSE if want else True
 
         return {"timeout_s": limit or None, "on_poll": poll}
 
@@ -1145,6 +1162,7 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
         # cancelled_at: Cancel / OK was sent (job.cancel(); also the CPU clock's limit for an engine without
         # reach_limit / harden); limit_at: the CPU clock's limit was sent (job.reach_limit(), and job.harden() when hard). Kept apart so a Cancel after the soft limit still reaches the job (verify-m2 F1).
         last_poll, cancelled_at, limit_at = -1e9, None, None
+        state["job_paused"] = False  # pause-button: this job was paused by the dialog (the last state sent)
         rounds_seen = 0  # round lines of this job written to log.txt (round_log_lines)
         cycles_seen = 0  # loop cycle lines of this job written to log.txt (cycle_log_lines)
         # Ends when the job is done (also after an engine panic: B-1). After Cancel / OK / the CPU limit the engine
@@ -1157,16 +1175,19 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                 last_poll = now
                 p = Progress.from_json(json.loads(job.progress()))
                 # honest times (K1): router time over all jobs (what run.timeout_s limits) and the wall time of
-                # the whole run; the engine's own elapsed_s restarts with every whole-route round
-                p.elapsed_s = router_before + (now - job_t0)
+                # the whole run; the engine's own elapsed_s restarts with every whole-route round.
+                # pause-button: the job's paused seconds (its clock left them out) are not router time either, so
+                # the live limit handed to the job (engine_limit) stays on the job's clock
+                job_s = max(0.0, now - job_t0 - p.paused_s)
+                p.elapsed_s = router_before + job_s
                 p.wall_s = now - t0
                 state["router_s"] = p.elapsed_s
                 p.cpu_s = state["router_cpu_s"] = cpu_before + (time.process_time() - cpu_t0)
                 # time-limit-fix r2: optimizing time, the clock run.timeout_s counts: the engine's own (it stands
                 # still in the final drawing, `drawing`); the CPU seconds stop with the first poll that sees the
                 # drawing (0.25 s resolution); the drawing's wall seconds apart
-                eng_opt = p.optimize_s if p.optimize_s >= 0 else now - job_t0  # -1: an engine without the figure
-                p.optimize_s = state["opt_s"] = router_before + min(eng_opt, now - job_t0)
+                eng_opt = p.optimize_s if p.optimize_s >= 0 else job_s  # -1: an engine without the figure
+                p.optimize_s = state["opt_s"] = router_before + min(eng_opt, job_s)
                 if not p.drawing:
                     state["opt_cpu_s"] = p.cpu_s
                 p.opt_cpu_s, state["draw_s"] = state["opt_cpu_s"], p.draw_s
@@ -1184,8 +1205,24 @@ def _run(port, ui, cfg, engine, out, report, log, ctx, tmp_root, project_dir, bo
                     log.line(f"CPU-time limit reached: {p.opt_cpu_s:.1f} s of {state['limit']:.0f} s optimizing "
                              f"(wall {p.optimize_s:.1f} s)")
                 p.limit_s = state["limit"]
+                pause_job, resume_job = getattr(job, "pause", None), getattr(job, "resume", None)
+                p.pausable = callable(pause_job) and callable(resume_job) and not done and not state["cancel"]
                 if ui.progress(p) is False:
                     state["cancel"] = True
+                # pause-button (user 2026-11-26): the dialog's Pause / Resume reach the engine job here; a stop request
+                # (Accept, Cancel) ends a pause in the engine by itself (RunControl::request_stop)
+                want = p.pausable and not state["cancel"] and pause_wanted()
+                if want != state["job_paused"]:
+                    if want:
+                        pause_job()
+                        log.line(f"Pause pressed at {p.optimize_s:.1f} s optimizing time ({p.stage or p.phase}): the "
+                                 "engine waits at its next stop test (no CPU), its clock stands still")
+                    elif not state["cancel"] and callable(resume_job):
+                        resume_job()
+                        log.line(f"Resume pressed: the run goes on ({p.paused_s:.1f} s paused so far, not counted)")
+                    else:
+                        log.line(f"Accept / Cancel while paused: the pause ends ({p.paused_s:.1f} s paused, not counted)")
+                    state["job_paused"] = want
                 if discard_pressed():
                     # Cancel: no waiting for the stage in progress. The engine is told to stop (it frees its threads
                     # by itself) and the job is abandoned: job.wait() is never called, so a result that is ready

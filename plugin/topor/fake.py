@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import uuid as _uuid
+import time
 from pathlib import Path
 
 from toporlib import pcbfile
@@ -137,11 +138,15 @@ class ScriptedUi:
     limit_changes: the progress dialog's time-limit control, scripted: ``[(when, seconds), ...]`` in order; `when` is
     a predicate on the ``Progress`` or an int (the n-th ``progress`` call, 1-based); once it holds, the next
     ``time_limit_request`` returns `seconds` (0 = no limit). None (the harness): the limit never changes.
+    pauses (pause-button): the progress dialog's Pause, scripted: ``[(when, seconds), ...]`` in order; `when` is a
+    predicate on the ``Progress`` (only asked while ``p.pausable``) or an int (the n-th ``progress`` call); once it
+    holds, ``pause_wanted`` is True for `seconds` wall seconds (then Resume). `paused_seen`: the progress values seen
+    while paused. Accept / Cancel end a pause (as the dialog does).
     Every call is appended to `calls` as ``(method, args)``.
     """
 
     def __init__(self, decisions=None, accept=True, cancel_at_iteration: int | None = None, ok_at_stable: bool = False,
-                 limit_changes=None, discard_at_iteration: int | None = None, discard_when=None):
+                 limit_changes=None, discard_at_iteration: int | None = None, discard_when=None, pauses=None):
         self._decisions = decisions
         self._accept = accept
         self.cancel_at_iteration = cancel_at_iteration
@@ -151,6 +156,9 @@ class ScriptedUi:
         self.discard_at_iteration, self.discard_when, self.discarded = discard_at_iteration, discard_when, False
         self._progress_n = 0
         self._limit_pending = None
+        self.pauses = list(pauses or [])
+        self._pause_until: float | None = None
+        self.paused_seen: list = []
         self.calls: list = []
 
     @staticmethod
@@ -185,10 +193,28 @@ class ScriptedUi:
                                    or (self.discard_when is not None and self.discard_when(p))):
             self.discarded = True
         if self.discarded:
+            self._pause_until = None
             return False
         if self.ok_at_stable and getattr(p, "stable", False):
+            self._pause_until = None
             return False
-        return not (self.cancel_at_iteration is not None and p.iteration >= self.cancel_at_iteration)
+        stop = self.cancel_at_iteration is not None and p.iteration >= self.cancel_at_iteration
+        if stop:
+            self._pause_until = None
+        elif self._pause_until is not None:
+            self.paused_seen.append(p)
+            if time.monotonic() >= self._pause_until:
+                self._pause_until = None
+        elif self.pauses and getattr(p, "pausable", False):
+            when, seconds = self.pauses[0]
+            if (self._progress_n >= when) if isinstance(when, int) else when(p):
+                self.pauses.pop(0)
+                self._pause_until = time.monotonic() + float(seconds)
+        return not stop
+
+    def pause_wanted(self) -> bool:
+        """The scripted Pause (``pauses``) holds now."""
+        return self._pause_until is not None
 
     def stop_discards(self) -> bool:
         """The scripted Cancel (``discard_at_iteration`` / ``discard_when``) was pressed."""

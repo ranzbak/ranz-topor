@@ -95,7 +95,7 @@ def test_wx_ui_dialogs_construct_headless(app, tmp_path):
         "preflight": ["findings", "cause", "accept", "use_default", "scope_whole", "scope_between",
                       "scope_touching", "existing", "respect_locked", "drawing_style", "grid_snap", "timeout", "timeout_clock",
                       "save_toml", "help", "cancel", "route"],
-        "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "cancel", "accept"],
+        "progress": ["limit", "limit_set", "limit_add5", "limit_add15", "pause", "cancel", "accept"],
         "preview": ["zoom", "image_before", "image_after", "summary", "findings", "cause", "report_dir",
                     "open_report_folder", "reject", "accept"],
         "error": ["details", "copy_details", "open_report_folder", "close"],
@@ -916,7 +916,7 @@ def test_progress_waits_for_round_1_colours_the_verdict_and_never_changes_size(a
         assert dlg.GetSize() == size, "numbers, stage names and verdicts never resize the dialog"
         for st in (dlg.elapsed_value, dlg.total_value, dlg.vias_value):
             assert st.GetSize().width >= st.GetTextExtent(st.GetLabel()).width, st.GetName()
-        assert dlg.widget("cancel_hint").GetLabel() == "Accept keeps the best result so far. Cancel takes nothing."
+        assert dlg.widget("cancel_hint").GetLabel() == "Accept keeps the best result so far. Cancel takes nothing. Pause frees the CPU."
         assert dlg.widget("cancel_hint").GetToolTipText() == ui_wx.WORDING["progress"]["cancel_hint_tip"]
     finally:
         dlg.Destroy()
@@ -1073,3 +1073,73 @@ def test_error_dialog_notice_look_is_for_info_only(app, tmp_path, severity, titl
         assert d.GetTitle() == ui_wx.WORDING["error"]["title_notice" if notice else "title"]
     finally:
         d.Destroy()
+
+
+# ------------------------------------------------------------------ pause-button (user 2026-11-26)
+def _running(pausable=True, **kw):
+    from dataclasses import replace
+    return replace(Progress("route", 3, 12, 27, 4, 12.0, "TopoR loop on the topology"), pausable=pausable, **kw)
+
+
+def test_progress_pause_toggles_to_resume_and_says_paused(app):
+    """Pause next to Cancel / Accept: greyed out until a step that can pause runs; a press turns it into Resume, the
+    phase line says paused (no CPU, the limit stands still) and pause_wanted holds until Resume."""
+    ui = _QuietUi()
+    assert ui.progress(_running(pausable=False)) is True
+    dlg = ui._progress
+    W = ui_wx.WORDING["progress"]
+    assert dlg.pause_button.GetLabel().replace("&", "") == W["pause"] and not dlg.pause_button.IsEnabled()
+    _press(dlg.pause_button)
+    assert ui.pause_wanted() is False, "a greyed-out Pause does nothing"
+    assert ui.progress(_running()) is True and dlg.pause_button.IsEnabled()
+    _press(dlg.pause_button)
+    assert ui.pause_wanted() is True
+    assert dlg.pause_button.GetLabel().replace("&", "") == W["resume"]
+    assert dlg.phase.GetLabel() == W["phase_paused"].format(t="0:00")
+    dlg.paused_at -= 75.2
+    assert ui.progress(_running(paused=True, paused_s=75.0)) is True, "a pause is no stop"
+    assert dlg.phase.GetLabel() == W["phase_paused"].format(t="1:15")
+    _press(dlg.pause_button)  # Resume
+    assert ui.pause_wanted() is False and dlg.pause_button.GetLabel().replace("&", "") == W["pause"]
+    assert ui.progress(_running()) is True
+    assert dlg.phase.GetLabel() == W["phase_route_stage"].format(stage="TopoR loop on the topology")
+    ui._close_progress()
+
+
+def test_progress_accept_or_cancel_while_paused_end_the_pause(app):
+    for button in ("accept", "cancel"):
+        ui = _QuietUi()
+        ui.progress(_running())
+        dlg = ui._progress
+        _press(dlg.pause_button)
+        assert ui.pause_wanted() is True
+        _press(getattr(dlg, f"{button}_button"))
+        assert ui.pause_wanted() is False and not dlg.pause_button.IsEnabled(), button
+        assert ui.progress(_running()) is False, button
+        assert not dlg.pause_button.IsEnabled(), f"{button}: Pause stays off after a stop"
+        assert ui.stop_discards() is (button == "cancel")
+        ui._close_progress()
+
+
+def test_progress_pause_ends_when_no_step_can_pause(app):
+    ui = _QuietUi()
+    ui.progress(_running())
+    dlg = ui._progress
+    _press(dlg.pause_button)
+    ui.progress(_running(pausable=False, phase="done"))
+    assert ui.pause_wanted() is False and not dlg.pause_button.IsEnabled()
+    assert dlg.pause_button.GetLabel().replace("&", "") == ui_wx.WORDING["progress"]["pause"]
+    ui._close_progress()
+
+
+def test_progress_paused_times_stand_still(app):
+    """The elapsed and the remaining figures come from the run flow's times, which leave the paused seconds out: a
+    progress paused for a minute shows the same optimizing time and the same time left as before the pause."""
+    ui = _QuietUi()
+    ui.progress(_running(optimize_s=12.0))
+    dlg = ui._progress
+    before = dlg.elapsed_value.GetLabel()
+    _press(dlg.pause_button)
+    ui.progress(_running(optimize_s=12.0, paused=True, paused_s=60.0, wall_s=80.0))
+    assert dlg.elapsed_value.GetLabel() == before == "0:12 / 10:00 · CPU 0:00"
+    ui._close_progress()
