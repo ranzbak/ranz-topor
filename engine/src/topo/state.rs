@@ -1000,14 +1000,14 @@ impl<'p> State<'p> {
             let ob = &pr.obstacles[o];
             0.5 * wi.w + if ob.bare { ob.clear } else { ob.clear.max(wi.s) } - 1.0
         };
-        let too_close = |stretch: &[Vec2]| -> Option<(ObsId, f64)> {
+        let too_close_by = |stretch: &[Vec2], slack: f64| -> Option<(ObsId, f64)> {
             for &o in &obs {
                 let ob = &pr.obstacles[o];
                 let m = ob.poly.len();
                 for sgm in stretch.windows(2) {
                     for i in 0..m {
                         let d = seg_seg_dist(sgm[0], sgm[1], ob.poly[i], ob.poly[(i + 1) % m]);
-                        if d < need(o) {
+                        if d < need(o) - slack {
                             return Some((o, d));
                         }
                     }
@@ -1015,11 +1015,54 @@ impl<'p> State<'p> {
             }
             None
         };
+        let too_close = |stretch: &[Vec2]| too_close_by(stretch, 0.0);
         let Some((o, d)) = too_close(&pts) else { return false };
         // The even pass points are no path: the wire's taut path at its nominal width through the
         // clearance spans of its passes (the drawing's shortest path), up to the last pass judged.
-        let taut = self.taut_prefix(w, end, *ks.last().unwrap());
-        let tc = too_close(&taut);
+        // The funnel's legs between two edge ports can cut a corner of the fan they cross closer
+        // than the clearance; the drawing wraps such a corner at it. So the path is relaxed
+        // first: a leg that comes closer than half the width plus the clearance to an obstacle
+        // is bent out to that distance at its nearest point (a few times, as a rubber band
+        // round the clearance discs); the exit is tight only when the bent path still is (it
+        // was pushed into other copper: no room for the nominal width).
+        let mut taut = self.taut_prefix(w, end, *ks.last().unwrap());
+        if !super::octi::fd45_off("nrg_relax") {
+            for _ in 0..6 {
+                let mut out = vec![taut[0]];
+                let mut bent = false;
+                for sgm in taut.windows(2) {
+                    let (p, q) = (sgm[0], sgm[1]);
+                    let mut best: Option<(f64, Vec2, Vec2, f64)> = None;
+                    for &o in &obs {
+                        let ob = &pr.obstacles[o];
+                        let m = ob.poly.len();
+                        for i in 0..m {
+                            let (d, x, y) = seg_seg_closest(p, q, ob.poly[i], ob.poly[(i + 1) % m]);
+                            let r = need(o) + 1.0;
+                            if d < r - 1.0 && best.is_none_or(|b| d - r < b.0 - b.3) {
+                                best = Some((d, x, y, r));
+                            }
+                        }
+                    }
+                    if let Some((d, x, y, r)) = best {
+                        if let Some(u) = (x - y).unit().filter(|_| d > 1.0) {
+                            let z = y + u * r;
+                            if (z - p).len() > 1.0 && (z - q).len() > 1.0 {
+                                out.push(z);
+                                bent = true;
+                            }
+                        }
+                    }
+                    out.push(q);
+                }
+                taut = out;
+                if !bent {
+                    break;
+                }
+            }
+        }
+        // (1 um slack: the relaxed band is a polyline round the discs, a few nm inside them)
+        let tc = too_close_by(&taut, 1_000.0);
         if std::env::var("TOPO_NECKDBG").is_ok() {
             let p: Vec<String> = taut.iter().map(|q| format!("({:.3},{:.3})", q.x / 1e6, -q.y / 1e6)).collect();
             eprintln!("EXITTAUT wire {w} end {end} ks {ks:?} turns {:?} taut [{}] close {tc:?}", wi.turns, p.join(", "));
@@ -1965,6 +2008,23 @@ impl<'p> State<'p> {
         }
         Ok(())
     }
+}
+
+/// Distance between the segments `a-b` and `c-d` with the nearest points on each (0 and an
+/// endpoint when they cross).
+fn seg_seg_closest(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> (f64, Vec2, Vec2) {
+    let pt = |p: Vec2, u: Vec2, v: Vec2| {
+        let e = v - u;
+        let l2 = e.len2();
+        let t = if l2 > 0.0 { ((p - u).dot(e) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        u + e * t
+    };
+    if interleave_seg(a, b, c, d) {
+        return (0.0, a, a);
+    }
+    let cands = [(a, pt(a, c, d)), (b, pt(b, c, d)), (pt(c, a, b), c), (pt(d, a, b), d)];
+    let (x, y) = cands.into_iter().min_by(|m, n| (m.0 - m.1).len().total_cmp(&(n.0 - n.1).len())).unwrap();
+    ((x - y).len(), x, y)
 }
 
 /// Distance between the segments `a-b` and `c-d`.
