@@ -50,7 +50,7 @@ xunit() {  # clippy, targeted release tests, the crop tool's tests, arm and sour
     (cd $M/engine && CARGO_TARGET_DIR=/root/nrg-mut-target cargo test --release "$@" > $OUT/mut-$n.log 2>&1 9>&-); note "mutant $n rc $? (want != 0)"
     cp $ROOT/engine/$f $M/engine/$f
   }
-  mut ownpad src/topo/state.rs 's/filter(|\&k| !inside(k))/filter(|\&k| { let _ = inside(k); true })/' --test topo_neck_regrow
+  mut ownpad src/topo/state.rs 's/legacy || (!inside(k) \&\& mine(k))/legacy || mine(k)/' --test topo_neck_regrow
   mut taut src/topo/state.rs 's/        if tc.is_none() {/        if false \&\& tc.is_none() {/' --test topo_neck_regrow
   mut axis src/topo/state.rs 's/pad_axis(\&me.poly, me.center, pts\[1\] - pts\[0\])/pad_axis(\&me.poly, me.center, pts[1] - pts[0]).filter(|_| false)/' --test topo_neck_regrow
   mut supply src/topo/core.rs 's/ \&\& w > dflt_w + 0.5//' --lib whole_supply

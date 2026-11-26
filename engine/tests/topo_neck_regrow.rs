@@ -151,15 +151,18 @@ use topor_engine::control::RunControl;
 use topor_engine::geom::quant::TrackPrim;
 use topor_engine::model::{BoardModel, Item, Options};
 
+/// A track piece (mm): `(width, a, b)`.
+type Piece = (f64, (f64, f64), (f64, f64));
+
 /// PWR's track pieces in path order from `start` (mm): `(width, a, b)`.
-fn pwr_chain(p: &str, start: (f64, f64)) -> (Vec<(f64, (f64, f64), (f64, f64))>, usize) {
+fn pwr_chain(p: &str, start: (f64, f64)) -> (Vec<Piece>, usize) {
     let path = format!("{}/tests/fixtures/neckrg/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
     let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let mut val = serde_json::to_value(Options::default()).unwrap();
     val["runs"] = serde_json::json!(1);
     let o: Options = serde_json::from_value(val).unwrap();
     let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
-    let mut rest: Vec<(f64, (f64, f64), (f64, f64))> = r
+    let mut rest: Vec<Piece> = r
         .items
         .iter()
         .filter_map(|it| match it {
@@ -186,7 +189,7 @@ fn pwr_chain(p: &str, start: (f64, f64)) -> (Vec<(f64, (f64, f64), (f64, f64))>,
 }
 
 /// The invariant: along the path, one necked stretch at most, and it touches an end.
-fn necked_stretches(ch: &[(f64, (f64, f64), (f64, f64))]) -> (usize, bool) {
+fn necked_stretches(ch: &[Piece]) -> (usize, bool) {
     let thin: Vec<bool> = ch.iter().map(|x| x.0 < 0.5 - 1e-4).collect();
     let n = (0..thin.len()).filter(|&i| thin[i] && (i == 0 || !thin[i - 1])).count();
     let touches = thin.first().copied().unwrap_or(false) || thin.last().copied().unwrap_or(false);
