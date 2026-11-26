@@ -2,6 +2,7 @@
 # neckrg_job.sh (branch neck-regrow): VM units.
 #   neckrg_job.sh crop ARM [sets...]   the qmtech ADV7511 crop (window of via-plan's via_crop_qm_adv17), routed with kept
 #                                      copper (runs 1 + sets), TOPO_NECKDBG + TOPO_PLANDUMP, under $OUT/crop/ARM
+#   neckrg_job.sh pu TAG ARM LABEL [sets]  the proposed patterns (harness.neckrg_patterns) routed as ARM, PNGs, "all done"
 #   neckrg_job.sh diag TAG             arms D (rounds 1) and V (default rounds) as two hzq units, then "all done"
 set -u
 OUT=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
@@ -19,8 +20,31 @@ crop() {
     --set optimize.runs=1 "$@" > $OUT/crop/$A/route.log 2>&1 9>&-
   note "crop $A rc $?"
 }
+P=$OUT/pats
+NAMES="neck_both_ends neck_reentry"
+pats() {  # pats ARM [sets]: the proposed patterns, kept copper, runs 1 rounds 1 (det s0), then PNGs of every arm present
+  local A=$1; shift
+  [ -d $P/boards ] || { python -m harness.neckrg_patterns $P/boards --drc > $P-gen.log 2>&1; note "pats gen rc $?"; }
+  for n in $NAMES; do
+    tools/route_board.sh $P/boards/$n/problem/$n.kicad_pcb $P/runs/$A/$n/$n/s0 --keep-copper --no-png --set optimize.runs=1 --set optimize.rounds=1 "$@" > $P/$A-$n.txt 2>&1 9>&-
+    note "pat $A $n rc $?"
+  done
+  python -m harness.neckrg_patterns_png $P/runs $P/png > $P/png.log 2>&1; note "pats png rc $?"
+}
 case ${1:-} in
   crop) shift; crop "$@" ;;
+  pats) shift; mkdir -p $P/runs; pats "$@" ;;
+  pu)  # pu TAG ARM LABEL [sets]: pats as one hzq unit, then "all done"
+    T=$2; A=$3; L=$4; shift 4; mkdir -p $P/runs
+    python - $P/runs/labels.json "$A" "$L" <<'PY'
+import json, sys, os
+p, a, l = sys.argv[1:]
+d = json.load(open(p)) if os.path.exists(p) else {}
+d[a] = l
+json.dump(d, open(p, "w"))
+PY
+    hzq run --threads 2 --name $T-$A -- bash $ROOT/tools/neckrg_job.sh pats $A "$@" > $OUT/u-$A.log 2>&1 9>&-
+    note "unit rc $?"; note "all done" ;;
   diag)  # diag TAG: arm D (det: runs 1, rounds 1) and arm V (runs 1, default rounds: via-plan vp1's arm M), main + debug prints
     T=$2; gen
     hzq run --threads 2 --name $T-D -- bash $ROOT/tools/neckrg_job.sh crop D --set optimize.rounds=1 > $OUT/u-D.log 2>&1 9>&- &
