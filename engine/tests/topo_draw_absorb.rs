@@ -425,3 +425,24 @@ fn no_band_pass_is_main() {
     assert_eq!(a.items, b.items);
     assert_eq!(a.erbs.as_ref().unwrap().band_pass_gaps_before, 0);
 }
+
+/// A1 in the joint commit, octilinear (dvn_crop_q2, one cycle): the model-gap pair of
+/// Net-(U9-~{RST}) is resolved by necking its band (`gap_shrunk`). The octilinear form is drawn
+/// at the neck's zones and width (`a1z`), and the pad-tip re-anchor leaves the band alone
+/// (`tip_anchor_reserved` skips a band with its own zones): the drawn copper keeps the neck
+/// (about 0.103 mm over several mm), and nothing gets worse.
+#[test]
+fn a_gap_neck_survives_the_octilinear_form_and_the_reanchor() {
+    let m = fixture("dvn", "dvn_crop_q2");
+    let o = one_cycle("octilinear");
+    let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(eo.gap_kept == 1 && eo.gap_shrunk == 0, "{eo:?}");
+    assert!(en.gap_kept == 0 && en.gap_shrunk == 1, "{en:?}");
+    assert!(on.warnings.iter().any(|w| w.starts_with("Net-(U9-~{RST})") && w.contains("necked from 0.250 mm")), "{:?}", on.warnings);
+    let thin = |r: &RouteResult| tracks(r).iter().filter(|t| t.0 > 95_000 && t.0 < 200_000).map(|t| t.1).sum::<f64>();
+    assert_eq!(thin(&off), 0.0);
+    assert!(thin(&on) > 2.0e6, "necked copper drawn {} nm", thin(&on));
+    assert!(on.violations.len() <= off.violations.len(), "off {:?}\non {:?}", off.violations, on.violations);
+    assert_eq!(on.routed, off.routed);
+}
