@@ -1680,6 +1680,18 @@ pub struct Options {
     /// down to the net's floor (`State::w_min`), where that removes or shallows its violations.
     /// Each neck is warned (a shrinkage). false (default until a verifier) = main's copper.
     pub forced_shrink: bool,
+    /// draw-absorb A1b (`[drawing] reserved_keep_neck`, docs/dev/design/draw-absorb.md): a band
+    /// the joint commit reserved necked (the plan's neck, `Reserved::pneck`) keeps that neck when
+    /// the drawing changes its shape: the pad-tip re-anchor (`tip_anchor_reserved`) draws the new
+    /// tail with the plan's zones at the reserved width, and the adopted band's octilinear form is
+    /// realised at the same zones and width; never wider than reserved. false (default until a
+    /// verifier) = main's copper (both redraw the band at its full width where the checker allows).
+    pub reserved_keep_neck: bool,
+    /// draw-absorb A3 (`[drawing] band_passes`, docs/dev/design/draw-absorb.md): with realise =
+    /// "erbs", passes of the iterated band realise per layer before any copper: the band of each
+    /// model gap's yielding wire is realised again with its partner's band as a sided obstacle
+    /// (`erbs::band_passes`), kept when cheaper. 0 (default until a verifier) = main's bands.
+    pub band_passes: usize,
     /// M3 (`[drawing] erbs_length_weight`): with realise = "erbs", the graded price of an ERBS
     /// longer than its band: the drawing prices a legal ERBS of length `L` over a band of length
     /// `B` at `L (1 + k max(0, L/B - 1)^2)` and keeps it unless a legal sequential run is cheaper
@@ -2103,6 +2115,8 @@ impl Default for Options {
             octi_straighten: true,
             erbs_gap_keep_max_mm: 0.15,
             forced_shrink: false,
+            reserved_keep_neck: false,
+            band_passes: 0,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
             bundle_pull: 0.3,

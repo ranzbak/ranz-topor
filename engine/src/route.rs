@@ -384,6 +384,20 @@ pub struct ErbsGapKept {
     pub layer: u32,
 }
 
+/// draw-absorb A1b meter: one reserved band the plan had necked, redrawn at full width.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct ErbsUnnecked {
+    pub wire: usize,
+    pub run: usize,
+    /// Necked length of the reserved band (mm) that the redraw dropped.
+    pub mm: f64,
+    /// Of the full-width redraw, the length (mm) inside the plan's neck zones where the full
+    /// width takes planned room of traces not drawn yet that the reserved width left free.
+    pub room_mm: f64,
+    /// `tip` (pad-tip re-anchor) or `octi` (the adopted band's octilinear form).
+    pub at: String,
+}
+
 /// TW2: a run of a drawn wire with no ERBS stretch at its ends ([`ErbsRunReport::no_band_list`],
 /// class `cut_no_band`): the wire, run, layer id, connection (net, pad labels) and why: "no
 /// stretch" (the ERBS drawing has none for the wire), "other layer" (none on the run's layer), or
@@ -430,6 +444,21 @@ pub struct ErbsRunReport {
     /// draw-absorb A1 (`[drawing] forced_shrink`): model-gap pairs resolved by realising one band
     /// with its plan's neck against the other (not kept as a violation).
     pub gap_shrunk: usize,
+    /// draw-absorb A1b meter: reserved bands the plan had necked that the drawing redrew at their
+    /// full width (pad-tip re-anchor `tip`, adopted band's octilinear form `octi`): count, necked
+    /// length dropped (mm), every one; and with `[drawing] reserved_keep_neck` the redraws that
+    /// kept the neck.
+    pub unnecked: usize,
+    pub unnecked_mm: f64,
+    pub unnecked_list: Vec<ErbsUnnecked>,
+    pub kept_neck: usize,
+    /// draw-absorb A3 (`[drawing] band_passes`): passes run, yielding bands realised again and
+    /// kept, model gaps between two bands before the passes and after them (the ERBS check).
+    pub band_passes: usize,
+    pub band_pass_tried: usize,
+    pub band_pass_moved: usize,
+    pub band_pass_gaps_before: usize,
+    pub band_pass_gaps_after: usize,
     /// The runs drawn without a band (`cut_no_band` and forced ones), one entry each.
     pub no_band_list: Vec<ErbsNoBand>,
     /// Runs of the drawn wires.

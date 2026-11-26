@@ -8400,6 +8400,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 warnings.push(format!("[drawing] octi_order = {:?} is not \"sweep\" or \"bends\": \"sweep\" (the default) used", opts.octi_order));
                 super::erbs::OctiOrder::Sweep
             }),
+            band_passes: opts.band_passes,
             ..super::erbs::ErbsOpts::default()
         };
         match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, stops) {
@@ -8435,6 +8436,14 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                     r.report.worst_gap / 1e6,
                     r.unbanded
                 ));
+                // draw-absorb A3 (`[drawing] band_passes`): the iterated band realise.
+                if opts.band_passes > 0 {
+                    let p = &r.passes;
+                    if let Some(l) = erbs_line.as_mut() {
+                        l.push_str(&format!("; band passes ([drawing] band_passes = {}): {} pass(es), {} yielding bands realised again, {} kept, model gaps between bands {} -> {}", opts.band_passes, p.passes, p.tried, p.moved, p.gaps_before, p.gaps_after));
+                    }
+                }
+                dr.joint.band_pass = r.passes;
                 live = r.order.clone();
                 // Test probe (fd45 r10): the ERBS draw order by net name, for a test whose
                 // precondition is an order (topo_m3_class_keep); nothing is formatted without a hook.

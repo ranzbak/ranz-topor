@@ -152,6 +152,16 @@ pub struct JointState {
     pub gap_runs: BTreeSet<(WireId, usize)>,
     /// draw-absorb A1 (`[drawing] forced_shrink`): model-gap pairs resolved by the plan's neck.
     pub gap_shrunk: usize,
+    /// draw-absorb A1b meter: reserved bands the plan had necked that the drawing redrew at full
+    /// width (no `[drawing] reserved_keep_neck`): (wire, run, necked length dropped nm, length of
+    /// the full-width copper in the plan's zones that takes planned room of undrawn wires nm
+    /// ([`Drawer::room_taken`]), where: "tip" = the pad-tip re-anchor, "octi" = the adopted
+    /// band's octilinear form).
+    pub unnecked: Vec<(WireId, usize, f64, f64, &'static str)>,
+    /// With `reserved_keep_neck`: the redraws that kept the band's neck (re-anchor, octilinear form).
+    pub kept_neck: usize,
+    /// draw-absorb A3 (`[drawing] band_passes`): the iterated band realise's counts.
+    pub band_pass: super::erbs::PassStats,
 }
 
 impl JointState {
@@ -642,6 +652,15 @@ pub fn tally<'w>(drawn: impl Iterator<Item = &'w WireOut>, j: &JointState, keep:
         octi_rescued: j.octi_rescued,
         gap_kept: j.gap_kept.len(),
         gap_shrunk: j.gap_shrunk,
+        unnecked: j.unnecked.len(),
+        unnecked_mm: j.unnecked.iter().map(|u| u.2).sum::<f64>() / 1e6,
+        unnecked_list: j.unnecked.iter().map(|&(w, r, l, room, at)| crate::route::ErbsUnnecked { wire: w, run: r, mm: l / 1e6, room_mm: room / 1e6, at: at.to_string() }).collect(),
+        kept_neck: j.kept_neck,
+        band_passes: j.band_pass.passes,
+        band_pass_tried: j.band_pass.tried,
+        band_pass_moved: j.band_pass.moved,
+        band_pass_gaps_before: j.band_pass.gaps_before,
+        band_pass_gaps_after: j.band_pass.gaps_after,
         gap_kept_max_mm: j.gap_kept.iter().map(|g| g.overlap_nm).max().unwrap_or(0) as f64 / 1e6,
         gap_kept_list: j
             .gap_kept

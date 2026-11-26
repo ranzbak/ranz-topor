@@ -124,11 +124,14 @@ pub struct ErbsOpts {
     pub margin: f64,
     /// first-draw-45 P3 (`[drawing] octi_order`): the order of the wires for the drawing.
     pub octi_order: OctiOrder,
+    /// draw-absorb A3 (`[drawing] band_passes`): passes of the iterated band realise per layer
+    /// ([`band_passes`]); 0 = none (main).
+    pub band_passes: usize,
 }
 
 impl Default for ErbsOpts {
     fn default() -> Self {
-        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, limit: None, draw_start: None, floor: None, fail_first: false, margin: 0.0, octi_order: OctiOrder::Sweep }
+        ErbsOpts { arc_step_deg: 22.5, deadline: None, stop: None, limit: None, draw_start: None, floor: None, fail_first: false, margin: 0.0, octi_order: OctiOrder::Sweep, band_passes: 0 }
     }
 }
 
@@ -186,6 +189,20 @@ pub enum GateSrc {
     Arc(usize),
     /// A vertex of feature `f`'s outline grown by the half width and its clearance.
     Feature(usize),
+    /// draw-absorb A3 (`[drawing] band_passes`): a point of another stretch's ERBS (index into the
+    /// layer's stretches) grown by the pitch of the two: the band yields to its gap partner.
+    Band(usize),
+}
+
+/// draw-absorb A3 (`[drawing] band_passes`): a segment `a b` of the ERBS of stretch `stretch`
+/// that the yielding band must keep `r` (half both widths, the larger clearance and the margin)
+/// from, on its side of the yielding band ([`band_passes`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Wall {
+    pub a: Vec2,
+    pub b: Vec2,
+    pub r: f64,
+    pub stretch: usize,
 }
 
 /// The obstacle behind a point: for a cut item its portal `a b` on the cut `p q` (the spokes `p a`
@@ -1142,7 +1159,9 @@ fn seg_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
 /// item)`; `radius`: stack radius per (vertex, stretch, corner); `skip`: features at the ends of
 /// over-full cuts it is on. O(n log n) in the obstacle points.
 #[allow(clippy::too_many_arguments)]
-fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize, o: &LayerOrder, items: &[(usize, usize)], radius: &BTreeMap<(usize, usize, usize), f64>, skip: &BTreeSet<usize>, opts: &ErbsOpts) -> Result<Erbs, String> {
+/// `walls` (draw-absorb A3): segments of other stretches' ERBS the band keeps their pitch from,
+/// on the side where they lie (none in the first realise).
+fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize, o: &LayerOrder, items: &[(usize, usize)], radius: &BTreeMap<(usize, usize, usize), f64>, skip: &BTreeSet<usize>, opts: &ErbsOpts, walls: &[Wall]) -> Result<Erbs, String> {
     let band = &s.band;
     let (c0, c1) = (band[0], band[band.len() - 1]);
     let (dirs, grow) = norm_dirs(sh.norm, opts.arc_step_deg);
@@ -1386,6 +1405,30 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         }
     }
 
+    // 1d. draw-absorb A3: the gap partners' ERBS segments, grown by the pitch of the two, on the
+    // partner's side (Dayan 1997 PDF p. 32: spoke creation pushes the bands apart; Su & Dai 1997
+    // PDF p. 2: the neighbour flexes, the topology stays). The side is the partner's against the
+    // band's present path (`walls` come with it, [`band_passes`]); a segment crossing the band
+    // has no side (a planned crossing) and is left out.
+    for wl in walls {
+        if band.windows(2).any(|w| seg_cross(w[0], w[1], wl.a, wl.b)) {
+            continue;
+        }
+        let m = (wl.a + wl.b) * 0.5;
+        let near = [wl.a, m, wl.b].into_iter().min_by(|x, y| band_dist(band, *x).total_cmp(&band_dist(band, *y))).unwrap_or(m);
+        let (left, dn) = band_side(band, near);
+        if dn <= 1.0 {
+            continue;
+        }
+        for x in grown(&[wl.a, wl.b], wl.r, &dirs, grow) {
+            let root = if (x - wl.a).len2() <= (x - wl.b).len2() { wl.a } else { wl.b };
+            let gi = gates.len();
+            gates.push(Gate { a: x, b: x, w: s.w, src: GateSrc::Band(wl.stretch), p: root, q: root, p_left: left });
+            let dips = spoke_crossed(band, x, root);
+            cand.push((x, left, gi, s.w, if dips { Detour::Auto } else { Detour::Never }, root));
+        }
+    }
+
     // The points: tips and arcs first (a coincident feature point is the same obstacle), the
     // corridor only, then the frame.
     let mut pp = Points::new(c0, c1, s.w);
@@ -1395,6 +1438,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
         GateSrc::Cut(c) => (0, c),
         GateSrc::Arc(v) => (1, v),
         GateSrc::Feature(f) => (2, f),
+        GateSrc::Band(b) => (3, b),
     });
     settled.dedup();
     for &(p, left, gi, w, det, _) in &cand {
@@ -1418,6 +1462,7 @@ fn erbs_stretch(sh: &LayerSheet, fg: &Grid, fclear: f64, s: &Stretch, si: usize,
                 GateSrc::Cut(c) => format!("C{c}"),
                 GateSrc::Arc(v) => format!("A{v}"),
                 GateSrc::Feature(f) => format!("F{f}"),
+                GateSrc::Band(b) => format!("B{b}"),
             });
             let d = match pp.det[i] {
                 Detour::Never => "N",
@@ -1461,8 +1506,17 @@ pub fn erbs_layer(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrd
     erbs_layer_with(sh, sts, mine, o, opts).es
 }
 
-/// [`erbs_layer`] with the stretches whose sleeve failed and the count the time limit cut.
-pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrder, opts: &ErbsOpts) -> LayerErbs {
+/// The per-layer inputs of [`erbs_stretch`]: cut items per stretch, stack radii, squeezed
+/// features per stretch, the feature grid and its widest clearance. O(cut items + stacks + features).
+struct LayerCtx {
+    per: BTreeMap<usize, Vec<(usize, usize)>>,
+    radius: BTreeMap<(usize, usize, usize), f64>,
+    squeezed: BTreeMap<usize, BTreeSet<usize>>,
+    fg: Grid,
+    fclear: f64,
+}
+
+fn layer_ctx(sh: &LayerSheet, o: &LayerOrder) -> LayerCtx {
     let mut per: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
     for (ci, cu) in o.cuts.iter().enumerate() {
         for (ii, x) in cu.items.iter().enumerate() {
@@ -1485,6 +1539,12 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         }
     }
     let (fg, fclear) = feat_grid(&sh.feats, 0.5e6);
+    LayerCtx { per, radius, squeezed, fg, fclear }
+}
+
+/// [`erbs_layer`] with the stretches whose sleeve failed and the count the time limit cut.
+pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &LayerOrder, opts: &ErbsOpts) -> LayerErbs {
+    let LayerCtx { per, radius, squeezed, fg, fclear } = layer_ctx(sh, o);
     let mut own: Vec<usize> = mine.to_vec();
     own.sort_unstable();
     own.dedup();
@@ -1506,7 +1566,7 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         let r = if opts.fail_first && k == 0 {
             Err("injected sleeve failure (test hook)".to_string())
         } else {
-            erbs_stretch(sh, &fg, fclear, &sts[si], si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts)
+            erbs_stretch(sh, &fg, fclear, &sts[si], si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts, &[])
         };
         Ok((r, t.elapsed().as_secs_f64()))
     });
@@ -1522,7 +1582,7 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         if std::env::var_os("TOPO_ERBS_SLEEVE").is_some_and(|v| v == "bad") && r.as_ref().map_or(true, |e| e.len > 1.3 * e.band_len) {
             eprintln!("ERBS bad st {si} wire {} net {} layer {}: {}", s.wire, s.net, sh.l, r.as_ref().map_or_else(|m| m.clone(), |e| format!("len {:.3} mm band {:.3} mm", e.len / 1e6, e.band_len / 1e6)));
             SLEEVE_AGAIN.with(|c| c.set(true));
-            let _ = erbs_stretch(sh, &fg, fclear, s, si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts);
+            let _ = erbs_stretch(sh, &fg, fclear, s, si, o, per.get(&si).unwrap_or(&none), &radius, squeezed.get(&si).unwrap_or(&no_skip), opts, &[]);
             SLEEVE_AGAIN.with(|c| c.set(false));
         }
         if time {
@@ -1537,6 +1597,150 @@ pub fn erbs_layer_with(sh: &LayerSheet, sts: &[Stretch], mine: &[usize], o: &Lay
         }
     }
     out
+}
+
+/// draw-absorb A3 (`[drawing] band_passes`): counts of the iterated band realise of a layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PassStats {
+    /// Model gaps between two stretches (`erbs_gap` violations, [`check_layer`]) before the first
+    /// pass and after the last.
+    pub gaps_before: usize,
+    pub gaps_after: usize,
+    /// Passes run; yielding stretches realised again; of those, the ones kept (cheaper).
+    pub passes: usize,
+    pub tried: usize,
+    pub moved: usize,
+}
+
+impl PassStats {
+    pub fn add(&mut self, o: &PassStats) {
+        self.gaps_before += o.gaps_before;
+        self.gaps_after += o.gaps_after;
+        self.passes = self.passes.max(o.passes);
+        self.tried += o.tried;
+        self.moved += o.moved;
+    }
+}
+
+/// Weight of a violation's depth against length in the price of a stretch in [`band_passes`]:
+/// 1 nm of clearance overlap costs as much as 10 nm of length (a push round a 50 um gap may make
+/// the band up to 0.5 mm longer before it costs more than the gap). Graded, no cutoff.
+pub const PASS_VIOL_W: f64 = 10.0;
+
+/// draw-absorb A3 (`[drawing] band_passes`, docs/dev/design/draw-absorb.md): the iterated band
+/// realise of one layer, before any copper. Per pass, every model gap between two stretches (a
+/// non-predicted [`check_layer`] violation: no over-full cut carries both) names its yielding
+/// stretch (the later by `rank`, the route order; ties by stretch id); that stretch is realised
+/// again ([`erbs_stretch`], same sleeve inputs) with its partners' ERBS segments near it as sided
+/// obstacles grown by the pitch of the two ([`Wall`]): spoke creation pushes the bands apart
+/// (Dayan 1997 PDF p. 32; Su & Dai 1997 PDF p. 2: the neighbour flexes, the topology stays;
+/// passes until nothing changes, Su & Dai PDF p. 4). A new ERBS is kept when its price (length +
+/// [`PASS_VIOL_W`] x the depth of every violation it takes part in) drops; the others are put
+/// back, to a fixpoint. Up to `opts.band_passes` passes, fewer when no gap is left or no stretch
+/// moved. Order-free within a pass (every yielding stretch sees the partners of the pass before;
+/// the realises run on lanes). O(passes x (yielding stretches x [`erbs_stretch`] + reverts x
+/// [`check_layer`])).
+pub fn band_passes(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, opts: &ErbsOpts, le: &mut LayerErbs, vs: &mut Vec<Violation>, rank: &dyn Fn(usize) -> usize) -> PassStats {
+    let gap_pairs = |vs: &[Violation]| -> Vec<(usize, usize)> {
+        vs.iter()
+            .filter(|v| !v.predicted)
+            .filter_map(|v| match v.other {
+                Party::Stretch(b) => Some((v.stretch, b)),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut st = PassStats { gaps_before: gap_pairs(vs).len(), ..PassStats::default() };
+    if opts.band_passes > 0 && st.gaps_before > 0 {
+        let ctx = layer_ctx(sh, o);
+        let none = Vec::new();
+        let no_skip = BTreeSet::new();
+        let price = |es: &[Erbs], at: &BTreeMap<usize, usize>, vs: &[Violation], si: usize| -> f64 {
+            let len = at.get(&si).map_or(0.0, |&i| es[i].len);
+            let v: f64 = vs.iter().filter(|v| v.stretch == si || v.other == Party::Stretch(si)).map(|v| v.amount).sum();
+            len + PASS_VIOL_W * v
+        };
+        let dist = |a: &[Vec2], b0: Vec2, b1: Vec2| a.windows(2).map(|w| seg_seg_dist(w[0], w[1], b0, b1)).fold(f64::INFINITY, f64::min);
+        for _ in 0..opts.band_passes {
+            if opts.expired().is_some() {
+                break;
+            }
+            let pairs = gap_pairs(vs);
+            if pairs.is_empty() {
+                break;
+            }
+            st.passes += 1;
+            let at: BTreeMap<usize, usize> = le.es.iter().enumerate().map(|(i, e)| (e.stretch, i)).collect();
+            let mut yields: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+            for (a, b) in pairs {
+                let (y, p) = if (rank(a), a) > (rank(b), b) { (a, b) } else { (b, a) };
+                yields.entry(y).or_default().insert(p);
+            }
+            let jobs: Vec<(usize, Vec<Wall>)> = yields
+                .iter()
+                .filter_map(|(&y, ps)| {
+                    let ey = &le.es[*at.get(&y)?];
+                    let sy = &sts[y];
+                    let mut walls: Vec<Wall> = Vec::new();
+                    for &p in ps {
+                        let Some(&ip) = at.get(&p) else { continue };
+                        let sp = &sts[p];
+                        let r = 0.5 * (sy.w + sp.w) + sy.s.max(sp.s) + opts.margin.max(0.0);
+                        for w in le.es[ip].path.windows(2) {
+                            if dist(&ey.path, w[0], w[1]) < 2.0 * r {
+                                walls.push(Wall { a: w[0], b: w[1], r, stretch: p });
+                            }
+                        }
+                    }
+                    (!walls.is_empty()).then_some((y, walls))
+                })
+                .collect();
+            if jobs.is_empty() {
+                break;
+            }
+            let res: Vec<Option<Erbs>> = super::par::map(&jobs, |_, (y, walls)| erbs_stretch(sh, &ctx.fg, ctx.fclear, &sts[*y], *y, o, ctx.per.get(y).unwrap_or(&none), &ctx.radius, ctx.squeezed.get(y).unwrap_or(&no_skip), opts, walls).ok());
+            // The topology stays (design note §4 rules): the walls only add obstacles, so the
+            // shortest path of the band's class can only get longer; a shorter one, or one that
+            // runs through a feature the first did not, left the class and is not taken.
+            let mut cand: Vec<(usize, Erbs)> = jobs
+                .iter()
+                .zip(res)
+                .filter_map(|((y, _), r)| r.map(|e| (*y, e)))
+                .filter(|(y, e)| {
+                    let old = &le.es[at[y]];
+                    e.len >= old.len - 1.0 && e.through.iter().all(|f| old.through.contains(f))
+                })
+                .collect();
+            st.tried += cand.len();
+            let (old_es, old_vs) = (le.es.clone(), vs.clone());
+            loop {
+                let mut es = old_es.clone();
+                for (y, e) in &cand {
+                    es[at[y]] = e.clone();
+                }
+                let nvs = check_layer(sh, sts, o, &es);
+                if std::env::var_os("TOPO_A3DBG").is_some() {
+                    for (y, e) in &cand {
+                        let vio = |vs: &[Violation]| vs.iter().filter(|v| v.stretch == *y || v.other == Party::Stretch(*y)).map(|v| format!("{:?}{}{:.3}", v.other, if v.predicted { "p" } else { "g" }, v.amount / 1e6)).collect::<Vec<_>>();
+                        eprintln!("A3 L{} st {y} wire {} price {:.4} -> {:.4} mm len {:.4} -> {:.4} viol {:?} -> {:?} path {:?}", sh.l, sts[*y].wire, price(&old_es, &at, &old_vs, *y) / 1e6, price(&es, &at, &nvs, *y) / 1e6, old_es[at[y]].len / 1e6, e.len / 1e6, vio(&old_vs), vio(&nvs), e.path.iter().map(|p| ((p.x / 1e3).round() / 1e3, (p.y / 1e3).round() / 1e3)).collect::<Vec<_>>());
+                    }
+                }
+                let worse: BTreeSet<usize> = cand.iter().map(|(y, _)| *y).filter(|&y| price(&es, &at, &nvs, y) >= price(&old_es, &at, &old_vs, y) - 1.0).collect();
+                if worse.is_empty() {
+                    le.es = es;
+                    *vs = nvs;
+                    break;
+                }
+                cand.retain(|(y, _)| !worse.contains(y));
+            }
+            st.moved += cand.len();
+            if cand.is_empty() {
+                break;
+            }
+        }
+    }
+    st.gaps_after = gap_pairs(vs).len();
+    st
 }
 
 /// The prefix rule of the ERBS fold (par-draw phase A): the units' results in unit order; from
@@ -1796,6 +2000,8 @@ pub fn check_layer(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, es: &[Erbs]
                 GateSrc::Feature(f) => {
                     pred_feat.insert((e.stretch, f));
                 }
+                // A settled gap wall predicts nothing: the gap stays a model gap.
+                GateSrc::Band(_) => {}
             }
         }
     }
@@ -1979,6 +2185,7 @@ pub fn dump(sh: &LayerSheet, sts: &[Stretch], le: &LayerErbs, vs: &[Violation]) 
                         GateSrc::Cut(c) => ("cut", c),
                         GateSrc::Arc(v) => ("arc", v),
                         GateSrc::Feature(f) => ("feat", f),
+                        GateSrc::Band(b) => ("band", b),
                     };
                     json!({"a": mm(g.a), "b": mm(g.b), "src": k, "id": i, "w": g.w / 1e6, "p": mm(g.p), "q": mm(g.q), "p_left": g.p_left})
                 })
@@ -2065,6 +2272,8 @@ pub struct Realised {
     /// drawn the sequential way.
     pub failed: Vec<(usize, String)>,
     pub seconds: f64,
+    /// draw-absorb A3 (`[drawing] band_passes`): the iterated band realise, all layers.
+    pub passes: PassStats,
 }
 
 /// The precedes order (Staepelaere 1992, OrderSegments, PDF p. 29: a wire is made octilinear
@@ -2110,6 +2319,13 @@ pub fn precedes(es: &[Erbs], sts: &[Stretch], o: &LayerOrder, before: &mut BTree
                     }
                 }
                 GateSrc::Feature(_) => {}
+                // draw-absorb A3: a band bent round its gap partner comes after it.
+                GateSrc::Band(b) => {
+                    let w2 = sts[b].wire;
+                    if w2 != wire {
+                        before.insert((w2, wire));
+                    }
+                }
             }
         }
     }
@@ -2492,12 +2708,25 @@ pub fn realise(st: &super::state::State, events: &[Vec<super::refine::LEv>], pac
         if out.stopped.is_none() {
             out.stopped = le.stopped;
         }
-        let vs = check_layer(&lf.sheet, &m.stretches, o, &le.es);
+        let mut le = le;
+        let mut vs = check_layer(&lf.sheet, &m.stretches, o, &le.es);
+        // draw-absorb A3 (`[drawing] band_passes`): the iterated band realise (off: no pass).
+        if eo.band_passes > 0 {
+            let pos: BTreeMap<usize, usize> = given.iter().enumerate().map(|(i, &w)| (w, i)).collect();
+            let rank = |si: usize| pos.get(&m.stretches[si].wire).copied().unwrap_or(usize::MAX);
+            let ps = band_passes(&lf.sheet, &m.stretches, o, &eo, &mut le, &mut vs, &rank);
+            out.passes.add(&ps);
+        }
         // Debug: the drawing's ERBS per layer (harness/erbs_accept.py reads `realise-L<n>.json`).
         if let Some(d) = std::env::var_os("TOPO_ERBS_DUMP") {
             let path = std::path::Path::new(&d).join(format!("realise-L{}.json", lf.sheet.l));
             let mut j = dump(&lf.sheet, &m.stretches, &le, &vs);
             j["overfull"] = overfull(&lf.sheet, &m.stretches, o);
+            // draw-absorb (Goal 3 RCA): every cut that carries a stretch, with its slack.
+            j["cuts"] = Value::from(o.cuts.iter().filter(|cu| !cu.items.is_empty()).map(|cu| {
+                let c = &lf.sheet.cuts[cu.cut];
+                json!({"p": [c.p.x / 1e6, c.p.y / 1e6], "q": [c.q.x / 1e6, c.q.y / 1e6], "slack": cu.slack / 1e6, "squeeze": cu.squeeze / 1e6, "cap": cu.cap / 1e6, "need": cu.need / 1e6, "st": cu.items.iter().map(|x| x.stretch).collect::<Vec<_>>()})
+            }).collect::<Vec<_>>());
             let _ = std::fs::write(path, j.to_string());
         }
         let r = report(&le, &vs);
