@@ -375,10 +375,13 @@ pub enum PadEndKind {
     /// A track end inside the pad off its centre that lies on the centre line of a segment of
     /// the net whose chain reaches the centre (a T onto the trace that ends there, as
     /// `fuse_branches` makes it): connected to the centre through that copper, but the trace
-    /// itself ends beside the centre. r7 (lead 2026-11-26, pending the user: "all traces still
-    /// connect to the middle of the pad, otherwise KiCad will delete them in cleanups"): a breach
-    /// (r6: listed only). It holds only while its host survives: KiCad's Cleanup removed the host
-    /// of esp D5.1's T in a short cascade and left the T an off-centre end (vfy r6 F2).
+    /// itself ends beside the centre. Listed, not a breach: KiCad's real Cleanup keeps such a T
+    /// (r7, user's method 2026-11-26 "if the track is gone after the cleanup, it was not good":
+    /// the project `harness.kicad_accepts` pad_centre, T joins 0.17 / 0.40 / 0.75 mm off the
+    /// centre on an axis host and on a 45-degree host, all kept; tests/test_kicad_accepts.py). It
+    /// stays joined to the centre only while its host survives (esp D5.1: Cleanup removed the
+    /// host in a short cascade, the same on main, and the T became an off-centre Terminal): the
+    /// board check judges the board after the real Cleanup too (`pad_centre_check.py --cleanup`).
     Tee,
 }
 
@@ -410,10 +413,10 @@ pub struct PadEndBreach {
 }
 
 impl PadEndBreach {
-    /// A breach of the rule (every kind, [`PadEndKind::Tee`] included since r7) on a pad whose
-    /// centre takes the track's end (not an edge-clear pad, not a blocked centre).
+    /// A breach of the rule (every kind but [`PadEndKind::Tee`], which KiCad's Cleanup keeps) on
+    /// a pad whose centre takes the track's end (not an edge-clear pad, not a blocked centre).
     pub fn counts(&self) -> bool {
-        !self.edge && !self.centre_blocked
+        self.kind != PadEndKind::Tee && !self.edge && !self.centre_blocked
     }
 }
 
@@ -1051,7 +1054,7 @@ mod tests {
     /// the origin (KiCad frame), a 0.25 mm track: a trace from the centre (with a bend inside
     /// the pad) is no breach; an end off the centre is a Terminal, two there a Junction, a
     /// segment across the pad with no end in it a PassThrough, an end on the centre trace a Tee
-    /// (counted since r7, the lead's rule); an end at a via in the pad, a foreign net and copper
+    /// (listed, not counted: KiCad keeps it); an end at a via in the pad, a foreign net and copper
     /// outside the pad are not judged, a segment through the pad to a via outside it is a
     /// PassThrough (r7). A narrow pad next to a pad of another net (the disc at the centre breaks the
     /// clearance) is a blocked centre and the edge band an edge-clear pad: listed, not counted.
@@ -1065,7 +1068,7 @@ mod tests {
         let j = kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), seg(1, (0, -525_000), (-500_000, -1_100_000))]);
         assert_eq!(j, vec![(PadEndKind::Junction, true, 525_000)], "one entry per point (dedup)");
         assert_eq!(kinds(&[seg(1, (-1_000_000, -300_000), (1_000_000, -300_000))]), vec![(PadEndKind::PassThrough, true, 300_000)]);
-        assert_eq!(kinds(&[seg(1, (0, 0), (0, -2_000_000)), seg(1, (0, -600_000), (500_000, -1_100_000))]), vec![(PadEndKind::Tee, true, 600_000)]);
+        assert_eq!(kinds(&[seg(1, (0, 0), (0, -2_000_000)), seg(1, (0, -600_000), (500_000, -1_100_000))]), vec![(PadEndKind::Tee, false, 600_000)]);
         let via = Item::Via(crate::model::ViaItem { kind: "via".into(), net: 1, at: crate::model::Pt { x: 0, y: -525_000 }, d: 600_000, drill: 300_000, layers: vec![0, 2], group: None, wire: None });
         assert!(kinds(&[seg(1, (0, -525_000), (500_000, -1_100_000)), via.clone()]).is_empty());
         // r7 (verifier r6 F3): a via outside the pad does not hide a segment across the pad
