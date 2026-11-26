@@ -208,13 +208,19 @@ class Progress:
     pick_cycles: list = field(default_factory=list)
     best_kind: str = ""
     sketch_seq: int = 0
+    # pause-button (user 2026-11-26): the engine job is paused (the dialog's Pause) and the seconds it was paused so
+    # far (engine: its clock left them out; the run flow leaves them out of elapsed_s); `pausable` (plugin): Pause can
+    # act now (an engine job or a kicad-cli step runs), else the dialog greys the button out
+    paused: bool = False
+    paused_s: float = 0.0
+    pausable: bool = False
 
     _INT = ("best_errors", "best_open", "best_shrinkages", "best_round", "last_run", "last_round", "last_errors",
             "last_open", "last_violations", "last_vias", "last_shrinkages", "last_routed", "rounds_ended",
             "loop_run", "loop_cycle", "loop_restarts", "loop_errors", "loop_open", "loop_violations", "loop_vias",
             "loop_shrinkages", "cycles_total", "runbest_run", "runbest_cycle", "runbest_errors", "runbest_open",
             "runbest_violations", "runbest_vias", "runbest_shrinkages", "sketch_seq", "cycles_logged")
-    _FLOAT = ("loop_at_s", "loop_length_mm", "last_at_s", "runbest_at_s", "runbest_length_mm")
+    _FLOAT = ("loop_at_s", "loop_length_mm", "last_at_s", "runbest_at_s", "runbest_length_mm", "paused_s")
 
     @staticmethod
     def from_json(d: dict) -> "Progress":
@@ -242,6 +248,7 @@ class Progress:
                         limit_step=str(d.get("limit_step", "") or ""), notice=str(d.get("notice", "") or ""),
                         runbest_kind=str(d.get("runbest_kind", "") or ""), best_kind=str(d.get("best_kind", "") or ""),
                         pick_cycles=[int(x) for x in (d.get("pick_cycles") or [])],
+                        paused=bool(d.get("paused", False)),
                         **{k: float(d.get(k, 0.0) or 0.0) for k in Progress._FLOAT},
                         **{k: int(d.get(k, 0) or 0) for k in Progress._INT})
 
@@ -310,6 +317,12 @@ class UiPort(Protocol):
     #       without waiting for it, discards whatever it returns and ends the run "cancelled" with the board untouched
     #       (no tracks, vias or zone changes). False = Accept (the best so far is taken) or no press. Asked after every
     #       ``progress`` call and before the commit; a UI without it never discards."""
+
+    # Optional (the interactive progress dialog only, pause-button; headless UIs leave it out and never pause):
+    #   def pause_wanted(self) -> bool:
+    #       """True while the user wants the run paused (the dialog's Pause, until Resume, Accept or Cancel). The run
+    #       flow asks after every ``progress`` call and pauses / resumes the engine job (``RouteJob.pause`` / ``resume``:
+    #       no CPU, its clock stands still) or the kicad-cli step (SIGSTOP / SIGCONT, its timeout stands still)."""
 
     # Optional (the interactive progress dialog only; headless UIs leave it out, so their limit stays fixed):
     #   def time_limit_request(self) -> float | None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -18,6 +19,11 @@ def kicad_cli() -> Path:
 DEFAULT_ENV: dict | None = None
 
 POLL_S = 0.25  # the progress callback runs at least this often while kicad-cli works
+
+#: pause-button: what `on_poll` returns while the user has the run paused (the progress dialog's Pause): kicad-cli is
+#: stopped (SIGSTOP, no CPU) until a poll returns anything else (SIGCONT); the paused time does not count toward the
+#: timeout. False still kills the process (Cancel).
+PAUSE = "pause"
 
 
 class KicadCliTimeout(RuntimeError):
@@ -40,13 +46,16 @@ def run_cli(cmd, *, timeout_s: float | None = None, on_poll=None, poll_s: float 
     :class:`KicadCliTimeout` raised. `on_poll()` (optional) is called at least every `poll_s`; a return
     value of ``False`` kills the process and raises :class:`KicadCliCancelled`. With `on_poll` None this is
     a blocking wait that still honours the timeout. Output goes to temp files, so a chatty child can never
-    fill a pipe and stall. `env` None = :data:`DEFAULT_ENV`. O(run time / poll_s) callbacks."""
+    fill a pipe and stall. `env` None = :data:`DEFAULT_ENV`. pause-button: an `on_poll` that returns :data:`PAUSE`
+    stops the process (SIGSTOP) until a later poll returns anything else (SIGCONT); the stopped time does not count
+    toward `timeout_s`. O(run time / poll_s) callbacks."""
     limit = float(timeout_s) if timeout_s and timeout_s > 0 else None
     with tempfile.TemporaryFile("w+") as so, tempfile.TemporaryFile("w+") as se:
         proc = subprocess.Popen([str(c) for c in cmd], stdin=subprocess.DEVNULL, stdout=so, stderr=se, text=True,
                                 env=env if env is not None else DEFAULT_ENV)
         t0 = time.monotonic()
         last = -1e9
+        stopped_at, stopped_s = None, 0.0  # pause-button: SIGSTOP time, and the stopped seconds so far
         try:
             while True:
                 try:
@@ -55,14 +64,23 @@ def run_cli(cmd, *, timeout_s: float | None = None, on_poll=None, poll_s: float 
                 except subprocess.TimeoutExpired:
                     pass
                 now = time.monotonic()
-                if limit is not None and now - t0 > limit:
+                run_s = now - t0 - stopped_s - (now - stopped_at if stopped_at is not None else 0.0)
+                if limit is not None and run_s > limit:
                     raise KicadCliTimeout(cmd, limit)
                 if on_poll is not None and now - last >= poll_s:
                     last = now
-                    if on_poll() is False:
+                    r = on_poll()
+                    if r is False:
                         raise KicadCliCancelled("kicad-cli stopped on request")
+                    if r == PAUSE and stopped_at is None:
+                        os.kill(proc.pid, signal.SIGSTOP)
+                        stopped_at = now
+                    elif r != PAUSE and stopped_at is not None:
+                        os.kill(proc.pid, signal.SIGCONT)
+                        stopped_s += now - stopped_at
+                        stopped_at = None
         except BaseException:
-            proc.kill()
+            proc.kill()  # SIGKILL also ends a stopped process
             proc.wait()
             raise
         so.seek(0)

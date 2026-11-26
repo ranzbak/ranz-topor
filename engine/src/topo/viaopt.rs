@@ -579,6 +579,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
         super::refine::shifted_lanes_of(st, cx.site_slack, w, o, ko.saturating_sub(1).min(n - 1), ko.min(n - 1), &tracks[o], pp, &cross_at)
     };
     for (&w, pl) in plans.iter() {
+        crate::control::pause_point(); // pause-button: seconds per sweep on a large board, no stop test
         if pl.vias.is_empty() || tracks[w].is_empty() {
             continue;
         }
@@ -696,6 +697,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
     let start: Vec<Site> = sites.clone();
     for _sweep in 0..2 {
         for (vi, v) in vs.iter().enumerate() {
+            crate::control::pause_point(); // pause-button: seconds per sweep on a large board, no stop test
             let net = st.wires[v.w].net;
             let (rv, c) = ((cx.via_r)(net), (cx.clear)(net));
             let tr = &tracks[v.w];
@@ -757,6 +759,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
     // sites as they are now).
     if let Some((lat, price)) = cx.grid {
         for (vi, v) in vs.iter().enumerate() {
+            crate::control::pause_point(); // pause-button: seconds per sweep on a large board, no stop test
             let net = st.wires[v.w].net;
             let (rv, c) = ((cx.via_r)(net), (cx.clear)(net));
             let tr = &tracks[v.w];
@@ -779,6 +782,7 @@ pub fn relocate_vias(cx: &ViaCtx, plans: &mut BTreeMap<WireId, super::draw::Plan
     }
     let mut out = BTreeMap::new();
     for (vi, v) in vs.iter().enumerate() {
+        crate::control::pause_point(); // pause-button: seconds per sweep on a large board, no stop test
         let s = sites[vi];
         let net = st.wires[v.w].net;
         let (rv, c) = ((cx.via_r)(net), (cx.clear)(net));

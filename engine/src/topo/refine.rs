@@ -2150,6 +2150,7 @@ impl<'a> CapModel<'a> {
         }
         let mut ch = Vec::new();
         for (w, ev) in evl.iter().enumerate().take(nw) {
+            crate::control::pause_point(); // pause-button: seconds per build on a large board, no stop test
             if st.wires[w].alive && used(w) {
                 let iv = via_ranges(ev, packer.via_between).0;
                 let (fx, mut ms) = m.master();
@@ -2163,6 +2164,7 @@ impl<'a> CapModel<'a> {
         if packer.via_cuts.is_some() {
             let t0 = std::time::Instant::now();
             for w in (0..nw).filter(|&w| st.wires[w].alive && used(w)) {
+                crate::control::pause_point();
                 let c = m.fx.price * m.fx.wire_over(&m.a, w).graded;
                 m.a.cost[m.fx.vbase + w] = c;
             }
@@ -2173,6 +2175,7 @@ impl<'a> CapModel<'a> {
             ms.flush(fx);
         }
         for (w, ev) in evl.iter().enumerate().take(nw) {
+            crate::control::pause_point();
             let swept = m.fx.vfocus.as_ref().is_none_or(|f| f.get(w).copied().unwrap_or(false));
             if st.wires[w].alive && used(w) && swept && !m.via_iv[w].is_empty() {
                 let all: Vec<usize> = (0..m.via_iv[w].len()).collect();

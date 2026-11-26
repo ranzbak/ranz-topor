@@ -137,7 +137,12 @@ impl ErbsOpts {
     /// drawing bound (both read live). With the cap and the bound both passed, the earlier one
     /// (a CPU-clock `harden` has no instant: the bound, when it passed, came first). O(1).
     pub fn expired(&self) -> Option<ErbsStop> {
-        let now = std::time::Instant::now();
+        // pause-button: the drawing's stop test waits at the pause gate; the instants here are on the
+        // run's clock (`TimeLimit::now`, paused time left out) whenever the limit is given
+        if let Some(l) = self.limit.as_ref() {
+            l.hold();
+        }
+        let now = self.limit.as_ref().map_or_else(std::time::Instant::now, |l| l.now());
         if self.stop.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
             return Some(ErbsStop::Cancel);
         }

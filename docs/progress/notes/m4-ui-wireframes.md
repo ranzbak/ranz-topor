@@ -570,13 +570,17 @@ title/label/button/checkbox/choice/heading/text).
 | progress | limit_add5 | button | +5 min |
 | progress | limit_add15 | button | +15 min |
 | progress | limit_hint | text | The limit counts optimizing time; the drawing after it is not counted. 0 = no limit. A limit below the time spent ends the optimizing now, keeping the best result. |
-| progress | cancel_hint | label | Accept keeps the best result so far. Cancel takes nothing. |
-| progress | cancel_hint_tip | text | Accept stops the run and takes the best result so far (the best shown here is exactly the board you get; the DRC and the preview follow, and you can still reject it there). Cancel stops at once and takes no result: the board stays exactly as it was. "Routes stable" does not stop the run: waiting longer may still find small gains. The time limit counts optimizing time only and is an emergency stop: the drawing after it, KiCad's DRC and the preview come on top. |
+| progress | cancel_hint | label | Accept keeps the best result so far. Cancel takes nothing. Pause frees the CPU. |
+| progress | cancel_hint_tip | text | Accept stops the run and takes the best result so far (the best shown here is exactly the board you get; the DRC and the preview follow, and you can still reject it there). Cancel stops at once and takes no result: the board stays exactly as it was. "Routes stable" does not stop the run: waiting longer may still find small gains. The time limit counts optimizing time only and is an emergency stop: the drawing after it, KiCad's DRC and the preview come on top. Pause stops the router within about a second so the computer is free for other work; Resume goes on with the same run and gives the same result. Paused time does not count toward the time limit. Accept and Cancel also work while paused. |
 | progress | cancel | button | Cancel |
 | progress | accept | button | Accept |
 | progress | phase_stable | text | Routes stable |
 | progress | title_stable | text | Topor — Routing {board} — Routes stable |
 | progress | phase_finishing | text | Accept pressed: finishing the current stage{stage}… {s} s |
+| progress | pause | button | Pause |
+| progress | resume | text | Resume |
+| progress | pause_tip | text | Pause: the router stops within about a second and uses no CPU, so you can use the computer for other work. Paused time does not count toward the time limit. Resume goes on with the same run (the same result as without the pause); Accept and Cancel also work while paused. |
+| progress | phase_paused | text | Paused {t}: no CPU used, the time limit stands still. Resume goes on. |
 | progress | round_value | text | {round} |
 | progress | gain_label | label | Gain |
 | progress | gain_value | text | {gain} % / {window} rounds |

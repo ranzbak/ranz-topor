@@ -19,7 +19,8 @@ Contents: [Quick start](#quick-start) · [Where the settings come from](#where-t
 3. Click **Topor: route** in the PCB Editor toolbar (or **Tools → External Plugins → Topor: route**).
 4. Read the findings, set the [Options](#options) (on a board that is already routed choose
    *Existing copper: Rip up and re-route*, otherwise there is nothing to route), press **Route**.
-5. Watch the progress. The dialog has two buttons for the whole run: **Accept** stops the run and takes the best result so far
+5. Watch the progress. The dialog has two buttons for the whole run (and **Pause** / **Resume** to free the CPU for a
+   while, see [Routes stable and Accept](#routes-stable-and-accept)): **Accept** stops the run and takes the best result so far
    (KiCad's DRC and the preview follow, see the next step; once the dialog says *first plan ready, Accept will
    draw it* there always is one; before that, during the topological search, there is none yet:
    [`NOTHING_TO_DRAW`](troubleshoot.md#nothing_to_draw)); **Cancel** (or Esc) stops at once and takes nothing: the board stays
@@ -563,6 +564,14 @@ time-limit field, never on Cancel).
   every step at its next check, the drawing included, draws nothing and frees its threads within seconds. It also works after an Accept (before the run has ended) and during the pre-flight and DRC
   rounds (the running `kicad-cli` is killed). The report and log say *cancelled by the user (Cancel)*; the run's outcome is
   *cancelled*. A Cancel pressed after the commit has nothing left to undo (use Edit → Undo).
+- **Pause** (next to Cancel, Alt+P; user 2026-11-26) frees the computer for other work in the middle of a run: the router
+  stops within about a second and uses no CPU, and the button reads **Resume** (Alt+R) until you press it again. The phase
+  line says *Paused m:ss: no CPU used, the time limit stands still*. Paused time counts toward nothing: not the time limit,
+  not `[run] limit_grace_s` or `drawing_grace_s`, not the *Optimizing* figure (*Total time* keeps the clock time). Resume goes
+  on with the same run and gives the same result as a run without the pause. **Accept** and **Cancel** work while paused
+  (Accept draws the best so far, Cancel drops the run within seconds). During the pre-flight DRC, the DRC rounds and the
+  preview export Pause stops the running `kicad-cli` (its `kicad_cli_timeout_s` stands still too); between steps the button
+  is greyed out. The log has one line per Pause and Resume. Headless runs (harness, MCP) have no Pause.
 
 A `kicad-cli` call that runs longer than `[run] kicad_cli_timeout_s` (default 120 s, `0` = no
 limit) is stopped and the run ends with [KICAD_CLI_TIMEOUT](troubleshoot.md#kicad_cli_timeout) (board unchanged).
