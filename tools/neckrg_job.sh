@@ -34,8 +34,10 @@ pats() {  # pats ARM [sets]: the proposed patterns, kept copper, runs 1 rounds 1
 }
 case ${1:-} in
   crop) shift; crop "$@" ;;
-  both)  # both TAG ARM LABEL: patterns (pu) and the crop (TOPO_NECKDBG) as two hzq units
+  both)  # both TAG ARM LABEL [BASE_TAG]: patterns (pu) and the crop (TOPO_NECKDBG) as two hzq units; BASE_TAG: copy
+    # that earlier job's pattern runs (/root/runs/BASE_TAG/pats/runs: its arms + labels) first, so the PNG shows them too
     T=$2; A=$3; L=$4; gen
+    if [ -n "${5:-}" ] && [ -d /root/runs/$5/pats/runs ]; then mkdir -p $P/runs; cp -r /root/runs/$5/pats/runs/. $P/runs/; note "copied arms of $5"; fi
     bash $ROOT/tools/neckrg_job.sh pu $T $A $L > $OUT/u-pu.log 2>&1 &
     hzq run --threads 2 --name $T-crop -- bash $ROOT/tools/neckrg_job.sh crop $A --set optimize.rounds=1 > $OUT/u-crop.log 2>&1 9>&- &
     wait ;;
