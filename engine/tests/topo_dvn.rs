@@ -294,9 +294,15 @@ fn centre_misses(m: &BoardModel, r: &topor_engine::route::RouteResult) -> Vec<(S
 #[test]
 fn crop_q3_pad_off_centre_ends_c19_at_the_centre() {
     let arm = |w: f64| {
-        let mut f = serde_json::to_value(Options::default()).unwrap()["factors"].clone();
-        f["weight"]["pad_off_centre"] = serde_json::json!(w);
-        let (m, r) = route_items("dvn_crop_q3", &[("factors", f)]);
+        // main's defaults (not route_items' pinned tw-on values: with those the plan already
+        // ends C19.2 at the centre at weight 0, so the price has nothing to choose).
+        let path = format!("{}/tests/fixtures/dvn/model-dvn_crop_q3.json", env!("CARGO_MANIFEST_DIR"));
+        let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut val = serde_json::to_value(Options::default()).unwrap();
+        val["runs"] = serde_json::json!(1);
+        val["factors"]["weight"]["pad_off_centre"] = serde_json::json!(w);
+        let o: Options = serde_json::from_value(val).unwrap();
+        let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
         let off: f64 = topor_engine::topo::tidy::pad_end_breaches(&m, &r.items).iter().filter(|h| h.hint() && h.pad == "C19.2").map(|h| h.off / MM).fold(0.0, f64::max);
         let viol: usize = r.connections.iter().map(|c| c.violations).sum();
         eprintln!("PADOFF w {w}: C19.2 off {off:.3} mm, viol {viol}, vias {}, unrouted {}, len {:.3} mm", r.vias, r.connections_total - r.routed, r.total_length_nm as f64 / MM);
