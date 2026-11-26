@@ -45,8 +45,8 @@ minimum width only where needed (p. 56); don't stretch the wire to the pad origi
   spoke passes ends at the tip leave point instead (the axis, about one trace radius out). This applies only when no
   other-net feature lies between the side path and the axis leg; otherwise the stretch is kept. The axis `Exit` shape
   then applies, and B drops the side neck.
-- **Options (schema + docs):** `[drawing] via_shift_mm` 1.0, `via_shift_passes` 2, `neck_trim` true,
-  `pad_tip_anchor` true. All judgement weights are graded; none is a cutoff.
+- **Options (schema + docs):** `[drawing] via_shift_mm` 0.0 (opt-in since r6, user 2026-11-26; 1.0 before),
+  `via_shift_passes` 2, `neck_trim` true, `pad_tip_anchor` true. All judgement weights are graded; none is a cutoff.
 
 **Invariants.** The class is kept (the same crossings per layer). Undrawn traces keep their planned room (A and B
 price it). The drawing never drops anything. Copper is identical for any thread count.
@@ -158,8 +158,8 @@ Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals 
   the all-off value.
 
 **r5 (2026-11-26, verifier vfy-via-shift-free-r1; lead: this part verifiable against main on its own).**
-- Defaults vs main: the three keys are new on this branch, all on by default (`via_shift_mm` 1.0, `neck_trim` true,
-  `pad_tip_anchor` true); all three off = main's copper (eprom/wiccon/esp hash, verifier).
+- Defaults vs main: the three keys are new on this branch; at r5 all on by default (`via_shift_mm` 1.0, `neck_trim`
+  true, `pad_tip_anchor` true; r6: `via_shift_mm` 0); all three off = main's copper (eprom/wiccon/esp hash, verifier).
 - C (tip anchor) is decided once, before drawing: `Drawer::tip_anchor_reserved` re-anchors every reserved end run at its
   own pad's tip right after `reserve_bands` (up to 4 sweeps, items, handles, owner and ERBS band updated); the draw-time
   re-anchor runs only for runs without a reservation. Before, the drawing order decided it (tw2_metric copper changed
@@ -176,3 +176,37 @@ Crop artefacts (all engines): 8 copper_edge_clearance at the boundary terminals 
   pinned pad exit). Unit test: split invariance and slack grading. The quarter-depth floor first tried (free = 0.25 x
   depth) priced free neighbours below their own move: the pocket test and via_passage_line failed.
 - Squeeze with the shift on: the copper-only room (`via_room_copper`); the planned corridors are in the price above.
+
+**r6 (2026-11-26, user decisions).**
+- `via_shift_mm` default 0 (opt-in; the code stays, experimental: r5 verifier F1/F2 are open for it, every helper is
+  gated on `via_shift_mm > 0`). `neck_trim` and `pad_tip_anchor` stay on.
+- Pad-centre invariant (user: every trace connects to the middle of its pad): `tidy::pad_end_breaches` per pad, net
+  and layer: every segment whose copper touches the pad reaches a track end at the centre (1 um) along shared ends.
+  Kinds Terminal, Junction, PassThrough (counted) and Tee (listed). Edge-clear and blocked-centre pads are listed
+  apart. Engine pattern test `topo_dvn::every_track_at_a_pad_ends_at_its_centre` (main's breaches pinned); board tool
+  `engine/examples/pad_centre.rs` + `scratch/agent-wt/tools/pad_centre_check.py`.
+- `neck_out_of_pad` (`neck_trim` paths only): a neck zone that covers any part of a run inside its own end pad grows
+  to `NECK_PAD_OUT` (20 um) past the outline, so no width step lies inside the pad (qmtech U9.9, U7.3: the narrow
+  piece from the centre lay wholly in the pad and Cleanup deleted it). A run that never leaves its pad (via in pad) is
+  necked to its end.
+
+**r7 (2026-11-26, verifier vfy-draw-via-neck-r6).**
+- KiCad's in-pad test, exactly (F1). `TRACKS_CLEANER::deleteTracksInPads` deletes a track whose ends hit a pad of
+  its net and whose `ERROR_INSIDE` polygon lies in the pad's. The polygon's round ends lie up to `r (1 - cos(pi/n))`
+  inside the true ones, n rounded up to a multiple of 8 (8 below r ~ 74 um at 5 um): 5.35 um for a 0.1407 mm track,
+  more than the old 5 um tolerance, so the tidy kept qmtech ADV7511KSTZ1.29's jog that KiCad deleted
+  (track_in_pad, one cycle). `geom::kicad` models the polygon (fitted to pcbnew's on 400 random tracks, every vertex
+  within 2 nm) and `track_inside` tests it against the pad's true shape (a superset of KiCad's pad polygon: inside
+  wherever KiCad says inside). The tidy (slack 2 nm) and the octi DP's stub price (`stub_price`, slack 1 um, so a
+  stub KiCad keeps by less than 1 um is still priced) use it.
+- The user's method for "does KiCad accept this" (2026-11-26): a test KiCad project, the real Cleanup (every box,
+  Xephyr), whatever goes was not good. `harness/kicad_accepts.py` pad_centre (kept as
+  tests/fixtures/kicad_accepts, replayed in tests/test_kicad_accepts.py): of nine cases only the jog goes. T joins
+  inside the pad 0.17 / 0.40 / 0.75 mm off the centre (axis and 45-degree hosts) stay, and so do off-centre ends
+  with no host. So a Tee stays listed, not counted.
+- The board check judges the board after the real Cleanup too (F2): `pad_centre_check.py --cleanup DIR` runs the
+  dialog (tools/gui_e2e.sh --existing --cleanup) and lists what is new after it (esp real D5.1: Cleanup removes the
+  host of the T in the USB_D+ short cascade, as on main, and the T is left an off-centre Terminal, which KiCad
+  keeps).
+- `pad_end_breaches`: a via end skips a segment only when the via lies in the pad (F3: a via outside no longer hides a
+  PassThrough). `neck_out_of_pad` only at a pad on the run's layer (F6).

@@ -179,6 +179,11 @@ pub const LEAVE_NM: f64 = 20_000.0;
 /// end).
 const STUB_SLACK_NM: f64 = 1_000.0;
 
+/// pad-snap: a stub whose far joint lies at least `w / 2` less this from its pad's outline (its
+/// true round end within this of the pad) is priced as lying inside it (r6's whole rule; r7 adds
+/// KiCad's polygon test, [`stub_price`]).
+const STUB_TOL_NM: f64 = 5_000.0;
+
 /// pad-snap: price of a first (last) leg of a run whose far (near) end lies so deep inside the
 /// run's own pad that the stub from the pad centre is wholly inside it (nm of length: 4 bends at
 /// the default 0.25 mm; [`OctiCfg::stub_nm`] derives it from the config, this is its default). tidy and KiCad's Cleanup delete that stub, so the track ends off the pad
@@ -193,16 +198,20 @@ pub const STUB_NM: f64 = 1.0e6;
 const STUB_VIOL_SHARE: f64 = 0.4;
 
 /// pad-snap: the [`STUB_NM`] price of a stub from `c` (a run end at its own pad `poly`, `ext` =
-/// the farthest outline point from `c`) to `j`, for a track of width `w`: 0 unless KiCad's Cleanup
-/// deletes the stub as a track inside the pad (its polygon at the board's maximum error `err`
-/// inside the outline, [`STUB_SLACK_NM`]; r7, before: `j` at least `w / 2` less 5 um from the
-/// outline). O(outline).
+/// the farthest outline point from `c`) to `j`, for a track of width `w`: 0 unless the stub may
+/// lie wholly inside the pad: `j` at least `w / 2` less [`STUB_TOL_NM`] from the outline (its true
+/// round end within 5 um of the pad, as before), or (r7) KiCad's Cleanup deletes it as a track
+/// inside the pad (its polygon at the board's maximum error `err` inside the outline,
+/// [`STUB_SLACK_NM`]): the polygon lies up to ~5.6 um inside the round end, so a stub whose round
+/// end sticks out by 5.35 um was free and KiCad deleted it (qmtech ADV7511KSTZ1.29). The union
+/// keeps every stub r6 priced. O(outline).
 pub fn stub_price(poly: &[Vec2], c: Vec2, ext: f64, w: f64, j: Vec2, base: f64, err: f64) -> f64 {
     if (j - c).len2() < 1.0 || !point_in_poly(j, poly) {
         return 0.0;
     }
+    let bd = super::padend::boundary_dist(j, poly);
     let depth = |q: Vec2| if point_in_poly(q, poly) { super::padend::boundary_dist(q, poly) } else { -super::padend::boundary_dist(q, poly) };
-    if !crate::geom::kicad::track_inside(c, j, w, err, depth, STUB_SLACK_NM) {
+    if bd < 0.5 * w - STUB_TOL_NM && !crate::geom::kicad::track_inside(c, j, w, err, depth, STUB_SLACK_NM) {
         return 0.0;
     }
     base * (1.0 + (j - c).len() / ext.max(1.0))
@@ -628,13 +637,21 @@ impl Drawer<'_> {
     /// neither a kept lead on that pad nor `lead_cont`), the pad is an obstacle and not anchored
     /// elsewhere (`end_at`), and `c` lies in the pad outline. Gives (outline, `c`, the farthest
     /// outline point from `c`). Used by the DP's price and by [`Drawer::run_pad_stubs`].
+    /// draw-via-neck r7: a branch end on its trunk (`end_at`) that lies inside the wire's own pad
+    /// counts too: the branch's first leg from the junction is deleted by KiCad's Cleanup when it
+    /// lies wholly inside the pad, and the branch then ends off the centre (qmtech one cycle
+    /// ADV7511KSTZ1.29: ADV_AVDD's branch from the trunk at the pad centre drew a 0.12 mm jog the
+    /// DP did not price, vfy-draw-via-neck-r6 F1). A junction outside the pad is not priced.
     pub(super) fn own_pad_end(&self, w: WireId, end: usize, at_end: bool, lead_cont: bool, c: Vec2) -> Option<(&[Vec2], Vec2, f64)> {
         let wi = &self.st.wires[w];
         let ob = if end == 0 { wi.pa } else { wi.pb };
-        if !at_end || lead_cont || ob == NO_OBS || ob >= self.b.proj.obstacles.len() || self.end_at.contains_key(&(w, end)) || self.b.kept_ends.iter().any(|k| k.obs == ob && k.lead.is_some()) {
+        if !at_end || lead_cont || ob == NO_OBS || ob >= self.b.proj.obstacles.len() || self.b.kept_ends.iter().any(|k| k.obs == ob && k.lead.is_some()) {
             return None;
         }
         let poly: &[Vec2] = &self.b.proj.obstacles[ob].poly;
+        if self.end_at.get(&(w, end)).is_some_and(|&q| fd45_off("dvn_branch_stub") || poly.len() < 3 || !point_in_poly(q, poly)) {
+            return None;
+        }
         if poly.len() < 3 || !point_in_poly(c, poly) {
             return None;
         }
@@ -2890,12 +2907,9 @@ mod tests {
         assert!((deep - STUB_NM * (1.0 + 0.5e6 / ext)).abs() < 1e-6, "{deep}");
         let deeper = stub_price_d(&poly, c, ext, w, v(0.0, 0.8e6));
         assert!(deeper > deep, "graded by the distance from the centre: {deeper} vs {deep}");
-        // r7: KiCad's polygon decides, not the true round end. The 0.2 mm track's end polygon
-        // (16 segments at 5 um) reaches r cos(11.25 deg) = 98.08 um along the axis: 98.5 um from
-        // the tip its true end sticks out 1.5 um but KiCad deletes it (priced); 96.5 um from the
-        // tip its polygon sticks out 1.58 um, more than STUB_SLACK_NM (free).
-        assert!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 98_500.0)) > 0.0);
-        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 96_500.0)), 0.0);
+        // within 5 um of half the width (the true round end): priced, as in r6
+        assert!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + 0.5 * STUB_TOL_NM)) > 0.0);
+        assert_eq!(stub_price_d(&poly, c, ext, w, v(0.0, 0.975e6 - 0.1e6 + 2.0 * STUB_TOL_NM)), 0.0);
         // the qmtech ADV7511KSTZ1.29 jog (0.3 x 1.6 mm pad, a 0.1407 mm track 45 degrees to
         // 65.011 um from the long side: its true end 5.34 um out, r6 priced it 0): priced
         let adv = vec![v(-0.15e6, -0.8e6), v(0.15e6, -0.8e6), v(0.15e6, 0.8e6), v(-0.15e6, 0.8e6)];
