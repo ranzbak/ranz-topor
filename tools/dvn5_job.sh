@@ -68,5 +68,10 @@ case ${1:-} in
     (export TOPO_VIADBG=1 TOPO_VIAPLANDBG=1; unit G esp $ESP "${C1[@]}")
     wait; find $OUT -name '*.log' -size +20M -exec gzip -9 {} + 2>/dev/null
     note "all done" ;;
+  rej)  # esp one cycle D and S (via_shift_mm 0) with TOPO_VIADBG and TOPO_VIAREJAT=$2 (per-connection RCA vs main)
+    (export TOPO_VIADBG=1 TOPO_VIAPLANDBG=1 TOPO_VIAREJAT="$2"; unit RD esp $ESP "${C1[@]}") & sleep 3
+    (export TOPO_VIADBG=1 TOPO_VIAREJAT="$2"; unit RS esp $ESP "${C1[@]}" --set drawing.via_shift_mm=0) &
+    wait; find $OUT -name '*.log' -size +20M -exec gzip -9 {} + 2>/dev/null
+    note "all done" ;;
   *) echo "usage: dvn5_job.sh attr|dbg ARM [sets]|suite|ladder"; exit 2 ;;
 esac

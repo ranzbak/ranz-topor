@@ -2401,6 +2401,19 @@ impl<'a> Drawer<'a> {
                     if turn_at(k).is_some_and(|q| (q - p).len() > 1.0) {
                         continue;
                     }
+                    if dbg {
+                        // RCA aid: TOPO_VIAREJAT="x,y;x,y" (KiCad mm): every test of the sites within
+                        // 0.06 mm of that point, with the blocking item's net.
+                        let pts: Vec<(f64, f64)> = std::env::var("TOPO_VIAREJAT").unwrap_or_default().split(';').filter_map(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)))).collect();
+                        {
+                            if pts.iter().any(|&(qx, qy)| (p.x / 1e6 - qx).hypot(-p.y / 1e6 - qy) < 0.06) {
+                                let item = via_item(net, p, sz, Some(w));
+                                let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
+                                let who: Vec<_> = rep.violations.iter().take(3).map(|v| (v.against.clone(), v.against.strip_prefix("item:").and_then(|x| x.parse::<usize>().ok()).and_then(|id| self.idx.net_of(id)), v.gap, v.required)).collect();
+                                eprintln!("VIAREJAT wire {w} via {i} k {k} at ({:.3},{:.3}) side {} check {who:?} hole {} own {} pair {}", p.x / 1e6, -p.y / 1e6, self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]), self.via_hole_ok(p, sz, net), self.via_own_pad_ok(p, sz, net), self.pair_via_ok(w, p, sz, net));
+                            }
+                        }
+                    }
                     if !self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) {
                         n_side += usize::from(Some(k) == at);
                         if dbg && Some(k) == at && std::env::var("TOPO_VIASIDE").is_ok() {
