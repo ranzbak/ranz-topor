@@ -1977,13 +1977,13 @@ impl<'a> Drawer<'a> {
         let st = self.st;
         let wi = &st.wires[w];
         let mut seen: Vec<(WireId, usize)> = Vec::new();
-        let mut tot = 0.0;
         // draw-via-neck r5 (esp RCA: +3V3's via moved onto IO8_SCL's pinned pad exit because
         // IO6's corridor, crossing 9 small triangles, was counted 9 times): with the shift on, a
         // neighbour's corridor counts once, at its deepest intrusion, so the price does not
-        // depend on the triangulation's density. Off: per traversal, as before.
+        // depend on the triangulation's density ([`neighbour_room_price`]). Off: per traversal,
+        // as before.
         let per_wire = self.opts.via_shift_mm > 0.0;
-        let mut deepest: Vec<(WireId, f64, f64)> = Vec::new();
+        let mut hits: Vec<RoomHit> = Vec::new();
         for &t in tris {
             for &(o, ok) in &st.tri_trav[t] {
                 let oi = &st.wires[o];
@@ -1999,33 +1999,18 @@ impl<'a> Drawer<'a> {
                 let s = oi.s.max(wi.s);
                 let pitch = (oi.w + s).max(1.0);
                 let depth = 0.5 * d + s + 0.5 * oi.w - dist;
-                let mut slack = f64::NAN;
-                if depth > 0.0 && per_wire {
-                    // How freely the neighbour can give way there (lead r5): its packed slack
-                    // away from the via; a pinned one (pad exit, full passage) pays the whole
-                    // depth, a free one a quarter. Graded, no cutoff.
-                    slack = self.pass_slack_away(o, ok, p);
-                    let eff = depth * (0.25 + 0.75 * depth / (depth + slack.max(0.0)));
-                    match deepest.iter_mut().find(|e| e.0 == o) {
-                        Some(e) => e.1 = e.1.max(eff),
-                        None => deepest.push((o, eff, pitch)),
-                    }
-                } else if depth > 0.0 {
-                    let x = depth / pitch;
-                    tot += pitch * (x + x * x);
-                }
                 if depth > 0.0 {
+                    // How freely the neighbour can give way there (lead r5): its packed slack
+                    // away from the via (only read with the shift on).
+                    let slack = if per_wire { self.pass_slack_away(o, ok, p) } else { 0.0 };
                     if std::env::var_os("TOPO_VIAPLANDBG").is_some() {
                         eprintln!("VIAPLANP wire {w} at ({:.3},{:.3}) other {o} net {} ok {ok} dist {:.3} depth {:.3} slack {:.3} pitch {:.3}", p.x / 1e6, -p.y / 1e6, oi.net, dist / 1e6, depth / 1e6, slack / 1e6, pitch / 1e6);
                     }
+                    hits.push(RoomHit { wire: o, depth, slack, pitch });
                 }
             }
         }
-        for (_, depth, pitch) in deepest {
-            let x = depth / pitch;
-            tot += pitch * (x + x * x);
-        }
-        room * tot
+        room * neighbour_room_price(&hits, per_wire)
     }
 
     /// draw-via-neck r5 (lead 2026-11-26, esp RCA): how far wire `o` can give way from a via at
@@ -5446,9 +5431,82 @@ impl<'a> Drawer<'a> {
     }
 }
 
+/// draw-via-neck r5: one traversal of a neighbour's planned corridor that a via site reaches into
+/// ([`Drawer::via_plan_price_in`]): the wire, how deep (nm), its packed slack away from the via
+/// (nm, [`Drawer::pass_slack_away`]) and its pitch (width + clearance, nm).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoomHit {
+    pub wire: WireId,
+    pub depth: f64,
+    pub slack: f64,
+    pub pitch: f64,
+}
+
+/// draw-via-neck r5 (lead 2026-11-26): how much more an intrusion into a pinned neighbour (no
+/// packed slack away from the via: a pad exit, a full passage) costs than one into a free
+/// neighbour, as a factor on the depth: `depth x (1 + PINNED_DEPTH x depth / (depth + slack))`.
+/// A free neighbour (slack >> depth) pays its depth (it moves that far: its detour); a pinned
+/// one pays 3x the depth (it cannot move: the room comes out of the next wire or the
+/// clearance). Graded, no cutoff. Measured on the pocket pattern (via_interval_sliver: X's
+/// pinned traversal, depth 0.39 mm, slack 0.014: the per-wire depth alone, factor 0, keeps the
+/// via 1 mm along the wire; 1-3 put it into the pocket) and on esp's one-cycle via sites (re-priced
+/// from the debug lines: 1 and 2 keep every pick, 3 moves IO8_SCL's via 0): 2.
+pub(crate) const PINNED_DEPTH: f64 = 2.0;
+
+/// The planned-room price (nm, before the `room` weight) of a via site's [`RoomHit`]s,
+/// `pitch x (x + x^2)` with `x = depth / pitch`. `per_wire` (the shift on): each neighbour
+/// once, at its deepest slack-weighted intrusion (`PINNED_DEPTH`): independent of how many
+/// triangles its corridor crosses near the site. Off: every traversal at its depth (main).
+pub(crate) fn neighbour_room_price(hits: &[RoomHit], per_wire: bool) -> f64 {
+    let f = |e: f64, pitch: f64| {
+        let x = e / pitch;
+        pitch * (x + x * x)
+    };
+    if !per_wire {
+        return hits.iter().filter(|h| h.depth > 0.0).map(|h| f(h.depth, h.pitch)).sum();
+    }
+    let mut deepest: Vec<(WireId, f64, f64)> = Vec::new();
+    for h in hits.iter().filter(|h| h.depth > 0.0) {
+        let e = h.depth * (1.0 + PINNED_DEPTH * h.depth / (h.depth + h.slack.max(0.0)));
+        match deepest.iter_mut().find(|x| x.0 == h.wire) {
+            Some(x) => x.1 = x.1.max(e),
+            None => deepest.push((h.wire, e, h.pitch)),
+        }
+    }
+    deepest.iter().map(|&(_, e, p)| f(e, p)).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// draw-via-neck r5 (lead 2026-11-26): the per-wire planned-room price does not depend on
+    /// the triangulation: a neighbour's corridor split over 1, 3 or 9 triangles near the site
+    /// (the same depth and slack in each) prices the same; per traversal (shift off, main) it
+    /// grows with the split. A pinned neighbour (slack 0) costs more than a free one (slack
+    /// 10 mm) at the same depth, and a deeper intrusion more than a shallower one (graded).
+    #[test]
+    fn neighbour_room_price_is_split_invariant_and_graded_by_slack() {
+        let mm = 1e6;
+        let hit = |wire: WireId, depth: f64, slack: f64| RoomHit { wire, depth: depth * mm, slack: slack * mm, pitch: 0.45 * mm };
+        let split = |n: usize| (0..n).map(|_| hit(3, 0.3, 0.5)).chain(std::iter::once(hit(4, 0.1, 0.0))).collect::<Vec<_>>();
+        let one = neighbour_room_price(&split(1), true);
+        for n in [3, 9] {
+            assert!((neighbour_room_price(&split(n), true) - one).abs() < 1e-6, "split {n}");
+            assert!(neighbour_room_price(&split(n), false) > neighbour_room_price(&split(1), false) * 1.5, "per traversal grows with the split {n}");
+        }
+        // the deepest traversal of a wire counts, not their sum
+        let two = [hit(3, 0.3, 0.5), hit(3, 0.1, 0.5)];
+        assert!((neighbour_room_price(&two, true) - neighbour_room_price(&two[..1], true)).abs() < 1e-6);
+        // pinned costs much more than free at the same depth; free pays at least its depth's price
+        let (pinned, free) = (neighbour_room_price(&[hit(3, 0.2, 0.0)], true), neighbour_room_price(&[hit(3, 0.2, 10.0)], true));
+        assert!(pinned > 3.0 * free, "pinned {pinned} free {free}");
+        assert!((free - neighbour_room_price(&[hit(3, 0.2, 0.0)], false)) / free < 0.1, "free ~ its depth: {free}");
+        // graded: more slack, cheaper; deeper, dearer; nothing without depth
+        let at = |d: f64, s: f64| neighbour_room_price(&[hit(3, d, s)], true);
+        assert!(at(0.2, 0.0) > at(0.2, 0.1) && at(0.2, 0.1) > at(0.2, 1.0) && at(0.3, 0.5) > at(0.2, 0.5));
+        assert_eq!(at(-0.1, 0.0), 0.0);
+    }
 
     fn v(x: f64, y: f64) -> Vec2 {
         Vec2 { x, y }

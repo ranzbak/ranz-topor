@@ -53,7 +53,9 @@ case ${1:-} in
     export CARGO_TARGET_DIR=$OUT/target-tt CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
     T=""; for t in topo_dvn topo_thick_layer tw2_metric topo_vias54 topo_fit topo_m3_patterns topo_d0 topo_cm1_room topo_fx_survivors topo_exist_term; do T="$T --test $t"; done
     (cd engine && cargo test --release --no-fail-fast $T) > $OUT/tt.log 2>&1 9>&-; note "tt rc $?"
-    grep -E '^test result|FAILED|panicked' $OUT/tt.log > $OUT/tt-summary.txt ;;
+    grep -E '^test result|FAILED|panicked' $OUT/tt.log > $OUT/tt-summary.txt
+    (cd engine && cargo test --release --lib neighbour_room_price) > $OUT/tt-lib.log 2>&1 9>&-; note "tt lib rc $?"
+    (cd engine && TOPO_VIADBG=1 cargo test --release --test topo_thick_layer thick_dive_grouping_site_window_reaches_the_drawing -- --nocapture) 2>&1 9>&- | gzip -9 > $OUT/dbg-thick-window.log.gz ;;
   tdbg)  # tdbg BIN FILTER...: one release test binary's tests with the via debug lines (gzipped)
     export CARGO_TARGET_DIR=$OUT/target-tt CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=1
     B=$2; shift 2
