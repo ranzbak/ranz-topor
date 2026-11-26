@@ -182,3 +182,45 @@ fn a_band_kept_across_a_model_gap_is_tagged_gap_kept() {
         assert!(p.hit_wire.is_some(), "{p:?}");
     }
 }
+
+// ---- draw-absorb A1 (`[drawing] forced_shrink`) ----
+
+fn with(m: &str, f: impl Fn(&mut serde_json::Value)) -> BoardModel {
+    let mut j: serde_json::Value = serde_json::from_str(m).unwrap();
+    f(&mut j);
+    BoardModel::from_json(&j.to_string()).expect("fixture parses")
+}
+
+fn opts_shrink(base: &Options, on: bool) -> Options {
+    let mut val = serde_json::to_value(base).unwrap();
+    val["forced_shrink"] = serde_json::json!(on);
+    serde_json::from_value(val).unwrap()
+}
+
+#[test]
+fn explore_a1() {
+    let path = format!("{}/tests/fixtures/erbs/model-gap_squeeze.json", env!("CARGO_MANIFEST_DIR"));
+    let src = std::fs::read_to_string(&path).unwrap();
+    for floor in [250_000i64, 150_000] {
+        let m = with(&src, |j| j["rules"]["min_track_width"] = serde_json::json!(floor));
+        let mut val = serde_json::to_value(Options::default()).unwrap();
+        val["runs"] = serde_json::json!(1);
+        val["topo_rounds"] = serde_json::json!(1);
+        val["draw_style"] = serde_json::json!("smooth");
+        let o: Options = serde_json::from_value(val).unwrap();
+        for on in [false, true] {
+            let r = route(&m, &opts_shrink(&o, on));
+            let e = r.erbs.as_ref().unwrap();
+            eprintln!("GAP floor {floor} on {on}: viols {} gap_kept {} shrunk {} necks {:?}", r.violations.len(), e.gap_kept, e.gap_shrunk, r.warnings.iter().filter(|w| w.contains("neck") || w.contains("narrow")).count());
+        }
+    }
+    let src = include_str!("fixtures/fx-narrow-gap.json");
+    for floor in [250_000i64, 100_000] {
+        let m = with(src, |j| j["rules"]["min_track_width"] = serde_json::json!(floor));
+        for on in [false, true] {
+            let r = route(&m, &opts_shrink(&opts(), on));
+            let amt: f64 = r.violations.len() as f64;
+            eprintln!("NARROW floor {floor} on {on}: viols {amt} {:?} warn {:?}", r.violations.iter().map(|v| (v.kind.clone(), v.depth_nm)).collect::<Vec<_>>(), r.warnings.iter().filter(|w| w.to_lowercase().contains("neck")).collect::<Vec<_>>());
+        }
+    }
+}

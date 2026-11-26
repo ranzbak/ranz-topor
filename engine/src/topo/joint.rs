@@ -147,6 +147,8 @@ pub struct JointState {
     pub gap_kept: Vec<GapKept>,
     /// Both runs of every `gap_kept` pair: the one drawn second records the violation.
     pub gap_runs: BTreeSet<(WireId, usize)>,
+    /// draw-absorb A1 (`[drawing] forced_shrink`): model-gap pairs resolved by the plan's neck.
+    pub gap_shrunk: usize,
 }
 
 impl JointState {
@@ -306,6 +308,83 @@ impl<'a> Drawer<'a> {
         // erbs_gap_keep_max_mm` keeps both bands; the gap stays as a counted violation of the band
         // drawn second. A deeper one, or a predicted conflict, goes to the selector.
         let gap_max = (self.opts.erbs_gap_keep_max_mm.max(0.0) * 1e6).round() as i64;
+        // draw-absorb A1 (`[drawing] forced_shrink`): before a model-gap pair is kept with its
+        // gap as a violation, the band the plan necks is realised again with that neck against
+        // the other band (the first realise saw only the static copper, which the full width
+        // clears; TopoR 6.3 manual p. 56: the minimum width in the bottleneck). The band that
+        // would yield by key first, then the other. A band that comes out legal against every
+        // item takes part in no conflict any more (its other pairs go too); one that does not
+        // keeps its copper as it was. Only ever narrower (realise takes the widest width that
+        // passes, never above the reserved one).
+        if self.opts.forced_shrink {
+            let pairs: Vec<(usize, usize)> = deep.iter().filter(|(&(a, c), &(d, _, _))| (bands[a].gap || bands[c].gap) && d <= gap_max).map(|(k, _)| *k).collect();
+            for (a, c) in pairs {
+                if !deep.contains_key(&(a, c)) {
+                    continue;
+                }
+                let (ka, kc) = (key(bands[a].w), key(bands[c].w));
+                let (yi, oi) = if (ka, bands[a].w, bands[a].r) > (kc, bands[c].w, bands[c].r) { (a, c) } else { (c, a) };
+                for x in [yi, oi] {
+                    let w = bands[x].w;
+                    let Some(pn) = self.plan_neck(w) else { continue };
+                    let layer = self.layer_of_band(&bands[x].items);
+                    let lid = self.layer_id(layer);
+                    let cur = self.joint.cur.replace(w);
+                    for h in std::mem::take(&mut handles[x]) {
+                        of_id.remove(&self.handles[h].0);
+                        self.uncommit(h);
+                    }
+                    self.joint.cur = cur;
+                    let pneck = Some(pn);
+                    let got = self.realise(w, layer, lid, &bands[x].pts, &pneck).filter(|(its, _)| !its.is_empty());
+                    let ok = got.is_some();
+                    if let Some((its, pnr)) = got {
+                        bands[x].items = its;
+                        bands[x].pneck = pnr;
+                    }
+                    let hs: Vec<usize> = bands[x].items.iter().map(|it| self.commit(it)).collect();
+                    for &h in &hs {
+                        let id = self.handles[h].0;
+                        of_id.insert(id, x);
+                        self.joint.owner.insert(h, w);
+                        self.joint.band_ids.insert(id, (w, h));
+                    }
+                    handles[x] = hs;
+                    if ok {
+                        // Its own check is clean; a partner's check against it (another net's
+                        // rule can be wider) decides whether that pair stays.
+                        let partners: Vec<usize> = deep.keys().filter(|&&(p, q)| p == x || q == x).map(|&(p, q)| if p == x { q } else { p }).collect();
+                        deep.retain(|&(p, q), _| p != x && q != x);
+                        for o in partners {
+                            let rep = self.checker.check_against(&self.idx, &bands[o].items, &[]);
+                            for v in &rep.violations {
+                                if v.against.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)) != Some(&x) {
+                                    continue;
+                                }
+                                let at = match bands[o].items.get(v.item) {
+                                    Some(Item::Track(t)) => {
+                                        let (s, e) = (t.prim.start(), t.prim.end());
+                                        ((s.x as i64 + e.x as i64) / 2, (s.y as i64 + e.y as i64) / 2)
+                                    }
+                                    _ => (0, 0),
+                                };
+                                let d = v.required - v.gap;
+                                let e = deep.entry((o.min(x), o.max(x))).or_insert((d, at, v.layer));
+                                if d > e.0 {
+                                    *e = (d, at, v.layer);
+                                }
+                            }
+                        }
+                    }
+                    if !deep.contains_key(&(a, c)) {
+                        break;
+                    }
+                }
+                if !deep.contains_key(&(a, c)) {
+                    self.joint.gap_shrunk += 1;
+                }
+            }
+        }
         let mut edges: Vec<(usize, usize)> = Vec::new();
         for (&(a, c), &(d, at, layer)) in &deep {
             if (bands[a].gap || bands[c].gap) && d <= gap_max {
@@ -471,6 +550,7 @@ pub fn tally<'w>(drawn: impl Iterator<Item = &'w WireOut>, j: &JointState, keep:
         left_reserved: j.left_reserved,
         octi_rescued: j.octi_rescued,
         gap_kept: j.gap_kept.len(),
+        gap_shrunk: j.gap_shrunk,
         gap_kept_max_mm: j.gap_kept.iter().map(|g| g.overlap_nm).max().unwrap_or(0) as f64 / 1e6,
         gap_kept_list: j
             .gap_kept

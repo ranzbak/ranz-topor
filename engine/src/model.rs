@@ -1673,6 +1673,13 @@ pub struct Options {
     /// the band drawn second, counted (`route.erbs.gap_kept`), instead of a forced run. A larger
     /// overlap goes to the selector (`erbs_conflict_keep`). 0 = every conflict to the selector.
     pub erbs_gap_keep_max_mm: f64,
+    /// draw-absorb A1 (`[drawing] forced_shrink`, docs/dev/design/draw-absorb.md): shrink before
+    /// violate. A band kept across a model gap (`erbs_gap_keep_max_mm`) is realised again with the
+    /// plan's own neck against the other band before the gap is kept (the plan necks it there; the
+    /// drawing realises that); a forced run (never drop) is necked over the stretches it violates,
+    /// down to the net's floor (`State::w_min`), where that removes or shallows its violations.
+    /// Each neck is warned (a shrinkage). false (default until a verifier) = main's copper.
+    pub forced_shrink: bool,
     /// M3 (`[drawing] erbs_length_weight`): with realise = "erbs", the graded price of an ERBS
     /// longer than its band: the drawing prices a legal ERBS of length `L` over a band of length
     /// `B` at `L (1 + k max(0, L/B - 1)^2)` and keeps it unless a legal sequential run is cheaper
@@ -2095,6 +2102,7 @@ impl Default for Options {
             octi_own_portals: true,
             octi_straighten: true,
             erbs_gap_keep_max_mm: 0.15,
+            forced_shrink: false,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
             bundle_pull: 0.3,

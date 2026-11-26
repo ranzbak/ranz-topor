@@ -724,6 +724,9 @@ pub struct DrawStats {
     /// [`forced_form_key`]), and the forced runs that keep free-angle stretches (their number and
     /// length, mm): their octilinear form costs more (or there is none).
     pub forced_octi: usize,
+    /// draw-absorb A1 (`[drawing] forced_shrink`): forced runs necked over their violating
+    /// stretches (fewer or shallower violations).
+    pub forced_shrunk: usize,
     pub forced_free_runs: usize,
     pub forced_free_stretches: usize,
     pub forced_free_mm: f64,
@@ -4577,6 +4580,19 @@ impl<'a> Drawer<'a> {
                             }
                         }
                     }
+                    // draw-absorb A1 (`[drawing] forced_shrink`): shrink before violate.
+                    if self.opts.forced_shrink && !vs.is_empty() {
+                        if let Some((its, nk, wn, ls, v2)) = self.shrink_forced(w, lid, &pts, &items, &vs) {
+                            items = its;
+                            vs = v2;
+                            for (e, l) in nk.ends.iter().zip(ls) {
+                                if let (Some((c, _)), true) = (e, l > 0.0) {
+                                    fnecks.push((*c, wn, l));
+                                }
+                            }
+                            self.stats.forced_shrunk += 1;
+                        }
+                    }
                     let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
                     let first = committed.len();
                     for it in &items {
@@ -5223,6 +5239,73 @@ impl<'a> Drawer<'a> {
         let nk = if self.opts.neck_trim { self.fit_neck(w, lid, pts, neck, wn) } else { *neck };
         let (items, lens) = self.neck_items(w, lid, pts, &nk, wn);
         Some((wn, items, lens))
+    }
+
+    /// draw-absorb A1 (`[drawing] forced_shrink`, docs/dev/design/draw-absorb.md): the forced run
+    /// `pts` (its `items` all at the wire's width; violations `vs`) necked over the stretches it
+    /// violates: one zone per track violation (the deepest [`NECK_ZONES`](super::exact::NECK_ZONES),
+    /// round its middle, half its length plus one pitch), at the widest width in `[floor, nominal]`
+    /// whose severity key is the floor's, each zone trimmed to what the checker needs and never
+    /// ending inside the run's own end pad (`neck_out_of_pads`). TopoR 6.3 manual p. 56 (minimum
+    /// width in bottlenecks), p. 72 (shrinkages). `None` unless the key ([`viol_key`]: shorts,
+    /// then amount) gets strictly better; a run the plan or a pad end already necks is left to
+    /// those necks (never widened). `(items, zones, width, necked length per zone, violations)`.
+    /// O(14 checks of the run + the trim).
+    #[allow(clippy::type_complexity)]
+    fn shrink_forced(&self, w: WireId, lid: u32, pts: &[Vec2], items: &[Item], vs: &[Viol]) -> Option<(Vec<Item>, super::exact::Neck, f64, [f64; super::exact::NECK_ZONES], Vec<Viol>)> {
+        let wi = &self.st.wires[w];
+        let min_w = self.st.w_min(wi.net, wi.w);
+        if min_w >= wi.w - 0.5 || pts.len() < 2 || items.iter().any(|i| matches!(i, Item::Track(t) if (t.width as f64) < wi.w - 0.5)) {
+            return None;
+        }
+        let mut zs: Vec<&Viol> = vs.iter().filter(|v| !v.via && v.kind != "connection_width").collect();
+        if zs.is_empty() {
+            return None;
+        }
+        zs.sort_by(|a, b| b.amount().total_cmp(&a.amount()));
+        let mut ends = [None; super::exact::NECK_ZONES];
+        for (z, v) in ends.iter_mut().zip(&zs) {
+            *z = Some((v.at, 0.5 * v.len_nm + wi.w + wi.s));
+        }
+        let nk0 = super::exact::Neck { min_w, ends };
+        let eval = |nk: &super::exact::Neck, wn: f64| {
+            let (its, ls) = self.neck_items(w, lid, pts, nk, wn);
+            let rep = self.checker.check_against(&self.idx, &its, &[]);
+            let mut v2 = self.viols_of(&its, &rep);
+            v2.extend(self.graze_viols(w, &its));
+            (its, ls, v2)
+        };
+        let better = |k: (f64, f64)| {
+            let b = viol_key(vs);
+            key_le(k, b) && (k.0 < b.0 - 1e-9 || k.1 < b.1 - 1e-9)
+        };
+        let kf = viol_key(&eval(&nk0, min_w).2);
+        if !better(kf) {
+            return None;
+        }
+        let (mut lo, mut hi) = (min_w, wi.w);
+        for _ in 0..12 {
+            let mid = 0.5 * (lo + hi);
+            if key_le(viol_key(&eval(&nk0, mid).2), kf) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let wn = lo.floor().max(min_w);
+        let mut pick: Option<(Vec<Item>, super::exact::Neck, [f64; super::exact::NECK_ZONES], Vec<Viol>)> = None;
+        for nk in [self.neck_out_of_pads(w, lid, pts, self.trim_neck(w, lid, pts, &nk0, wn)), self.neck_out_of_pads(w, lid, pts, nk0)] {
+            let (its, ls, v2) = eval(&nk, wn);
+            // The trimmed zones first; the whole zones only where they are strictly better.
+            let k = viol_key(&v2);
+            if better(k) && pick.as_ref().is_none_or(|p| {
+                let b = viol_key(&p.3);
+                key_le(k, b) && (k.0 < b.0 - 1e-9 || k.1 < b.1 - 1e-9)
+            }) {
+                pick = Some((its, nk, ls, v2));
+            }
+        }
+        pick.map(|(its, nk, ls, v2)| (its, nk, wn, ls, v2))
     }
 
     /// draw-via-neck B (`[drawing] neck_trim`, lead 2026-11-24): the neck width of the run `pts`

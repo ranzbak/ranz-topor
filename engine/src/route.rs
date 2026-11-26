@@ -427,6 +427,9 @@ pub struct ErbsRunReport {
     pub gap_kept: usize,
     pub gap_kept_max_mm: f64,
     pub gap_kept_list: Vec<ErbsGapKept>,
+    /// draw-absorb A1 (`[drawing] forced_shrink`): model-gap pairs resolved by realising one band
+    /// with its plan's neck against the other (not kept as a violation).
+    pub gap_shrunk: usize,
     /// The runs drawn without a band (`cut_no_band` and forced ones), one entry each.
     pub no_band_list: Vec<ErbsNoBand>,
     /// Runs of the drawn wires.
