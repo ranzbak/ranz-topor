@@ -28,7 +28,9 @@ Real dialog (Xephyr :6, own KiCad home, every box on; wt-pcm-runs/cl0), replay =
   - esp drawing loss / topology, a via passed on the wrong side: IO7-IO10_SDA, IO9_BOOT-+3V3 via.
   - These are the router's open quality items. No single mechanism fixes all of them.
 - Engine "short" and KiCad "shorting" differ once. The engine counts ADV_HPD_C against HDMI5V as a short
-  (depth 0.40 mm), but KiCad's DRC and Cleanup do not see one there; not diagnosed yet. A plain mid-segment
+  (depth 0.40 mm), but the written file has no such contact. The nearest HDMI5V F.Cu segment, (139.368, 57.399)
+  to (140.967, 55.800), runs parallel 0.43 mm clear of HPD_C. So the engine's violation list is stale against a
+  later pass that moved HDMI5V; this is a report bug, not copper. A plain mid-segment
   crossing is joined by KiCad and removed (shorting fixture, CROSS case).
 
 ## Options (a user decision: it touches the never-drop / costly-not-failed rule)
