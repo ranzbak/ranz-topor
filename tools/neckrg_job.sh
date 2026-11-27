@@ -75,6 +75,11 @@ case ${1:-} in
     ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb
     for a in nrg_join nrg_contig; do TOPO_FD45_OFF=$a bunit A$a esp $ESP; TOPO_FD45_OFF=$a bunit A$a qm $QM; done
     xunit ;;
+  r5qm)  # r5: qm det s0 with TOPO_NECKDBG + TOPO_OCTIDBG + plan dump, tip and the nrg_join arm (= main's drawing)
+    for a in tip nrg_join; do d=$OUT/qdbg-$a; mkdir -p $d
+      ( [ $a = tip ] || export TOPO_FD45_OFF=$a; TOPO_NECKDBG=1 TOPO_OCTIDBG=1 TOPO_PLANDUMP=$d/plan.json tools/route_board.sh $QM $d/s0 --no-png --set optimize.runs=1 --set optimize.rounds=1 > $d/route.log 2>&1 9>&- ); note "qdbg $a rc $?"
+      gzip -9 $d/route.log
+    done ;;
   r3qm)  # r3: the qmtech crop at the tip (T) + qm det s0 C1 with main's exit test (nrg_exit + nrg_join)
     crop T --set optimize.rounds=1
     TOPO_FD45_OFF=nrg_exit,nrg_join bunit Anrg_exit+nrg_join qm $QM ;;
