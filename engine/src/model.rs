@@ -1835,7 +1835,9 @@ pub struct Options {
     /// directions from a point of the pass's previous portal to a point of its next one; the cut
     /// condition, Leiserson & Maley 1985; a wire in a straight oblique sleeve keeps its factor,
     /// Maley 1987 p. 32); the rest is this graded price (the length the wires spend to cross
-    /// squarer). 0 = the oblique overage counts as over-full (before bundle-turn). Default 1.
+    /// squarer). 0 (default) = the oblique overage counts as over-full. Opt-in (user 2026-11-28):
+    /// the room model under-predicts what the drawing realises (bh26: drawing_loss 21 -> 31, new
+    /// detours); a redesign follows, design note first.
     pub oblique_price: f64,
     /// tw4-r2 (2b) (`[capacity] via_disc_height`, docs/dev/design/tw4-r2.md (2b)): with via_cuts,
     /// a planned via's disc packs on the two edges its wire crosses round it at the via point's
@@ -2180,7 +2182,7 @@ impl Default for Options {
             via_cuts: true,
             via_best_point: false,
             via_over_ramp_mm: 0.0,
-            oblique_price: 1.0,
+            oblique_price: 0.0,
             via_disc_height: false,
             via_site_price: "off".into(),
             via_pair_room: false,

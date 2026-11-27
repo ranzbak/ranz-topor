@@ -611,11 +611,11 @@ fn local_judge_falls_back_to_global_under_cuts() {
 /// Step B (`[optimize] local_depth`): a deeper ring frees at least as many wires per local
 /// layering as depth 1 (the crossings of the crossings; more on one of the boards), and the layerings stay exact (no partner
 /// fault, no unpriced held-held crossing, no stale held event), 2 and 4 layers.
-/// bundle-turn r2: measured with main's capacity model (`oblique_price` 0). With the oblique price
-/// on (the default) this fixture has fewer over-full edges, the depth-1 and depth-2 rings free the
-/// same wires (mean 1.3 / 1.3 on 2 and 4 layers; at oblique price 0: 1.5 / 1.6 and 1.3 / 1.3), so
-/// the strict "more somewhere" has nothing to show; depth 2 >= depth 1 and the exactness checks
-/// are asserted at the default too.
+/// bundle-turn r2: measured with main's capacity model (`oblique_price` 0, the default; item 4 is
+/// opt-in since user 2026-11-28). With the oblique price on this fixture has fewer over-full
+/// edges, the depth-1 and depth-2 rings free the same wires (mean 1.3 / 1.3 on 2 and 4 layers; at
+/// oblique price 0: 1.5 / 1.6 and 1.3 / 1.3), so the strict "more somewhere" has nothing to show
+/// there; the exactness checks are asserted with item 4 on too.
 #[test]
 fn local_depth_two_frees_more_and_stays_exact() {
     // SAFETY: the variable only switches on a debug count; tests reading it all want it on.
@@ -631,8 +631,8 @@ fn local_depth_two_frees_more_and_stays_exact() {
         pads.push(("B3", 2, 4.0, 17.0, 1.0, 1.0, 2));
         let m = board_layers(30.0, 20.0, 8, &pads, n_layers);
         for d in [1, 2] {
-            let (_, l, line) = judge_line(&m, &loop_opts(&format!(r#""loop_judge": "local", "local_depth": {d}"#)));
-            assert!(l > 0.0 && line.contains("TOPO_LOCALCHECK: 0 partner faults, 0 unpriced held-held crossings, 0 stale held events"), "default, depth {d}: {line}");
+            let (_, l, line) = judge_line(&m, &loop_opts(&format!(r#""loop_judge": "local", "local_depth": {d}, "oblique_price": 1.0"#)));
+            assert!(l > 0.0 && line.contains("TOPO_LOCALCHECK: 0 partner faults, 0 unpriced held-held crossings, 0 stale held events"), "oblique price on, depth {d}: {line}");
         }
         let (_, l1, d1) = judge_line(&m, &loop_opts(r#""loop_judge": "local", "local_depth": 1, "oblique_price": 0.0"#));
         let (_, l2, d2) = judge_line(&m, &loop_opts(r#""loop_judge": "local", "local_depth": 2, "oblique_price": 0.0"#));

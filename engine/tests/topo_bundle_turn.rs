@@ -55,10 +55,11 @@ fn worst(pk: &Packer, e: usize, items: &[PackItem], d: f64) -> f64 {
 fn oblique_overage_is_a_price_and_over_full_only_when_it_does_not_fit_square() {
     let m = tiny();
     let b = board::build(&m, &BuildOpts::default()).unwrap();
-    let on = Packer::for_model(&m, &Options::default(), &b.proj);
-    let off = Packer::for_model(&m, &Options { oblique_price: 0.0, ..Options::default() }, &b.proj);
+    // Item 4 is opt-in (user 2026-11-28, default 0): the "on" arm sets the measured price 1.
+    let on = Packer::for_model(&m, &Options { oblique_price: 1.0, ..Options::default() }, &b.proj);
+    let off = Packer::for_model(&m, &Options::default(), &b.proj);
     let w2 = Packer::for_model(&m, &Options { oblique_price: 2.0, ..Options::default() }, &b.proj);
-    assert_eq!(Options::default().oblique_price, 1.0, "on by default");
+    assert_eq!(Options::default().oblique_price, 0.0, "opt-in: off by default (user 2026-11-28)");
     let e = (0..b.proj.edges.len()).max_by(|&a, &c| on.edge_len(a).total_cmp(&on.edge_len(c))).unwrap();
     let obl = [track(2, 1.5), track(3, 1.5)];
     let sq = [track(2, 1.0), track(3, 1.0)];
@@ -121,13 +122,15 @@ fn refit_and_straighten_lines_report_convergence() {
 /// Per net code: (net, length mm, bends, segments off 0/45/90 degrees).
 type NetShape = (i32, f64, usize, usize);
 
-/// Per net code its [`NetShape`], the violations per connection and the unrouted count.
-fn route_pattern(p: &str) -> (Vec<NetShape>, Vec<(String, usize)>, usize) {
+/// Per net code its [`NetShape`], the violations per connection and the unrouted count, routed at
+/// `[capacity] oblique_price` = `oblique` (item 4, opt-in since 2026-11-28; 0 = the default).
+fn route_pattern(p: &str, oblique: f64) -> (Vec<NetShape>, Vec<(String, usize)>, usize) {
     let path = format!("{}/tests/fixtures/bundle_turn/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
     let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let mut val = serde_json::to_value(Options::default()).unwrap();
     val["runs"] = serde_json::json!(1);
     val["rounds"] = serde_json::json!(1);
+    val["oblique_price"] = serde_json::json!(oblique);
     let o: Options = serde_json::from_value(val).unwrap();
     let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
     let mut out = Vec::new();
@@ -177,10 +180,11 @@ fn route_pattern(p: &str) -> (Vec<NetShape>, Vec<(String, usize)>, usize) {
 /// over the oblique factor; before: 7.99 mm round the wall), no violation, every wire within 1 % of
 /// the reference length (5.2718 / 6.1115 / 6.7243 mm), and N2, drawn before N1 turns off, keeps
 /// N1's fork room: its reference 3 bends (item 1 off, `TOPO_FD45_OFF=fork`: 4, N2 bends into the
-/// room N1 needs after the fork and steps back).
+/// room N1 needs after the fork and steps back). Item 4 is opt-in (user 2026-11-28), so the test
+/// sets it on: N3 keeping the corridor is what item 4 fixes (the reach_none mutant fails here).
 #[test]
 fn turn_fork_corner_no_violation_no_detour() {
-    let (nets, viols, unrouted) = route_pattern("turn_fork_corner");
+    let (nets, viols, unrouted) = route_pattern("turn_fork_corner", 1.0);
     assert_eq!(unrouted, 0);
     assert!(viols.iter().all(|v| v.1 == 0), "violations {viols:?}");
     for (net, l) in [(1, 5.2718), (2, 6.1115), (3, 6.7243)] {
@@ -196,7 +200,7 @@ fn turn_fork_corner_no_violation_no_detour() {
 #[test]
 #[ignore = "N2 keeps a free-angle leg: open_strip's wall at undrawn N1's zero-width planned crossing (ERBS 37 um off N1's taut line) blocks the nested elbow; follow-up: ERBS bands spaced at pitch before drawing (lead 2026-11-27)"]
 fn turn_fork_corner_matches_expected() {
-    let (nets, viols, unrouted) = route_pattern("turn_fork_corner");
+    let (nets, viols, unrouted) = route_pattern("turn_fork_corner", 1.0);
     assert_eq!(unrouted, 0);
     assert!(viols.iter().all(|v| v.1 == 0), "violations {viols:?}");
     let refs = [(1, 5.2718, 2), (2, 6.1115, 3), (3, 6.7243, 3)];
@@ -213,7 +217,7 @@ fn turn_fork_corner_matches_expected() {
 #[test]
 #[ignore = "judged after via-site-truth lands: B is planned with two P3 vias onto the keepout-closed B.Cu (lead 2026-11-27)"]
 fn hole_bundle_room_matches_expected() {
-    let (nets, _viols, unrouted) = route_pattern("hole_bundle_room");
+    let (nets, _viols, unrouted) = route_pattern("hole_bundle_room", 0.0);
     assert_eq!(unrouted, 0);
     for &(net, _, b, off) in &nets {
         assert_eq!(off, 0, "net {net}: legs off 0/45/90 degrees ({nets:?})");

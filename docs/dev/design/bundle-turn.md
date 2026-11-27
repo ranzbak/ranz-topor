@@ -110,7 +110,10 @@ oblique factor it can reach inside its sleeve (pack.rs `Taut::sq`, `reach_factor
   before.
 - The taut directions are unchanged.
 
-The option is `[capacity] oblique_price`: default 1, and 0 restores the old rule.
+The option is `[capacity] oblique_price`: opt-in, default 0 (the old rule); 1 is the measured price. User decision
+2026-11-28: opt-in, because on qmtech-bh26 the room model under-predicts what the drawing realises (compass
+drawing_loss 21 -> 31, planner_overfull 20 -> 12, every new detour vs main traced to this item, round 3 report).
+The room model gets redesigned later, design note first.
 
 **First version and why it changed (bt1r2, 2026-11-27).** The first version used factor 1 for every pass, so every
 oblique crossing counted as square. Arm B (item 4 alone, det s0) moved 156 of 464 qm connections:

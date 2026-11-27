@@ -189,11 +189,17 @@ fn route(m: &BoardModel, extra: &[(&str, serde_json::Value)]) -> RouteResult {
     })
 }
 
-/// bundle-turn r2: main's capacity model (`[capacity] oblique_price` 0). With the oblique price on
-/// (the default) the P3 layering of this fixture finds its documented optimum at ω off (P 1 via,
-/// F3 / F4 jog over B1), so there is no weave left for the via-site tests to measure: they pin it.
+/// bundle-turn r2: main's capacity model (`[capacity] oblique_price` 0, the default again since
+/// item 4 became opt-in, user 2026-11-28). With the oblique price on the P3 layering of this
+/// fixture finds its documented optimum at ω off (P 1 via, F3 / F4 jog over B1), so there is no
+/// weave left for the via-site tests to measure: they pin 0 explicitly, independent of the default.
 fn main_cap() -> (&'static str, serde_json::Value) {
     ("oblique_price", serde_json::json!(0.0))
+}
+
+/// Item 4 on (`[capacity] oblique_price` 1, opt-in since 2026-11-28).
+fn oblique_on() -> (&'static str, serde_json::Value) {
+    ("oblique_price", serde_json::json!(1.0))
 }
 
 fn plan(r: &RouteResult) -> serde_json::Value {
@@ -275,7 +281,7 @@ fn thick_dive_grouping_lane_sites() {
 /// the layering keeps P on one layer and lets the thin crossers on that layer dive (2 small vias
 /// each, ω 1): P 0 vias, 0 drawn violations. With ω 1 for every via and main's capacity model
 /// (oblique price 0) P weaves with 3 vias, two of them in 1 mm gaps (the S1 items). bundle-turn
-/// r2: with the oblique price on (the default) ω 1 already gives the fixture's optimum (P 1 via
+/// r2: with the oblique price on (opt-in, pinned) ω 1 already gives the fixture's optimum (P 1 via
 /// near x 6.85, F3 / F4 jog over B1) instead of the weave.
 #[test]
 fn thick_dive_grouping_wide_keeps_its_layer() {
@@ -286,7 +292,7 @@ fn thick_dive_grouping_wide_keeps_its_layer() {
     assert_eq!(r.violations.len(), 0, "{:?}", r.violations);
     let r0 = route(&m, &[main_cap(), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
     assert_eq!(per_net(&r0)[&1].0, 3, "ω 1, oblique price 0: P weaves (main): {:?}", per_net(&r0));
-    let rd = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+    let rd = route(&m, &[oblique_on(), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
     assert!(per_net(&rd)[&1].0 <= 1 && rd.violations.is_empty(), "ω 1, oblique price on: P at the optimum (1 via), clean: {:?} {:?}", per_net(&rd), rd.violations);
 }
 
