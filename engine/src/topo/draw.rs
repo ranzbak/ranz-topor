@@ -790,9 +790,6 @@ pub struct DrawStats {
     /// [`forced_form_key`]), and the forced runs that keep free-angle stretches (their number and
     /// length, mm): their octilinear form costs more (or there is none).
     pub forced_octi: usize,
-    /// draw-absorb A1 (`[drawing] forced_shrink`): forced runs necked over their violating
-    /// stretches (fewer or shallower violations).
-    pub forced_shrunk: usize,
     pub forced_free_runs: usize,
     pub forced_free_stretches: usize,
     pub forced_free_mm: f64,
@@ -4741,7 +4738,7 @@ impl<'a> Drawer<'a> {
                             vs = v2;
                             // r2: one stretch, one neck entry (at the run end it touches).
                             fnecks.extend(neck);
-                            self.stats.forced_shrunk += 1;
+                            self.joint.a1_forced += 1;
                             self.joint.a1_wires.insert(w);
                             self.joint.a1_mono += usize::from(fix.mono_nm > 0.0);
                             self.joint.a1_mono_nm += fix.mono_nm;
@@ -5312,7 +5309,7 @@ impl<'a> Drawer<'a> {
             ends[1] = Some((c, (n - nb..n).map(|k| far(k, c)).fold(0.0, f64::max)));
         }
         // Runs of necked passes in between (without `neck_from_pad`): one zone each.
-        let mut z = 2;
+        let mut z = super::exact::MID_ZONE;
         let mut i = 0;
         while i < mid.len() && z < super::exact::NECK_ZONES {
             let mut j = i;
@@ -5384,7 +5381,7 @@ impl<'a> Drawer<'a> {
         let inside = |x: &(Vec2, Vec2), i: usize| neck.ends[i].is_some_and(|(cc, r)| ((x.0 + x.1) * 0.5 - cc).len() <= r);
         let np = pieces.len();
         // A whole-wire zone (unbounded) and the zones in between (only without `neck_from_pad`).
-        let mut zone_of: Vec<Option<usize>> = pieces.iter().map(|x| (0..super::exact::NECK_ZONES).find(|&i| inside(x, i) && (i >= 2 || neck.ends[i].is_some_and(|z| !z.1.is_finite())))).collect();
+        let mut zone_of: Vec<Option<usize>> = pieces.iter().map(|x| (0..super::exact::NECK_ZONES).find(|&i| inside(x, i) && (i >= super::exact::MID_ZONE || neck.ends[i].is_some_and(|z| !z.1.is_finite())))).collect();
         if contig {
             if pts.first().is_some_and(|&p| near(p, 0)) {
                 for (k, x) in pieces.iter().enumerate() {
@@ -5582,12 +5579,16 @@ impl<'a> Drawer<'a> {
             return None;
         }
         let rep = self.checker.check_against(&self.idx, items, &[]);
-        let zs = self.hit_zones(w, items, &rep, &|_| true, super::exact::NECK_ZONES);
+        // r3 (vfy-draw-absorb r2 finding 1): the hit zones lie in mid-run, so they take the mid
+        // slots ([`super::exact::MID_ZONE`]..): in slots 0/1 `neck_items` (neck-regrow) narrows
+        // only the stretch from the wire's own end, so the deepest hits got no neck unless their
+        // circle held the run's start (then the whole run).
+        let zs = self.hit_zones(w, items, &rep, &|_| true, super::exact::NECK_ZONES - super::exact::MID_ZONE);
         if zs.is_empty() {
             return None;
         }
         let mut ends = [None; super::exact::NECK_ZONES];
-        for (z, v) in ends.iter_mut().zip(zs) {
+        for (z, v) in ends.iter_mut().skip(super::exact::MID_ZONE).zip(zs) {
             *z = Some(v);
         }
         let nk0 = super::exact::Neck { min_w, ends };

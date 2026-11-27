@@ -292,6 +292,13 @@ pub(super) struct Neck {
 /// Most neck zones of one wire: its two pad ends and up to four necked stretches in between.
 pub(super) const NECK_ZONES: usize = 6;
 
+/// First slot of [`Neck::ends`] for a zone in between (neck-regrow, `Drawer::neck_items`):
+/// slots 0 and 1 are the end zones of the wire's ends `a` and `b`, which narrow only the
+/// contiguous stretch of a run from that end (a finite radius); a zone from this slot on narrows
+/// every piece of the run inside its circle. draw-absorb A1's hit zones (mid-run violations of a
+/// forced run or a reserved band) live here (vfy-draw-absorb r2 finding 1).
+pub(super) const MID_ZONE: usize = 2;
+
 
 impl Wp {
     /// The segment `a-b` cut where it crosses a neck zone's circle, each piece with the width the

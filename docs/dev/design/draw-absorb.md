@@ -215,7 +215,7 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
   - Zones go over the violating tracks (`hit_zones`), at the widest width whose severity key ([`viol_key`]) is the
     floor's, trimmed (`trim_neck`), never ending inside its own end pad (`neck_out_of_pads`).
   - Taken only when the key gets strictly better (graded: a neck that only makes a violation shallower is taken too).
-  - Counted: `stats.forced_shrunk`; each neck is a NECKED warning.
+  - Counted: `route.erbs.forced_shrunk` (r3; was the unreported `stats.forced_shrunk`); each neck is a NECKED warning.
 - **The floor** is `State::w_min`: the plan's neck floor, i.e. the KiCad minimum track width, the net class minimum,
   and 2 x the minimum connection width.
 - **Where it touches the neck-regrow branch:** both paths build their copper with `Drawer::neck_items` (necked inside

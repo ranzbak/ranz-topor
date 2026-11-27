@@ -452,6 +452,10 @@ pub struct ErbsRunReport {
     pub a1_one_stretch: usize,
     pub a1_one_stretch_mm: f64,
     pub a1_stub_out: usize,
+    /// draw-absorb A1 (`[drawing] forced_shrink`): forced runs (never drop) necked over their
+    /// violating stretches, each taken only where it makes the violations strictly fewer or
+    /// shallower (the severity key: shorts, then amount).
+    pub forced_shrunk: usize,
     /// draw-absorb A1b meter: reserved bands the plan had necked that the drawing redrew at their
     /// full width (pad-tip re-anchor `tip`, adopted band's octilinear form `octi`): count, necked
     /// length dropped (mm), every one; and with `[drawing] reserved_keep_neck` the redraws that

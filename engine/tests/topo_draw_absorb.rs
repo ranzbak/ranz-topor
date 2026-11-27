@@ -302,6 +302,7 @@ fn a_forced_run_shrinks_from_the_gap_to_the_nearer_end_instead_of_violating() {
     assert!(tracks(&off).iter().all(|t| t.0 == 250_000));
     let on = route(&m, &opts_shrink(&opts(), true));
     assert_eq!((on.routed, on.violations.len()), (1, 0), "{:?}", on.violations);
+    assert_eq!((off.erbs.as_ref().unwrap().forced_shrunk, on.erbs.as_ref().unwrap().forced_shrunk), (0, 1), "one forced run shrunk");
     let necks: Vec<&String> = on.warnings.iter().filter(|w| w.contains("necked from 0.250 mm to 0.100 mm")).collect();
     assert_eq!(necks.len(), 1, "one shrinkage warning: {:?}", on.warnings);
     let ts = tracks(&on);
@@ -397,6 +398,54 @@ fn a_gap_kept_band_is_necked_against_its_partner() {
     assert!(on.violations.len() < off.violations.len(), "off {:?}\non {:?}", off.violations, on.violations);
     assert!(on.warnings.iter().any(|w| w.contains("necked from 0.250 mm")), "{:?}", on.warnings);
     assert!(tracks(&on).iter().all(|t| t.0 >= 150_000), "{:?}", tracks(&on));
+    assert_eq!(on.routed, off.routed);
+}
+
+/// r3 (vfy-draw-absorb r2 finding 2, mutant `shrink_not_strict`): a forced run whose violation no
+/// width changes. Both pads and the whole way between them lie inside a track keepout on both
+/// layers (no wall): the run's only violation is the keepout, gap 0 at any width (the checker's
+/// containment test), so its severity key is the same at every width in `[floor, nominal]`. A1
+/// takes a neck only where the key gets strictly better: none here, the copper and the
+/// violations are main's, no neck warning, and no forced run counts as shrunk
+/// (`route.erbs.forced_shrunk`). Non-strict (mutant `shrink_not_strict`), the bisection ends
+/// ~37 nm under nominal (`(w - floor) / 4096`), the trim drops the zone (no violation fewer
+/// without it), and the run was taken as shrunk for nothing: counted, its wire marked as A1's for
+/// the supply-width warning, its collinear pieces merged.
+#[test]
+fn a_forced_run_no_width_helps_is_not_necked() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| {
+        j["rules"]["min_track_width"] = serde_json::json!(100_000);
+        j["pads"].as_array_mut().unwrap().retain(|p| !p["ref"].as_str().unwrap().starts_with('W'));
+        let r = |x: i64, y: i64| serde_json::json!([x, y]);
+        j["keepouts"] = serde_json::json!([{"name": "no tracks", "layers": [0, 2], "poly": [r(1_000_000, 6_000_000), r(29_000_000, 6_000_000), r(29_000_000, 14_000_000), r(1_000_000, 14_000_000)], "no_tracks": true, "no_vias": true}]);
+    });
+    let (off, on) = (route(&m, &opts_shrink(&opts(), false)), route(&m, &opts_shrink(&opts(), true)));
+    assert!(!off.violations.is_empty() && off.violations.iter().all(|v| v.depth_nm <= 1), "main: forced inside the keepout, gap 0: {:?}", off.violations);
+    assert_eq!(off.items, on.items, "no width helps: main's copper");
+    assert_eq!(off.violations.len(), on.violations.len());
+    assert!(!on.warnings.iter().any(|w| w.contains("necked from")), "no neck warning: {:?}", on.warnings);
+    assert!(tracks(&on).iter().all(|t| t.0 == 250_000));
+    assert_eq!(on.erbs.as_ref().unwrap().forced_shrunk, 0, "nothing shrunk: {:?}", on.erbs);
+}
+
+/// r3 (vfy-draw-absorb r2 finding 1, merge with neck-regrow): erbs/qfn_fan (smooth, one cycle,
+/// min track width 0.1 mm) keeps one band pair across a model gap. The yielding band (net 3, x 8 ..
+/// 31 mm) gets two spots; the deepest one lies in mid-band, its circle (r 4.03 mm round x 12.0)
+/// misses the band's start at x 8.0. A1 puts the spots in the mid slots (`exact::MID_ZONE`..),
+/// which narrow every piece inside their circle; in the end slots 0/1 (the r2 code on main's
+/// neck-regrow `neck_items`) slot 0 narrows only the stretch from the wire's own end, so the
+/// deepest hit kept its width and the pair stayed a violation (2 violations, gap_kept 1).
+#[test]
+fn a_mid_band_gap_spot_is_necked_where_it_hits() {
+    let m = with(&std::fs::read_to_string(format!("{}/tests/fixtures/erbs/model-qfn_fan.json", env!("CARGO_MANIFEST_DIR"))).unwrap(), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
+    let o = one_cycle("smooth");
+    let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(eo.gap_kept >= 1 && !off.violations.is_empty() && eo.gap_shrunk == 0, "main keeps the gap: {eo:?}");
+    assert!(en.gap_shrunk >= 1 && en.gap_kept + en.gap_shrunk == eo.gap_kept, "{en:?}");
+    assert!(on.violations.is_empty(), "{:?}", on.violations);
+    assert!(valleys(&m, &on).is_empty(), "{:?}", chains(&m, &on));
+    assert!(tracks(&on).iter().all(|t| t.0 >= 100_000));
     assert_eq!(on.routed, off.routed);
 }
 

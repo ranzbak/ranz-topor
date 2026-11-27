@@ -171,6 +171,9 @@ pub struct JointState {
     pub a1_mono: usize,
     pub a1_mono_nm: f64,
     pub a1_stubs: usize,
+    /// draw-absorb A1 (`Drawer::shrink_forced`): forced runs necked over their violating stretches
+    /// (the severity key strictly better: fewer or shallower violations).
+    pub a1_forced: usize,
 }
 
 /// draw-absorb A1 r2: what [`Drawer::a1_finish`] changed in a run's necked copper.
@@ -381,10 +384,14 @@ impl<'a> Drawer<'a> {
                     if nk.min_w >= wi.w - 0.5 {
                         continue;
                     }
-                    let free = nk.ends.iter().filter(|z| z.is_none()).count();
+                    // r3 (vfy-draw-absorb r2 finding 1): the spots are mid-run zones, so only the
+                    // free mid slots ([`super::exact::MID_ZONE`]..) take them; slots 0/1 are the
+                    // plan's end zones (`neck_items` narrows them from the wire's end only).
+                    let mids = super::exact::MID_ZONE..super::exact::NECK_ZONES;
+                    let free = mids.clone().filter(|&i| nk.ends[i].is_none()).count();
                     let partner_hit = |v: &crate::check::Violation| v.against.strip_prefix("item:").and_then(|t| t.parse::<usize>().ok()).and_then(|id| of_id.get(&id)).is_some_and(|b| partners.contains(b));
                     let spots = self.hit_zones(w, &bands[x].items, &rep0, &partner_hit, free);
-                    let slots: Vec<usize> = (0..super::exact::NECK_ZONES).filter(|&i| nk.ends[i].is_none()).collect();
+                    let slots: Vec<usize> = mids.filter(|&i| nk.ends[i].is_none()).collect();
                     for (i, z) in slots.into_iter().zip(&spots) {
                         nk.ends[i] = Some(*z);
                     }
@@ -866,6 +873,7 @@ pub fn tally<'w>(drawn: impl Iterator<Item = &'w WireOut>, j: &JointState, keep:
         a1_one_stretch: j.a1_mono,
         a1_one_stretch_mm: j.a1_mono_nm / 1e6,
         a1_stub_out: j.a1_stubs,
+        forced_shrunk: j.a1_forced,
         unnecked: j.unnecked.len(),
         unnecked_mm: j.unnecked.iter().map(|u| u.2).sum::<f64>() / 1e6,
         unnecked_list: j.unnecked.iter().map(|&(w, r, l, room, at)| crate::route::ErbsUnnecked { wire: w, run: r, mm: l / 1e6, room_mm: room / 1e6, at: at.to_string() }).collect(),
