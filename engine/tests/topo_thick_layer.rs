@@ -331,7 +331,9 @@ fn thick_dive_grouping_one_side_move() {
 #[test]
 fn thick_dive_grouping_end_sites_only() {
     let m = thick_dive_grouping();
-    let dvn_off = [("via_shift_mm", serde_json::json!(0.0)), ("neck_trim", serde_json::json!(false)), ("pad_tip_anchor", serde_json::json!(false))];
+    // defaults-flip-a1: main's drawing also has draw-absorb A1 off (`forced_shrink`, on by default
+    // since 2026-11-27): with A1 the control arm shrinks P's forced runs (3 items, 3 shorts).
+    let dvn_off = [("via_shift_mm", serde_json::json!(0.0)), ("neck_trim", serde_json::json!(false)), ("pad_tip_anchor", serde_json::json!(false)), ("forced_shrink", serde_json::json!(false))];
     let o = |on: bool, main_draw: bool| {
         let mut v = vec![("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(on)), ("via_site_slack", serde_json::json!(0.0))];
         if main_draw {

@@ -82,8 +82,9 @@ fn forced_free_line(octi_on: bool, s: &draw::DrawStats) -> Option<String> {
 /// silent; `None` when none. Counts every drawing of the round (trial redraws too).
 fn mono_line(s: &draw::DrawStats) -> Option<String> {
     (s.mono_wires > 0).then(|| {
+        let stubs = if s.mono_stubs > 0 { format!("; {} narrowed pad-end stubs moved out of KiCad's in-pad delete (the trace keeps its pad-centre end)", s.mono_stubs) } else { String::new() };
         format!(
-            "neck profile (never wider again after a neck): {} wire drawings narrowed at both ends were narrowed between them too, one neck along the whole wire ({:.2} mm narrowed)",
+            "neck profile (never wider again after a neck): {} wire drawings that would widen again after a neck (necks at both ends, or a neck in mid-run) were narrowed on to one end, one neck stretch per wire ({:.2} mm narrowed){stubs}",
             s.mono_wires, s.mono_mm
         )
     })
@@ -11185,8 +11186,10 @@ mod tests {
         s.mono_mm = 12.345;
         assert_eq!(
             super::mono_line(&s).as_deref(),
-            Some("neck profile (never wider again after a neck): 2 wire drawings narrowed at both ends were narrowed between them too, one neck along the whole wire (12.35 mm narrowed)")
+            Some("neck profile (never wider again after a neck): 2 wire drawings that would widen again after a neck (necks at both ends, or a neck in mid-run) were narrowed on to one end, one neck stretch per wire (12.35 mm narrowed)")
         );
+        s.mono_stubs = 1;
+        assert!(super::mono_line(&s).unwrap().ends_with("(12.35 mm narrowed); 1 narrowed pad-end stubs moved out of KiCad's in-pad delete (the trace keeps its pad-centre end)"));
     }
 
     /// TW7 B `[optimize] pattern_stuck`: the order falls with every fruitless try, never to 0,

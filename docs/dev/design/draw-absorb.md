@@ -346,12 +346,29 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
     that cut base, not a code regression. Check "N cycles (picked run)" before comparing real qmtech numbers.)
   - Real KiCad Cleanup (Xephyr, all options), det and real, qm and esp: it deletes no copper that main keeps.
 
-- **Pending user decision: the one-stretch step (`a1_finish`, `one_neck_stretch`).** A1's own step necks a run on to
-  its end (via, T, pad) in one stretch. Where main's `monotone_necks` (via wires only, neck-regrow) would stop short,
-  it necks more: qmtech ADV_AVDD T -> via, 0.19 mm more of a 0.28 mm supply net; DRC equal. Options: keep, gate like
-  `monotone_necks` with `neck_from_pad`, or drop. Today's behaviour is pinned by
-  `a1_necks_a_run_to_its_via_in_one_stretch` (kills mutant mono_off); mid-slot use by
-  `a_forced_run_with_four_hit_spots_uses_all_four_mid_slots` (kills mutant mid_zone_3).
+- **Decided (user 2026-11-27, branch defaults-flip-a1): one never-widen implementation.** A1's own one-stretch
+  step (`a1_finish` / `one_neck_stretch`, debug arm `dab_mono`) is removed. A1 draws its necks where they hit;
+  main's `Drawer::monotone_necks` (neck-regrow r6), which every drawing path runs after a wire's last run, makes the
+  whole wire's profile monotone from its cheaper end, across its vias, and only with `[search] neck_from_pad` (off:
+  a mid-run neck is wanted, as in main). `a1_finish` keeps the zone-cut merge and the in-pad stub move; the stub
+  move is also done by `monotone_necks` for a pad-end stub it narrows from full width (debug arm `mono_stub`). The
+  r4 test `a1_necks_a_run_to_its_via_in_one_stretch` is re-expressed for `monotone_necks` as
+  `a1_neck_on_a_via_wire_runs_from_the_cheaper_wire_end` (necked from the pad A1 over the gap, 12.71 mm, full
+  width after it across the via; r4's step necked the run on to its via, 18.00 mm). `route.erbs.a1_one_stretch*`
+  are gone; the "neck profile" line counts the joins (and the moved stubs).
+  - Measured (defaults-flip-a1 at 087bbfd9, det s0 C1, base = main b59e745e; reports/defaults-flip-a1-*.md): with
+    both flips off the copper is main's on qm/esp/wiccon/eprom (A1b removal and this change are copper-neutral off).
+    forced_shrink on alone: qm copper = the r4 verifier's `mono_off` arm (DRC 200 -> 146, unconnected 16 = 16,
+    vias 248 -> 252, 0 valleys); esp = r4's A1 copper (17 -> 15). wiccon, eprom = main. Real (ccx33, 600 s wall)
+    esp 10 -> 8 at 30 cycles (= r4's A1 copper). Real KiCad Cleanup (all boxes): det qm/esp and real esp delete no
+    copper main keeps and no net loses a connection. The stub step (`mono_stub`) fires on none of the 4 boards; the
+    unit test `monotone_necks_moves_a_narrowed_pad_stub_out_of_the_pad` kills its arm.
+
+**A1b DROPPED (user 2026-11-27, branch defaults-flip-a1).** The option `[drawing] reserved_keep_neck`, its code
+(`kept_neck_items`, `fit_neck_with`'s grow-trimmed mode, the octilinear-form branch) and its meter
+(`route.erbs.unnecked*`, `kept_neck`, `Drawer::room_taken`, `TOPO_A1BDBG`) are removed; off was main's copper, so
+board copper is unchanged. The fixture `model-a1b_octi_crop.json` stays: A1's tests use it. The record below is
+historical.
 
 **A1b as built (2026-11-27): `[drawing] reserved_keep_neck`**, default false (since 0.5.0, unreleased); off = main
 copper (hash on 4 boards).

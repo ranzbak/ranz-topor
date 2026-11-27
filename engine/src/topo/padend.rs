@@ -258,11 +258,6 @@ impl Drawer<'_> {
                 let mut skip: Vec<usize> = res.handles.iter().map(|&h| self.handles[h].0).collect();
                 skip.sort_unstable();
                 let (s0, e0) = (res.pts[0], res.pts[res.pts.len() - 1]);
-                // draw-absorb A1b meter: the reserved neck this re-anchor drops. The anchored band
-                // is drawn at full width (main; lead 2026-11-27: `reserved_keep_neck` does not apply
-                // here, the dropped neck is the plan's hook into the pad side, and the user-approved
-                // Q3 expectation is the pad-axis entry at full width).
-                let dropped = res.pneck.map_or(0.0, |p| p.1.iter().sum::<f64>());
                 let mut p = res.pts.clone();
                 let mut moved = false;
                 for end in [0usize, 1] {
@@ -276,16 +271,6 @@ impl Drawer<'_> {
                 }
                 if !moved {
                     continue;
-                }
-                if dropped > 0.0 {
-                    let room = match (self.plan_neck(w), res.pneck) {
-                        (Some(n), Some((wn, _))) => self.room_taken(w, &p, &n, wn),
-                        _ => 0.0,
-                    };
-                    if std::env::var_os("TOPO_A1BDBG").is_some() {
-                        eprintln!("A1B tip wire {w} net {} run {r} dropped {:.3} mm room {:.3} mm old {:?} new {:?}", self.st.wires[w].net, dropped / 1e6, room / 1e6, res.pts.iter().map(|q| ((q.x / 1e3).round() / 1e3, (-q.y / 1e3).round() / 1e3)).collect::<Vec<_>>(), p.iter().map(|q| ((q.x / 1e3).round() / 1e3, (-q.y / 1e3).round() / 1e3)).collect::<Vec<_>>());
-                    }
-                    self.joint.unnecked.push((w, r, dropped, room, "tip"));
                 }
                 let items = self.run_items(w, layer, &p);
                 let old = self.joint.reserved.remove(&(w, r)).expect("reserved");
@@ -313,18 +298,6 @@ impl Drawer<'_> {
                 break;
             }
         }
-    }
-
-    /// draw-absorb A1b (`[drawing] reserved_keep_neck`): the tracks of the run `pts` of wire `w`
-    /// with the reserved neck `z` (the plan's zones at the reserved width `z.min_w`), each zone cut
-    /// to what the checker needs and grown where the full width would take planned room of traces
-    /// not drawn yet ([`Drawer::fit_neck_with`], `[drawing] neck_trim`; without it the plan's
-    /// zones as they are): never wider than reserved where the plan's neck holds someone's room.
-    /// `(items, necked length per zone)`.
-    pub(super) fn kept_neck_items(&self, w: WireId, layer: usize, pts: &[Vec2], z: &super::exact::Neck) -> (Vec<crate::model::Item>, [f64; super::exact::NECK_ZONES]) {
-        let lid = self.layer_id(layer);
-        let nk = if self.opts.neck_trim { self.fit_neck_with(w, lid, pts, z, z.min_w, true) } else { *z };
-        self.neck_items(w, lid, pts, &nk, z.min_w)
     }
 
     pub(super) fn tip_anchor_path(&self, w: WireId, end: usize, layer: usize, path: &[Vec2], skip: &[usize]) -> Option<Vec<Vec2>> {
