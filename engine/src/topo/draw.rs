@@ -4178,7 +4178,6 @@ impl<'a> Drawer<'a> {
                         let t_o = std::time::Instant::now();
                         let wneck = if pneck_out.is_some() || attempt == 1 { pneck } else { None };
                         let exits = [if ps { self.pad_exit(w, 0, pts[1]) } else { None }, if pe { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
-                        let got = self.octilinear(w, k0, k1, layer, &pts, wneck, exits, None);
                         let dbg = std::env::var("TOPO_OCTIDBG").is_ok();
                         // draw-absorb A1: an adopted band necked against a gap partner takes its
                         // octilinear form at its neck (zones and width), never wider.
@@ -4221,6 +4220,17 @@ impl<'a> Drawer<'a> {
                                 main
                             }
                             None => self.realise(w, layer, lid, o_pts, &pneck),
+                        };
+                        // r2 (qm JS1_4 RCA): the joint commit's neck gives the adopted band a
+                        // reserved neck, so main's call would search its form with the plan neck
+                        // (`wneck`), a different staircase over the whole run that moves the
+                        // bands nested beside it. An A1 band takes main's full-width form first
+                        // (the form off would draw), necked by `real`; the plan-neck form only
+                        // when that one breaks a rule. Debug arm (`TOPO_FD45_OFF=dab_form`): r1.
+                        let a1_main_form = a1z.is_some() && !a1b && wneck.is_some() && !super::octi::fd45_off("dab_form");
+                        let got = match a1_main_form.then(|| self.octilinear(w, k0, k1, layer, &pts, None, exits, None)).flatten() {
+                            Some(o) if real(&o.pts).is_some() => Some(o),
+                            _ => self.octilinear(w, k0, k1, layer, &pts, wneck, exits, None),
                         };
                         let tag = match got {
                             Some(o) => match real(&o.pts) {
