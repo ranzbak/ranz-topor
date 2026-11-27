@@ -997,7 +997,7 @@ pub fn foreign_copper_only(st: &State, layers: &[Vec<u64>], only: Option<&[bool]
 /// predicted count, shorts = the predicted shorts among them, penalty = its graded part
 /// ([`Predicted::penalty`]). O(1).
 pub fn criteria_of(p: Predicted, viol_mm: f64, vias: usize, length_mm: f64, shrinkages: usize, area_mm2: f64) -> Criteria {
-    Criteria { errors: p.count, shorts: p.shorts, short_extra: p.short_extra, open: 0, violations: p.count, penalty: p.penalty(viol_mm), vias, length_mm, shrinkages, warnings: 0, area_mm2 }
+    Criteria { errors: p.count, shorts: p.shorts, short_extra: p.short_extra, open: 0, violations: p.count, penalty: p.penalty(viol_mm), vias, length_mm, shrinkages, neck_mm: 0.0, neck_vias: 0, necking: 0.0, warnings: 0, area_mm2 }
 }
 
 /// The evaluation of a whole topology that every whole-board loop move (layer re-optimisation,

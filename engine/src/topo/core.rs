@@ -118,6 +118,15 @@ pub(crate) fn a1_supply_grade(w: f64, to: f64, len: f64) -> (f64, f64) {
     (left, (1.0 - left) * len / MM)
 }
 
+/// pick-necks: a neck to `to` (nm) over `len` (nm) of a wire of full width `w`, as graded mm:
+/// `len x (1 - to / w)`, 0 for a stretch not narrower. Graded, no cutoff. O(1).
+pub(crate) fn neck_grade(w: f64, to: f64, len: f64) -> f64 {
+    if w <= 0.0 {
+        return 0.0;
+    }
+    len / MM * (1.0 - (to / w).clamp(0.0, 1.0))
+}
+
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
 /// neck-regrow: a neck to `to` (nm) over `neck_len` of a wire of nominal width `w` and drawn
 /// length `wire_len` is a whole-wire neck of a supply net when it spans the wire (within 1 um) and
@@ -141,6 +150,7 @@ fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci
     o.items = wo.items.clone();
     o.neck_nm = wo.necks.iter().map(|n| n.2).sum();
     o.neck_n = wo.necks.len();
+    o.neck_graded_mm = wo.necks.iter().map(|n| neck_grade(st.wires[w].w, n.1, n.2)).sum();
     o.neck_w = wo.necks.iter().map(|n| n.1).fold(None, |a: Option<f64>, x| Some(a.map_or(x, |y| y.min(x))));
     o.viol = wo.viol.clone();
     o.runs = wo.runs.iter().map(|(l, p)| (b.signal_layers[*l], p.clone())).collect();
@@ -217,6 +227,8 @@ struct Outcome {
     neck_w: Option<f64>,
     /// Necked stretches (TopoR's shrinkages).
     neck_n: usize,
+    /// pick-necks: graded necked length, mm: sum of `len x (1 - w_neck / w_full)` over the necks.
+    neck_graded_mm: f64,
     /// Straight pad-to-pad distance (nm), the detour reference.
     ghost_nm: f64,
     /// Rules its written copper breaks (M-B1 never drop); empty for a legal connection.
@@ -524,7 +536,7 @@ fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::
     let ri = Role::ALL.iter().position(|&r| r == role).expect("role");
     let applied = db[ri];
     let drawn_roles = |j: usize| -> Vec<&'static str> { Role::ALL.iter().zip(db).filter(|(_, b)| *b == Some(j)).map(|(r, _)| r.name()).collect() };
-    let crit_json = |c: &Criteria| serde_json::json!({"errors": c.errors, "shorts": c.shorts, "open": c.open, "violations": c.violations, "vias": c.vias, "length_mm": (c.length_mm * 1e3).round() / 1e3, "shrinkages": c.shrinkages, "penalty": (c.penalty * 1e3).round() / 1e3});
+    let crit_json = |c: &Criteria| serde_json::json!({"errors": c.errors, "shorts": c.shorts, "open": c.open, "violations": c.violations, "vias": c.vias, "length_mm": (c.length_mm * 1e3).round() / 1e3, "shrinkages": c.shrinkages, "neck_mm": (c.neck_mm * 1e3).round() / 1e3, "neck_vias": c.neck_vias, "necking": (c.necking * 1e3).round() / 1e3, "penalty": (c.penalty * 1e3).round() / 1e3});
     let json: Vec<serde_json::Value> = rows
         .iter()
         .enumerate()
@@ -538,7 +550,7 @@ fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::
         rows.iter()
             .enumerate()
             .map(|(j, (i, a, c, _))| format!(
-                "[{}{}] {} (run {}): predicted {} errors / {} vias / {:.1} mm, drawn {} errors ({} shorts, {} open) / {} vias / {:.1} mm{}",
+                "[{}{}] {} (run {}): predicted {} errors / {} vias / {:.1} mm, drawn {} errors ({} shorts, {} open) / {} vias / {:.1} mm / necking {:.1} ({:.1} mm necked, {} neck vias){}",
                 if applied == Some(j) { "APPLIED " } else { "" },
                 a.roles.iter().map(|r| r.name()).collect::<Vec<_>>().join(", "),
                 a.label,
@@ -551,6 +563,9 @@ fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::
                 c.open,
                 c.vias,
                 c.length_mm,
+                c.necking,
+                c.neck_mm,
+                c.neck_vias,
                 { let d = drawn_roles(j); if d.is_empty() { String::new() } else { format!(", drawn best: {}", d.join(", ")) } }
             ))
             .collect::<Vec<_>>()
@@ -10562,6 +10577,7 @@ fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [O
             o.viol = vp;
             o.neck_nm = 0.0;
             o.neck_n = 0;
+            o.neck_graded_mm = 0.0;
             o.neck_w = None;
         }
         {
@@ -10966,6 +10982,18 @@ fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assem
     let shorts = if shorts_on { out.iter().filter(|o| o.routed && o.viol.iter().any(|v| v.kind == "short")).count() } else { 0 };
     let penalty = viol_events(model, dec, out).iter().map(|(ci, ev)| reg.price(ev, &WireCtx { net: dec.connections[*ci].net, tier: dec.connections[*ci].tier })).sum::<f64>()
         + dec.connections.iter().flat_map(|c| out[c.id].dp_events.iter().map(move |ev| (c, ev))).map(|(c, ev)| reg.price(ev, &WireCtx { net: c.net, tier: c.tier })).sum::<f64>();
+    // pick-necks: necked vias = vias smaller than the net class via of their net.
+    let mut full_via: BTreeMap<i32, i64> = BTreeMap::new();
+    let mut neck_vias = 0usize;
+    for c in &dec.connections {
+        let o = &out[c.id];
+        if !o.routed {
+            continue;
+        }
+        let full = *full_via.entry(c.net).or_insert_with(|| crate::vias::via_sizes(&model.rules, c.net, opts).first().map_or(0, |s| s.d));
+        neck_vias += o.vias.iter().filter(|v| v.1.d < full).count();
+    }
+    let neck_mm: f64 = out.iter().filter(|o| o.routed).map(|o| o.neck_graded_mm).sum();
     Criteria {
         errors: open + violating,
         shorts,
@@ -10976,6 +11004,9 @@ fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assem
         vias: a.tot_vias,
         length_mm: a.tot_len as f64 / MM,
         shrinkages: out.iter().filter(|o| o.routed).map(|o| o.neck_n).sum(),
+        neck_mm,
+        neck_vias,
+        necking: neck_mm + opts.neck_via_mm.max(0.0) * neck_vias as f64,
         warnings,
         area_mm2: area / (MM * MM),
     }

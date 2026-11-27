@@ -64,6 +64,17 @@ pub struct Criteria {
     pub length_mm: f64,
     /// Necked stretches (TopoR's "shrinkages").
     pub shrinkages: usize,
+    /// pick-necks (user 2026-11-27): graded necked length of the drawn copper, mm: each necked
+    /// piece counts `length x (1 - w_neck / w_full)` of its net's full width. 0 for a plan.
+    pub neck_mm: f64,
+    /// pick-necks: vias smaller than the net class via (neck vias, e.g. down to the Board Setup
+    /// minimum) of the drawn copper. 0 for a plan.
+    pub neck_vias: usize,
+    /// pick-necks: the necking criterion of `pick = best`: `neck_mm + [optimize] neck_via_mm x
+    /// neck_vias` (mm equivalent). Ranked after the shorts, before length + vias (TopoR 6.3
+    /// manual pp. 72-73 sort the table by violations, then length, with width reductions
+    /// (shrinkages) a criterion of their own). 0 for a plan.
+    pub necking: f64,
     /// Warning-level factor findings (a column, not a Pareto criterion).
     pub warnings: usize,
     /// Occupied area (mm²) for the `area` objective.
@@ -84,11 +95,11 @@ impl Criteria {
     /// length, shrinkages). The shorts are part of the errors criterion, so a variant with more
     /// shorts never covers one with fewer: the archive keeps what the pick prefers.
     pub fn covers(&self, o: &Criteria) -> bool {
-        self.errors <= o.errors && self.shorts <= o.shorts && self.penalty <= o.penalty + 1e-9 && self.vias <= o.vias && self.length_mm <= o.length_mm + 1e-9 && self.shrinkages <= o.shrinkages
+        self.errors <= o.errors && self.shorts <= o.shorts && self.penalty <= o.penalty + 1e-9 && self.vias <= o.vias && self.length_mm <= o.length_mm + 1e-9 && self.shrinkages <= o.shrinkages && self.necking <= o.necking + 1e-9
     }
     /// Covers `o` and is better on at least one criterion.
     pub fn dominates(&self, o: &Criteria) -> bool {
-        self.covers(o) && (self.errors < o.errors || self.shorts < o.shorts || self.penalty < o.penalty - 1e-9 || self.vias < o.vias || self.length_mm < o.length_mm - 1e-9 || self.shrinkages < o.shrinkages)
+        self.covers(o) && (self.errors < o.errors || self.shorts < o.shorts || self.penalty < o.penalty - 1e-9 || self.vias < o.vias || self.length_mm < o.length_mm - 1e-9 || self.shrinkages < o.shrinkages || self.necking < o.necking - 1e-9)
     }
 }
 
@@ -267,6 +278,10 @@ impl Objective {
             }
             return a.shrinkages < b.shrinkages;
         }
+        // pick-necks: `Best` ranks the necking after the shorts, before length + vias.
+        if matches!(self, Objective::Best { .. }) && (a.necking - b.necking).abs() > 1e-9 {
+            return a.necking < b.necking;
+        }
         let (va, vb) = (self.ranked_value(a), self.ranked_value(b));
         va < vb - 1e-9 || (va - vb).abs() <= 1e-9 && a.shrinkages < b.shrinkages
     }
@@ -304,6 +319,9 @@ impl Objective {
                 return Some(("length", a.length_mm - b.length_mm));
             }
         } else {
+            if matches!(self, Objective::Best { .. }) && (a.necking - b.necking).abs() > 1e-9 {
+                return Some(("necking", a.necking - b.necking));
+            }
             let dv = self.ranked_value(a) - self.ranked_value(b);
             if dv.abs() > 1e-9 {
                 return Some((if matches!(self, Objective::Area) { "area" } else { "score" }, dv));
@@ -335,6 +353,10 @@ pub struct VariantRow {
     pub vias: usize,
     pub length_mm: f64,
     pub shrinkages: usize,
+    /// pick-necks: graded necked length (mm), necked vias, and their sum ([`Criteria::necking`]).
+    pub neck_mm: f64,
+    pub neck_vias: usize,
+    pub necking: f64,
     pub warnings: usize,
     pub area_mm2: f64,
     /// Length added per via removed against the previous row of the same error count (sorted
@@ -477,6 +499,9 @@ impl<T> Archive<T> {
                 vias: c.vias,
                 length_mm: (c.length_mm * 1000.0).round() / 1000.0,
                 shrinkages: c.shrinkages,
+                neck_mm: (c.neck_mm * 1000.0).round() / 1000.0,
+                neck_vias: c.neck_vias,
+                necking: (c.necking * 1000.0).round() / 1000.0,
                 warnings: c.warnings,
                 area_mm2: (c.area_mm2 * 1000.0).round() / 1000.0,
                 mm_per_via: mm_per_via.map(|x| (x * 100.0).round() / 100.0),
@@ -495,12 +520,12 @@ pub fn table_text(rows: &[VariantRow], obj: &Objective) -> String {
         Objective::LengthVias { mm_per_via } => format!("length_vias, pick errors_weighted, {mm_per_via} mm/via"),
         Objective::ErrorsViasLength { .. } => "length_vias, pick errors_vias_length (errors, shorts, open, vias, length)".to_string(),
         Objective::Area => "area".to_string(),
-        Objective::Best { mm_per_via, penalty } => format!("length_vias, pick best (errors, shorts, length + {mm_per_via} mm/via{})", if *penalty { " + violation price" } else { "" }),
+        Objective::Best { mm_per_via, penalty } => format!("length_vias, pick best (errors, shorts, necking, length + {mm_per_via} mm/via{})", if *penalty { " + violation price" } else { "" }),
     };
-    let mut s = format!("variants ({} kept, objective {objective}; errors (violations, shorts) / vias / length mm / shrinkages / warnings / area mm2 / mm per via):", rows.len());
+    let mut s = format!("variants ({} kept, objective {objective}; errors (violations, shorts) / vias / length mm / shrinkages / necking mm-eq (necked mm + neck vias) / warnings / area mm2 / mm per via):", rows.len());
     for r in rows {
         s.push_str(&format!(
-            " [{}{}] {} ({}, {}) / {} / {:.1} / {} / {} / {:.1} / {}{};",
+            " [{}{}] {} ({}, {}) / {} / {:.1} / {} / {:.1} ({:.1} + {}) / {} / {:.1} / {}{};",
             if r.picked { "PICKED " } else { "" },
             r.label,
             r.errors,
@@ -509,6 +534,9 @@ pub fn table_text(rows: &[VariantRow], obj: &Objective) -> String {
             r.vias,
             r.length_mm,
             r.shrinkages,
+            r.necking,
+            r.neck_mm,
+            r.neck_vias,
             r.warnings,
             r.area_mm2,
             r.mm_per_via.map_or("-".to_string(), |x| format!("{x:.1}")),
@@ -602,6 +630,31 @@ mod tests {
         // objective (365), v2 (400) is the worst non-champion.
         let labels: Vec<&str> = a.items.iter().map(|v| v.label.as_str()).collect();
         assert_eq!(labels, vec!["v0", "v1", "v3"]);
+    }
+
+    /// pick-necks: `pick = best` ranks the necking after errors and shorts and before length + vias.
+    #[test]
+    fn best_pick_necking_beats_length() {
+        let o = Objective::from_options("length_vias", 25.0, "best");
+        let mk = |len: f64, necking: f64| Criteria { length_mm: len, necking, ..Criteria::default() };
+        let (short_necked, long_plain) = (mk(100.0, 12.0), mk(180.0, 3.0));
+        assert!(o.better(&long_plain, &short_necked), "less necking wins although 80 mm longer");
+        assert!(!o.better(&short_necked, &long_plain));
+        assert_eq!(o.decider(&long_plain, &short_necked).map(|d| d.0), Some("necking"));
+        // equal necking: length + mm_per_via x vias decides
+        let (a, b) = (mk(100.0, 5.0), Criteria { vias: 1, ..mk(90.0, 5.0) });
+        assert!(o.better(&a, &b), "100 < 90 + 25 mm/via: the via price counts at equal necking");
+        let c2 = mk(90.0, 5.0);
+        assert!(o.better(&c2, &a), "equal necking falls back to length");
+        assert_eq!(o.decider(&c2, &a).map(|d| d.0), Some("score"));
+        // errors and shorts stay first
+        let err = Criteria { errors: 1, ..mk(10.0, 0.0) };
+        assert!(o.better(&short_necked, &err), "fewer errors beat less necking");
+        // the other picks do not look at it
+        let w = Objective::from_options("length_vias", 25.0, "errors_weighted");
+        assert!(w.better(&short_necked, &long_plain));
+        let e = Objective::from_options("length_vias", 25.0, "errors_vias_length");
+        assert!(e.better(&short_necked, &long_plain));
     }
 
     #[test]
