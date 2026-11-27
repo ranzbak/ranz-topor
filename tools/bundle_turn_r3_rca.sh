@@ -14,6 +14,9 @@ case "${1:-}" in
   split) TOPO_XRDBG=1 run split3-bh --set optimize.crossing_split=3 ;;
   fork) TOPO_FD45_OFF=fork run fork-bh ;;
   obl0) run obl0-bh --set capacity.oblique_price=0 ;;
+  prov) TOPO_RUNPROV=1 TOPO_STRDBG=1 TOPO_OCTIDBG=1 TOPO_LANEDBG=1 run prov-bh; zcat $OUT/prov-bh.log.gz >/dev/null; L=$OUT/prov-bh/qmtech-bh26-s0.log
+        grep -E "w845|wire 845|w222|wire 222" $L > $OUT/prov-w845-w222.txt; grep -E "^(RUNPROV|OCTI|STR)" $L | cut -c1-300 | gzip > $OUT/prov-all.txt.gz; gzip -f $L ;;
+  top3) hzq run --threads 4 --name bt3-prov -- bash $ROOT/tools/bundle_turn_r3_rca.sh prov 9>&-; note "all done" ;;
   top2)
     for u in fork obl0; do hzq run --threads 4 --name bt3-$u -- bash $ROOT/tools/bundle_turn_r3_rca.sh $u 9>&- & sleep 3; done
     wait; note "all done" ;;
