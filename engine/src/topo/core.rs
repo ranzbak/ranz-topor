@@ -536,7 +536,7 @@ fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::
     let ri = Role::ALL.iter().position(|&r| r == role).expect("role");
     let applied = db[ri];
     let drawn_roles = |j: usize| -> Vec<&'static str> { Role::ALL.iter().zip(db).filter(|(_, b)| *b == Some(j)).map(|(r, _)| r.name()).collect() };
-    let crit_json = |c: &Criteria| serde_json::json!({"errors": c.errors, "shorts": c.shorts, "open": c.open, "violations": c.violations, "vias": c.vias, "length_mm": (c.length_mm * 1e3).round() / 1e3, "shrinkages": c.shrinkages, "neck_mm": (c.neck_mm * 1e3).round() / 1e3, "neck_vias": c.neck_vias, "necking": (c.necking * 1e3).round() / 1e3, "penalty": (c.penalty * 1e3).round() / 1e3});
+    let crit_json = |c: &Criteria| serde_json::json!({"errors": c.errors, "shorts": c.shorts, "open": c.open, "violations": c.violations, "vias": c.vias, "length_mm": (c.length_mm * 1e3).round() / 1e3, "shrinkages": c.shrinkages, "neck_mm": (c.neck_mm * 1e3).round() / 1e3 + 0.0, "neck_vias": c.neck_vias, "necking": (c.necking * 1e3).round() / 1e3, "penalty": (c.penalty * 1e3).round() / 1e3});
     let json: Vec<serde_json::Value> = rows
         .iter()
         .enumerate()

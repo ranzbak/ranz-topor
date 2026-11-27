@@ -157,7 +157,7 @@ def test_report_lists_the_variant_table_and_the_time_budget_warning(tmp_path):
     res = _result()
     res["variants"] = [
         {"label": "round 2", "errors": 1, "vias": 20, "length_mm": 500.0, "shrinkages": 0, "warnings": 0,
-         "area_mm2": 210.0, "mm_per_via": None, "champion": ["fewest errors", "shortest"], "picked": True},
+         "necking": 12.5, "area_mm2": 210.0, "mm_per_via": None, "champion": ["fewest errors", "shortest"], "picked": True},
         {"label": "round 2 as drawn", "errors": 1, "vias": 26, "length_mm": 490.0, "shrinkages": 1, "warnings": 1,
          "area_mm2": 230.0, "mm_per_via": None, "champion": [], "picked": False}]
     res["moves"] = {"reroute": 3, "channel swap": 1}
@@ -167,7 +167,7 @@ def test_report_lists_the_variant_table_and_the_time_budget_warning(tmp_path):
     rep.write()
     md = (tmp_path / "report.md").read_text()
     assert "## Variants\n" in md
-    assert "| round 2 | 1 | 20 | 500.0 | 0 | 0 | 210.0 | - | fewest errors, shortest | yes |" in md
+    assert "| round 2 | 1 | 20 | 500.0 | 0 | 12.5 | 0 | 210.0 | - | fewest errors, shortest | yes |" in md
     assert "| round 2 as drawn |" in md and "reroute 3, channel swap 1" in md
     assert any("time budget hit" in ln for ln in rep.summary_lines())
     assert len(rep.summary_lines()) <= SUMMARY_MAX_LINES
@@ -234,7 +234,8 @@ def test_draw_grace_text_drops_every_wire_drawn_when_the_cap_then_cut_the_traces
 _ROW = {"roles": ["best", "errors", "shortest", "vias"], "drawn_roles": ["best", "errors", "shortest", "vias"],
         "row": "cycle 9 (gen 6)", "run": 2, "applied": True,
         "predicted": {"errors": 3, "vias": 31, "length_mm": 929.34},
-        "drawn": {"errors": 24, "vias": 45, "length_mm": 998.71, "shorts": 6, "open": 0}}
+        "drawn": {"errors": 24, "vias": 45, "length_mm": 998.71, "shorts": 6, "open": 0,
+                   "necking": 52.5, "neck_mm": 32.5, "neck_vias": 2}}
 
 
 def test_bests_summary_line_without_bests_is_empty():
@@ -255,7 +256,7 @@ def test_bests_summary_line_several_rows_and_missing_drawn_fields():
     bare = {}  # no roles, nothing drawn: every value n/a, never a crash
     line = bests_summary_line([{**_ROW, "roles": ["best", "errors", "vias"]}, other, bare])
     parts = line.split(": ", 1)[1].split(" · ")
-    assert parts == ["*best, errors, vias: 24 errors / 45 vias / 998.7 mm",
+    assert parts == ["*best, errors, vias: 24 errors / 45 vias / 998.7 mm / necking 52.5",
                      "shortest: 19 errors / n/a vias / n/a mm",
                      "-: n/a errors / n/a vias / n/a mm"], parts
     assert sum(x.startswith("*") for x in parts) == 1, "only the applied row is marked"
@@ -268,9 +269,9 @@ def test_bests_table_md_rows_predicted_drawn_and_applied():
     rows = bests_table_md([_ROW, other])
     assert rows[0].startswith("| roles (table) | roles (drawn) |") and rows[1].startswith("|---|")
     assert rows[2] == ("| best, errors, shortest, vias | best, errors, shortest, vias | cycle 9 (gen 6) | 2 | "
-                       "3 errors / 31 vias / 929.3 mm | 24 errors / 45 vias / 998.7 mm | 6 | 0 | yes |"), rows[2]
+                       "3 errors / 31 vias / 929.3 mm | 24 errors / 45 vias / 998.7 mm | 6 | 0 | 52.5 | 32.5 | 2 | yes |"), rows[2]
     assert rows[3] == ("| shortest |  | cycle 27 (gen 6) | n/a | 0 errors / 41 vias / 865.6 mm | "
-                       "n/a errors / n/a vias / n/a mm | n/a | n/a |  |"), rows[3]
+                       "n/a errors / n/a vias / n/a mm | n/a | n/a | n/a | n/a | n/a |  |"), rows[3]
     assert len(rows) == 4 and bests_table_md([]) == rows[:2]
 
 
