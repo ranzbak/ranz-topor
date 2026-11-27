@@ -61,7 +61,7 @@ SKEW_MAX = 0.5         # mm length mismatch of a diff pair
 CENTRE_TOL = 0.01      # mm
 DOUBLE_TOL = 0.05      # mm between two trace ends inside one pad
 POWER_PIN_FRAC = 0.7   # a pad narrower than this fraction of the net width cannot carry the chain
-OFFSET_FRAC = 0.2      # entry crossing offset from the axis line, fraction of the pad short side
+OFFSET_FRAC = 0.4      # the entering track's line may miss the pad centre by this fraction of the pad short side (hand-calibrated 2026-11-28)
 AXIS_DEG = 12.0        # pad entry heading tolerance to the pad long axis
 FINE_PAD = 0.6         # entry checks only for pads at most this wide (fine pitch: the trace is as wide as the pad)
 ASPECT_MIN = 1.3       # pads below this aspect have no axis
@@ -80,7 +80,7 @@ MINUTES = {
     "off_axis_entry": (1.5, 6.0, 3.0),
     "wrong_side_entry": (4.0, 0.0, 4.0),
     "power_chain_narrow_pin": (10.0, 0.0, 10.0),
-    "bend_excess": (1.0, 0.6, 8.0),          # per bend over the minimal estimate
+    "bend_excess": (0.2, 0.1, 2.0),          # info only: the hand layout has as many (calibration 2026-11-28)
     "acute_angle": (2.5, 0.0, 2.5),
     "free_angle": (1.0, 0.0, 1.0),
     "min_clearance_run": (0.2, 0.15, 2.0),    # per mm
@@ -267,6 +267,7 @@ def load_board(pcb: Path, pro: Path | None = None) -> Board:
         uu = kid(v, "uuid")
         vv.uuid = uu[1] if uu else ""
         b.vias.append(vv)
+    b.net_set = {p.net for p in b.pads if p.net} | {s.net for s in b.segs if s.net}
     b.nets = sorted({p.net for p in b.pads if p.net} | {s.net for s in b.segs if s.net})
     b.classes, b.assign, b.patterns, b.rules = _load_pro(pro)
     return b
@@ -304,7 +305,7 @@ def _load_pro(pro):
         d = json.loads(Path(pro).read_text())
         ns = d.get("net_settings", {})
         for c in ns.get("classes", []):
-            classes[c["name"]] = {k: c.get(k) for k in ("track_width", "clearance", "via_diameter", "via_drill")}
+            classes[c["name"]] = {k: c.get(k) for k in ("track_width", "clearance", "via_diameter", "via_drill", "diff_pair_width")}
         assign = dict(ns.get("netclass_assignments") or {})
         patterns = [(p["pattern"], p["netclass"]) for p in ns.get("netclass_patterns", [])]
         ds = d.get("board", {}).get("design_settings", {}).get("rules", {})
@@ -328,6 +329,33 @@ def class_val(b: Board, net: str, key: str) -> float:
     if v is None:
         v = b.classes["Default"].get(key) or 0.0
     return float(v)
+
+
+_PAIR = re.compile(r"^(.*?)(?:([_]?)([PN])|([+-]))$")
+
+
+def pair_partner(net: str) -> str | None:
+    m = _PAIR.match(net)
+    if not m:
+        return None
+    base = m.group(1)
+    if m.group(4):
+        return base + ("-" if m.group(4) == "+" else "+")
+    if m.group(2) == "_":
+        return base + "_" + ("N" if m.group(3) == "P" else "P")
+    return None
+
+
+def expected_width(b: Board, net: str) -> float:
+    """Width the net is meant to be drawn at: the class diff_pair_width for a member of a diff pair (both halves exist
+    and the class has its own pair width), else the class track width."""
+    w = class_val(b, net, "track_width")
+    c = b.classes.get(net_class(b, net)) or {}
+    dw = c.get("diff_pair_width")
+    q = pair_partner(net)
+    if dw and q and q in b.net_set:
+        return float(dw)
+    return w
 
 
 def clearance(b: Board, n1: str, n2: str) -> float:
@@ -520,6 +548,36 @@ def headings(pts):
     return out
 
 
+def leg_lengths(pts):
+    """lengths of the straight legs of a path between bends (turn >= BEND_DEG on one layer)."""
+    clean = []
+    for p in pts:
+        if clean and math.dist(clean[-1][:2], p[:2]) < 1e-6 and clean[-1][2] == p[2]:
+            continue
+        clean.append(p)
+    legs, cur = [], 0.0
+    for i in range(1, len(clean)):
+        cur += math.dist(clean[i - 1][:2], clean[i][:2])
+        bend = False
+        if i < len(clean) - 1 and clean[i - 1][2] == clean[i][2] == clean[i + 1][2]:
+            a, b, c = clean[i - 1], clean[i], clean[i + 1]
+            h1, h2 = math.atan2(b[1] - a[1], b[0] - a[0]), math.atan2(c[1] - b[1], c[0] - b[0])
+            bend = abs(math.degrees((h2 - h1 + math.pi) % (2 * math.pi) - math.pi)) >= BEND_DEG
+        if bend or i == len(clean) - 1:
+            legs.append(cur)
+            cur = 0.0
+    return legs
+
+
+def short_leg_run(legs, lim):
+    """longest run of consecutive inner legs shorter than lim (the pad-end legs are exits, not part of a staircase)."""
+    best = cur = 0
+    for l in legs[1:-1]:
+        cur = cur + 1 if l < lim else 0
+        best = max(best, cur)
+    return best
+
+
 # ---------------------------------------------------------------- rows
 def row(kind, severity, desc, items, net="", connection="", size=None, size_label="", source="own", minutes_=None, extra=None):
     r = {"type": kind, "severity": severity, "description": desc,
@@ -602,7 +660,7 @@ class Ctx:
 def check_necks(cx: Ctx):
     b, rows = cx.b, []
     for net, g in cx.graphs.items():
-        cw = class_val(b, net, "track_width")
+        cw = expected_width(b, net)
         neck = [i for i, e in enumerate(g.edges) if not e["link"] and e["w"] < cw - NECK_TOL]
         if not neck:
             continue
@@ -769,12 +827,14 @@ def _entry_crossings(g, p, inside, fpc, net):
             el = math.hypot(ex, ey) or 1.0
             ex, ey = ex / el, ey / el
             dev = math.degrees(math.acos(min(1.0, abs(ex * ux + ey * uy))))
-            off = abs((cp.x - p.x) * uy - (cp.y - p.y) * ux)
-            if dev > AXIS_DEG or off > max(0.04, OFFSET_FRAC * short):
+            # how far the entering track's own line passes from the pad centre (0 for a lane on the axis AND for a
+            # 45 deg leg aimed at the centre; > 0 for a lane beside the axis or a corner entry)
+            off = abs((p.x - qin[0]) * ey - (p.y - qin[1]) * ex)
+            if off > max(0.04, OFFSET_FRAC * short):
                 rows.append(row("off_axis_entry", "warning",
-                                f"Entry into pad {conn} is {dev:.0f} deg off the pad axis, {off:.3f} mm off the axis line",
+                                f"Entry into pad {conn}: the track line misses the pad centre by {off:.3f} mm (heading {dev:.0f} deg off the pad axis)",
                                 [(f"Entry [{net}] {conn}", cp.x, cp.y, "")], net=net, connection=conn,
-                                size=max(off, dev / 100.0), size_label="mm off axis",
+                                size=off, size_label="mm line misses centre",
                                 extra={"heading_dev_deg": round(dev, 1), "axis_offset_mm": round(off, 4)}))
             if ring:
                 sx = 1 if (p.x - fpc[0]) * ux + (p.y - fpc[1]) * uy >= 0 else -1
@@ -901,7 +961,7 @@ def check_shape(cx: Ctx):
             exc = nb - max(minb, 2) - 3
             if exc >= 1:
                 mid = pts[len(pts) // 2]
-                rows.append(row("bend_excess", "warning", f"{nb} bends in {c.name}; a minimal route needs about {max(minb, 2)}",
+                rows.append(row("bend_excess", "info", f"{nb} bends in {c.name}; a minimal route needs about {max(minb, 2)}",
                                 [(f"Connection {c.name} [{net}]", mid[0], mid[1], "")], net=net, connection=c.name, size=exc, size_label="bends over estimate",
                                 extra={"bends": nb, "bends_min_est": max(minb, 2)}))
     return rows
@@ -928,9 +988,6 @@ def check_decap(cx: Ctx):
                             [(f"Pad {p.num} of {p.ref}", p.x, p.y, "")], net=p.net, connection=f"{p.ref}.{p.num}->{q.ref}.{q.num}",
                             size=d - DECAP_MAX, size_label="mm over limit", extra={"distance_mm": round(d, 2)}))
     return rows
-
-
-_PAIR = re.compile(r"^(.*?)(?:([_]?)([PN])|([+-]))$")
 
 
 def check_diffpairs(cx: Ctx):
@@ -973,6 +1030,8 @@ def review_rules(b: Board, cx: Ctx, ratio=RATIO) -> str:
     out = ["(version 1)", "# generated review rules: warning only, review only, never in the user's project"]
     for cname, c in b.classes.items():
         w = c.get("track_width")
+        if w and c.get("diff_pair_width"):
+            w = min(w, c["diff_pair_width"])   # pair members are meant to be drawn at the pair width
         if w and any(net_class(b, n) == cname for n in b.nets):
             out.append(f'(rule "rv_neck_{cname.replace(" ", "_")}" (constraint track_width (min {w:g}mm)) '
                        f'(condition "A.NetClass == \'{cname}\'") (severity warning))')

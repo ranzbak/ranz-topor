@@ -95,14 +95,31 @@ def test_double_entry_and_off_centre(tmp_path):
     assert "end_off_centre" in kinds(rows) and "double_entry" not in kinds(rows)
 
 
-def test_off_axis_entry_offset_and_angle(tmp_path):
-    pad = fp("U1", 0, 0, [("1", 0, 0, 90, 1.4, 0.3, "A")])   # long axis vertical
-    ok = cc.check_pad_entries(cc.Ctx(cc.load_board(*board(tmp_path, [pad, seg(0, 0, 0, 3, 0.2, "A")]))))
-    assert "off_axis_entry" not in kinds(ok)
-    off = cc.check_pad_entries(cc.Ctx(cc.load_board(*board(tmp_path, [pad, seg(0, 0, 0.13, 0.4, 0.2, "A"), seg(0.13, 0.4, 0.13, 3, 0.2, "A")]))))
-    assert "off_axis_entry" in kinds(off)
-    diag = cc.check_pad_entries(cc.Ctx(cc.load_board(*board(tmp_path, [pad, seg(0, 0, 2, 2, 0.2, "A")]))))
-    assert "off_axis_entry" in kinds(diag)
+def test_off_axis_entry_line_misses_centre(tmp_path):
+    pad = fp("U1", 0, 0, [("1", 0, 0, 90, 1.4, 0.3, "A")])   # long axis vertical, 0.3 wide
+    def rows(*segs):
+        return cc.check_pad_entries(cc.Ctx(cc.load_board(*board(tmp_path, [pad, *segs]))))
+    assert "off_axis_entry" not in kinds(rows(seg(0, 0, 0, 3, 0.2, "A")))           # on the axis
+    assert "off_axis_entry" not in kinds(rows(seg(0, 0, 2, 2, 0.2, "A")))           # 45 deg leg aimed at the centre: legal
+    assert "off_axis_entry" in kinds(rows(seg(0, 0, 0.13, 0.4, 0.2, "A"), seg(0.13, 0.4, 0.13, 3, 0.2, "A")))  # lane beside the axis
+    assert "off_axis_entry" in kinds(rows(seg(0.14, -0.5, 2.14, 1.5, 0.2, "A")))           # corner entry, line misses the centre
+
+
+def test_pair_member_is_judged_at_the_pair_width(tmp_path):
+    items = [seg(0, 0, 5, 0, 0.16, "D_P"), seg(0, 1, 5, 1, 0.16, "D_N")]
+    pcb, pro = board(tmp_path, items)
+    d = json.loads(pro.read_text())
+    d["net_settings"]["classes"][0]["diff_pair_width"] = 0.16
+    d["net_settings"]["classes"][0]["track_width"] = 0.2
+    pro.write_text(json.dumps(d))
+    b = cc.load_board(pcb, pro)
+    assert cc.expected_width(b, "D_P") == 0.16
+    assert cc.check_necks(cc.Ctx(b)) == []
+    items = [seg(0, 0, 5, 0, 0.16, "SOLO")]              # same width, no partner: a real neck
+    pcb, pro2 = board(tmp_path, items)
+    pro2.write_text(json.dumps(d))
+    rows = cc.check_necks(cc.Ctx(cc.load_board(pcb, pro2)))
+    assert [r["net"] for r in rows] == ["SOLO"]
 
 
 def test_detour_ratio(tmp_path):
@@ -135,7 +152,7 @@ def test_bends_acute_and_free_angle(tmp_path):
              seg(4, 0, 5, 0, 0.2, "A"), seg(5, 0, 6, 1, 0.2, "A"), seg(6, 1, 7, 1, 0.2, "A"), seg(7, 1, 8, 0, 0.2, "A"),
              seg(8, 0, 10, 0, 0.2, "A")]
     rows = cc.check_shape(cc.Ctx(cc.load_board(*board(tmp_path, pads + stair))))
-    assert "bend_excess" in kinds(rows)
+    assert "bend_excess" in kinds(rows) and all(r["severity"] == "info" for r in rows if r["type"] == "bend_excess")
     spike = [seg(0, 0, 6, 0, 0.2, "A"), seg(6, 0, 5, 0.2, 0.2, "A"), seg(5, 0.2, 10, 0, 0.2, "A")]
     rows = cc.check_shape(cc.Ctx(cc.load_board(*board(tmp_path, pads + spike))))
     assert "acute_angle" in kinds(rows) and "free_angle" in kinds(rows)
