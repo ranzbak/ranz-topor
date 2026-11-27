@@ -247,7 +247,7 @@ def test_bests_summary_line_one_row_with_every_role_is_marked_applied():
     from topor.report import bests_summary_line
     line = bests_summary_line([_ROW])
     assert line == ("Four bests drawn (* = applied, [optimize] pick): "
-                    "*best, errors, shortest, vias: 24 errors / 45 vias / 998.7 mm"), line
+                    "*best, errors, shortest, vias: 24 errors / 45 vias / 998.7 mm / necking 52.5"), line
 
 
 def test_bests_summary_line_several_rows_and_missing_drawn_fields():
