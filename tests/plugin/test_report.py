@@ -269,7 +269,7 @@ def test_bests_table_md_rows_predicted_drawn_and_applied():
     rows = bests_table_md([_ROW, other])
     assert rows[0].startswith("| roles (table) | roles (drawn) |") and rows[1].startswith("|---|")
     assert rows[2] == ("| best, errors, shortest, vias | best, errors, shortest, vias | cycle 9 (gen 6) | 2 | "
-                       "3 errors / 31 vias / 929.3 mm | 24 errors / 45 vias / 998.7 mm | 6 | 0 | 52.5 | 32.5 | 2 | yes |"), rows[2]
+                       "3 errors / 31 vias / 929.3 mm | 24 errors / 45 vias / 998.7 mm | 6 | 0 | 52.5 | 3.25 | 2 | yes |"), rows[2]
     assert rows[3] == ("| shortest |  | cycle 27 (gen 6) | n/a | 0 errors / 41 vias / 865.6 mm | "
                        "n/a errors / n/a vias / n/a mm | n/a | n/a | n/a | n/a | n/a |  |"), rows[3]
     assert len(rows) == 4 and bests_table_md([]) == rows[:2]

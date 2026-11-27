@@ -1150,8 +1150,9 @@ def test_progress_paused_times_stand_still(app):
 def test_score_delta_has_a_text_for_every_decider():
     """Every criterion `Objective::decider` can name has its own wording (rule 13); a sub-mm necking delta
     never prints as "-0" (pick-necks)."""
+    words = ui_wx.WORDING["progress"]
     for decider in ("errors", "shorts", "open", "vias", "length", "shrinkages", "score", "area", "necking"):
-        text = ui_wx.score_delta(decider, 2.0)
-        assert text and not text.startswith(decider + " "), (decider, text)
+        assert f"delta_{decider}" in words, decider
+        assert ui_wx.score_delta(decider, 2.0), decider
     assert ui_wx.score_delta("necking", -0.4) == "necking -0.4 mm-eq"
     assert ui_wx.score_delta("", 1.0) == ""
