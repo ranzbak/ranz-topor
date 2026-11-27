@@ -1159,3 +1159,61 @@ fn _packer_is_sync() {
     sync::<Packer<'static>>();
     sync::<State<'static>>();
 }
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    const MM: f64 = 1e6;
+
+    /// A 10 x 10 mm two-layer board with two pads: a projection for [`Packer::new`].
+    fn tiny() -> crate::model::BoardModel {
+        let p = |v: f64| (v * MM) as i64;
+        let c = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let segs: Vec<String> = (0..4)
+            .map(|i| {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(a.0), p(a.1), p(b.0), p(b.1))
+            })
+            .collect();
+        let pad = |i: usize, x: f64| {
+            format!(
+                r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":1,"attr":"smd","center":[{},{}],"rotation_deg":0.0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{d},"h":{d}}}}}}}"#,
+                p(x),
+                p(5.0),
+                d = p(1.0)
+            )
+        };
+        let s = format!(
+            r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}}],"pads":[{},{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+            pad(0, 2.0),
+            pad(1, 8.0),
+            segs.join(",")
+        );
+        crate::model::BoardModel::from_json(&s).unwrap()
+    }
+
+    /// bundle-turn r2 (verifier mutants reach_one, reach_no_normal): [`Packer::reach_factor`] keeps
+    /// the taut factor in an oblique sleeve (a straight 45 degree bundle crosses every cut on its
+    /// way at 45 degrees, Maley 1987 p. 32: the first version gave 1 everywhere and broke a
+    /// straight oblique bus on qmtech, JS2_2 0 -> 36 violations), and reaches exactly 1 where the
+    /// sleeve's cone holds the cut's normal between two of its samples.
+    #[test]
+    fn reach_factor_keeps_the_oblique_sleeve_and_finds_the_normal() {
+        let m = tiny();
+        let b = crate::topo::board::build(&m, &crate::topo::board::BuildOpts::default()).unwrap();
+        let pk = Packer::new(&b.proj, Vec::new(), 0.0, 0.0);
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+        let ed = v(1.0, 0.0);
+        let dk = v(1.0, 1.0);
+        let taut = pk.factor(ed, dk);
+        assert!((taut - std::f64::consts::SQRT_2).abs() < 1e-9, "test setup: 45 degrees, 1 / sin = {taut}");
+        // A straight oblique sleeve: both portals narrow, 10 mm apart along the 45 degree line.
+        let oblique = pk.reach_factor(ed, dk, (v(-5.0, -5.0), v(-4.9, -5.0)), (v(5.0, 5.0), v(5.1, 5.0)));
+        assert!(oblique > 1.35, "an oblique sleeve keeps its factor: {oblique}");
+        // A short sleeve whose cone runs from 45 degrees past the normal (to ~98.5 degrees): the
+        // normal (45 degrees off the taut direction) lies between two of the 1/8 samples.
+        let square = pk.reach_factor(ed, dk, (v(-1.0, -1.0), v(-1.0, -1.0)), (v(-1.3, 1.0), v(1.0, 1.0)));
+        assert!((square - 1.0).abs() < 1e-12, "the cut's normal inside the cone: factor 1, got {square}");
+    }
+}

@@ -5897,7 +5897,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 }
                 if self.dbg {
                     let t = self.dbg_crit();
-                    eprintln!("LOOPDBG[{}] cycle {} loop P4: {} wires ripped, {}: {t}", self.dbg_tag, c.cycle, vw.len(), if lost { "undone (a wire found no path)" } else if worse { "undone (worse)" } else { "taken" });
+                    eprintln!("LOOPDBG[{}] cycle {} loop P4: {} wires ripped (conns {cis:?}), {}: {t}", self.dbg_tag, c.cycle, vw.len(), if lost { "undone (a wire found no path)" } else if worse { "undone (worse)" } else { "taken" });
                 }
                 true
             }

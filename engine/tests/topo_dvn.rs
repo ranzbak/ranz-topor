@@ -359,9 +359,12 @@ fn neck_answers_hold_with_the_taut_exit_test() {
 /// violation, via or unrouted connection and at most 0.5 mm more copper. Routed with main's
 /// defaults. The fuse's pad-end price makes the change here (mutants pcp4: dropping its far end
 /// leg term or its T-point term fails this test; the DP's weight term alone does not).
+/// bundle-turn r2: with the oblique price on (`[capacity] oblique_price` 1, the default) the plan
+/// already ends C19.2 at the centre at weight 0 (0.000 mm), so the price's arms pin main's
+/// capacity model (oblique price 0), and the default is checked to end at the centre too.
 #[test]
 fn crop_q3_pad_off_centre_ends_c19_at_the_centre() {
-    let arm = |w: f64| {
+    let arm_at = |w: f64, oblique: f64| {
         // main's defaults (not route_items' pinned tw-on values: with those the plan already
         // ends C19.2 at the centre at weight 0, so the price has nothing to choose).
         let path = format!("{}/tests/fixtures/dvn/model-dvn_crop_q3.json", env!("CARGO_MANIFEST_DIR"));
@@ -372,15 +375,19 @@ fn crop_q3_pad_off_centre_ends_c19_at_the_centre() {
         // defaults-flip-a1: main's exit test, pinned (with taut exits the plan ends C19.2 at the
         // centre at weight 0 already: 0.000 mm, so the price has nothing to choose).
         val["exit_taut"] = serde_json::json!(false);
+        val["oblique_price"] = serde_json::json!(oblique);
         let o: Options = serde_json::from_value(val).unwrap();
         let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
         let off: f64 = topor_engine::topo::tidy::pad_end_breaches(&m, &r.items).iter().filter(|h| h.hint() && h.pad == "C19.2").map(|h| h.off / MM).fold(0.0, f64::max);
         let viol: usize = r.connections.iter().map(|c| c.violations).sum();
-        eprintln!("PADOFF w {w}: C19.2 off {off:.3} mm, viol {viol}, vias {}, unrouted {}, len {:.3} mm", r.vias, r.connections_total - r.routed, r.total_length_nm as f64 / MM);
+        eprintln!("PADOFF w {w} oblique {oblique}: C19.2 off {off:.3} mm, viol {viol}, vias {}, unrouted {}, len {:.3} mm", r.vias, r.connections_total - r.routed, r.total_length_nm as f64 / MM);
         (off, viol, r.vias, r.connections_total - r.routed, r.total_length_nm as f64 / MM)
     };
+    let arm = |w: f64| arm_at(w, 0.0);
     let (off0, viol0, vias0, un0, len0) = arm(0.0);
     let (off5, viol5, vias5, un5, len5) = arm(5.0);
+    let (offd, ..) = arm_at(0.0, Options::default().oblique_price);
+    assert!(offd < 1e-3, "the default (oblique price on) ends C19.2 at the centre at weight 0: {offd} mm");
     assert!(off0 > 0.2, "weight 0 (main) ends C19.2 off centre: {off0} mm");
     assert!(off5 < 1e-3, "weight 5 ends C19.2 at the centre: {off5} mm");
     assert!(viol5 <= viol0 && vias5 <= vias0 && un5 <= un0, "viol {viol0}->{viol5} vias {vias0}->{vias5} unrouted {un0}->{un5}");

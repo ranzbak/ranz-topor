@@ -1958,6 +1958,53 @@ mod tests {
         f(&mut dr);
     }
 
+    /// bundle-turn r2 (item 2, verifier r1 finding 4: no test killed it): a forced run is relaxed
+    /// only at its bottleneck ([`Drawer::exact_fix_local`]; TopoR 6.3 manual p. 237: the minimal
+    /// clearance only in the narrowest spots). Net-1 run from A (2, 12) to B (22, 12) mm through a
+    /// gap between two foreign tracks at x 12 that is narrower than the clearance (no legal path)
+    /// and past a foreign track C below the line at x 15..17 that it comes `d` too close to (room
+    /// below C to go round it). The local set relaxes the two gap tracks only: the repaired run
+    /// goes round C at the full clearance; the run-wide relaxation (`exact_fix_relaxed`, the debug
+    /// arm `relaxloc` off) relaxes C too and keeps the straight run beside it, `d` too close. Kills
+    /// relax_on ignored in `need_of` (every object relaxed) and a set that never grows (`None`).
+    #[test]
+    fn forced_runs_are_relaxed_only_at_their_bottleneck() {
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: -y * MM };
+        two_pads((2.0, 12.0), (22.0, 12.0), &mut |dr| {
+            let wi = dr.st.wires[0].clone();
+            let tw = 150_000.0;
+            let wp0 = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
+            // The centre distance a net-2 track of width `tw` needs (a probe far away).
+            dr.commit(&track_item(2, 0, tw, v(20.0, 22.0), v(21.0, 22.0), None));
+            let need = dr.need_of(dr.ents.len() - 1, &wp0, wi.w);
+            let full = dr.model.rules.net_rule(1).clearance as f64 + 0.5 * wi.w + dr.eps;
+            let relax = 0.5 * full;
+            // The gap: each tip `g` from the line, too close at the full clearance, enough relaxed.
+            let g = need - 0.6 * relax;
+            dr.commit(&track_item(2, 0, tw, v(12.0, 12.0 - g / MM), v(12.0, 8.0), None));
+            dr.commit(&track_item(2, 0, tw, v(12.0, 12.0 + g / MM), v(12.0, 16.0), None));
+            let gap_ids = [dr.ents.len() - 2, dr.ents.len() - 1];
+            // C below the line, `d` too close at the full clearance (inside the relaxed one).
+            let d = 0.3 * relax;
+            let yc = 12.0 + (need - d) / MM;
+            dr.commit(&track_item(2, 0, tw, v(15.0, yc), v(17.0, yc), None));
+            let c_id = dr.ents.len() - 1;
+            let k1 = dr.st.wires[0].passes.len();
+            // The forced block's base polyline has a vertex in the gap (a funnel corner there).
+            let pts = vec![v(2.0, 12.0), v(12.0, 12.0), v(22.0, 12.0)];
+            let clear_of = |dr: &Drawer, ids: &[usize], wp: &Wp, q: &[Vec2]| q.windows(2).all(|x| dr.seg_clear(ids, wp, x[0], x[1]));
+            assert!(!clear_of(dr, &gap_ids, &wp0, &pts), "precondition: the gap is too narrow at the full clearance");
+            let mut set = RelaxSet::default();
+            let (local, n) = dr.exact_fix_local(0, 0, k1, 0, pts.clone(), None, relax, &mut set).expect("a locally relaxed path");
+            let wide = dr.exact_fix_relaxed(0, 0, k1, 0, pts.clone(), None, relax).expect("a relaxed path");
+            let wp_r = Wp { relax, ..wp0 };
+            assert!(clear_of(dr, &gap_ids, &wp_r, &local) && clear_of(dr, &gap_ids, &wp_r, &wide), "both pass the gap at the relaxed clearance");
+            assert!(n >= 1 && gap_ids.iter().all(|&i| set.contains(i)) && !set.contains(c_id), "the set holds the gap tracks, not C: {n}");
+            assert!(clear_of(dr, &[c_id], &wp0, &local), "local: C keeps the full clearance");
+            assert!(!clear_of(dr, &[c_id], &wp0, &wide), "run-wide: the run stays beside C, {} nm too close (the arm this kills)", d);
+        });
+    }
+
     /// first-draw-45 r7 (`[drawing] short_leg_mm`, the esp +3V3 staircase): a net-1 run from A
     /// (2, 12) to B (8, 10) mm, the taut chord at 18.4 degrees, in a corridor of two foreign net-2
     /// tracks parallel to it, each `dw` beyond the chord's clearance. Every octilinear form in the

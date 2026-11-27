@@ -811,7 +811,8 @@ impl Drawer<'_> {
         // depth (Bast, Brosi & Storandt 2020 section 4.3, p. 7: keep room for the lines routed
         // later; Dayan 1997 pp. 15-16: spacing for every wire).
         // (a, b, sign): the room lies where `sign * (b - a) x (p - a) > 0`.
-        let mut zones: Vec<(Vec2, Vec2, f64)> = Vec::new();
+        // (a, b, sign, depth): priced to `depth` beyond the line (infinite between two bounds).
+        let mut zones: Vec<(Vec2, Vec2, f64, f64)> = Vec::new();
         // P6 (b): per crossed edge (first end, unit direction, length, span lo, span hi): the
         // lane slot outside `lo..hi` is priced (see below).
         let mut gates: Vec<(Vec2, Vec2, f64, f64, f64)> = own_gates;
@@ -887,6 +888,14 @@ impl Drawer<'_> {
                 // that triangle, offset by the lane spacing towards the wire, bounds its room too
                 // ([`Drawer::neighbour_fork`]): from the bound on this edge to the offset of its
                 // planned point beyond (forward), or from there to the bound (backward).
+                //
+                // bundle-turn r2: that room ends on the far side of the neighbour, `2 gap` deep
+                // (the bound line, `gap` to the neighbour, `gap` past it), deepest priced on the
+                // neighbour's line and nothing past its far side (a tent, `x = min(d, 2 gap - d) /
+                // pitch`; the zones between two bounds keep `x = d / pitch`). r1's half plane was
+                // unbounded in depth: a leg of the same run 2.6 mm away, past the neighbour itself,
+                // paid (d / pitch)^2 per mm, and the DP bent the run's pad end leg 30 um off the
+                // pad axis to pay less (qmtech crop Q3, ADV_AVDD at x 137.22: a hook into the pad).
                 if fork_room {
                     for (after, g) in [(false, g_lo), (true, g_hi)] {
                         let Some(a) = g else { continue };
@@ -903,10 +912,28 @@ impl Drawer<'_> {
                                 nrm = -nrm;
                             }
                             let b = cq + nrm * gap;
-                            if (b - a).len2() >= 1.0 {
-                                zones.push(if fwd { (a, b, sign) } else { (b, a, sign) });
+                            // A zone over the run's own end (its pad or via) is room the run
+                            // cannot keep: its end is fixed there, closer to the neighbour than
+                            // the lane spacing, and the two neck down to each other at their
+                            // pads (`neck`). Pricing it bends the approach away from the end
+                            // (judge pattern distant_radius: W1 0.5 % longer than its ERBS).
+                            let (za, zb) = if fwd { (a, b) } else { (b, a) };
+                            let covers = |p: Vec2| {
+                                let zl = (zb - za).len();
+                                let zu = (zb - za) * (1.0 / zl.max(1.0));
+                                let (d, t) = (sign * zu.cross(p - za), (p - za).dot(zu));
+                                d > 0.0 && d < 2.0 * gap && (0.0..=zl).contains(&t)
+                            };
+                            if covers(taut[0]) || covers(taut[taut.len() - 1]) {
                                 if dbg {
-                                    eprintln!("LANEFORK wire {w} k {k} after {after} fwd {fwd} zone ({:.3},{:.3})-({:.3},{:.3}) sign {sign}", a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6);
+                                    eprintln!("LANEFORK wire {w} k {k} after {after} fwd {fwd}: zone over the run's end, dropped");
+                                }
+                                continue;
+                            }
+                            if (b - a).len2() >= 1.0 {
+                                zones.push(if fwd { (a, b, sign, 2.0 * gap) } else { (b, a, sign, 2.0 * gap) });
+                                if dbg {
+                                    eprintln!("LANEFORK wire {w} k {k} after {after} fwd {fwd} zone ({:.3},{:.3})-({:.3},{:.3}) sign {sign} depth {:.3}", a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6, 2.0 * gap / 1e6);
                                 }
                             }
                         }
@@ -922,7 +949,7 @@ impl Drawer<'_> {
                 for (side, sign) in [(0, 1.0), (1, -1.0)] {
                     if let (Some(a), Some(b)) = (sa[side], sb[side]) {
                         if (b - a).len2() >= 1.0 {
-                            zones.push((a, b, sign));
+                            zones.push((a, b, sign, f64::INFINITY));
                         }
                     }
                 }
@@ -1171,7 +1198,7 @@ impl Drawer<'_> {
             let l = (b - a).len();
             let mut tot = 0.0;
             if l >= 1.0 {
-                for &(za, zb, sign) in &zones {
+                for &(za, zb, sign, zd) in &zones {
                     let zl = (zb - za).len();
                     let zu = (zb - za) * (1.0 / zl);
                     let d0 = sign * zu.cross(a - za);
@@ -1188,8 +1215,8 @@ impl Drawer<'_> {
                     for i in 0..n {
                         let f = (i as f64 + 0.5) / n as f64;
                         let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
-                        if d > 0.0 && (0.0..=zl).contains(&t) {
-                            let x = d / pitch;
+                        if d > 0.0 && d < zd && (0.0..=zl).contains(&t) {
+                            let x = d.min(zd - d) / pitch;
                             tot += ds * (x + x * x);
                         }
                     }
@@ -2267,12 +2294,12 @@ impl Drawer<'_> {
     }
 }
 
-/// The `planned_room` zones (a, b, sign) and lane-slot gates (first end, unit direction,
+/// The `planned_room` zones (a, b, sign, depth) and lane-slot gates (first end, unit direction,
 /// length, span lo, span hi) of one octilinear run with what every leg needs of them computed
 /// once: the zone's length and unit direction, the gate's far end (the same expressions as the
 /// scan in `octilinear`, so the price is bit-identical).
 pub(super) struct RoomPre {
-    zones: Vec<(Vec2, f64, f64, Vec2)>,
+    zones: Vec<(Vec2, f64, f64, Vec2, f64)>,
     gates: Vec<(Vec2, Vec2, f64, f64, f64)>,
     cors: Vec<Corridor>,
 }
@@ -2408,12 +2435,12 @@ pub(super) fn corridor_room(cors: &[Corridor], pitch: f64, a: Vec2, b: Vec2) -> 
 }
 
 impl RoomPre {
-    pub(super) fn new(zones: &[(Vec2, Vec2, f64)], gates: &[(Vec2, Vec2, f64, f64, f64)], cors: &[Corridor]) -> RoomPre {
+    pub(super) fn new(zones: &[(Vec2, Vec2, f64, f64)], gates: &[(Vec2, Vec2, f64, f64, f64)], cors: &[Corridor]) -> RoomPre {
         let zones = zones
             .iter()
-            .map(|&(za, zb, sign)| {
+            .map(|&(za, zb, sign, zd)| {
                 let zl = (zb - za).len();
-                (za, sign, zl, (zb - za) * (1.0 / zl))
+                (za, sign, zl, (zb - za) * (1.0 / zl), zd)
             })
             .collect();
         let gates = gates.iter().map(|&(gp, gu, glen, glo, ghi)| (gp, gp + gu * glen, glen, glo, ghi)).collect();
@@ -2433,7 +2460,7 @@ impl RoomPre {
         if l >= 1.0 {
             let n = ((l / (0.25 * pitch)).ceil() as usize).clamp(2, 24);
             let ds = l / n as f64;
-            for &(za, sign, zl, zu) in &self.zones {
+            for &(za, sign, zl, zu, zd) in &self.zones {
                 let d0 = sign * zu.cross(a - za);
                 let d1 = sign * zu.cross(b - za);
                 if d0 <= 0.0 && d1 <= 0.0 {
@@ -2446,8 +2473,8 @@ impl RoomPre {
                 for i in 0..n {
                     let f = (i as f64 + 0.5) / n as f64;
                     let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
-                    if d > 0.0 && (0.0..=zl).contains(&t) {
-                        let x = d / pitch;
+                    if d > 0.0 && d < zd && (0.0..=zl).contains(&t) {
+                        let x = d.min(zd - d) / pitch;
                         tot += ds * (x + x * x);
                     }
                 }
@@ -2677,11 +2704,11 @@ mod tests {
     }
 
     /// The `room` scan of `octilinear` before `RoomPre` (its `tot`), verbatim.
-    fn room_ref(zones: &[(Vec2, Vec2, f64)], gates: &[(Vec2, Vec2, f64, f64, f64)], pitch: f64, a: Vec2, b: Vec2) -> f64 {
+    fn room_ref(zones: &[(Vec2, Vec2, f64, f64)], gates: &[(Vec2, Vec2, f64, f64, f64)], pitch: f64, a: Vec2, b: Vec2) -> f64 {
         let l = (b - a).len();
         let mut tot = 0.0;
         if l >= 1.0 {
-            for &(za, zb, sign) in zones {
+            for &(za, zb, sign, zd) in zones {
                 let zl = (zb - za).len();
                 let zu = (zb - za) * (1.0 / zl);
                 let d0 = sign * zu.cross(a - za);
@@ -2698,8 +2725,8 @@ mod tests {
                 for i in 0..n {
                     let f = (i as f64 + 0.5) / n as f64;
                     let (d, t) = (d0 + (d1 - d0) * f, t0 + (t1 - t0) * f);
-                    if d > 0.0 && (0.0..=zl).contains(&t) {
-                        let x = d / pitch;
+                    if d > 0.0 && d < zd && (0.0..=zl).contains(&t) {
+                        let x = d.min(zd - d) / pitch;
                         tot += ds * (x + x * x);
                     }
                 }
@@ -2759,7 +2786,8 @@ mod tests {
             let sc = [0.2, 2.0, 10.0][g.int(0, 2) as usize] * MM;
             let rp = |g: &mut Rng| o + v(g.f() * sc, g.f() * sc);
             let pitch = (0.1 + 0.5 * g.f()) * MM;
-            let zones: Vec<(Vec2, Vec2, f64)> = (0..g.int(0, 12)).map(|_| (rp(&mut g), rp(&mut g), if g.int(0, 1) == 0 { 1.0 } else { -1.0 })).collect();
+            // bundle-turn r2: half of them with a finite depth (the fork zones' tent).
+            let zones: Vec<(Vec2, Vec2, f64, f64)> = (0..g.int(0, 12)).map(|_| (rp(&mut g), rp(&mut g), if g.int(0, 1) == 0 { 1.0 } else { -1.0 }, if g.int(0, 1) == 0 { f64::INFINITY } else { g.f() * sc })).collect();
             let gates: Vec<(Vec2, Vec2, f64, f64, f64)> = (0..g.int(0, 12))
                 .map(|_| {
                     let (p, q) = (rp(&mut g), rp(&mut g));

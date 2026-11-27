@@ -118,8 +118,11 @@ fn refit_and_straighten_lines_report_convergence() {
 // harness.radii_patterns.model_fixture, engine/tests/fixtures/bundle_turn), routed det s0 as the
 // harness does (one run, one round).
 
-/// Per net code: (length mm, bends, segments off 0/45/90 degrees), and the violations per net.
-fn route_pattern(p: &str) -> (Vec<(i32, f64, usize, usize)>, Vec<(String, usize)>, usize) {
+/// Per net code: (net, length mm, bends, segments off 0/45/90 degrees).
+type NetShape = (i32, f64, usize, usize);
+
+/// Per net code its [`NetShape`], the violations per connection and the unrouted count.
+fn route_pattern(p: &str) -> (Vec<NetShape>, Vec<(String, usize)>, usize) {
     let path = format!("{}/tests/fixtures/bundle_turn/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
     let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let mut val = serde_json::to_value(Options::default()).unwrap();
@@ -166,13 +169,15 @@ fn route_pattern(p: &str) -> (Vec<(i32, f64, usize, usize)>, Vec<(String, usize)
         }
         out.push((net, len, dirs.len().saturating_sub(1), off));
     }
-    let viols = r.connections.iter().map(|c| (c.name.clone(), c.violations as usize)).collect();
+    let viols = r.connections.iter().map(|c| (c.name.clone(), c.violations)).collect();
     (out, viols, r.connections_total - r.routed)
 }
 
-/// turn_fork_corner, the part item 4 fixes: N3 keeps the corridor (P4 no longer rips it out over
-/// the oblique factor; before: 7.99 mm round the wall), no violation, every wire within 1 % of the
-/// reference length (5.2718 / 6.1115 / 6.7243 mm).
+/// turn_fork_corner, the parts items 4 and 1 fix: N3 keeps the corridor (P4 no longer rips it out
+/// over the oblique factor; before: 7.99 mm round the wall), no violation, every wire within 1 % of
+/// the reference length (5.2718 / 6.1115 / 6.7243 mm), and N2, drawn before N1 turns off, keeps
+/// N1's fork room: its reference 3 bends (item 1 off, `TOPO_FD45_OFF=fork`: 4, N2 bends into the
+/// room N1 needs after the fork and steps back).
 #[test]
 fn turn_fork_corner_no_violation_no_detour() {
     let (nets, viols, unrouted) = route_pattern("turn_fork_corner");
@@ -182,6 +187,8 @@ fn turn_fork_corner_no_violation_no_detour() {
         let &(_, g, _, _) = nets.iter().find(|x| x.0 == net).unwrap();
         assert!(g <= l * 1.01, "N{net}: {g:.4} mm vs the reference {l} ({nets:?})");
     }
+    let &(_, _, b2, _) = nets.iter().find(|x| x.0 == 2).unwrap();
+    assert!(b2 <= 3, "N2: {b2} bends, the reference 3 ({nets:?})");
 }
 
 /// turn_fork_corner in full: the bundle nests at pitch, every leg octilinear, no more bends than
