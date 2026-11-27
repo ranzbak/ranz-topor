@@ -1692,14 +1692,6 @@ pub struct Options {
     /// reaches the neck on to the cheaper wire end (defaults-flip-a1, user 2026-11-27).
     /// false (default until a verifier) = main's copper.
     pub forced_shrink: bool,
-    /// draw-absorb A1b (`[drawing] reserved_keep_neck`, docs/dev/design/draw-absorb.md): a band
-    /// the joint commit reserved necked (the plan's neck, `Reserved::pneck`) keeps that neck in its
-    /// octilinear form: where main's form would be wider than reserved, the form is realised at
-    /// the plan's zones and the reserved width (never wider than reserved). The pad-tip re-anchor
-    /// (`tip_anchor_reserved`) is not affected: its dropped neck is the plan's hook into the pad
-    /// side and the pad-axis entry is drawn at full width (lead 2026-11-27, Q3); it is only metered.
-    /// false (default until a verifier) = main's copper.
-    pub reserved_keep_neck: bool,
     /// draw-absorb A3 (`[drawing] band_passes`, docs/dev/design/draw-absorb.md): with realise =
     /// "erbs", passes of the iterated band realise per layer before any copper: the band of each
     /// model gap's yielding wire is realised again with its partner's band as a sided obstacle
@@ -2129,7 +2121,6 @@ impl Default for Options {
             octi_straighten: true,
             erbs_gap_keep_max_mm: 0.15,
             forced_shrink: false,
-            reserved_keep_neck: false,
             band_passes: 0,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,

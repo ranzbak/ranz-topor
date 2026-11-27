@@ -542,7 +542,7 @@ fn a_forced_shrink_takes_the_widest_width_that_clears() {
     assert!(thin > 90_000 && thin <= 100_000, "neck width {thin}");
 }
 
-// ---- draw-absorb A1b (`[drawing] reserved_keep_neck`) and A3 (`[drawing] band_passes`) ----
+// ---- draw-absorb A3 (`[drawing] band_passes`) ----
 
 fn opts_with(base: &Options, kv: &[(&str, serde_json::Value)]) -> Options {
     let mut val = serde_json::to_value(base).unwrap();
@@ -559,36 +559,6 @@ fn one_cycle(style: &str) -> Options {
 fn fixture(dir: &str, p: &str) -> BoardModel {
     let path = format!("{}/tests/fixtures/{dir}/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
     BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap()
-}
-
-/// A1b on the Q3 crop (ADV7511 row, default options, one cycle): main re-anchors a reserved band
-/// the plan had necked (wire 36) at its pad's tip at full width, dropping 1.1 mm of neck (the
-/// meter's `tip` entry). The lead's rule (2026-11-27, user-approved Q3 pad-axis entry at full
-/// width): reserved_keep_neck leaves the re-anchor alone, so the tip copper is main's and the drop
-/// is still metered.
-#[test]
-fn a_reanchored_band_enters_at_full_width_with_keep_neck() {
-    let m = fixture("dvn", "dvn_crop_q3");
-    let o = one_cycle("octilinear");
-    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
-    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
-    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
-    let tip = |e: &topor_engine::route::ErbsRunReport| e.unnecked_list.iter().filter(|u| u.at == "tip").cloned().collect::<Vec<_>>();
-    assert!(tip(eo).iter().any(|u| u.mm > 0.5), "main drops a reserved neck at the tip: {:?}", eo.unnecked_list);
-    assert_eq!(tip(eo), tip(en), "the re-anchor is main's with the key on");
-    assert_eq!(eo.unnecked, eo.unnecked_list.len());
-    assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
-    assert_eq!(on.routed, off.routed);
-}
-
-#[test]
-fn keep_neck_without_a_dropped_neck_is_main() {
-    let m = fixture("dvn", "dvn_crop_q2");
-    let o = one_cycle("octilinear");
-    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
-    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
-    assert!(off.erbs.as_ref().unwrap().unnecked_list.is_empty());
-    assert_eq!(off.items, on.items);
 }
 
 /// A3 on erbs/qfn_fan (smooth, one cycle): the ERBS check finds one model gap between two fan-out
@@ -658,32 +628,12 @@ fn a_gap_neck_survives_the_octilinear_form_and_the_reanchor() {
 }
 
 
-/// A1b octilinear half on a public qmtech crop (window 97.5..105 x 49.5..57 mm, the 0.4 mm net
-/// of wires 6 / 812 on the full board; harness.abstract_crop, one cycle, octilinear): main draws
-/// two reserved-necked bands' octilinear forms wider than reserved (`octi_wider`, 0.67 + 0.74 mm).
-/// With reserved_keep_neck both keep the reserved neck (`kept_neck` 2, no `octi_wider`): more
-/// copper between the floor and the nominal width, no violation added, nothing unrouted.
-#[test]
-fn an_octilinear_form_keeps_the_reserved_neck() {
-    let m = fixture("dvn", "a1b_octi_crop");
-    let o = one_cycle("octilinear");
-    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
-    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
-    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
-    assert_eq!(eo.unnecked_list.iter().filter(|u| u.at == "octi_wider").count(), 2, "{:?}", eo.unnecked_list);
-    assert_eq!(eo.kept_neck, 0);
-    assert!(en.unnecked_list.is_empty() && en.kept_neck == 2, "{:?} kept {}", en.unnecked_list, en.kept_neck);
-    let mid = |r: &RouteResult| tracks(r).iter().filter(|t| t.0 > 150_000 && t.0 < 330_000).map(|t| t.1).sum::<f64>();
-    assert!(mid(&on) > mid(&off) + 0.3 * MM, "necked {} -> {}", mid(&off) / MM, mid(&on) / MM);
-    assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
-    assert_eq!(on.routed, off.routed);
-}
-
 // ---- draw-absorb A1 r2: the invariants over every A1 path ----
 
 /// The A1 fixtures, each with its options: forced runs (fx_narrow_gap at four floors, the gap
 /// next to a pad), joint-commit necks (gap_squeeze smooth; dvn_crop_q2 octilinear: the adopted
-/// band's octilinear form at its neck, `a1z`), and the A1b crop with A1 on too.
+/// band's octilinear form at its neck, `a1z`), and a1b_octi_crop (a public qmtech crop; it was
+/// A1b's fixture, the A1b option `reserved_keep_neck` is dropped, user 2026-11-27) with A1 on.
 fn a1_cases() -> Vec<(&'static str, BoardModel, Options)> {
     let gap = |w: i64| with(include_str!("fixtures/fx-narrow-gap.json"), move |j| j["rules"]["min_track_width"] = serde_json::json!(w));
     let at_pad = with(include_str!("fixtures/fx-narrow-gap.json"), |j| {

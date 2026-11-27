@@ -357,6 +357,12 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
   width after it across the via; r4's step necked the run on to its via, 18.00 mm). `route.erbs.a1_one_stretch*`
   are gone; the "neck profile" line counts the joins (and the moved stubs).
 
+**A1b DROPPED (user 2026-11-27, branch defaults-flip-a1).** The option `[drawing] reserved_keep_neck`, its code
+(`kept_neck_items`, `fit_neck_with`'s grow-trimmed mode, the octilinear-form branch) and its meter
+(`route.erbs.unnecked*`, `kept_neck`, `Drawer::room_taken`, `TOPO_A1BDBG`) are removed; off was main's copper, so
+board copper is unchanged. The fixture `model-a1b_octi_crop.json` stays: A1's tests use it. The record below is
+historical.
+
 **A1b as built (2026-11-27): `[drawing] reserved_keep_neck`**, default false (since 0.5.0, unreleased); off = main
 copper (hash on 4 boards).
 

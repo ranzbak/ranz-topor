@@ -4160,18 +4160,7 @@ impl<'a> Drawer<'a> {
                 };
                 // draw-absorb A1: the zones of an adopted band the joint commit necked against a
                 // gap partner (its warnings name them; its octilinear form keeps them).
-                // draw-absorb A1b (`[drawing] reserved_keep_neck`): an adopted band reserved with
-                // the plan's neck takes its octilinear form at that neck too (never wider).
-                let a1b = adopted.as_ref().is_some_and(|x| x.zones.is_none() && self.opts.reserved_keep_neck && x.pneck.is_some_and(|p| p.0 < wi.w) && pneck.is_some());
-                let a1z: Option<super::exact::Neck> = adopted.as_ref().and_then(|x| {
-                    x.zones.map(|ends| super::exact::Neck { min_w: x.pneck.map_or(0.0, |p| p.0), ends }).or(match (a1b, x.pneck, &pneck) {
-                        (true, Some((wn, _)), Some(n)) => Some(super::exact::Neck { min_w: wn, ends: n.ends }),
-                        _ => None,
-                    })
-                });
-                // A1b meter: the adopted band's necked length (an octilinear form at full width drops it).
-                let adopted_neck: f64 = adopted.as_ref().and_then(|x| x.pneck).map_or(0.0, |p| p.1.iter().sum());
-                let adopted_wn: Option<f64> = adopted.as_ref().and_then(|x| x.pneck).map(|p| p.0);
+                let a1z: Option<super::exact::Neck> = adopted.as_ref().and_then(|x| x.zones.map(|ends| super::exact::Neck { min_w: x.pneck.map_or(0.0, |p| p.0), ends }));
                 let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = if restored {
                     kept.as_ref().and_then(|k| k.4)
                 } else {
@@ -4261,20 +4250,6 @@ impl<'a> Drawer<'a> {
                         // draw-absorb A1: an adopted band necked against a gap partner takes its
                         // octilinear form at its neck (zones and width), never wider.
                         let real = |o_pts: &[Vec2]| match &a1z {
-                            // A1b: main's realise, unless it draws the band wider than reserved
-                            // (full width, or a wider neck); then the reserved neck where legal.
-                            Some(z) if a1b => {
-                                let main = self.realise(w, layer, lid, o_pts, &pneck);
-                                if main.as_ref().is_some_and(|(_, pn)| pn.is_some_and(|p| p.0 <= z.min_w + 0.5)) {
-                                    return main;
-                                }
-                                let (its, ls) = self.kept_neck_items(w, layer, o_pts, z);
-                                if ls.iter().sum::<f64>() > 0.0 && self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its) {
-                                    Some((its, Some((z.min_w, ls))))
-                                } else {
-                                    main
-                                }
-                            }
                             Some(z) => {
                                 // r2: zone cuts merged, pad stubs kept (`a1_finish`).
                                 let (its, _) = self.a1_finish(w, self.neck_items(w, lid, o_pts, z, z.min_w).0);
@@ -4303,27 +4278,6 @@ impl<'a> Drawer<'a> {
                         let tag = match got {
                             Some(o) => match real(&o.pts) {
                                 Some((its, pn)) => {
-                                    if attempt < 0 && adopted_neck > 0.0 {
-                                        // A1b meter: an octilinear form necked wider than reserved.
-                                        if let (Some((w2, _)), Some(wn)) = (pn, adopted_wn) {
-                                            if w2 > wn + 0.5 && !a1b {
-                                                if std::env::var_os("TOPO_A1BDBG").is_some() {
-                                                    let (a, b) = (o.pts[0], o.pts[o.pts.len() - 1]);
-                                                    eprintln!("A1B octi_wider wire {w} net {} run {r} reserved {:.3} drawn {:.3} mm from ({:.3},{:.3}) to ({:.3},{:.3})", self.st.wires[w].net, wn / 1e6, w2 / 1e6, a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6);
-                                                }
-                                                self.joint.unnecked.push((w, r, adopted_neck, 0.0, "octi_wider"));
-                                            }
-                                        }
-                                        if pn.is_none() {
-                                            let room = match (&pneck, adopted_wn) {
-                                                (Some(n), Some(wn)) => self.room_taken(w, &o.pts, n, wn),
-                                                _ => 0.0,
-                                            };
-                                            self.joint.unnecked.push((w, r, adopted_neck, room, "octi"));
-                                        } else if a1b && pn.is_some_and(|p| adopted_wn.is_some_and(|wn| p.0 <= wn + 0.5)) {
-                                            self.joint.kept_neck += 1;
-                                        }
-                                    }
                                     self.stats.octi_asis += o.asis;
                                     self.stats.octi_asis_below += o.asis_below;
                                     pts = o.pts;
@@ -5702,28 +5656,6 @@ impl<'a> Drawer<'a> {
         lo.floor().max(neck.min_w)
     }
 
-    /// draw-absorb A1b meter: length (nm) of the run `pts` of wire `w` inside the zones of `neck`
-    /// where its full width takes planned room of wires not drawn yet that the width `wn` leaves
-    /// free (the room price of [`Drawer::via_plan_price`], as [`Drawer::fit_neck`] grows a neck
-    /// by it). 0 = the full width there costs no other trace room. O(samples x traversals).
-    pub(super) fn room_taken(&self, w: WireId, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> f64 {
-        let wi = &self.st.wires[w];
-        let last = wi.tris.len().saturating_sub(1);
-        let mut l = 0.0;
-        for s in pts.windows(2) {
-            let sl = (s[1] - s[0]).len();
-            let n = ((sl / 5.0e4).ceil() as usize).max(1);
-            for j in 0..n {
-                let q = s[0] + (s[1] - s[0]) * ((j as f64 + 0.5) / n as f64);
-                let inside = neck.ends.iter().flatten().any(|&(c, r)| (q - c).len() <= r);
-                if inside && self.via_plan_price(w, 0, last, q, wi.w) > self.via_plan_price(w, 0, last, q, wn) {
-                    l += sl / n as f64;
-                }
-            }
-        }
-        l
-    }
-
     /// draw-via-neck B (`[drawing] neck_trim`): the plan's neck zones of the run `pts` (necked to
     /// `wn`) cut to where the room ends. Each zone first shrinks to the smallest radius the checker
     /// accepts ([`Drawer::trim_neck`]; a zone over the whole wire is tried from either end, the
@@ -5734,13 +5666,6 @@ impl<'a> Drawer<'a> {
     /// only where another trace needs that room (TopoR 6.3 manual p. 56, the minimum width only
     /// where needed). Graded, no cutoff. O(zones x 14 checks of the run + zones x 65 x segments).
     pub(super) fn fit_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
-        self.fit_neck_with(w, lid, pts, neck, wn, false)
-    }
-
-    /// [`Drawer::fit_neck`]; `grow_trimmed` (draw-absorb A1b, `[drawing] reserved_keep_neck`): a
-    /// zone the checker does not need (trimmed away) still grows from radius 0 where the full
-    /// width would take planned room of traces not drawn yet (the room the reserved neck kept).
-    pub(super) fn fit_neck_with(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64, grow_trimmed: bool) -> super::exact::Neck {
         let wi = &self.st.wires[w];
         let ext = |c: Vec2| pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0;
         let len_of = |n: &super::exact::Neck| self.neck_items(w, lid, pts, n, wn).1.iter().sum::<f64>();
@@ -5781,11 +5706,7 @@ impl<'a> Drawer<'a> {
         let extra = |q: Vec2| ((self.via_plan_price(w, 0, last, q, wi.w) - self.via_plan_price(w, 0, last, q, wn)) / pitch).max(0.0);
         for i in 0..super::exact::NECK_ZONES {
             let Some((c, r1)) = base.ends[i] else { continue };
-            let r0 = match nk.ends[i] {
-                Some((_, r0)) => r0,
-                None if grow_trimmed => 0.0,
-                None => continue,
-            };
+            let Some((_, r0)) = nk.ends[i] else { continue };
             let r1 = if r1.is_finite() { r1 } else { ext(c) };
             if room <= 0.0 || r1 <= r0 + 1.0 {
                 continue;
