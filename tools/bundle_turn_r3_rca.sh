@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # bundle-turn r3 step 1 (RCA of the user's qm detours): det s0 C1 on qmtech-bh26 (the user's Board Setup rules).
+#   top2: item attribution arms: fork zones off (TOPO_FD45_OFF=fork), oblique_price 0
 #   top: tip clean (metrics), tip dbg (TOPO_XRDBG + TOPO_LOOPDBG: crossing-pass groups, loop reroute tries), tip split3 (XRDBG only)
 set -u
 OUT=${HZ_RUN_DIR:?}; ROOT=$(cd "$(dirname "$0")/.." && pwd); cd $ROOT
@@ -11,6 +12,11 @@ case "${1:-}" in
   clean) run tip-bh ;;
   dbg) TOPO_XRDBG=1 TOPO_LOOPDBG=1 run dbg-bh ;;
   split) TOPO_XRDBG=1 run split3-bh --set optimize.crossing_split=3 ;;
+  fork) TOPO_FD45_OFF=fork run fork-bh ;;
+  obl0) run obl0-bh --set capacity.oblique_price=0 ;;
+  top2)
+    for u in fork obl0; do hzq run --threads 4 --name bt3-$u -- bash $ROOT/tools/bundle_turn_r3_rca.sh $u 9>&- & sleep 3; done
+    wait; note "all done" ;;
   top)
     for u in clean dbg split; do hzq run --threads 4 --name bt3-$u -- bash $ROOT/tools/bundle_turn_r3_rca.sh $u 9>&- & sleep 3; done
     wait; note "all done" ;;
