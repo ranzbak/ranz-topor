@@ -9166,13 +9166,14 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         let cap = opts.straighten_passes.max(1);
         let mut pass_changed = true;
         let (mut passes, mut phase) = (0usize, 0usize);
-        // bundle-turn (3): the wires drawn with violations (never drop) were forced against their
+        // bundle-turn (3), `[drawing] refit_forced` (off by default): the wires drawn with
+        // violations (never drop) were forced against their
         // neighbours' first drafts; once the straightening has moved those, each is drawn again
         // against the copper as it is ([`draw::Drawer::refit_forced`], kept when it has fewer
         // violations), then the straightening runs again (one re-fit round; debug arm
         // `TOPO_FD45_OFF=refit`). TopoR 6.3 manual p. 237: the minimal clearance only in the
         // narrowest spots, so a run squeezed where room has become free is fitted again.
-        let mut refit_round_done = !opts.allow_violations || super::octi::fd45_off("refit");
+        let mut refit_round_done = !opts.refit_forced || !opts.allow_violations || super::octi::fd45_off("refit");
         let (mut refit_tried, mut refit_kept) = (0usize, 0usize);
         // The re-fit is an optional pass of the drawing: it stops at Cancel, at `[run]
         // drawing_grace_s` (soft limit) or at the time limit (hard); every wire stays drawn.

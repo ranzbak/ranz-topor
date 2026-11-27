@@ -1681,6 +1681,11 @@ pub struct Options {
     /// the straightening freed (`Drawer::refit_forced`), the straightening runs again, with the
     /// same bound. Default 4 (qmtech reached the bound still changing: the line says so).
     pub straighten_passes: usize,
+    /// bundle-turn item 3 (`[drawing] refit_forced`): after the straightening, draw every wire
+    /// with violations (never drop) again against the straightened copper, kept when it has fewer
+    /// violations, then straighten again. Off by default: on qmtech (det s0, 2026-11-27) it took
+    /// ~75 s cpu for 1 fewer DRC error (15 redraws, 3 kept, 0 legal).
+    pub refit_forced: bool,
     /// TW2 (`[drawing] erbs_gap_keep_max_mm`): with realise = "erbs", two bands the joint check
     /// finds too close by a model gap of the ERBS (`RunBand::gap`, no over-full cut predicts it)
     /// are both kept when the overlap is at most this: the gap stays as a clearance violation of
@@ -2135,6 +2140,7 @@ impl Default for Options {
             octi_own_portals: true,
             octi_straighten: true,
             straighten_passes: 4,
+            refit_forced: false,
             erbs_gap_keep_max_mm: 0.15,
             forced_shrink: true,
             band_passes: 0,

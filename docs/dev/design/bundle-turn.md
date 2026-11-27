@@ -55,6 +55,11 @@ line (fixpoint, or bound reached), and there is a new line for the re-fit.
 
 **Literature.** TopoR p. 237 (as in item 2). Staepelaere 1992 ch. 5 p. 15 (StraightenLayer).
 
+**Option and default.** `[drawing] refit_forced`, off by default (lead 2026-11-27). On qm (det s0, bt1r5 arms) the re-fit
+cost about 75 s cpu for 1 fewer DRC error: 15 redraws, 3 kept, 0 legal. Only wires whose violation partner, or a wire on
+one of their planned edges, moved are drawn again. Parked: re-fit only the violating runs (`refit_run`), not the whole
+wire by force.
+
 **Debug arm.** `TOPO_FD45_OFF=refit`.
 
 ## 4. Over-full only when it does not fit at the factors a turn reaches (pack.rs `oblique_split`, `Taut::sq`)
