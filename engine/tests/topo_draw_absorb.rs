@@ -1,0 +1,813 @@
+//! draw-absorb A0 (docs/dev/design/draw-absorb.md §4 A0): the provenance meter. Every drawn
+//! violation carries its writer, its forced candidate, its band status, what its copper hits
+//! (`violations[].prov`), its drawn compass class and fault class F1-F7, and the result counts them
+//! (`draw_absorb`). Measurement only: the copper is the same with or without it (checked on the
+//! boards by copper hash, not here).
+
+use topor_engine::model::{BoardModel, Options};
+use topor_engine::route::{route, RouteResult};
+
+const MM: f64 = 1e6;
+
+fn opts() -> Options {
+    Options::from_json(r#"{"runs": 1, "wall_clock_s": 60.0, "topo_rounds": 3}"#).expect("options parse")
+}
+
+/// The counts add up to the violations, each violation has a writer, a candidate and a fault class.
+fn check_counts(r: &RouteResult) {
+    let m = r.draw_absorb.as_ref().expect("the meter ran");
+    assert_eq!(m.violations, r.violations.len());
+    assert_eq!(m.by_fclass.values().sum::<usize>(), r.violations.len(), "{m:?}");
+    assert_eq!(m.by_mech.values().sum::<usize>(), r.violations.len(), "{m:?}");
+    for v in &r.violations {
+        let p = v.prov.as_ref().expect("every topo violation has a provenance");
+        assert!(["F1", "F2", "F3", "F4", "F5", "F6", "F7"].contains(&p.fclass.as_str()), "{p:?}");
+        assert!(!p.mech.is_empty() && !p.cand.is_empty() && !p.class.is_empty(), "{p:?}");
+    }
+}
+
+/// fx_narrow_gap_forced (tests/topo_mb1.rs): the only way is a gap too narrow for the track; the
+/// forced run hits the two wall pads: static hits, written by the never-drop run.
+#[test]
+fn a_forced_run_against_pads_is_a_static_hit() {
+    let m = BoardModel::from_json(include_str!("fixtures/fx-narrow-gap.json")).expect("fixture parses");
+    let r = route(&m, &opts());
+    assert!(!r.violations.is_empty());
+    check_counts(&r);
+    for v in &r.violations {
+        let p = v.prov.as_ref().unwrap();
+        assert_eq!((p.mech.as_str(), p.hit.as_str(), p.hit_wire), ("forced_run", "static", None), "{p:?}");
+        assert!(["relaxed", "funnel", "erbs", "erbs_kept", "attempt0", "attempt1", "attempt3", "attempt4", "attempt5"].contains(&p.cand.as_str()), "{p:?}");
+        assert_eq!(p.w_nm, 250_000, "{p:?}");
+        assert!(p.w_min_nm > 0 && p.w_min_nm <= p.w_nm && p.drawn_w_nm > 0, "{p:?}");
+        assert_eq!(p.fclass, topor_engine::topo::compass::fault_class("forced_run", &p.class, false), "{p:?}");
+    }
+}
+
+/// The narrow gap widened to fit one track (0.9 mm: 0.25 mm + 2 x 0.2 mm fits, two tracks need
+/// 1.1 mm), with a second net through it: one is drawn legally, the other is forced through the
+/// gap against it. That violation hits the other connection's track: a movable hit, with the
+/// router wire and its connection named.
+#[test]
+fn a_forced_run_against_a_neighbour_names_the_neighbour() {
+    let mut j: serde_json::Value = serde_json::from_str(include_str!("fixtures/fx-narrow-gap.json")).unwrap();
+    let mm = |v: f64| serde_json::json!((v * MM) as i64);
+    j["nets"].as_array_mut().unwrap().push(serde_json::json!({"code": 2, "name": "SIG2"}));
+    let pads = j["pads"].as_array_mut().unwrap();
+    for p in pads.iter_mut() {
+        let r = p["ref"].as_str().unwrap().to_string();
+        let lid = p["layers"][0].to_string();
+        if r.starts_with("WN") {
+            p["center"][1] = mm(4.775);
+            p["shapes"][&lid]["h"] = mm(9.55);
+        } else if r.starts_with("WS") {
+            p["center"][1] = mm(15.225);
+            p["shapes"][&lid]["h"] = mm(9.55);
+        }
+    }
+    let a = pads.iter().find(|p| p["ref"] == "A1").unwrap().clone();
+    for (r, x) in [("A2", 3.0), ("B2", 27.0)] {
+        let mut q = a.clone();
+        q["uuid"] = serde_json::json!(format!("absorb-{r}"));
+        q["ref"] = serde_json::json!(r);
+        q["net"] = serde_json::json!(2);
+        q["center"] = serde_json::json!([(x * MM) as i64, (12.0 * MM) as i64]);
+        pads.push(q);
+    }
+    let m = BoardModel::from_json(&j.to_string()).expect("fixture parses");
+    let r = route(&m, &opts());
+    assert_eq!(r.routed, 2, "never drop: both drawn: {:?}", r.warnings);
+    assert!(!r.violations.is_empty(), "two tracks do not fit the gap");
+    check_counts(&r);
+    let mv: Vec<_> = r.violations.iter().filter(|v| v.prov.as_ref().unwrap().hit == "movable").collect();
+    assert!(!mv.is_empty(), "the forced run hits the other net's track: {:?}", r.violations);
+    for v in &mv {
+        let p = v.prov.as_ref().unwrap();
+        assert_eq!(p.mech, "forced_run", "{p:?}");
+        assert!(p.hit_wire.is_some(), "the hit router wire: {p:?}");
+        let other = r.connections.iter().find(|c| c.id != v.conn).unwrap().id;
+        assert_eq!(p.hit_conn, Some(other), "{p:?}");
+        assert!(v.against.contains("SIG"), "{v:?}");
+    }
+    let m = r.draw_absorb.as_ref().unwrap();
+    assert_eq!(m.by_hit.get("movable").copied().unwrap_or(0), mv.len());
+}
+
+/// A via forced over sites blocked by another router wire's vias (tests/topo_d2.rs
+/// `a_forced_via_stays_in_the_plans_class`, the blockers given a wire): its violations are tagged
+/// `forced_via` / `via` with the via's index, and each hit names the blocking wire.
+#[test]
+fn a_forced_via_names_its_writer_and_the_wire_it_hits() {
+    use topor_engine::check::Checker;
+    use topor_engine::geom::Vec2;
+    use topor_engine::topo::board::{self, BuildOpts};
+    use topor_engine::topo::draw::{via_item, Drawer, Plan};
+    use topor_engine::topo::init::InitWeights;
+    use topor_engine::topo::state::State;
+    use topor_engine::vias::ViaSize;
+    let p = |v: f64| (v * MM) as i64;
+    let pad = |i: usize, net: i32, x: f64, y: f64| {
+        format!(
+            r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":{net},"attr":"pth","center":[{},{}],"rotation_deg":0.0,"layers":[0, 2],"shapes":{{"0":{{"kind":"rect","w":{d},"h":{d}}},"2":{{"kind":"rect","w":{d},"h":{d}}}}},"drill":{{"w":{h},"h":{h}}}}}"#,
+            p(x),
+            p(y),
+            d = p(0.6),
+            h = p(0.3)
+        )
+    };
+    let c = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+    let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+    let s = format!(
+        r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}},{{"code":3,"name":"C"}}],"pads":[{},{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+        pad(0, 1, 2.0, 10.0),
+        pad(1, 1, 18.0, 10.0),
+        segs.join(",")
+    );
+    let m = BoardModel::from_json(&s).unwrap();
+    let b = board::build(&m, &BuildOpts { steiner_mm: 0.0, ..BuildOpts::default() }).unwrap();
+    let conns = b.connections(&m);
+    let mut st = State::new(&b.proj);
+    let cn = conns.iter().find(|c| c.net == 1).unwrap();
+    st.route_conn(cn, &InitWeights::default(), (cn.w + cn.s) / 400_000.0).expect("routes");
+    let o = Options::default();
+    let checker = Checker::new(&m, &o);
+    let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+    let mut dr = Drawer::new(&m, &o, &b, &st, &checker);
+    dr.force = true;
+    // Vias of net 3, owned by router wire 7, on a 0.7 mm grid over the whole board: no legal site.
+    let blocker = ViaSize { d: 1_000_000, drill: 500_000 };
+    let mut y = 0.4;
+    while y <= 19.6 {
+        let mut x = 0.4;
+        while x <= 19.6 {
+            dr.commit(&via_item(3, v(x, -y), blocker, Some(7)));
+            x += 0.7;
+        }
+        y += 0.7;
+    }
+    let k = st.wires[0].passes.len() / 2;
+    let plan = Plan { layers: vec![0, 1], vias: vec![(k, k)], at: vec![k] };
+    let mut ids = Vec::new();
+    let vias = dr.place_vias(0, &plan, &mut ids).expect("never drop: a via");
+    assert_eq!((vias.len(), dr.stats.via_forced), (1, 1), "{:?}", dr.stats);
+    let vs = dr.via_viol.get(&0).expect("the forced via's violations");
+    assert!(!vs.is_empty());
+    for x in vs {
+        assert_eq!((x.src.mech, x.src.cand, x.src.run), ("forced_via", "via", 0), "{x:?}");
+        if x.against.contains("item:") {
+            assert_eq!(x.src.hit_wire, Some(7), "the blocking via's wire: {x:?}");
+        }
+    }
+    assert!(vs.iter().any(|x| x.src.hit_wire == Some(7)), "{vs:?}");
+}
+
+/// tests/tw2_metric.rs `model_gaps_keep_both_bands_and_report_the_violation` (erbs/gap_squeeze):
+/// two bands kept across a model gap; the band drawn second carries the gap as its violation,
+/// tagged `gap_kept` / `band` / `kept`, against the other band's copper (a movable hit).
+#[test]
+fn a_band_kept_across_a_model_gap_is_tagged_gap_kept() {
+    let path = format!("{}/tests/fixtures/erbs/model-gap_squeeze.json", env!("CARGO_MANIFEST_DIR"));
+    let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut val = serde_json::to_value(Options::default()).unwrap();
+    val["runs"] = serde_json::json!(1);
+    val["topo_rounds"] = serde_json::json!(1);
+    val["draw_style"] = serde_json::json!("smooth");
+    let r = route(&m, &serde_json::from_value(val).unwrap());
+    assert!(r.erbs.as_ref().is_some_and(|e| e.gap_kept > 0), "{:?}", r.erbs);
+    check_counts(&r);
+    let g: Vec<_> = r.violations.iter().filter_map(|v| v.prov.as_ref()).filter(|p| p.mech == "gap_kept").collect();
+    assert!(!g.is_empty(), "{:?}", r.violations);
+    for p in g {
+        assert_eq!((p.cand.as_str(), p.cut.as_str(), p.hit.as_str()), ("band", "kept", "movable"), "{p:?}");
+        assert!(p.hit_wire.is_some(), "{p:?}");
+    }
+}
+
+// ---- draw-absorb A1 (`[drawing] forced_shrink`) ----
+
+fn with(m: &str, f: impl Fn(&mut serde_json::Value)) -> BoardModel {
+    let mut j: serde_json::Value = serde_json::from_str(m).unwrap();
+    f(&mut j);
+    BoardModel::from_json(&j.to_string()).expect("fixture parses")
+}
+
+fn opts_shrink(base: &Options, on: bool) -> Options {
+    let mut val = serde_json::to_value(base).unwrap();
+    val["forced_shrink"] = serde_json::json!(on);
+    serde_json::from_value(val).unwrap()
+}
+
+/// Track widths (nm) and lengths (nm) of the routed copper.
+fn tracks(r: &RouteResult) -> Vec<(i64, f64)> {
+    r.items
+        .iter()
+        .filter_map(|it| match it {
+            topor_engine::model::Item::Track(t) => {
+                let (a, b) = (t.prim.start(), t.prim.end());
+                Some((t.width, ((a.x as f64 - b.x as f64).powi(2) + (a.y as f64 - b.y as f64).powi(2)).sqrt()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Track chains of the routed copper per net and layer between stops (pad centres, vias, ends,
+/// T / branch nodes), each walked end to end: `(net, layer, widths in path order, lengths)`. The
+/// user rule "never widen again after a neck" (lead 2026-11-27: at most one necked stretch per
+/// run, touching a run end, or the whole run) is checked on these (tools/vfy_neck_regrow.py's
+/// walk, in Rust).
+fn chains(m: &BoardModel, r: &RouteResult) -> Vec<(i32, u32, Vec<i64>, Vec<f64>)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    type P = (i64, i64);
+    let mut segs: Vec<(i32, u32, P, P, i64, f64)> = Vec::new();
+    let mut stops: BTreeSet<P> = m.pads.iter().map(|p| (p.center.x, -p.center.y)).collect();
+    for it in &r.items {
+        match it {
+            topor_engine::model::Item::Track(t) => {
+                let (a, b) = (t.prim.start(), t.prim.end());
+                let (a, b) = ((i64::from(a.x), i64::from(a.y)), (i64::from(b.x), i64::from(b.y)));
+                segs.push((t.net, t.layer, a, b, t.width, (((a.0 - b.0) as f64).powi(2) + ((a.1 - b.1) as f64).powi(2)).sqrt()));
+            }
+            topor_engine::model::Item::Via(v) => {
+                stops.insert((v.at.x, v.at.y));
+            }
+        }
+    }
+    let mut adj: BTreeMap<(i32, u32, P), Vec<usize>> = BTreeMap::new();
+    for (i, s) in segs.iter().enumerate() {
+        adj.entry((s.0, s.1, s.2)).or_default().push(i);
+        adj.entry((s.0, s.1, s.3)).or_default().push(i);
+    }
+    let mut seen = vec![false; segs.len()];
+    let mut out = Vec::new();
+    for (&(net, layer, start), inc) in &adj {
+        if inc.len() == 2 && !stops.contains(&start) {
+            continue;
+        }
+        for &e0 in inc {
+            if seen[e0] {
+                continue;
+            }
+            let (mut node, mut e) = (start, e0);
+            let (mut ws, mut ls) = (Vec::new(), Vec::new());
+            loop {
+                seen[e] = true;
+                let s = segs[e];
+                ws.push(s.4);
+                ls.push(s.5);
+                let nxt = if s.2 == node { s.3 } else { s.2 };
+                let at = &adj[&(net, layer, nxt)];
+                if at.len() != 2 || stops.contains(&nxt) {
+                    break;
+                }
+                let e2 = if at[0] == e { at[1] } else { at[0] };
+                if seen[e2] {
+                    break;
+                }
+                (node, e) = (nxt, e2);
+            }
+            out.push((net, layer, ws, ls));
+        }
+    }
+    out
+}
+
+/// The chains that widen again after a neck: a narrower piece with a wider piece on both sides
+/// (a valley), and those narrower at both ends than in their middle; `(net, layer, widths)`.
+fn valleys(m: &BoardModel, r: &RouteResult) -> Vec<(i32, u32, Vec<i64>)> {
+    chains(m, r)
+        .into_iter()
+        .filter(|(_, _, ws, _)| {
+            let mx = |v: &[i64]| v.iter().copied().max().unwrap_or(0);
+            let valley = (1..ws.len().saturating_sub(1)).any(|i| ws[i] < mx(&ws[..i]) && ws[i] < mx(&ws[i + 1..]));
+            let both = ws.len() > 1 && ws[0] < mx(ws) && ws[ws.len() - 1] < mx(ws);
+            valley || both
+        })
+        .map(|(n, l, ws, _)| (n, l, ws))
+        .collect()
+}
+
+/// A1 pattern `wide_bottleneck_neck` on fx_narrow_gap: the 0.25 mm track's only way is a gap
+/// that fits it only at 0.1 mm (the net's floor: min track width 0.1 mm). Main (forced_shrink
+/// off) draws it forced at full width, 2 clearance violations of 75 um. On (r2, lead 2026-11-27,
+/// user "never widen again after a neck"): the forced run is necked from the gap to the nearer
+/// run end, one stretch (r1 necked the gap only and widened again on both sides: the verifier's
+/// valley), no violation, one neck warning; the other pad end keeps 0.25 mm and both ends stay
+/// at their pad centres.
+#[test]
+fn a_forced_run_shrinks_from_the_gap_to_the_nearer_end_instead_of_violating() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
+    let off = route(&m, &opts_shrink(&opts(), false));
+    assert_eq!(off.violations.len(), 2, "main: the forced run at full width: {:?}", off.violations);
+    assert!(tracks(&off).iter().all(|t| t.0 == 250_000));
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!((on.routed, on.violations.len()), (1, 0), "{:?}", on.violations);
+    assert_eq!((off.erbs.as_ref().unwrap().forced_shrunk, on.erbs.as_ref().unwrap().forced_shrunk), (0, 1), "one forced run shrunk");
+    let necks: Vec<&String> = on.warnings.iter().filter(|w| w.contains("necked from 0.250 mm to 0.100 mm")).collect();
+    assert_eq!(necks.len(), 1, "one shrinkage warning: {:?}", on.warnings);
+    let ts = tracks(&on);
+    assert!(ts.iter().all(|t| t.0 >= 100_000 && t.0 <= 250_000), "{ts:?}");
+    let thin: f64 = ts.iter().filter(|t| t.0 < 250_000).map(|t| t.1).sum();
+    let all: f64 = ts.iter().map(|t| t.1).sum();
+    // The gap's walls span x 14.5 .. 15.5, the pads sit at x 3 and 27: from the gap's far side to
+    // the nearer pad is over 11 mm, the other side keeps its width.
+    assert!(thin > 11.0 * MM && thin < 0.75 * all, "necked {} of {} mm", thin / MM, all / MM);
+    assert!(valleys(&m, &on).is_empty(), "one necked stretch, touching an end: {:?}", chains(&m, &on));
+    let at = |x: f64| on.items.iter().filter_map(|it| match it {
+        topor_engine::model::Item::Track(t) => Some((t.prim.start(), t.prim.end(), t.width)),
+        _ => None,
+    }).filter(|(a, b, _)| [a, b].iter().any(|p| (p.x as f64 - x * MM).abs() < 1e3 && (p.y as f64 - 10.0 * MM).abs() < 1e3)).map(|x| x.2).collect::<Vec<_>>();
+    let (a, b) = (at(3.0), at(27.0));
+    assert!(a.len() == 1 && b.len() == 1, "a track ends at each pad centre: {a:?} {b:?}");
+    assert!((a[0] < 250_000) != (b[0] < 250_000), "necked at one pad end, full width at the other: {a:?} {b:?}");
+}
+
+/// The floor is the nominal width (min track width 0.25 mm): nothing to shrink, the copper is
+/// main's whether forced_shrink is on or off.
+#[test]
+fn no_floor_below_the_width_no_shrink() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(250_000));
+    let (off, on) = (route(&m, &opts_shrink(&opts(), false)), route(&m, &opts_shrink(&opts(), true)));
+    assert_eq!(off.items, on.items);
+    assert_eq!(off.violations.len(), on.violations.len());
+}
+
+/// A gap too narrow even for the floor (the fixture's 0.2 mm: 50 um short per side after necking): the
+/// shrink is graded, it is taken where it makes the violations shallower, never deeper.
+#[test]
+fn a_shrink_that_cannot_clear_still_shallows() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(200_000));
+    let (off, on) = (route(&m, &opts_shrink(&opts(), false)), route(&m, &opts_shrink(&opts(), true)));
+    let d = |r: &RouteResult| r.violations.iter().map(|v| v.depth_nm).max().unwrap_or(0);
+    assert!(!on.violations.is_empty() && d(&on) < d(&off), "off {:?} on {:?}", off.violations, on.violations);
+    assert!(tracks(&on).iter().all(|t| t.0 >= 200_000));
+}
+
+/// A1 pattern `neck_not_at_pad`: as above with the gap 0.6 mm from pad A1's edge (walls at x
+/// 4.1 .. 5.1, the pad's edge at 3.5). The neck may reach back to the pad (neck from pad), but no
+/// width step lies inside the pad (KiCad's Cleanup would delete the narrow piece as a track in the
+/// pad), and the track still ends at the pad's centre.
+#[test]
+fn a_shrink_next_to_a_pad_has_no_width_step_in_the_pad() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| {
+        j["rules"]["min_track_width"] = serde_json::json!(100_000);
+        for p in j["pads"].as_array_mut().unwrap() {
+            if p["ref"].as_str().unwrap().starts_with('W') {
+                p["center"][0] = serde_json::json!(4_600_000);
+            }
+        }
+    });
+    assert!(!route(&m, &opts_shrink(&opts(), false)).violations.is_empty(), "main: forced at full width");
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!((on.routed, on.violations.len()), (1, 0), "{:?}", on.violations);
+    let segs: Vec<(f64, f64, i64)> = on.items.iter().filter_map(|it| match it {
+        topor_engine::model::Item::Track(t) => Some((t.prim.start().x as f64 / MM, t.prim.end().x as f64 / MM, t.width)),
+        _ => None,
+    }).collect();
+    assert!(segs.iter().any(|s| s.2 < 250_000), "necked: {segs:?}");
+    assert!(segs.iter().any(|s| (s.0 - 3.0).abs() < 1e-3 || (s.1 - 3.0).abs() < 1e-3), "ends at the pad centre: {segs:?}");
+    // A width step = the joint of two tracks of different width; none inside the pad (x < 3.5).
+    for a in &segs {
+        for b in &segs {
+            if a.2 != b.2 && (a.1 - b.0).abs() < 1e-6 {
+                assert!(a.1 > 3.5, "width step inside pad A1 at x {}: {segs:?}", a.1);
+            }
+        }
+    }
+}
+
+/// A1 in the joint commit (erbs/gap_squeeze, smooth): two bands kept across a model gap. With the
+/// net's floor below the width (min track width 0.15 mm), forced_shrink realises one band necked
+/// over the gap against the other: the pair is resolved (`gap_shrunk`), the gap is no violation
+/// any more, the neck is warned, and nothing is narrower than the floor.
+#[test]
+fn a_gap_kept_band_is_necked_against_its_partner() {
+    let path = format!("{}/tests/fixtures/erbs/model-gap_squeeze.json", env!("CARGO_MANIFEST_DIR"));
+    let m = with(&std::fs::read_to_string(&path).unwrap(), |j| j["rules"]["min_track_width"] = serde_json::json!(150_000));
+    let mut val = serde_json::to_value(Options::default()).unwrap();
+    val["runs"] = serde_json::json!(1);
+    val["topo_rounds"] = serde_json::json!(1);
+    val["draw_style"] = serde_json::json!("smooth");
+    let o: Options = serde_json::from_value(val).unwrap();
+    let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+    let gap = |r: &RouteResult| r.violations.iter().filter(|v| v.prov.as_ref().is_some_and(|p| p.mech == "gap_kept")).count();
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(eo.gap_kept > 0 && gap(&off) > 0 && eo.gap_shrunk == 0, "{eo:?}");
+    assert!(en.gap_shrunk > 0 && en.gap_kept + en.gap_shrunk == eo.gap_kept, "{en:?}");
+    assert!(gap(&on) < gap(&off), "off {} on {}", gap(&off), gap(&on));
+    assert!(on.violations.len() < off.violations.len(), "off {:?}\non {:?}", off.violations, on.violations);
+    assert!(on.warnings.iter().any(|w| w.contains("necked from 0.250 mm")), "{:?}", on.warnings);
+    assert!(tracks(&on).iter().all(|t| t.0 >= 150_000), "{:?}", tracks(&on));
+    assert_eq!(on.routed, off.routed);
+}
+
+/// r3 (vfy-draw-absorb r2 finding 2, mutant `shrink_not_strict`): a forced run whose violation no
+/// width changes. Both pads and the whole way between them lie inside a track keepout on both
+/// layers (no wall): the run's only violation is the keepout, gap 0 at any width (the checker's
+/// containment test), so its severity key is the same at every width in `[floor, nominal]`. A1
+/// takes a neck only where the key gets strictly better: none here, the copper and the
+/// violations are main's, no neck warning, and no forced run counts as shrunk
+/// (`route.erbs.forced_shrunk`). Non-strict (mutant `shrink_not_strict`), the bisection ends
+/// ~37 nm under nominal (`(w - floor) / 4096`), the trim drops the zone (no violation fewer
+/// without it), and the run was taken as shrunk for nothing: counted, its wire marked as A1's for
+/// the supply-width warning, its collinear pieces merged.
+#[test]
+fn a_forced_run_no_width_helps_is_not_necked() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| {
+        j["rules"]["min_track_width"] = serde_json::json!(100_000);
+        j["pads"].as_array_mut().unwrap().retain(|p| !p["ref"].as_str().unwrap().starts_with('W'));
+        let r = |x: i64, y: i64| serde_json::json!([x, y]);
+        j["keepouts"] = serde_json::json!([{"name": "no tracks", "layers": [0, 2], "poly": [r(1_000_000, 6_000_000), r(29_000_000, 6_000_000), r(29_000_000, 14_000_000), r(1_000_000, 14_000_000)], "no_tracks": true, "no_vias": true}]);
+    });
+    let (off, on) = (route(&m, &opts_shrink(&opts(), false)), route(&m, &opts_shrink(&opts(), true)));
+    assert!(!off.violations.is_empty() && off.violations.iter().all(|v| v.depth_nm <= 1), "main: forced inside the keepout, gap 0: {:?}", off.violations);
+    assert_eq!(off.items, on.items, "no width helps: main's copper");
+    assert_eq!(off.violations.len(), on.violations.len());
+    assert!(!on.warnings.iter().any(|w| w.contains("necked from")), "no neck warning: {:?}", on.warnings);
+    assert!(tracks(&on).iter().all(|t| t.0 == 250_000));
+    assert_eq!(on.erbs.as_ref().unwrap().forced_shrunk, 0, "nothing shrunk: {:?}", on.erbs);
+}
+
+/// r3 (vfy-draw-absorb r2 finding 1, merge with neck-regrow): erbs/qfn_fan (smooth, one cycle,
+/// min track width 0.1 mm) keeps one band pair across a model gap. The yielding band (net 3, x 8 ..
+/// 31 mm) gets two spots; the deepest one lies in mid-band, its circle (r 4.03 mm round x 12.0)
+/// misses the band's start at x 8.0. A1 puts the spots in the mid slots (`exact::MID_ZONE`..),
+/// which narrow every piece inside their circle; in the end slots 0/1 (the r2 code on main's
+/// neck-regrow `neck_items`) slot 0 narrows only the stretch from the wire's own end, so the
+/// deepest hit kept its width and the pair stayed a violation (2 violations, gap_kept 1).
+#[test]
+fn a_mid_band_gap_spot_is_necked_where_it_hits() {
+    let m = with(&std::fs::read_to_string(format!("{}/tests/fixtures/erbs/model-qfn_fan.json", env!("CARGO_MANIFEST_DIR"))).unwrap(), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
+    let o = one_cycle("smooth");
+    let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(eo.gap_kept >= 1 && !off.violations.is_empty() && eo.gap_shrunk == 0, "main keeps the gap: {eo:?}");
+    assert!(en.gap_shrunk >= 1 && en.gap_kept + en.gap_shrunk == eo.gap_kept, "{en:?}");
+    assert!(on.violations.is_empty(), "{:?}", on.violations);
+    assert!(valleys(&m, &on).is_empty(), "{:?}", chains(&m, &on));
+    assert!(tracks(&on).iter().all(|t| t.0 >= 100_000));
+    assert_eq!(on.routed, off.routed);
+}
+
+/// fx_narrow_gap with one wall per `(x mm, gap centre y mm)` (1 mm thick, a 0.5 mm gap, on both
+/// layers): the 0.25 mm track from A1 (3, 10) to B1 (27, 10) has to pass every gap. The pad
+/// order and the layer order inside a wall are the fixture's (the plan necks the run itself, so
+/// nothing is forced, with another order). `b1_back`: B1 on B.Cu at x 27, so the run ends in a via.
+fn multi_gap(min_w: i64, gaps: &[(f64, f64)], b1_back: bool) -> BoardModel {
+    with(include_str!("fixtures/fx-narrow-gap.json"), |j| {
+        j["rules"]["min_track_width"] = serde_json::json!(min_w);
+        let pads = j["pads"].as_array_mut().unwrap();
+        let mut sig: Vec<serde_json::Value> = pads.iter().filter(|p| p["net"] == 1).cloned().collect();
+        if b1_back {
+            sig[1]["layers"] = serde_json::json!([2]);
+            sig[1]["shapes"] = serde_json::json!({"2": {"kind": "rect", "w": 1_000_000, "h": 1_000_000}});
+        }
+        let wall = pads.iter().find(|p| p["ref"] == "WNF").cloned().unwrap();
+        pads.clear();
+        let mut k = 0;
+        for &(x, gy) in gaps {
+            for (y0, y1) in [(0.0, gy - 0.25), (gy + 0.25, 20.0)] {
+                for layer in [2, 0] {
+                    let mut p = wall.clone();
+                    p["ref"] = serde_json::json!(format!("W{k}"));
+                    p["uuid"] = serde_json::json!(format!("{k:08x}-7c3f-41b0-91fb-a89f87e7d2a5"));
+                    p["center"] = serde_json::json!([(x * MM) as i64, ((y0 + y1) / 2.0 * MM) as i64]);
+                    p["layers"] = serde_json::json!([layer]);
+                    p["shapes"] = serde_json::json!({ layer.to_string(): {"kind": "rect", "w": 1_000_000, "h": ((y1 - y0) * MM) as i64} });
+                    pads.push(p);
+                    k += 1;
+                }
+            }
+        }
+        pads.extend(sig);
+    })
+}
+
+/// vfy-draw-absorb r3 survivor `mid_zone_3` (`exact::MID_ZONE` 2 -> 3, which leaves A1 three mid
+/// slots): a forced run with FOUR hit tracks (one per gap of four, alternating y 7 / 13 mm, so
+/// each gap is passed by its own short track; main: 8 violations) gets one neck zone per hit in
+/// the four mid slots. With three slots `hit_zones` merges all four into one centroid circle: the
+/// same widths and no violation, but the neck starts 0.8 um further on (the one full-width stub
+/// before it is 1.85 um long, with the merged zone 1.07 um) and every later vertex moves with it,
+/// so the test pins the stub and the first necked track to 0.3 um. Qmtech has A1 runs with 4-6
+/// spots (r2 ABSORBDBG: 24 of 117).
+#[test]
+fn a_forced_run_with_four_hit_spots_uses_all_four_mid_slots() {
+    let m = multi_gap(100_000, &[(9.0, 7.0), (14.0, 13.0), (19.0, 7.0), (24.0, 13.0)], false);
+    let off = route(&m, &opts_shrink(&opts(), false));
+    assert!(off.violations.len() >= 8, "main: two violations per gap: {}", off.violations.len());
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!((on.routed, on.violations.len(), on.erbs.as_ref().unwrap().forced_shrunk), (1, 0, 1), "{:?}", on.violations);
+    assert!(valleys(&m, &on).is_empty(), "{:?}", chains(&m, &on));
+    let ts = tracks(&on);
+    let w: Vec<i64> = ts.iter().map(|t| t.0).collect();
+    assert_eq!(&w[..5], &[250_000, 250_000, 250_000, 250_000, 100_000], "{w:?}");
+    assert!(w[4..].iter().all(|&x| x == 100_000), "one necked stretch to the far end: {w:?}");
+    assert!((ts[3].1 - 1_850.0).abs() < 300.0, "the full-width stub before the neck: {} nm", ts[3].1);
+    assert!((ts[4].1 - 1_417_418.0).abs() < 300.0, "the first necked track: {} nm", ts[4].1);
+}
+
+/// vfy-draw-absorb r3 survivor `mono_off` (`a1_finish` without `one_neck_stretch`; arm
+/// `TOPO_FD45_OFF=dab_mono`): pins A1's own one-stretch step. One gap at x 15 mm and B1 on the
+/// other layer (the run A1 -> via -> B1): the hit zone's neck is a stretch in mid-run; A1 reaches
+/// it on to the run's end (the via), 18.00 mm at 0.1 mm and the B.Cu run at 0.25 mm. Without the
+/// step the run keeps 5.29 mm at full width before the via (neck, full width, via: widens again
+/// after the neck; the supply-net case on qmtech, ADV_AVDD T -> via, 0.19 mm at 0.28 mm).
+/// DECISION PENDING (user): keep this step, gate it like `monotone_necks` with `neck_from_pad`,
+/// or drop it (docs/dev/design/draw-absorb.md); this test pins today's behaviour.
+#[test]
+fn a1_necks_a_run_to_its_via_in_one_stretch() {
+    let m = multi_gap(100_000, &[(15.0, 10.0)], true);
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!((on.violations.len(), on.erbs.as_ref().unwrap().forced_shrunk), (0, 1), "{:?}", on.violations);
+    let ts = tracks(&on);
+    assert_eq!(ts.iter().map(|t| t.0).collect::<Vec<_>>(), [100_000, 250_000], "one necked stretch, then the other layer's run at full width: {ts:?}");
+    assert!((ts[0].1 / MM - 18.0).abs() < 0.01 && (ts[1].1 / MM - 6.0).abs() < 0.01, "{ts:?}");
+}
+
+/// The neck takes the widest width that clears, not the floor: with a floor of 0.05 mm the gap
+/// (0.5 mm between the walls, 0.2 mm clearance each side) is cleared at about 0.1 mm.
+#[test]
+fn a_forced_shrink_takes_the_widest_width_that_clears() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(50_000));
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!(on.violations.len(), 0, "{:?}", on.violations);
+    let thin = tracks(&on).iter().map(|t| t.0).min().unwrap();
+    assert!(thin > 90_000 && thin <= 100_000, "neck width {thin}");
+}
+
+// ---- draw-absorb A1b (`[drawing] reserved_keep_neck`) and A3 (`[drawing] band_passes`) ----
+
+fn opts_with(base: &Options, kv: &[(&str, serde_json::Value)]) -> Options {
+    let mut val = serde_json::to_value(base).unwrap();
+    for (k, v) in kv {
+        val[*k] = v.clone();
+    }
+    serde_json::from_value(val).unwrap()
+}
+
+fn one_cycle(style: &str) -> Options {
+    opts_with(&Options::default(), &[("runs", serde_json::json!(1)), ("topo_rounds", serde_json::json!(1)), ("draw_style", serde_json::json!(style))])
+}
+
+fn fixture(dir: &str, p: &str) -> BoardModel {
+    let path = format!("{}/tests/fixtures/{dir}/model-{p}.json", env!("CARGO_MANIFEST_DIR"));
+    BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+/// A1b on the Q3 crop (ADV7511 row, default options, one cycle): main re-anchors a reserved band
+/// the plan had necked (wire 36) at its pad's tip at full width, dropping 1.1 mm of neck (the
+/// meter's `tip` entry). The lead's rule (2026-11-27, user-approved Q3 pad-axis entry at full
+/// width): reserved_keep_neck leaves the re-anchor alone, so the tip copper is main's and the drop
+/// is still metered.
+#[test]
+fn a_reanchored_band_enters_at_full_width_with_keep_neck() {
+    let m = fixture("dvn", "dvn_crop_q3");
+    let o = one_cycle("octilinear");
+    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
+    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    let tip = |e: &topor_engine::route::ErbsRunReport| e.unnecked_list.iter().filter(|u| u.at == "tip").cloned().collect::<Vec<_>>();
+    assert!(tip(eo).iter().any(|u| u.mm > 0.5), "main drops a reserved neck at the tip: {:?}", eo.unnecked_list);
+    assert_eq!(tip(eo), tip(en), "the re-anchor is main's with the key on");
+    assert_eq!(eo.unnecked, eo.unnecked_list.len());
+    assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
+    assert_eq!(on.routed, off.routed);
+}
+
+#[test]
+fn keep_neck_without_a_dropped_neck_is_main() {
+    let m = fixture("dvn", "dvn_crop_q2");
+    let o = one_cycle("octilinear");
+    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
+    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
+    assert!(off.erbs.as_ref().unwrap().unnecked_list.is_empty());
+    assert_eq!(off.items, on.items);
+}
+
+/// A3 on erbs/qfn_fan (smooth, one cycle): the ERBS check finds one model gap between two fan-out
+/// bands; main keeps both across the gap (a clearance violation). One band pass realises the
+/// later band again with its partner as a sided wall: the gap is gone before any copper (no gap
+/// kept, no violation), the band only a little longer (no detour), all routed.
+#[test]
+fn a_band_pass_pushes_a_model_gap_apart() {
+    let m = fixture("erbs", "qfn_fan");
+    let o = one_cycle("smooth");
+    let off = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
+    let on = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(1))]));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(eo.gap_kept >= 1 && !off.violations.is_empty() && eo.band_passes == 0, "{eo:?}");
+    assert!(en.band_pass_moved >= 1 && en.band_pass_gaps_after < en.band_pass_gaps_before, "{en:?}");
+    assert_eq!((en.gap_kept, on.violations.len(), on.routed), (0, 0, off.routed), "{:?}", on.violations);
+    let len = |r: &RouteResult| tracks(r).iter().map(|t| t.1).sum::<f64>();
+    assert!(len(&on) < 1.01 * len(&off), "length {} -> {}", len(&off) / MM, len(&on) / MM);
+}
+
+/// A3 keeps the topology: on erbs/serpentine_bundle (smooth) a wall-pushed realise of the
+/// serpentine found a path 60 mm shorter through the pads (another class); the pass refuses a
+/// band shorter than its first realise (the walls only add obstacles) or one through a new
+/// feature, so the drawing is no worse than main's.
+#[test]
+fn a_band_pass_never_changes_the_class() {
+    let m = fixture("erbs", "serpentine_bundle");
+    let o = one_cycle("smooth");
+    let off = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
+    let on = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(3))]));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert_eq!(en.rejected_static, eo.rejected_static, "{en:?}");
+    assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
+    assert_eq!(on.routed, off.routed);
+}
+
+/// A3 off (0 passes) on a fixture with model gaps is main's copper.
+#[test]
+fn no_band_pass_is_main() {
+    let m = fixture("erbs", "river_wrap");
+    let o = one_cycle("smooth");
+    let a = route(&m, &o);
+    let b = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
+    assert_eq!(a.items, b.items);
+    assert_eq!(a.erbs.as_ref().unwrap().band_pass_gaps_before, 0);
+}
+
+/// A1 in the joint commit, octilinear (dvn_crop_q2, one cycle): the model-gap pair of
+/// Net-(U9-~{RST}) is resolved by necking its band (`gap_shrunk`). The octilinear form is drawn
+/// at the neck's zones and width (`a1z`), and the pad-tip re-anchor leaves the band alone
+/// (`tip_anchor_reserved` skips a band with its own zones): the drawn copper keeps the neck
+/// (about 0.103 mm over several mm), and nothing gets worse.
+#[test]
+fn a_gap_neck_survives_the_octilinear_form_and_the_reanchor() {
+    let m = fixture("dvn", "dvn_crop_q2");
+    let o = one_cycle("octilinear");
+    let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(eo.gap_kept == 1 && eo.gap_shrunk == 0, "{eo:?}");
+    assert!(en.gap_kept == 0 && en.gap_shrunk == 1, "{en:?}");
+    assert!(on.warnings.iter().any(|w| w.starts_with("Net-(U9-~{RST})") && w.contains("necked from 0.250 mm")), "{:?}", on.warnings);
+    let thin = |r: &RouteResult| tracks(r).iter().filter(|t| t.0 > 95_000 && t.0 < 200_000).map(|t| t.1).sum::<f64>();
+    assert_eq!(thin(&off), 0.0);
+    assert!(thin(&on) > 2.0e6, "necked copper drawn {} nm", thin(&on));
+    assert!(on.violations.len() <= off.violations.len(), "off {:?}\non {:?}", off.violations, on.violations);
+    assert_eq!(on.routed, off.routed);
+}
+
+
+/// A1b octilinear half on a public qmtech crop (window 97.5..105 x 49.5..57 mm, the 0.4 mm net
+/// of wires 6 / 812 on the full board; harness.abstract_crop, one cycle, octilinear): main draws
+/// two reserved-necked bands' octilinear forms wider than reserved (`octi_wider`, 0.67 + 0.74 mm).
+/// With reserved_keep_neck both keep the reserved neck (`kept_neck` 2, no `octi_wider`): more
+/// copper between the floor and the nominal width, no violation added, nothing unrouted.
+#[test]
+fn an_octilinear_form_keeps_the_reserved_neck() {
+    let m = fixture("dvn", "a1b_octi_crop");
+    let o = one_cycle("octilinear");
+    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
+    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert_eq!(eo.unnecked_list.iter().filter(|u| u.at == "octi_wider").count(), 2, "{:?}", eo.unnecked_list);
+    assert_eq!(eo.kept_neck, 0);
+    assert!(en.unnecked_list.is_empty() && en.kept_neck == 2, "{:?} kept {}", en.unnecked_list, en.kept_neck);
+    let mid = |r: &RouteResult| tracks(r).iter().filter(|t| t.0 > 150_000 && t.0 < 330_000).map(|t| t.1).sum::<f64>();
+    assert!(mid(&on) > mid(&off) + 0.3 * MM, "necked {} -> {}", mid(&off) / MM, mid(&on) / MM);
+    assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
+    assert_eq!(on.routed, off.routed);
+}
+
+// ---- draw-absorb A1 r2: the invariants over every A1 path ----
+
+/// The A1 fixtures, each with its options: forced runs (fx_narrow_gap at four floors, the gap
+/// next to a pad), joint-commit necks (gap_squeeze smooth; dvn_crop_q2 octilinear: the adopted
+/// band's octilinear form at its neck, `a1z`), and the A1b crop with A1 on too.
+fn a1_cases() -> Vec<(&'static str, BoardModel, Options)> {
+    let gap = |w: i64| with(include_str!("fixtures/fx-narrow-gap.json"), move |j| j["rules"]["min_track_width"] = serde_json::json!(w));
+    let at_pad = with(include_str!("fixtures/fx-narrow-gap.json"), |j| {
+        j["rules"]["min_track_width"] = serde_json::json!(100_000);
+        for p in j["pads"].as_array_mut().unwrap() {
+            if p["ref"].as_str().unwrap().starts_with('W') {
+                p["center"][0] = serde_json::json!(4_600_000);
+            }
+        }
+    });
+    let squeeze = {
+        let path = format!("{}/tests/fixtures/erbs/model-gap_squeeze.json", env!("CARGO_MANIFEST_DIR"));
+        with(&std::fs::read_to_string(&path).unwrap(), |j| j["rules"]["min_track_width"] = serde_json::json!(150_000))
+    };
+    vec![
+        ("gap 0.1", gap(100_000), opts()),
+        ("gap 0.05", gap(50_000), opts()),
+        ("gap 0.2", gap(200_000), opts()),
+        ("gap at pad", at_pad, opts()),
+        ("gap_squeeze", squeeze, one_cycle("smooth")),
+        ("dvn_crop_q2", fixture("dvn", "dvn_crop_q2"), one_cycle("octilinear")),
+        ("a1b_octi_crop", fixture("dvn", "a1b_octi_crop"), one_cycle("octilinear")),
+    ]
+}
+
+/// verifier F1 (user "never widen again after a neck"): on every A1 fixture the copper with
+/// forced_shrink on has no chain that widens again after a neck that main's copper does not
+/// have too (main's own plan-neck shapes are branch neck-regrow's), and A1 necked something on
+/// the cases built for it.
+#[test]
+fn a1_never_widens_again_after_a_neck() {
+    for (name, m, o) in a1_cases() {
+        let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+        let vo = valleys(&m, &off);
+        let new: Vec<_> = valleys(&m, &on).into_iter().filter(|v| !vo.contains(v)).collect();
+        assert!(new.is_empty(), "{name}: A1 widens again after a neck: {new:?}");
+        if name.starts_with("gap") || name == "dvn_crop_q2" {
+            let thin = |r: &RouteResult| tracks(r).iter().filter(|t| t.0 < 250_000).count();
+            assert!(thin(&on) > thin(&off), "{name}: A1 necked nothing");
+        }
+    }
+}
+
+/// verifier F2 (qmtech det s0: A1 track ends off their pad centre 29 -> 34): on every A1 fixture
+/// the copper with forced_shrink on has no more track ends inside a pad off its centre than
+/// main's (tidy's own count, the one the report gives), and every pad end of an A1 neck is
+/// still a track end at the pad centre.
+#[test]
+fn a1_keeps_the_pad_centre_ends() {
+    for (name, m, o) in a1_cases() {
+        let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+        let n = |r: &RouteResult| topor_engine::topo::tidy::off_centre_pad_ends(&m, &r.items).0;
+        assert!(n(&on) <= n(&off), "{name}: ends off centre {} -> {}", n(&off), n(&on));
+    }
+}
+
+/// lead 2026-11-27 (POWER-NECK-MONOTONE): an A1 neck on a supply-width net (wider than the
+/// board's default width) is warned on its own, graded by the width share lost times its length;
+/// a net at the default width gets no such warning.
+#[test]
+fn an_a1_neck_on_a_supply_width_net_is_warned_graded() {
+    let supply = with(include_str!("fixtures/fx-narrow-gap.json"), |j| {
+        j["rules"]["min_track_width"] = serde_json::json!(100_000);
+        j["rules"]["default"]["width"] = serde_json::json!(200_000);
+        j["rules"]["per_net"] = serde_json::json!({"1": {"clearance": 200_000, "width": 250_000, "via_d": 600_000, "via_drill": 300_000, "netclass": "Power", "width_source": "netclass", "min_width": 0}});
+    });
+    let on = route(&supply, &opts_shrink(&opts(), true));
+    assert_eq!(on.violations.len(), 0, "{:?}", on.violations);
+    let w: Vec<&String> = on.warnings.iter().filter(|w| w.contains("supply-width net necked by draw-absorb A1")).collect();
+    assert_eq!(w.len(), 1, "{:?}", on.warnings);
+    assert!(w[0].starts_with("SIG (") && w[0].contains("0.250 mm (board default 0.200 mm) to 0.100 mm") && w[0].contains("40 % of its width left"), "{}", w[0]);
+    let len: f64 = tracks(&on).iter().filter(|t| t.0 < 250_000).map(|t| t.1).sum::<f64>() / MM;
+    let sev: f64 = w[0].rsplit("severity ").next().unwrap().split(' ').next().unwrap().parse().unwrap();
+    assert!((sev - 0.6 * len).abs() < 0.02, "severity {sev} = 0.6 x {len} mm");
+    assert!(route(&supply, &opts_shrink(&opts(), false)).warnings.iter().all(|w| !w.contains("supply-width net necked")));
+    let dflt = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
+    assert!(route(&dflt, &opts_shrink(&opts(), true)).warnings.iter().all(|w| !w.contains("supply-width net necked")), "a default-width net is no supply net");
+    // Only A1's necks: the plan's own necks of wide nets (main, A1 off) keep their NECKED lines only.
+    for (name, m, o) in a1_cases() {
+        assert!(route(&m, &opts_shrink(&o, false)).warnings.iter().all(|w| !w.contains("supply-width net necked")), "{name}: off warns an A1 neck");
+    }
+}
+
+/// A3's partner swap (design note §4 A1: the band that yields by key first, then the other) on
+/// dvn_crop_q2 (smooth, one cycle, 3 passes): a first yielder whose wall-pushed realise is not
+/// kept lets its partner yield in the next pass: 3 stretches move, 21 -> 19 violations. Without
+/// the swap only 2 move and the violations stay at 21 (verifier r1 mutant a3_no_swap).
+#[test]
+fn a_band_pass_lets_the_partner_yield_when_the_first_yielder_is_put_back() {
+    let m = fixture("dvn", "dvn_crop_q2");
+    let o = one_cycle("smooth");
+    let off = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
+    let on = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(3))]));
+    let en = on.erbs.as_ref().unwrap();
+    assert!(en.band_pass_moved >= 3, "{en:?}");
+    assert!(on.violations.len() < off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
+    assert_eq!(on.routed, off.routed);
+}
+
+/// Tracks (start to end) off the 45 degree directions (more than 0.01 degrees), over 50 um long.
+fn any_angle(r: &RouteResult) -> usize {
+    r.items
+        .iter()
+        .filter_map(|it| match it {
+            topor_engine::model::Item::Track(t) => {
+                let (a, b) = (t.prim.start(), t.prim.end());
+                Some(((b.x - a.x) as f64, (b.y - a.y) as f64))
+            }
+            _ => None,
+        })
+        .filter(|&(dx, dy)| dx.hypot(dy) > 50_000.0 && {
+            let deg = dy.atan2(dx).to_degrees().rem_euclid(45.0);
+            deg.min(45.0 - deg) > 0.01
+        })
+        .count()
+}
+
+/// A1 r2 (qm JS1_4 RCA) on a1b_octi_crop (octilinear, one cycle): the joint commit necks
+/// Net 7's band against a gap partner; its necked octilinear form breaks a rule, so the band
+/// takes main's realise of the same form (necked at the pad end only) instead of losing the form
+/// (r1: the band fell back to its any-angle ERBS, necked 0.140 mm over 0.9 mm). Any-angle
+/// tracks: main 13, r2 14, r1's reject (`TOPO_FD45_OFF=dab_ofb`) 17; nothing worse.
+#[test]
+fn a_necked_band_that_breaks_a_rule_keeps_its_octilinear_form() {
+    let (_, m, o) = a1_cases().into_iter().find(|c| c.0 == "a1b_octi_crop").unwrap();
+    let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(en.gap_shrunk >= 1, "{en:?}");
+    assert!(en.octi_form >= eo.octi_form, "octi forms off {} on {}", eo.octi_form, en.octi_form);
+    assert!(any_angle(&on) <= any_angle(&off) + 1, "any-angle off {} on {}", any_angle(&off), any_angle(&on));
+    assert!(on.violations.len() <= off.violations.len());
+    assert_eq!(on.routed, off.routed);
+}

@@ -1055,9 +1055,49 @@ pub fn merge_viols(vs: Vec<Viol>) -> Vec<Viol> {
     out
 }
 
+/// draw-absorb A0 (docs/dev/design/draw-absorb.md): where a drawn violation comes from, recorded
+/// when the violating copper is written. Measurement only: nothing in the drawing reads it (it is
+/// not part of [`Viol`]'s equality), so the copper is the same with or without it. The report
+/// ([`crate::route::ViolProv`]) adds the drawn compass class and the fault class F1-F7.
+#[derive(Clone, Debug, Default)]
+pub struct ViolSrc {
+    /// The writer: `forced_run` (a never-drop run, [`Drawer::draw_wire`]'s force branch),
+    /// `forced_via` (a via placed by [`Drawer::force_via`]), `gap_kept` (a band kept across a
+    /// model gap, drawn second: TW2 `erbs_gap_keep_max_mm`), `junction_join` (a branch joined to its
+    /// trunk by force, D5), `diff_pair` (D7 pair realisation); empty = not recorded.
+    pub mech: &'static str,
+    /// The forced run's candidate ([`ForcedCand`] source): `relaxed` (exact path with the clearance
+    /// relaxed), `funnel`, `erbs` (its band), `erbs_kept`, `attempt0`..`attempt5` (the ladder
+    /// attempt whose copper was forced); `via` for a forced via, `band` for a gap-kept band.
+    pub cand: &'static str,
+    /// The forced run's octilinear form: `ok` (a form won), `rejected`, `none`, `skip`.
+    pub form: &'static str,
+    /// The run's band status ([`super::joint::CutClass`] name: `static`, `predicted`, `gap`,
+    /// `no_band`, `junction`, `redrawn`; `kept` = a reserved band drawn second); empty without ERBS.
+    pub cut: &'static str,
+    /// Run index of the wire (a via: the via's index).
+    pub run: usize,
+    /// The run's last legal attempt failed on the via-side topology test.
+    pub wrong_side: bool,
+    /// The plan necks the wire (M-C plan neck).
+    pub plan_neck: bool,
+    /// The wire's nominal width, its floor (net class / board minimum, `State::w_min`) and the
+    /// narrowest drawn track of the violating run (nm; 0 for a via).
+    pub w_nm: f64,
+    pub w_min_nm: f64,
+    pub drawn_w_nm: f64,
+    /// The router wire whose copper it hits (`None`: a pad, kept copper, the board, a shape).
+    pub hit_wire: Option<WireId>,
+    /// That copper was a band the joint commit reserved (its wire not drawn yet).
+    pub hit_reserved: bool,
+    /// The hit wire's packed room (nm) on the side away from the violation, at its pass nearest to
+    /// it ([`Drawer::iv`]): how far it could give way inside its own sleeve; `None` unpacked.
+    pub hit_slack_nm: Option<f64>,
+}
+
 /// A rule the written copper of a wire breaks (M-B1 never drop), priced by the `violation`
-/// factor ([`super::factors::violation_amount`]).
-#[derive(Clone, Debug, PartialEq)]
+/// factor ([`super::factors::violation_amount`]). Equality leaves out `src` (a measurement).
+#[derive(Clone, Debug)]
 pub struct Viol {
     /// `clearance`, `short` (copper overlap), `hole_clearance`, `edge_clearance`,
     /// `connection_width` (a sliver against a pad or via of its own net).
@@ -1074,6 +1114,14 @@ pub struct Viol {
     pub against: String,
     /// The violating item is a via.
     pub via: bool,
+    /// draw-absorb A0: its provenance (measurement only).
+    pub src: ViolSrc,
+}
+
+impl PartialEq for Viol {
+    fn eq(&self, o: &Self) -> bool {
+        self.kind == o.kind && self.at == o.at && self.layer == o.layer && self.depth_nm == o.depth_nm && self.len_nm == o.len_nm && self.against == o.against && self.via == o.via
+    }
 }
 
 impl Viol {
@@ -2680,6 +2728,9 @@ impl<'a> Drawer<'a> {
                     ids.push(id);
                     out.push((k, p, sz));
                     self.pair_via_dbg(w, i, if self.via_site.contains_key(&(w, i)) { "forced (planned site not free)" } else { "forced (no planned site)" }, p, sz, vs.len());
+                    let mut vs = vs;
+                    let base = ViolSrc { mech: "forced_via", cand: "via", run: i, w_nm: self.st.wires[w].w, w_min_nm: self.st.w_min(net, self.st.wires[w].w), ..ViolSrc::default() };
+                    self.tag_viols(&mut vs, &base);
                     self.via_viol.entry(w).or_default().extend(vs);
                     self.stats.via_forced += 1;
                     continue;
@@ -2809,13 +2860,13 @@ impl<'a> Drawer<'a> {
                 let rep = self.checker.check_against(&self.idx, std::slice::from_ref(&item), &[]);
                 let mut vs = self.viols_of(std::slice::from_ref(&item), &rep);
                 if !self.via_hole_ok(p, sz, net) {
-                    vs.push(Viol { kind: "hole_clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.via_hole_clear().max(1) as f64, len_nm: sz.d as f64, against: "copper shape".into(), via: true });
+                    vs.push(Viol { kind: "hole_clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.via_hole_clear().max(1) as f64, len_nm: sz.d as f64, against: "copper shape".into(), via: true, src: ViolSrc::default() });
                 }
                 if !self.pair_via_ok(w, p, sz, net) {
-                    vs.push(Viol { kind: "clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.net_rule(net).clearance.max(1) as f64, len_nm: sz.d as f64, against: "diff pair partner copper".into(), via: true });
+                    vs.push(Viol { kind: "clearance", at: p, layer: u32::MAX, depth_nm: self.model.rules.net_rule(net).clearance.max(1) as f64, len_nm: sz.d as f64, against: "diff pair partner copper".into(), via: true, src: ViolSrc::default() });
                 }
                 if !self.via_own_pad_ok(p, sz, net) {
-                    vs.push(Viol { kind: "connection_width", at: p, layer: u32::MAX, depth_nm: self.model.rules.min_connection.max(1) as f64, len_nm: sz.d as f64, against: "own-net pad".into(), via: true });
+                    vs.push(Viol { kind: "connection_width", at: p, layer: u32::MAX, depth_nm: self.model.rules.min_connection.max(1) as f64, len_nm: sz.d as f64, against: "own-net pad".into(), via: true, src: ViolSrc::default() });
                 }
                 let side = if self.via_side_ok(w, k, p, plan.layers[i], plan.layers[i + 1]) { 0.0 } else { 1.0 };
                 let reach = match class {
@@ -3183,6 +3234,107 @@ impl<'a> Drawer<'a> {
     pub fn viols_of(&self, items: &[Item], rep: &CheckReport) -> Vec<Viol> {
         viols_with(self.model, self.opts, self.checker, &self.idx, items, rep)
     }
+
+    /// draw-absorb A0: give each of `vs` (about to be written) the provenance `base` and what its
+    /// copper hits: the router wire owning the indexed item it names (`item:N`, live now), whether
+    /// that is a band the joint commit reserved, and that wire's packed room away from the
+    /// violation ([`Drawer::slack_away_near`]). Measurement only. O(violations x handles).
+    pub(super) fn tag_viols(&self, vs: &mut [Viol], base: &ViolSrc) {
+        for v in vs.iter_mut() {
+            let mut s = base.clone();
+            if let Some((hw, reserved)) = against_item(&v.against).and_then(|id| self.wire_of_item(id)) {
+                s.hit_wire = Some(hw);
+                s.hit_reserved = reserved;
+                s.hit_slack_nm = self.slack_away_near(hw, v.at);
+            }
+            v.src = s;
+        }
+    }
+
+    /// The router wire of the live indexed item `id` and whether it is a reserved band (its wire
+    /// not drawn yet). The index reuses freed ids: the live handle holding `id` is the one.
+    /// O(handles).
+    fn wire_of_item(&self, id: usize) -> Option<(WireId, bool)> {
+        let h = (0..self.handles.len()).rev().find(|&h| self.handles[h].0 == id && self.ents.get(self.handles[h].1).is_some_and(|e| e.live))?;
+        let w = self.ent_wire.get(&self.handles[h].1).copied().or_else(|| self.joint.band_ids.get(&id).map(|x| x.0))?;
+        Some((w, self.joint.owner.contains_key(&h)))
+    }
+
+    /// draw-absorb A0: the packed room (nm) of wire `o` on the side away from `p`, at its pass
+    /// whose packed lane point (`iv.nom`) lies nearest to `p` (the room a re-taut of `o` inside its
+    /// sleeve could give, [`Drawer::pass_slack_away`] over all its passes); `None` when no pass of
+    /// `o` is packed. O(passes of `o`).
+    fn slack_away_near(&self, o: WireId, p: Vec2) -> Option<f64> {
+        let (st, pr) = (self.st, &self.b.proj);
+        let mut best: Option<(f64, f64)> = None;
+        for &pid in st.wires.get(o)?.passes.iter() {
+            let (Some(&lo), Some(&hi), Some(&nom)) = (self.iv.lo.get(pid), self.iv.hi.get(pid), self.iv.nom.get(pid)) else { continue };
+            if !(lo.is_finite() && hi.is_finite() && nom.is_finite()) {
+                continue;
+            }
+            let [a, b] = pr.edges[st.passes[pid].edge];
+            let (a, b) = (pr.pos[a], pr.pos[b]);
+            let len = (b - a).len();
+            if len < 1.0 {
+                continue;
+            }
+            let lane = a + (b - a) * nom;
+            let slack = if (p - lane).dot(b - a) > 0.0 { (nom - lo) * len } else { (hi - nom) * len };
+            let d = (p - lane).len();
+            if best.is_none_or(|x| d < x.0) {
+                best = Some((d, slack));
+            }
+        }
+        best.map(|x| x.1)
+    }
+
+    /// draw-absorb A0: the provenance of a run's violations of wire `w` (run `r`, band status
+    /// `cut`, the plan neck `pneck`) written by `mech` from candidate `cand` with octilinear
+    /// outcome `form`; `items` = the run's copper (its narrowest track).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_src(&self, w: WireId, mech: &'static str, cand: &'static str, form: &'static str, cut: &'static str, r: usize, wrong_side: bool, plan_neck: bool, items: &[Item]) -> ViolSrc {
+        let wi = &self.st.wires[w];
+        let drawn = items.iter().filter_map(|i| match i {
+            Item::Track(t) => Some(t.width as f64),
+            _ => None,
+        });
+        ViolSrc {
+            mech,
+            cand,
+            form,
+            cut,
+            run: r,
+            wrong_side,
+            plan_neck,
+            w_nm: wi.w,
+            w_min_nm: self.st.w_min(wi.net, wi.w),
+            drawn_w_nm: drawn.fold(f64::NAN, f64::min).max(0.0),
+            ..ViolSrc::default()
+        }
+    }
+}
+
+/// The index id an `against` label names (`item:N`, or `... (item:N)` as [`viols_measured`] names
+/// routed copper).
+pub fn against_item(against: &str) -> Option<usize> {
+    let t = &against[against.find("item:")? + 5..];
+    let n = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    t[..n].parse().ok()
+}
+
+/// draw-absorb A0: the label of forced candidate from ladder attempt `a` (-1 = the band, 6 = the
+/// kept ERBS, 0..5 the ladder).
+pub fn attempt_label(a: isize) -> &'static str {
+    match a {
+        ..0 => "erbs",
+        0 => "attempt0",
+        1 => "attempt1",
+        2 => "attempt2",
+        3 => "attempt3",
+        4 => "attempt4",
+        5 => "attempt5",
+        _ => "erbs_kept",
+    }
 }
 
 /// [`Drawer::viols_of`] for any checker and index of accepted copper (D7: the realised diff-pair
@@ -3226,6 +3378,7 @@ pub fn viols_measured(model: &BoardModel, _opts: &Options, checker: &Checker, id
                     len_nm: x.d as f64,
                     against: name(&v.against),
                     via: true,
+                    src: ViolSrc::default(),
                 }),
                 Item::Track(t) => {
                     let TrackPrim::Seg { a, b } = t.prim else { continue };
@@ -3246,7 +3399,7 @@ pub fn viols_measured(model: &BoardModel, _opts: &Options, checker: &Checker, id
                     };
                     if !probe {
                         let tw = t.width as f64;
-                        out.push(Viol { kind: kind(false), at: (a + b) * 0.5, layer: v.layer, depth_nm: depth, len_nm: tw.min(len.max(tw)), against: name(&v.against), via: false });
+                        out.push(Viol { kind: kind(false), at: (a + b) * 0.5, layer: v.layer, depth_nm: depth, len_nm: tw.min(len.max(tw)), against: name(&v.against), via: false, src: ViolSrc::default() });
                         continue;
                     }
                     let coarse = grid(0.0, 1.0, 500_000.0, 48);
@@ -3290,6 +3443,7 @@ pub fn viols_measured(model: &BoardModel, _opts: &Options, checker: &Checker, id
                         len_nm: blen,
                         against: name(&v.against),
                         via: false,
+                        src: ViolSrc::default(),
                     });
                 }
             }
@@ -3443,6 +3597,7 @@ impl<'a> Drawer<'a> {
                     len_nm: t.width as f64,
                     against: "own-net pad or via".into(),
                     via: false,
+                    src: ViolSrc::default(),
                 })
             })
             .collect();
@@ -4000,6 +4155,20 @@ impl<'a> Drawer<'a> {
                 } else {
                     self.run_items(w, layer, &pts)
                 };
+                // draw-absorb A1: the zones of an adopted band the joint commit necked against a
+                // gap partner (its warnings name them; its octilinear form keeps them).
+                // draw-absorb A1b (`[drawing] reserved_keep_neck`): an adopted band reserved with
+                // the plan's neck takes its octilinear form at that neck too (never wider).
+                let a1b = adopted.as_ref().is_some_and(|x| x.zones.is_none() && self.opts.reserved_keep_neck && x.pneck.is_some_and(|p| p.0 < wi.w) && pneck.is_some());
+                let a1z: Option<super::exact::Neck> = adopted.as_ref().and_then(|x| {
+                    x.zones.map(|ends| super::exact::Neck { min_w: x.pneck.map_or(0.0, |p| p.0), ends }).or(match (a1b, x.pneck, &pneck) {
+                        (true, Some((wn, _)), Some(n)) => Some(super::exact::Neck { min_w: wn, ends: n.ends }),
+                        _ => None,
+                    })
+                });
+                // A1b meter: the adopted band's necked length (an octilinear form at full width drops it).
+                let adopted_neck: f64 = adopted.as_ref().and_then(|x| x.pneck).map_or(0.0, |p| p.1.iter().sum());
+                let adopted_wn: Option<f64> = adopted.as_ref().and_then(|x| x.pneck).map(|p| p.0);
                 let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = if restored {
                     kept.as_ref().and_then(|k| k.4)
                 } else {
@@ -4065,7 +4234,7 @@ impl<'a> Drawer<'a> {
                     last_reason = "drawing: a track grazes a pad or via of its own net (KiCad minimum connection width)".to_string();
                     if self.force {
                         let vs = self.graze_viols(w, &items);
-                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }, None));
+                        cands.push((vs.iter().map(Viol::amount).sum(), pts.clone(), items.clone(), vs, neck, attempt_label(attempt), None));
                     }
                     continue;
                 }
@@ -4086,9 +4255,72 @@ impl<'a> Drawer<'a> {
                         let exits = [if ps { self.pad_exit(w, 0, pts[1]) } else { None }, if pe { self.pad_exit(w, 1, pts[pts.len() - 2]) } else { None }];
                         let got = self.octilinear(w, k0, k1, layer, &pts, wneck, exits, None);
                         let dbg = std::env::var("TOPO_OCTIDBG").is_ok();
+                        // draw-absorb A1: an adopted band necked against a gap partner takes its
+                        // octilinear form at its neck (zones and width), never wider.
+                        let real = |o_pts: &[Vec2]| match &a1z {
+                            // A1b: main's realise, unless it draws the band wider than reserved
+                            // (full width, or a wider neck); then the reserved neck where legal.
+                            Some(z) if a1b => {
+                                let main = self.realise(w, layer, lid, o_pts, &pneck);
+                                if main.as_ref().is_some_and(|(_, pn)| pn.is_some_and(|p| p.0 <= z.min_w + 0.5)) {
+                                    return main;
+                                }
+                                let (its, ls) = self.kept_neck_items(w, layer, o_pts, z);
+                                if ls.iter().sum::<f64>() > 0.0 && self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its) {
+                                    Some((its, Some((z.min_w, ls))))
+                                } else {
+                                    main
+                                }
+                            }
+                            Some(z) => {
+                                // r2: one neck stretch per run, pad stubs kept (`a1_finish`).
+                                let (its, _) = self.a1_finish(w, self.neck_items(w, lid, o_pts, z, z.min_w).0);
+                                let mut ls = [0.0; super::exact::NECK_ZONES];
+                                if let (Some((_, _, l)), Some(i)) = (super::joint::neck_of(&its, wi.w), z.ends.iter().position(Option::is_some)) {
+                                    ls[i] = l;
+                                }
+                                if self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its) {
+                                    return Some((its, Some((z.min_w, ls))));
+                                }
+                                // r2 (a1b_octi_crop): a necked form that breaks a rule falls back
+                                // to main's realise of the same form (legal or None), so the
+                                // band never loses its octilinear form to the neck. Debug arm
+                                // (`TOPO_FD45_OFF=dab_ofb`): r1's reject.
+                                if super::octi::fd45_off("dab_ofb") {
+                                    return None;
+                                }
+                                let main = self.realise(w, layer, lid, o_pts, &pneck);
+                                if std::env::var_os("TOPO_ABSORBDBG").is_some() {
+                                    eprintln!("ABSORBDBG a1z octi fail wire {w} net {} run {r}: main realise {}", wi.net, if main.is_some() { "ok" } else { "none" });
+                                }
+                                main
+                            }
+                            None => self.realise(w, layer, lid, o_pts, &pneck),
+                        };
                         let tag = match got {
-                            Some(o) => match self.realise(w, layer, lid, &o.pts, &pneck) {
+                            Some(o) => match real(&o.pts) {
                                 Some((its, pn)) => {
+                                    if attempt < 0 && adopted_neck > 0.0 {
+                                        // A1b meter: an octilinear form necked wider than reserved.
+                                        if let (Some((w2, _)), Some(wn)) = (pn, adopted_wn) {
+                                            if w2 > wn + 0.5 && !a1b {
+                                                if std::env::var_os("TOPO_A1BDBG").is_some() {
+                                                    let (a, b) = (o.pts[0], o.pts[o.pts.len() - 1]);
+                                                    eprintln!("A1B octi_wider wire {w} net {} run {r} reserved {:.3} drawn {:.3} mm from ({:.3},{:.3}) to ({:.3},{:.3})", self.st.wires[w].net, wn / 1e6, w2 / 1e6, a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6);
+                                                }
+                                                self.joint.unnecked.push((w, r, adopted_neck, 0.0, "octi_wider"));
+                                            }
+                                        }
+                                        if pn.is_none() {
+                                            let room = match (&pneck, adopted_wn) {
+                                                (Some(n), Some(wn)) => self.room_taken(w, &o.pts, n, wn),
+                                                _ => 0.0,
+                                            };
+                                            self.joint.unnecked.push((w, r, adopted_neck, room, "octi"));
+                                        } else if a1b && pn.is_some_and(|p| adopted_wn.is_some_and(|wn| p.0 <= wn + 0.5)) {
+                                            self.joint.kept_neck += 1;
+                                        }
+                                    }
                                     self.stats.octi_asis += o.asis;
                                     self.stats.octi_asis_below += o.asis_below;
                                     pts = o.pts;
@@ -4137,7 +4369,7 @@ impl<'a> Drawer<'a> {
                         if self.octi.any_forbidden && !super::octi::breaks(&pts).0.is_empty() {
                             last_reason = "drawing: no octilinear geometry for this run ([drawing] any_angle = \"forbidden\")".to_string();
                             if self.force {
-                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, if attempt < 0 { "erbs" } else { "attempt" }, None));
+                                cands.push((0.0, pts.clone(), items.clone(), Vec::new(), None, attempt_label(attempt), None));
                             }
                             continue;
                         }
@@ -4229,7 +4461,9 @@ impl<'a> Drawer<'a> {
                     // TW2 `[drawing] erbs_gap_keep_max_mm`: a band kept across a model gap
                     // carries the gap as its violation when it is drawn second (no hiding).
                     if src < 0 {
-                        let gv = self.gap_viols(w, r, &items);
+                        let mut gv = self.gap_viols(w, r, &items);
+                        let base = self.run_src(w, "gap_kept", "band", "", "kept", r, false, pneck.is_some(), &items);
+                        self.tag_viols(&mut gv, &base);
                         out.viol.extend(gv);
                     }
                     if let Some((wn, ls)) = neck {
@@ -4240,7 +4474,7 @@ impl<'a> Drawer<'a> {
                             out.necks.push((pts[pts.len() - 1], wn, ls[1]));
                         }
                     }
-                    if let (Some((wn, ls)), Some(pn)) = (pneck_out, &pneck) {
+                    if let (Some((wn, ls)), Some(pn)) = (pneck_out, a1z.as_ref().or(pneck.as_ref())) {
                         if wn < wi.w {
                             for (z, l) in pn.ends.iter().zip(ls) {
                                 if let (Some((c, _)), true) = (z, l > 0.0) {
@@ -4284,7 +4518,7 @@ impl<'a> Drawer<'a> {
                 }
                 if self.force {
                     let (price, vs, lazy) = self.lazy_cand(w, &items, &rep);
-                    cands.push((price, pts.clone(), items.clone(), vs, neck, if attempt < 0 { "erbs" } else { "attempt" }, lazy));
+                    cands.push((price, pts.clone(), items.clone(), vs, neck, attempt_label(attempt), lazy));
                 }
                 let v = &rep.violations[0];
                 last_viol = Some(v.clone());
@@ -4497,6 +4731,20 @@ impl<'a> Drawer<'a> {
                             }
                         }
                     }
+                    // draw-absorb A1 (`[drawing] forced_shrink`): shrink before violate.
+                    if self.opts.forced_shrink && !vs.is_empty() {
+                        if let Some((its, neck, fix, v2)) = self.shrink_forced(w, lid, &pts, &items, &vs) {
+                            items = its;
+                            vs = v2;
+                            // r2: one stretch, one neck entry (at the run end it touches).
+                            fnecks.extend(neck);
+                            self.joint.a1_forced += 1;
+                            self.joint.a1_wires.insert(w);
+                            self.joint.a1_mono += usize::from(fix.mono_nm > 0.0);
+                            self.joint.a1_mono_nm += fix.mono_nm;
+                            self.joint.a1_stubs += fix.stubs;
+                        }
+                    }
                     let (ps, pe) = (r == 0, r == plan.layers.len() - 1);
                     let first = committed.len();
                     for it in &items {
@@ -4517,9 +4765,12 @@ impl<'a> Drawer<'a> {
                     }
                     out.necks.extend(fnecks);
                     run_prov("forced", w, wi.net, layer, src, ftag, &pts);
+                    let n_items = items.len();
                     out.items.extend(items);
                     out.runs.push((layer, pts));
                     out.run_src.push(if self.opts.realise != "erbs" { super::joint::RunSrc::Seq } else { super::joint::RunSrc::Forced { erbs: src == "erbs", class: cut } });
+                    let base = self.run_src(w, "forced_run", src, ftag, if self.opts.realise != "erbs" { "" } else { cut.name() }, r, last_reason.contains("wrong side"), pneck.is_some(), &out.items[out.items.len() - n_items..]);
+                    self.tag_viols(&mut vs, &base);
                     out.viol.extend(vs);
                     ok = true;
                 }
@@ -5058,7 +5309,7 @@ impl<'a> Drawer<'a> {
             ends[1] = Some((c, (n - nb..n).map(|k| far(k, c)).fold(0.0, f64::max)));
         }
         // Runs of necked passes in between (without `neck_from_pad`): one zone each.
-        let mut z = 2;
+        let mut z = super::exact::MID_ZONE;
         let mut i = 0;
         while i < mid.len() && z < super::exact::NECK_ZONES {
             let mut j = i;
@@ -5082,7 +5333,7 @@ impl<'a> Drawer<'a> {
     /// circle; a run that comes back into the circle, or another run of the wire passing within
     /// it, keeps the full width (user 2026-11-26: never widen again downstream of a neck).
     /// O(segments x zones).
-    fn neck_items(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> (Vec<Item>, [f64; super::exact::NECK_ZONES]) {
+    pub(super) fn neck_items(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> (Vec<Item>, [f64; super::exact::NECK_ZONES]) {
         let wi = &self.st.wires[w];
         let mut items = Vec::new();
         let mut lens = [0.0; super::exact::NECK_ZONES];
@@ -5130,7 +5381,7 @@ impl<'a> Drawer<'a> {
         let inside = |x: &(Vec2, Vec2), i: usize| neck.ends[i].is_some_and(|(cc, r)| ((x.0 + x.1) * 0.5 - cc).len() <= r);
         let np = pieces.len();
         // A whole-wire zone (unbounded) and the zones in between (only without `neck_from_pad`).
-        let mut zone_of: Vec<Option<usize>> = pieces.iter().map(|x| (0..super::exact::NECK_ZONES).find(|&i| inside(x, i) && (i >= 2 || neck.ends[i].is_some_and(|z| !z.1.is_finite())))).collect();
+        let mut zone_of: Vec<Option<usize>> = pieces.iter().map(|x| (0..super::exact::NECK_ZONES).find(|&i| inside(x, i) && (i >= super::exact::MID_ZONE || neck.ends[i].is_some_and(|z| !z.1.is_finite())))).collect();
         if contig {
             if pts.first().is_some_and(|&p| near(p, 0)) {
                 for (k, x) in pieces.iter().enumerate() {
@@ -5283,6 +5534,108 @@ impl<'a> Drawer<'a> {
         Some((wn, items, lens))
     }
 
+    /// draw-absorb A1: neck zones over the tracks of `items` (wire `w`) that the violations of
+    /// `rep` passing `keep` name: one per track round its middle, half its length plus one pitch
+    /// (the trim shrinks it to what the checker needs), the deepest first; more tracks than `free`
+    /// zones: one zone over all of them. O(violations).
+    pub(super) fn hit_zones(&self, w: WireId, items: &[Item], rep: &CheckReport, keep: &dyn Fn(&Violation) -> bool, free: usize) -> Vec<(Vec2, f64)> {
+        let wi = &self.st.wires[w];
+        let mut segs: BTreeMap<usize, (i64, Vec2, Vec2)> = BTreeMap::new();
+        for v in rep.violations.iter().filter(|v| keep(v)) {
+            let Some(Item::Track(t)) = items.get(v.item) else { continue };
+            let (a, b) = (t.prim.start(), t.prim.end());
+            let (a, b) = (Vec2 { x: f64::from(a.x), y: -f64::from(a.y) }, Vec2 { x: f64::from(b.x), y: -f64::from(b.y) });
+            let e = segs.entry(v.item).or_insert((0, a, b));
+            e.0 = e.0.max(v.required - v.gap);
+        }
+        let mut z: Vec<(i64, Vec2, Vec2)> = segs.into_values().collect();
+        z.sort_by_key(|p| std::cmp::Reverse(p.0));
+        let pitch = wi.w + wi.s;
+        if z.len() <= free {
+            return z.iter().map(|&(_, a, b)| ((a + b) * 0.5, 0.5 * (b - a).len() + pitch)).collect();
+        }
+        if free == 0 {
+            return Vec::new();
+        }
+        let n = z.len() as f64;
+        let c = z.iter().fold(Vec2::default(), |s, &(_, a, b)| s + (a + b) * 0.5) * (1.0 / n);
+        vec![(c, z.iter().map(|&(_, a, b)| (a - c).len().max((b - c).len())).fold(0.0, f64::max) + pitch)]
+    }
+
+    /// draw-absorb A1 (`[drawing] forced_shrink`, docs/dev/design/draw-absorb.md): the forced run
+    /// `pts` (its `items` all at the wire's width; violations `vs`) necked over the stretches it
+    /// violates ([`Drawer::hit_zones`]), at the widest width in `[floor, nominal]`
+    /// whose severity key is the floor's, each zone trimmed to what the checker needs and never
+    /// ending inside the run's own end pad (`neck_out_of_pads`). TopoR 6.3 manual p. 56 (minimum
+    /// width in bottlenecks), p. 72 (shrinkages). `None` unless the key ([`viol_key`]: shorts,
+    /// then amount) gets strictly better; a run the plan or a pad end already necks is left to
+    /// those necks (never widened). `(items, zones, width, necked length per zone, violations)`.
+    /// O(14 checks of the run + the trim).
+    #[allow(clippy::type_complexity)]
+    fn shrink_forced(&self, w: WireId, lid: u32, pts: &[Vec2], items: &[Item], vs: &[Viol]) -> Option<(Vec<Item>, Option<(Vec2, f64, f64)>, super::joint::A1Fix, Vec<Viol>)> {
+        let wi = &self.st.wires[w];
+        let min_w = self.st.w_min(wi.net, wi.w);
+        if min_w >= wi.w - 0.5 || pts.len() < 2 || items.iter().any(|i| matches!(i, Item::Track(t) if (t.width as f64) < wi.w - 0.5)) {
+            return None;
+        }
+        let rep = self.checker.check_against(&self.idx, items, &[]);
+        // r3 (vfy-draw-absorb r2 finding 1): the hit zones lie in mid-run, so they take the mid
+        // slots ([`super::exact::MID_ZONE`]..): in slots 0/1 `neck_items` (neck-regrow) narrows
+        // only the stretch from the wire's own end, so the deepest hits got no neck unless their
+        // circle held the run's start (then the whole run).
+        let zs = self.hit_zones(w, items, &rep, &|_| true, super::exact::NECK_ZONES - super::exact::MID_ZONE);
+        if zs.is_empty() {
+            return None;
+        }
+        let mut ends = [None; super::exact::NECK_ZONES];
+        for (z, v) in ends.iter_mut().skip(super::exact::MID_ZONE).zip(zs) {
+            *z = Some(v);
+        }
+        let nk0 = super::exact::Neck { min_w, ends };
+        // r2: the copper as drawn: one neck stretch per run, pad stubs kept ([`Drawer::a1_finish`]).
+        let eval = |nk: &super::exact::Neck, wn: f64| {
+            let (its, fix) = self.a1_finish(w, self.neck_items(w, lid, pts, nk, wn).0);
+            let rep = self.checker.check_against(&self.idx, &its, &[]);
+            let mut v2 = self.viols_of(&its, &rep);
+            v2.extend(self.graze_viols(w, &its));
+            (its, fix, v2)
+        };
+        let better = |k: (f64, f64)| {
+            let b = viol_key(vs);
+            key_le(k, b) && (k.0 < b.0 - 1e-9 || k.1 < b.1 - 1e-9)
+        };
+        let kf = viol_key(&eval(&nk0, min_w).2);
+        if !better(kf) {
+            return None;
+        }
+        let (mut lo, mut hi) = (min_w, wi.w);
+        for _ in 0..12 {
+            let mid = 0.5 * (lo + hi);
+            if key_le(viol_key(&eval(&nk0, mid).2), kf) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let wn = lo.floor().max(min_w);
+        let mut pick: Option<(Vec<Item>, super::joint::A1Fix, Vec<Viol>)> = None;
+        for nk in [self.neck_out_of_pads(w, lid, pts, self.trim_neck(w, lid, pts, &nk0, wn)), self.neck_out_of_pads(w, lid, pts, nk0)] {
+            let (its, fix, v2) = eval(&nk, wn);
+            // The trimmed zones first; the whole zones only where they are strictly better.
+            let k = viol_key(&v2);
+            if better(k) && pick.as_ref().is_none_or(|p| {
+                let b = viol_key(&p.2);
+                key_le(k, b) && (k.0 < b.0 - 1e-9 || k.1 < b.1 - 1e-9)
+            }) {
+                pick = Some((its, fix, v2));
+            }
+        }
+        pick.map(|(its, fix, v2)| {
+            let neck = super::joint::neck_of(&its, wi.w);
+            (its, neck, fix, v2)
+        })
+    }
+
     /// draw-via-neck B (`[drawing] neck_trim`, lead 2026-11-24): the neck width of the run `pts`
     /// with the plan's zones `neck` when no width passes the checker ([`Drawer::plan_neck_run`]
     /// is `None`: a violation the width cannot remove, e.g. a terminal closer to the board edge
@@ -5319,6 +5672,28 @@ impl<'a> Drawer<'a> {
         lo.floor().max(neck.min_w)
     }
 
+    /// draw-absorb A1b meter: length (nm) of the run `pts` of wire `w` inside the zones of `neck`
+    /// where its full width takes planned room of wires not drawn yet that the width `wn` leaves
+    /// free (the room price of [`Drawer::via_plan_price`], as [`Drawer::fit_neck`] grows a neck
+    /// by it). 0 = the full width there costs no other trace room. O(samples x traversals).
+    pub(super) fn room_taken(&self, w: WireId, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> f64 {
+        let wi = &self.st.wires[w];
+        let last = wi.tris.len().saturating_sub(1);
+        let mut l = 0.0;
+        for s in pts.windows(2) {
+            let sl = (s[1] - s[0]).len();
+            let n = ((sl / 5.0e4).ceil() as usize).max(1);
+            for j in 0..n {
+                let q = s[0] + (s[1] - s[0]) * ((j as f64 + 0.5) / n as f64);
+                let inside = neck.ends.iter().flatten().any(|&(c, r)| (q - c).len() <= r);
+                if inside && self.via_plan_price(w, 0, last, q, wi.w) > self.via_plan_price(w, 0, last, q, wn) {
+                    l += sl / n as f64;
+                }
+            }
+        }
+        l
+    }
+
     /// draw-via-neck B (`[drawing] neck_trim`): the plan's neck zones of the run `pts` (necked to
     /// `wn`) cut to where the room ends. Each zone first shrinks to the smallest radius the checker
     /// accepts ([`Drawer::trim_neck`]; a zone over the whole wire is tried from either end, the
@@ -5328,7 +5703,14 @@ impl<'a> Drawer<'a> {
     /// ([`Drawer::via_plan_price`] per sample, over the wire's pitch): the neck reaches further
     /// only where another trace needs that room (TopoR 6.3 manual p. 56, the minimum width only
     /// where needed). Graded, no cutoff. O(zones x 14 checks of the run + zones x 65 x segments).
-    fn fit_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
+    pub(super) fn fit_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
+        self.fit_neck_with(w, lid, pts, neck, wn, false)
+    }
+
+    /// [`Drawer::fit_neck`]; `grow_trimmed` (draw-absorb A1b, `[drawing] reserved_keep_neck`): a
+    /// zone the checker does not need (trimmed away) still grows from radius 0 where the full
+    /// width would take planned room of traces not drawn yet (the room the reserved neck kept).
+    pub(super) fn fit_neck_with(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64, grow_trimmed: bool) -> super::exact::Neck {
         let wi = &self.st.wires[w];
         let ext = |c: Vec2| pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0;
         let len_of = |n: &super::exact::Neck| self.neck_items(w, lid, pts, n, wn).1.iter().sum::<f64>();
@@ -5368,7 +5750,12 @@ impl<'a> Drawer<'a> {
         // Room price of the full width over the necked width at `q`, per nm of track.
         let extra = |q: Vec2| ((self.via_plan_price(w, 0, last, q, wi.w) - self.via_plan_price(w, 0, last, q, wn)) / pitch).max(0.0);
         for i in 0..super::exact::NECK_ZONES {
-            let (Some((c, r1)), Some((_, r0))) = (base.ends[i], nk.ends[i]) else { continue };
+            let Some((c, r1)) = base.ends[i] else { continue };
+            let r0 = match nk.ends[i] {
+                Some((_, r0)) => r0,
+                None if grow_trimmed => 0.0,
+                None => continue,
+            };
             let r1 = if r1.is_finite() { r1 } else { ext(c) };
             if room <= 0.0 || r1 <= r0 + 1.0 {
                 continue;
@@ -5821,6 +6208,28 @@ pub(crate) fn neighbour_room_price(hits: &[RoomHit], per_wire: bool) -> f64 {
 mod tests {
     use super::*;
 
+    /// draw-absorb A0: the index id of an `against` label, as the checker and `viols_measured`
+    /// name routed copper; and each forced candidate's ladder label (a call-site mutant of the
+    /// labels changes these).
+    #[test]
+    fn against_item_and_attempt_labels() {
+        assert_eq!(against_item("item:12"), Some(12));
+        assert_eq!(against_item("track of SIG (item:7)"), Some(7));
+        assert_eq!(against_item("via of GND (item:345)"), Some(345));
+        assert_eq!(against_item("pad:U1:3"), None);
+        assert_eq!(against_item("kept:abc"), None);
+        assert_eq!(against_item("item:"), None);
+        let ls: Vec<&str> = (-1..=6).map(attempt_label).collect();
+        assert_eq!(ls, ["erbs", "attempt0", "attempt1", "attempt2", "attempt3", "attempt4", "attempt5", "erbs_kept"]);
+        // Equality leaves the provenance out (it is a measurement).
+        let v = Viol { kind: "clearance", at: Vec2 { x: 1.0, y: 2.0 }, layer: 0, depth_nm: 3.0, len_nm: 4.0, against: "x".into(), via: false, src: ViolSrc::default() };
+        let mut w = v.clone();
+        w.src.mech = "forced_run";
+        assert_eq!(v, w);
+        w.depth_nm = 5.0;
+        assert_ne!(v, w);
+    }
+
     /// draw-via-neck r6: a neck at the run's pad end reaches past the pad's outline (no width
     /// step inside the pad, whose in-pad narrow piece KiCad's Cleanup would delete); a neck
     /// starting inside the pad covers the pad end too; a run that never leaves the pad is necked
@@ -5903,7 +6312,7 @@ mod tests {
     #[test]
     fn force_via_key_puts_shorts_first() {
         const MM: f64 = 1e6;
-        let viol = |kind: &'static str, depth_mm: f64| Viol { kind, at: v(0.0, 0.0), layer: 0, depth_nm: depth_mm * MM, len_nm: 0.6 * MM, against: "x".into(), via: true };
+        let viol = |kind: &'static str, depth_mm: f64| Viol { kind, at: v(0.0, 0.0), layer: 0, depth_nm: depth_mm * MM, len_nm: 0.6 * MM, against: "x".into(), via: true, src: ViolSrc::default() };
         let on_track = [viol("short", 0.05), viol("hole_clearance", 0.02)];
         let tight = [viol("clearance", 0.12), viol("clearance", 0.12), viol("hole_clearance", 0.1)];
         let (a, b) = (force_via_key(&on_track, 0.0, 0.0), force_via_key(&tight, 0.0, 0.0));
@@ -5932,7 +6341,7 @@ mod tests {
     fn forced_form_key_is_one_graded_scale_with_shorts_first() {
         const MM: f64 = 1e6;
         let cfg = super::super::octi::OctiCfg::default(); // violation 1000, any_angle 15, acute 50 (mm)
-        let viol = |kind: &'static str, depth_mm: f64, len_mm: f64| Viol { kind, at: v(0.0, 0.0), layer: 0, depth_nm: depth_mm * MM, len_nm: len_mm * MM, against: "x".into(), via: false };
+        let viol = |kind: &'static str, depth_mm: f64, len_mm: f64| Viol { kind, at: v(0.0, 0.0), layer: 0, depth_nm: depth_mm * MM, len_nm: len_mm * MM, against: "x".into(), via: false, src: ViolSrc::default() };
         // taut: one 10 mm free-angle stretch (8 x 6), then 10 mm straight; octi: 45 deg + straight, a bit longer
         let taut = [v(0.0, 0.0), v(8.0 * MM, 6.0 * MM), v(18.0 * MM, 6.0 * MM)];
         let octi = [v(0.0, 0.0), v(2.0 * MM, 0.0), v(8.0 * MM, 6.0 * MM), v(18.0 * MM, 6.0 * MM)];

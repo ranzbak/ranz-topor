@@ -562,3 +562,261 @@ pub fn plan_compass(v: &PlanView, model: &str, opt_loop: &str, round: usize) -> 
         notes,
     }
 }
+
+// ---- draw-absorb A0: the drawn side, per violation (docs/dev/design/draw-absorb.md §1, §4 A0) ----
+
+/// `toporlib/compass.py` `REACH_MM`: the least reach of a drawn violation to a plan item (mm).
+pub const DRAWN_REACH_MM: f64 = 0.5;
+
+/// Distance from `p` to segment `a`-`b` (nm, KiCad frame); the `_seg_dist` of compass.py.
+fn pt_seg_dist(p: [i64; 2], a: [i64; 2], b: [i64; 2]) -> f64 {
+    let f = |q: [i64; 2]| (q[0] as f64, q[1] as f64);
+    let ((px, py), (ax, ay), (bx, by)) = (f(p), f(a), f(b));
+    let (dx, dy) = (bx - ax, by - ay);
+    let l2 = dx * dx + dy * dy;
+    let t = if l2 <= 0.0 { 0.0 } else { (((px - ax) * dx + (py - ay) * dy) / l2).clamp(0.0, 1.0) };
+    (px - (ax + t * dx)).hypot(py - (ay + t * dy))
+}
+
+/// `it` lies on `layer` (or any layer) with a segment within `r` nm of `at` (no segments:
+/// anywhere); the `_near` of compass.py.
+fn near(it: &CompassItem, at: [i64; 2], layer: &str, r: f64) -> bool {
+    if !it.layers.is_empty() && !it.layers.iter().any(|l| l == layer) && layer != "all layers" {
+        return false;
+    }
+    it.segs.is_empty() || it.segs.iter().any(|s| pt_seg_dist(at, s[0], s[1]) <= r)
+}
+
+/// The drawn compass class of a violation of engine class `vc` at `at` on `layer` (reach `r`,
+/// nm): the rule of `toporlib/compass.py` `classify_violation`, the first that matches, in its
+/// order (a port, so the engine's result carries it; `harness` checks both agree, the Python
+/// stays the reference). `mine`: the compass items of its connection, in item order; `others`:
+/// the over-full and model-gap items of other connections. O(items).
+pub fn drawn_class(vc: &str, at: [i64; 2], layer: &str, mine: &[&CompassItem], others: &[&CompassItem], r: f64) -> &'static str {
+    let first = |cls: &str, need_near: bool| mine.iter().any(|it| it.class == cls && (!need_near || near(it, at, layer, r)));
+    if vc == "via_site" && first("via_site", false) {
+        return "via_site";
+    }
+    for cls in ["unlayerable", "foreign_copper", "planner_overfull", "model_gap"] {
+        if first(cls, true) {
+            return match cls {
+                "unlayerable" => "unlayerable",
+                "foreign_copper" => "foreign_copper",
+                "planner_overfull" => "planner_overfull",
+                _ => "model_gap",
+            };
+        }
+    }
+    if others.iter().any(|it| (it.class == "planner_overfull" || it.class == "model_gap") && near(it, at, layer, r)) {
+        return "overfull_nearby";
+    }
+    if first("forced_path", false) {
+        return "forced_path";
+    }
+    if first("pad_exit", true) || (vc == "pad_exit" && first("pad_exit_stub", true)) {
+        return "pad_exit";
+    }
+    if first("shrinkage", true) {
+        return if vc == "pad_exit" { "pad_exit" } else { "neck_loss" };
+    }
+    if first("edge_overpredict", true) {
+        return "edge_overpredict";
+    }
+    if vc == "pad_exit" {
+        return "pad_exit";
+    }
+    "drawing_loss"
+}
+
+/// The fault class of the note (docs/dev/design/draw-absorb.md §1) of a drawn violation written by
+/// `mech`, of drawn compass class `cls`, whose copper hits a `movable` (another router wire) or
+/// static item: F1 forced via, static hit; F2 forced via, movable hit; F3 at a planned neck
+/// (`neck_loss`); F4 the plan's cuts fit (`drawing_loss`, `overfull_nearby`, `edge_overpredict`),
+/// movable hit; F5 the same, static hit; F6 the plan has no room or no method there (over-full,
+/// model gap, unlayerable, foreign copper, forced path, via site of a run); F7 pad exit.
+pub fn fault_class(mech: &str, cls: &str, movable: bool) -> &'static str {
+    if mech == "forced_via" {
+        return if movable { "F2" } else { "F1" };
+    }
+    match cls {
+        "neck_loss" => "F3",
+        "drawing_loss" | "overfull_nearby" | "edge_overpredict" => {
+            if movable {
+                "F4"
+            } else {
+                "F5"
+            }
+        }
+        "pad_exit" => "F7",
+        _ => "F6",
+    }
+}
+
+/// draw-absorb A0: the drawn compass class and fault class of every violation of `r`
+/// (`violations[].prov`) and their counts (`r.draw_absorb`), from the result alone (its compass,
+/// its connections' widths), so it holds for whichever variant is handed back. A result without a
+/// compass classes every violation `drawing_loss` (as compass.py does). Measurement only.
+/// O(violations x compass items).
+pub fn absorb_meter(r: &mut crate::route::RouteResult) {
+    let width: BTreeMap<usize, i64> = r.connections.iter().map(|c| (c.id, c.width)).collect();
+    if let Some(m) = absorb_classes(&mut r.violations, r.compass.as_ref(), &width) {
+        r.draw_absorb = Some(m);
+    }
+}
+
+/// [`absorb_meter`] on the parts: the violations `vs` (their `prov` filled), the round's compass
+/// `cp`, the connections' widths (nm by id). `None` when no violation has a provenance (another
+/// engine, or nothing drawn by force). O(violations x compass items).
+pub fn absorb_classes(vs: &mut [crate::route::ViolationReport], cp: Option<&Compass>, width: &BTreeMap<usize, i64>) -> Option<crate::route::DrawAbsorb> {
+    if vs.iter().all(|v| v.prov.is_none()) {
+        return None;
+    }
+    let items: &[CompassItem] = cp.map_or(&[], |c| &c.items[..]);
+    let mut by_conn: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (k, it) in items.iter().enumerate() {
+        for &c in &it.conns {
+            by_conn.entry(c).or_default().push(k);
+        }
+    }
+    let has = cp.is_some();
+    let mut m = crate::route::DrawAbsorb::default();
+    let mut conns: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let mut runs: BTreeMap<(usize, usize), String> = BTreeMap::new();
+    let add = |map: &mut BTreeMap<String, usize>, k: &str| *map.entry(k.to_string()).or_insert(0) += 1;
+    for v in vs.iter_mut() {
+        let Some(p) = v.prov.as_mut() else { continue };
+        let reach = (DRAWN_REACH_MM * 1e6).max(4.0 * width.get(&v.conn).copied().unwrap_or(0) as f64) + 0.5 * v.length_nm as f64;
+        let mine_k = by_conn.get(&v.conn).map_or(&[][..], |x| &x[..]);
+        let mine: Vec<&CompassItem> = mine_k.iter().map(|&k| &items[k]).collect();
+        let others: Vec<&CompassItem> = items.iter().enumerate().filter(|(k, it)| (it.class == "planner_overfull" || it.class == "model_gap") && !mine_k.contains(k)).map(|x| x.1).collect();
+        p.class = if has { drawn_class(&v.class, v.at, &v.layer, &mine, &others, reach) } else { "drawing_loss" }.into();
+        p.fclass = fault_class(&p.mech, &p.class, p.hit == "movable").into();
+        m.violations += 1;
+        add(&mut m.by_fclass, &p.fclass);
+        conns.entry(p.fclass.clone()).or_default().insert(v.conn);
+        add(&mut m.by_mech, if p.mech.is_empty() { "unrecorded" } else { &p.mech });
+        add(&mut m.by_cand, if p.cand.is_empty() { "-" } else { &p.cand });
+        add(&mut m.by_cut, if p.cut.is_empty() { "-" } else { &p.cut });
+        add(&mut m.by_class, &p.class);
+        add(&mut m.by_hit, &p.hit);
+        if p.mech == "forced_run" {
+            runs.insert((v.conn, p.run), if p.cut.is_empty() { "-".into() } else { p.cut.clone() });
+        }
+        if p.hit == "movable" && p.hit_slack_nm.is_some_and(|s| s >= v.depth_nm) {
+            add(&mut m.retaut_room, &p.fclass);
+        }
+        if p.mech != "forced_via" && p.drawn_w_nm > 0 && (p.drawn_w_nm - p.w_min_nm) >= 2 * v.depth_nm {
+            add(&mut m.shrink_room, &p.fclass);
+        }
+    }
+    m.conns_by_fclass = conns.into_iter().map(|(k, s)| (k, s.len())).collect();
+    for c in runs.into_values() {
+        *m.forced_runs_by_cut.entry(c).or_insert(0) += 1;
+    }
+    Some(m)
+}
+
+#[cfg(test)]
+mod absorb_tests {
+    use super::*;
+    use crate::route::{ViolProv, ViolationReport};
+
+    fn item(class: &str, conns: &[usize], at: [i64; 2], layers: &[&str]) -> CompassItem {
+        CompassItem { class: class.into(), layers: layers.iter().map(|s| s.to_string()).collect(), conns: conns.to_vec(), segs: vec![[at, at]], over_nm: 0, members: 1 }
+    }
+
+    fn viol(conn: usize, class: &str, at: [i64; 2], mech: &str, hit: &str) -> ViolationReport {
+        ViolationReport { conn, class: class.into(), at, layer: "F.Cu".into(), depth_nm: 50_000, length_nm: 200_000, prov: Some(ViolProv { mech: mech.into(), hit: hit.into(), ..ViolProv::default() }), ..ViolationReport::default() }
+    }
+
+    /// The drawn class follows compass.py's order: each branch, and a near item of an earlier
+    /// class wins over a later one.
+    #[test]
+    fn drawn_class_takes_the_first_match_in_compass_order() {
+        let at = [1_000_000, 1_000_000];
+        let far = [9_000_000, 9_000_000];
+        let r = 600_000.0;
+        let c = |cls: &str, vc: &str, at_it: [i64; 2]| {
+            let it = item(cls, &[0], at_it, &["F.Cu"]);
+            drawn_class(vc, at, "F.Cu", &[&it], &[], r)
+        };
+        assert_eq!(c("via_site", "via_site", far), "via_site", "a via site needs no nearness");
+        assert_eq!(c("via_site", "clearance", far), "drawing_loss", "only for a via_site violation");
+        assert_eq!(c("unlayerable", "clearance", at), "unlayerable");
+        assert_eq!(c("foreign_copper", "clearance", at), "foreign_copper");
+        assert_eq!(c("planner_overfull", "clearance", at), "planner_overfull");
+        assert_eq!(c("planner_overfull", "clearance", far), "drawing_loss", "an over-full cut far away");
+        assert_eq!(c("model_gap", "clearance", at), "model_gap");
+        assert_eq!(c("forced_path", "clearance", far), "forced_path");
+        assert_eq!(c("pad_exit", "clearance", at), "pad_exit");
+        assert_eq!(c("pad_exit_stub", "pad_exit", at), "pad_exit");
+        assert_eq!(c("pad_exit_stub", "clearance", at), "drawing_loss");
+        assert_eq!(c("shrinkage", "clearance", at), "neck_loss");
+        assert_eq!(c("shrinkage", "pad_exit", at), "pad_exit");
+        assert_eq!(c("edge_overpredict", "clearance", at), "edge_overpredict");
+        assert_eq!(c("nothing", "pad_exit", at), "pad_exit");
+        assert_eq!(c("nothing", "clearance", at), "drawing_loss");
+        // Another layer does not match; an item on no layer does.
+        let it = item("planner_overfull", &[0], at, &["B.Cu"]);
+        assert_eq!(drawn_class("clearance", at, "F.Cu", &[&it], &[], r), "drawing_loss");
+        let it = item("planner_overfull", &[0], at, &[]);
+        assert_eq!(drawn_class("clearance", at, "F.Cu", &[&it], &[], r), "planner_overfull");
+        // Another wire's over-full bottleneck nearby; the own over-full one first.
+        let o = item("planner_overfull", &[1], at, &["F.Cu"]);
+        assert_eq!(drawn_class("clearance", at, "F.Cu", &[], &[&o], r), "overfull_nearby");
+        let sh = item("shrinkage", &[0], at, &["F.Cu"]);
+        assert_eq!(drawn_class("clearance", at, "F.Cu", &[&sh], &[&o], r), "overfull_nearby", "over-full nearby before the neck");
+        let fp = item("forced_path", &[0], far, &[]);
+        assert_eq!(drawn_class("clearance", at, "F.Cu", &[&sh, &fp], &[], r), "forced_path", "forced path before the neck");
+        assert_eq!(drawn_class("clearance", at, "F.Cu", &[&fp], &[&o], r), "overfull_nearby", "over-full nearby before the forced path");
+    }
+
+    #[test]
+    fn fault_class_follows_the_note() {
+        assert_eq!(fault_class("forced_via", "pad_exit", false), "F1");
+        assert_eq!(fault_class("forced_via", "via_site", true), "F2");
+        assert_eq!(fault_class("forced_run", "neck_loss", true), "F3");
+        assert_eq!(fault_class("forced_run", "neck_loss", false), "F3");
+        for c in ["drawing_loss", "overfull_nearby", "edge_overpredict"] {
+            assert_eq!(fault_class("forced_run", c, true), "F4");
+            assert_eq!(fault_class("gap_kept", c, false), "F5");
+        }
+        for c in ["planner_overfull", "model_gap", "unlayerable", "foreign_copper", "forced_path", "via_site"] {
+            assert_eq!(fault_class("forced_run", c, true), "F6");
+        }
+        assert_eq!(fault_class("forced_run", "pad_exit", true), "F7");
+    }
+
+    /// The counts: per fault class and connection, per writer, forced runs per band status once
+    /// per (connection, run), the re-taut room (hit slack >= depth, movable only) and the shrink
+    /// room (narrowing to the floor clears twice the depth, never for a via).
+    #[test]
+    fn the_meter_counts_every_class_once() {
+        let at = [1_000_000, 1_000_000];
+        let cp = Compass { items: vec![item("shrinkage", &[0], at, &["F.Cu"])], ..Compass::default() };
+        let mut vs = vec![viol(0, "clearance", at, "forced_run", "movable"), viol(0, "clearance", at, "forced_run", "movable"), viol(1, "clearance", at, "forced_via", "static"), viol(2, "clearance", at, "forced_run", "static")];
+        for (v, (cut, run, slack, w, wmin)) in vs.iter_mut().zip([("gap", 0, Some(60_000), 500_000, 380_000), ("gap", 0, Some(40_000), 500_000, 450_000), ("", 0, None, 0, 0), ("no_band", 1, None, 250_000, 250_000)]) {
+            let p = v.prov.as_mut().unwrap();
+            (p.cut, p.run, p.hit_slack_nm, p.drawn_w_nm, p.w_min_nm) = (cut.into(), run, slack, w, wmin);
+        }
+        vs.push(ViolationReport { conn: 3, prov: None, ..ViolationReport::default() });
+        let width: BTreeMap<usize, i64> = [(0, 500_000), (1, 250_000), (2, 250_000)].into_iter().collect();
+        let m = absorb_classes(&mut vs, Some(&cp), &width).expect("provenance present");
+        let cls: Vec<&str> = vs.iter().filter_map(|v| v.prov.as_ref()).map(|p| p.fclass.as_str()).collect();
+        assert_eq!(cls, ["F3", "F3", "F1", "F5"]);
+        assert_eq!(m.violations, 4);
+        let get = |x: &BTreeMap<String, usize>, k: &str| x.get(k).copied().unwrap_or(0);
+        assert_eq!((get(&m.by_fclass, "F3"), get(&m.by_fclass, "F1"), get(&m.by_fclass, "F5")), (2, 1, 1));
+        assert_eq!((get(&m.conns_by_fclass, "F3"), get(&m.conns_by_fclass, "F1")), (1, 1));
+        assert_eq!((get(&m.by_mech, "forced_run"), get(&m.by_mech, "forced_via")), (3, 1));
+        assert_eq!((get(&m.forced_runs_by_cut, "gap"), get(&m.forced_runs_by_cut, "no_band")), (1, 1), "one forced run per (connection, run)");
+        assert_eq!(get(&m.retaut_room, "F3"), 1, "slack 60 um >= depth 50 um; 40 um is not");
+        assert_eq!(get(&m.shrink_room, "F3"), 1, "0.5 -> 0.38 mm frees 60 um a side >= 50 um; 0.5 -> 0.45 does not");
+        assert_eq!(get(&m.shrink_room, "F5"), 0, "at its floor");
+        // No compass: every violation a drawing loss (as compass.py), no provenance at all: no meter.
+        let m2 = absorb_classes(&mut vs[..1], None, &width).unwrap();
+        assert_eq!(vs[0].prov.as_ref().unwrap().class, "drawing_loss");
+        assert_eq!(get(&m2.by_fclass, "F4"), 1);
+        assert!(absorb_classes(&mut vs[4..], Some(&cp), &width).is_none());
+    }
+}

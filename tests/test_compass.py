@@ -201,3 +201,31 @@ def test_pad_exit_at_a_planned_neck_stays_a_pad_exit_and_other_classes_become_ne
     assert row(cp, "drawing_loss")["drawn"] == 1
     cls, sub, i = compass.classify_violation(v[0], [neck], [], 0.5e6)
     assert (cls, i) == ("pad_exit", 0) and "planned neck" in sub
+
+
+def test_draw_absorb_fault_classes_join_kicad_items_and_check_the_engine_class():
+    # draw-absorb A0: the engine's meter (route.draw_absorb, violations[].prov) carried into the compass: KiCad items
+    # per fault class of the joined drawn violation, "kicad_only" for the rest, and the engine's compass class checked
+    # against this module's (a mismatch is counted and listed). Flat d_F*/k_F* columns for the scorecard.
+    conns = [conn(i) for i in range(2)]
+    it = {"class": "planner_overfull", "layers": ["F.Cu"], "conns": [0], "segs": [seg((4.0, 5.0), (6.0, 5.0))], "over_nm": 1}
+    v = [dict(viol(0, (5.0, 5.0)), prov={"mech": "forced_run", "hit": "movable", "class": "planner_overfull", "fclass": "F6"}),
+         dict(viol(1, (20.0, 20.0)), prov={"mech": "forced_via", "hit": "static", "class": "pad_exit", "fclass": "F1"})]
+    r = route(v, [it], conns, {"planner_overfull": 1})
+    r["draw_absorb"] = {"violations": 2, "by_fclass": {"F6": 1, "F1": 1}, "conns_by_fclass": {"F6": 1, "F1": 1},
+                        "retaut_room": {"F6": 1}, "shrink_room": {}, "forced_runs_by_cut": {"gap": 1}}
+    cp = compass.build(r, [drc("clearance", [(5.0, 5.1)]), drc("clearance", [(20.0, 20.1)]), drc("clearance", [(50, 50)])], 0)
+    ab = cp["absorb"]
+    assert ab["drawn"] == {"F1": 1, "F6": 1}
+    assert ab["kicad"] == {"F1": 1, "F6": 1, "kicad_only": 1}
+    # violation 1: this module says drawing_loss (no item near it), the engine said pad_exit
+    assert (ab["class_mismatch"], ab["class_mismatch_rows"]) == (1, [1])
+    assert ab["retaut_room"] == {"F6": 1} and ab["forced_runs_by_cut"] == {"gap": 1}
+    assert [x["fclass"] for x in cp["violations"]] == ["F6", "F1"]
+    cols = compass.columns(cp)
+    assert (cols["d_F6"], cols["k_F6"], cols["d_F3"], cols["k_F3"]) == (1, 1, 0, 0)
+    # without DRC: no KiCad side; without the engine meter: no absorb block and no F columns
+    assert compass.build(r, None, None)["absorb"]["kicad"] is None
+    del r["draw_absorb"]
+    cp2 = compass.build(r, None, None)
+    assert cp2["absorb"] is None and "d_F1" not in compass.columns(cp2)

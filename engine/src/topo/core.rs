@@ -109,6 +109,14 @@ fn free_snap(stage: &str, drawn: &BTreeMap<WireId, WireOut>, st: &State) {
     }
 }
 
+/// draw-absorb A1 r2: the grade of a neck from width `w` to `to` over `len` (nm) on a supply-width
+/// net: (the share of its width left, the severity = width share lost x length in mm). Graded, no
+/// cutoff: a deeper or longer neck is more severe. O(1).
+pub(crate) fn a1_supply_grade(w: f64, to: f64, len: f64) -> (f64, f64) {
+    let left = if w > 0.0 { (to / w).clamp(0.0, 1.0) } else { 1.0 };
+    (left, (1.0 - left) * len / MM)
+}
+
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
 /// neck-regrow: a neck to `to` (nm) over `neck_len` of a wire of nominal width `w` and drawn
 /// length `wire_len` is a whole-wire neck of a supply net when it spans the wire (within 1 um) and
@@ -8425,6 +8433,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 warnings.push(format!("[drawing] octi_order = {:?} is not \"sweep\" or \"bends\": \"sweep\" (the default) used", opts.octi_order));
                 super::erbs::OctiOrder::Sweep
             }),
+            band_passes: opts.band_passes,
             ..super::erbs::ErbsOpts::default()
         };
         match super::erbs::realise(&st, &lr.events, &packer, bottom, &conn, &pts, &dr.pad_end, &super::board::outline_segments(model), &mo, &layers, &live, stops) {
@@ -8460,6 +8469,14 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                     r.report.worst_gap / 1e6,
                     r.unbanded
                 ));
+                // draw-absorb A3 (`[drawing] band_passes`): the iterated band realise.
+                if opts.band_passes > 0 {
+                    let p = &r.passes;
+                    if let Some(l) = erbs_line.as_mut() {
+                        l.push_str(&format!("; band passes ([drawing] band_passes = {}): {} pass(es), {} yielding bands realised again, {} kept, model gaps between bands {} -> {}", opts.band_passes, p.passes, p.tried, p.moved, p.gaps_before, p.gaps_after));
+                    }
+                }
+                dr.joint.band_pass = r.passes;
                 live = r.order.clone();
                 // Test probe (fd45 r10): the ERBS draw order by net name, for a test whose
                 // precondition is an order (topo_m3_class_keep); nothing is formatted without a hook.
@@ -8924,7 +8941,9 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                             }
                             if !add.is_empty() {
                                 let rep = dr.checker.check_against(&dr.idx, &add, &[]);
-                                let vs = dr.viols_of(&add, &rep);
+                                let mut vs = dr.viols_of(&add, &rep);
+                                let base = dr.run_src(bw, "junction_join", "join", "", "", 0, false, false, &add);
+                                dr.tag_viols(&mut vs, &base);
                                 let mut wo = drawn.remove(&bw).expect("drawn branch");
                                 for it in &add {
                                     let h = dr.commit(it);
@@ -10003,6 +10022,44 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             ex.join("; ")
         ));
     }
+    // draw-absorb A1 r2 (lead 2026-11-27; POWER-NECK-MONOTONE): every neck of a wire A1 necked
+    // (`[drawing] forced_shrink`: a joint-commit band or a forced run) on a supply-width net (wider
+    // than the board's default width) gets a warning of its own, graded by the width it loses
+    // times its length (its narrowest part sets the current), the most severe first.
+    {
+        let dflt = model.rules.default.width as f64;
+        let net_name = |net: i32| model.nets.iter().find(|n| n.code == net).map_or(String::new(), |n| n.name.clone());
+        let mut lines: Vec<(f64, String)> = Vec::new();
+        for (&w, wo) in &drawn {
+            let wi = &st.wires[w];
+            if !dr.joint.a1_wires.contains(&w) || wi.w <= dflt + 0.5 {
+                continue;
+            }
+            let ci = conn_of[wire_conn[w]];
+            for &(_, to, len) in &wo.necks {
+                if to >= wi.w - 0.5 || len <= 0.0 {
+                    continue;
+                }
+                let (left, sev) = a1_supply_grade(wi.w, to, len);
+                lines.push((
+                    sev,
+                    format!(
+                        "{} ({}): supply-width net necked by draw-absorb A1 ([drawing] forced_shrink): {:.3} mm (board default {:.3} mm) to {:.3} mm over {:.2} mm, {:.0} % of its width left (its narrowest part sets its current); severity {:.2} (width lost x mm)",
+                        net_name(wi.net),
+                        dec.connections[ci].from.label,
+                        wi.w / MM,
+                        dflt / MM,
+                        to / MM,
+                        len / MM,
+                        100.0 * left,
+                        sev
+                    ),
+                ));
+            }
+        }
+        lines.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        warnings.extend(lines.into_iter().map(|l| l.1));
+    }
     if dr.stats.octi_asis > 0 {
         // first-draw-45 P1: counted, not hidden (the free-angle count does not see them: they are
         // octilinear).
@@ -10406,6 +10463,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         limit: None,
         bests: Vec::new(),
         erbs: erbs_runs,
+        draw_absorb: None,
         compass: compass_plan.map(|mut c| {
             c.drawn_shrinkages = crit_main.shrinkages;
             c
@@ -10479,11 +10537,17 @@ fn realise_pairs(model: &BoardModel, opts: &Options, pairs: &Pairs, out: &mut [O
             let su = score(&ru);
             if su.0 < sc.0 || (su.0 == sc.0 && su.1 < sc.1) { ru } else { rc }
         };
-        let vp = diffpair::check(&ctx, &idx, &rz.p_items);
+        let dp_src = |mut v: Vec<draw::Viol>| {
+            for x in v.iter_mut() {
+                x.src.mech = "diff_pair";
+            }
+            v
+        };
+        let vp = dp_src(diffpair::check(&ctx, &idx, &rz.p_items));
         for it in &rz.p_items {
             idx.insert(it);
         }
-        let vn = diffpair::check(&ctx, &idx, &rz.n_items);
+        let vn = dp_src(diffpair::check(&ctx, &idx, &rz.n_items));
         for it in &rz.n_items {
             idx.insert(it);
         }
@@ -10734,8 +10798,24 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
         _ => None,
     };
     let mut exits_of: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    // draw-absorb A0: the connection of each drawn router wire (its items carry the wire), for the
+    // connection a violation's copper hits.
+    let wire_conn: BTreeMap<usize, usize> = if out.iter().any(|o| o.routed && !o.viol.is_empty()) {
+        out.iter().enumerate().filter(|(_, o)| o.routed).flat_map(|(ci, o)| o.items.iter().filter_map(move |it| match it {
+            Item::Track(t) => t.wire.map(|w| (w, ci)),
+            Item::Via(v) => v.wire.map(|w| (w, ci)),
+        })).collect()
+    } else {
+        BTreeMap::new()
+    };
+    let srcs: BTreeMap<usize, &[draw::Viol]> = out.iter().enumerate().filter(|(_, o)| o.routed).map(|(ci, o)| (ci, o.viol.as_slice())).collect();
+    let mut nth: BTreeMap<usize, usize> = BTreeMap::new();
     for (ci, ev) in viol_events(model, dec, out) {
         let Event::Violation { kind, at, layer, depth_nm, len_nm, against, cause } = &ev else { continue };
+        // viol_events lists a connection's violations in `o.viol` order.
+        let k = nth.entry(ci).or_insert(0);
+        let src = srcs.get(&ci).and_then(|vs| vs.get(*k)).map(|v| &v.src);
+        *k += 1;
         let c = &dec.connections[ci];
         let r = &reports[ci];
         violations.push(crate::route::ViolationReport {
@@ -10758,6 +10838,7 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
                 exits_of.entry(ci).or_insert_with(|| [&c.from, &c.to].into_iter().filter_map(&term_pad).flat_map(|i| crate::route::exit_pins(&pad_keys, i)).collect()),
             )
             .into(),
+            prov: src.map(|x| prov_of(x, against, &wire_conn)),
         });
     }
     let mut diff_pairs = Vec::new();
@@ -10792,6 +10873,32 @@ fn assemble(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &[Ou
         }
     }
     Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations, diff_pairs }
+}
+
+/// draw-absorb A0: the report of a drawn violation's provenance `x` (`against`: what it is too
+/// close to; `wire_conn`: drawn router wire -> connection id). The compass and fault classes are
+/// filled from the whole result ([`super::compass::absorb_meter`]). O(log wires).
+fn prov_of(x: &draw::ViolSrc, against: &str, wire_conn: &BTreeMap<usize, usize>) -> crate::route::ViolProv {
+    let routed = against.starts_with("track of") || against.starts_with("via of") || against.starts_with("arc of");
+    crate::route::ViolProv {
+        mech: x.mech.into(),
+        cand: x.cand.into(),
+        form: x.form.into(),
+        cut: x.cut.into(),
+        run: x.run,
+        wrong_side: x.wrong_side,
+        plan_neck: x.plan_neck,
+        w_nm: x.w_nm.round() as i64,
+        w_min_nm: x.w_min_nm.round() as i64,
+        drawn_w_nm: x.drawn_w_nm.round() as i64,
+        hit: if x.hit_wire.is_some() || routed { "movable" } else { "static" }.into(),
+        hit_wire: x.hit_wire,
+        hit_conn: x.hit_wire.and_then(|w| wire_conn.get(&w).copied()),
+        hit_reserved: x.hit_reserved,
+        hit_slack_nm: x.hit_slack_nm.map(|v| v.round() as i64),
+        class: String::new(),
+        fclass: String::new(),
+    }
 }
 
 /// The `violation` factor's events of the outcomes `out`, per connection id: one per rule the

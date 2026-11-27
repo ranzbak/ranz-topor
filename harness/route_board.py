@@ -250,6 +250,8 @@ def route_board(board: str, out_dir: Path, *, overrides: dict | None = None, tim
         (out_dir / f"{name}--compass.json").write_text(json.dumps(cps, indent=1))
         m["compass"] = compass_mod.columns(cps)
         m["compass_line"] = compass_mod.summary_line(cps)
+        # draw-absorb A0: drawn violations and KiCad items per fault class F1-F7 (engine meter)
+        m["draw_absorb"] = cps.get("absorb")
     except Exception as e:  # noqa: BLE001 - a metric, never a failed run
         m["compass"] = None
         m["compass_error"] = f"{type(e).__name__}: {e}"
