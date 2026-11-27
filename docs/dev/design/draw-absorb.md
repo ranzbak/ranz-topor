@@ -346,12 +346,16 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
     that cut base, not a code regression. Check "N cycles (picked run)" before comparing real qmtech numbers.)
   - Real KiCad Cleanup (Xephyr, all options), det and real, qm and esp: it deletes no copper that main keeps.
 
-- **Pending user decision: the one-stretch step (`a1_finish`, `one_neck_stretch`).** A1's own step necks a run on to
-  its end (via, T, pad) in one stretch. Where main's `monotone_necks` (via wires only, neck-regrow) would stop short,
-  it necks more: qmtech ADV_AVDD T -> via, 0.19 mm more of a 0.28 mm supply net; DRC equal. Options: keep, gate like
-  `monotone_necks` with `neck_from_pad`, or drop. Today's behaviour is pinned by
-  `a1_necks_a_run_to_its_via_in_one_stretch` (kills mutant mono_off); mid-slot use by
-  `a_forced_run_with_four_hit_spots_uses_all_four_mid_slots` (kills mutant mid_zone_3).
+- **Decided (user 2026-11-27, branch defaults-flip-a1): one never-widen implementation.** A1's own one-stretch
+  step (`a1_finish` / `one_neck_stretch`, debug arm `dab_mono`) is removed. A1 draws its necks where they hit;
+  main's `Drawer::monotone_necks` (neck-regrow r6), which every drawing path runs after a wire's last run, makes the
+  whole wire's profile monotone from its cheaper end, across its vias, and only with `[search] neck_from_pad` (off:
+  a mid-run neck is wanted, as in main). `a1_finish` keeps the zone-cut merge and the in-pad stub move; the stub
+  move is also done by `monotone_necks` for a pad-end stub it narrows from full width (debug arm `mono_stub`). The
+  r4 test `a1_necks_a_run_to_its_via_in_one_stretch` is re-expressed for `monotone_necks` as
+  `a1_neck_on_a_via_wire_runs_from_the_cheaper_wire_end` (necked from the pad A1 over the gap, 12.71 mm, full
+  width after it across the via; r4's step necked the run on to its via, 18.00 mm). `route.erbs.a1_one_stretch*`
+  are gone; the "neck profile" line counts the joins (and the moved stubs).
 
 **A1b as built (2026-11-27): `[drawing] reserved_keep_neck`**, default false (since 0.5.0, unreleased); off = main
 copper (hash on 4 boards).

@@ -507,22 +507,28 @@ fn a_forced_run_with_four_hit_spots_uses_all_four_mid_slots() {
     assert!((ts[4].1 - 1_417_418.0).abs() < 300.0, "the first necked track: {} nm", ts[4].1);
 }
 
-/// vfy-draw-absorb r3 survivor `mono_off` (`a1_finish` without `one_neck_stretch`; arm
-/// `TOPO_FD45_OFF=dab_mono`): pins A1's own one-stretch step. One gap at x 15 mm and B1 on the
-/// other layer (the run A1 -> via -> B1): the hit zone's neck is a stretch in mid-run; A1 reaches
-/// it on to the run's end (the via), 18.00 mm at 0.1 mm and the B.Cu run at 0.25 mm. Without the
-/// step the run keeps 5.29 mm at full width before the via (neck, full width, via: widens again
-/// after the neck; the supply-net case on qmtech, ADV_AVDD T -> via, 0.19 mm at 0.28 mm).
-/// DECISION PENDING (user): keep this step, gate it like `monotone_necks` with `neck_from_pad`,
-/// or drop it (docs/dev/design/draw-absorb.md); this test pins today's behaviour.
+/// defaults-flip-a1 (user 2026-11-27: one never-widen implementation; re-expresses r4's
+/// `a1_necks_a_run_to_its_via_in_one_stretch`, which pinned A1's own per-run one-stretch step,
+/// now removed). One gap at x 15 mm and B1 on the other layer (the wire A1 -> via -> B1): the hit
+/// zone's neck lies in mid-run. A1 draws it there; `Drawer::monotone_necks` (main's step for every
+/// wire, `[search] neck_from_pad`) then makes the whole wire's profile monotone from its cheaper
+/// end: necked from the pad A1 over the gap (12.71 mm at 0.1 mm), full width after it, across the
+/// via (5.29 mm F.Cu + 6.00 mm B.Cu at 0.25 mm). r4's step necked run 0 on to its via instead
+/// (18.00 mm at 0.1 mm), 5.29 mm more narrowed copper for the same violations (0). With
+/// `neck_from_pad` off the mid-run neck stays where it is (wanted there, as in main).
 #[test]
-fn a1_necks_a_run_to_its_via_in_one_stretch() {
+fn a1_neck_on_a_via_wire_runs_from_the_cheaper_wire_end() {
     let m = multi_gap(100_000, &[(15.0, 10.0)], true);
     let on = route(&m, &opts_shrink(&opts(), true));
     assert_eq!((on.violations.len(), on.erbs.as_ref().unwrap().forced_shrunk), (0, 1), "{:?}", on.violations);
     let ts = tracks(&on);
-    assert_eq!(ts.iter().map(|t| t.0).collect::<Vec<_>>(), [100_000, 250_000], "one necked stretch, then the other layer's run at full width: {ts:?}");
-    assert!((ts[0].1 / MM - 18.0).abs() < 0.01 && (ts[1].1 / MM - 6.0).abs() < 0.01, "{ts:?}");
+    assert_eq!(ts.iter().map(|t| t.0).collect::<Vec<_>>(), [100_000, 250_000, 250_000], "necked from the pad A1, full width from the gap on: {ts:?}");
+    let mm: Vec<f64> = ts.iter().map(|t| t.1 / MM).collect();
+    assert!((mm[0] - 12.71).abs() < 0.01 && (mm[1] - 5.29).abs() < 0.01 && (mm[2] - 6.0).abs() < 0.01, "{mm:?}");
+    assert!(valleys(&m, &on).is_empty(), "{:?}", chains(&m, &on));
+    let mid = route(&m, &opts_with(&opts_shrink(&opts(), true), &[("neck_from_pad", serde_json::json!(false))]));
+    let w: Vec<i64> = tracks(&mid).iter().map(|t| t.0).collect();
+    assert!(w.len() >= 3 && w[0] == 250_000 && w.contains(&100_000) && w[w.len() - 1] == 250_000, "neck_from_pad off: the neck stays in mid-run: {w:?}");
 }
 
 /// The neck takes the widest width that clears, not the floor: with a floor of 0.05 mm the gap
@@ -811,3 +817,4 @@ fn a_necked_band_that_breaks_a_rule_keeps_its_octilinear_form() {
     assert!(on.violations.len() <= off.violations.len());
     assert_eq!(on.routed, off.routed);
 }
+

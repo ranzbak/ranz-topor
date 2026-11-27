@@ -1686,9 +1686,10 @@ pub struct Options {
     /// plan's own neck against the other band before the gap is kept (the plan necks it there; the
     /// drawing realises that); a forced run (never drop) is necked over the stretches it violates,
     /// down to the net's floor (`State::w_min`), where that removes or shallows its violations.
-    /// Each neck is warned (a shrinkage). r2: one necked stretch per run, from the gap to the
-    /// nearer run end (never widen again after a neck; `joint::one_neck_stretch`), in-pad stubs
-    /// kept off KiCad's in-pad delete, a graded warning per neck on a supply-width net.
+    /// Each neck is warned (a shrinkage). In-pad stubs are kept off KiCad's in-pad delete, and a
+    /// neck on a supply-width net gets a graded warning. Never wider again after a neck: the
+    /// drawing's one step for every wire (`Drawer::monotone_necks`, with `[search] neck_from_pad`)
+    /// reaches the neck on to the cheaper wire end (defaults-flip-a1, user 2026-11-27).
     /// false (default until a verifier) = main's copper.
     pub forced_shrink: bool,
     /// draw-absorb A1b (`[drawing] reserved_keep_neck`, docs/dev/design/draw-absorb.md): a band

@@ -165,11 +165,8 @@ pub struct JointState {
     /// draw-absorb A1 r2: the wires A1 necked (a joint-commit band or a forced run), for the
     /// supply-width neck warning.
     pub a1_wires: BTreeSet<WireId>,
-    /// draw-absorb A1 r2 ([`Drawer::a1_finish`]): A1 runs whose necks were joined into one
-    /// stretch touching a run end (never wider again after a neck), and the length narrowed for it
-    /// (nm); pad-end stubs moved out of KiCad's in-pad delete.
-    pub a1_mono: usize,
-    pub a1_mono_nm: f64,
+    /// draw-absorb A1 r2 ([`Drawer::a1_finish`]): pad-end stubs moved out of KiCad's in-pad
+    /// delete.
     pub a1_stubs: usize,
     /// draw-absorb A1 (`Drawer::shrink_forced`): forced runs necked over their violating stretches
     /// (the severity key strictly better: fewer or shallower violations).
@@ -179,8 +176,6 @@ pub struct JointState {
 /// draw-absorb A1 r2: what [`Drawer::a1_finish`] changed in a run's necked copper.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct A1Fix {
-    /// Length (nm) narrowed to join the necks into one stretch (0: already one).
-    pub mono_nm: f64,
     /// Pad-end stubs moved so KiCad's Cleanup keeps them.
     pub stubs: usize,
 }
@@ -416,8 +411,6 @@ impl<'a> Drawer<'a> {
                         bands[x].pneck = Some(pnr);
                         bands[x].zones = Some(z.ends);
                         self.joint.a1_wires.insert(w);
-                        self.joint.a1_mono += usize::from(fix.mono_nm > 0.0);
-                        self.joint.a1_mono_nm += fix.mono_nm;
                         self.joint.a1_stubs += fix.stubs;
                     }
                     let hs: Vec<usize> = bands[x].items.iter().map(|it| self.commit(it)).collect();
@@ -554,7 +547,7 @@ impl<'a> Drawer<'a> {
     #[allow(clippy::type_complexity)]
     fn neck_band(&self, w: WireId, lid: u32, pts: &[Vec2], pn: &super::exact::Neck, allowed: &dyn Fn(&str) -> bool, dbg: bool) -> Option<(Vec<Item>, (f64, [f64; super::exact::NECK_ZONES]), super::exact::Neck, A1Fix)> {
         let wi = &self.st.wires[w];
-        // r2: the copper as drawn: one neck stretch per run, pad stubs kept ([`Drawer::a1_finish`]).
+        // r2: the copper as drawn: zone cuts merged, pad stubs kept ([`Drawer::a1_finish`]).
         let draw = |nk: &super::exact::Neck, wn: f64| self.a1_finish(w, self.neck_items(w, lid, pts, nk, wn).0);
         let ok = |nk: &super::exact::Neck, wn: f64| {
             let its = draw(nk, wn).0;
@@ -595,45 +588,29 @@ impl<'a> Drawer<'a> {
         (!items.is_empty() && self.track_own_pad_ok(w, &items)).then_some((items, (wn, ls), nk, fix))
     }
 
-    /// draw-absorb A1 r2 (verifier vfy-draw-absorb-r1 F1/F2; user 2026-11-26 "never widen again
-    /// after a neck", lead 2026-11-27): the necked copper `items` of one run of wire `w` (its
-    /// tracks in path order, KiCad frame) as A1 draws it:
-    /// 1. one necked stretch that touches a run end, or the whole run ([`one_neck_stretch`]): a
-    ///    neck in the middle reaches on to the nearer run end (the pad side, neck from pad; a T
-    ///    split or a via where the run ends there), necks that would make two stretches join;
-    /// 2. collinear pieces of one width joined (the zone cuts), as KiCad's Cleanup would;
-    /// 3. a narrowed end stub in an own-net pad that KiCad's Cleanup would delete as a track
+    /// draw-absorb A1 r2 (verifier vfy-draw-absorb-r1 F2): the necked copper `items` of one run
+    /// of wire `w` (its tracks in path order, KiCad frame) as A1 draws it:
+    /// 1. collinear pieces of one width joined (the zone cuts), as KiCad's Cleanup would;
+    /// 2. a narrowed end stub in an own-net pad that KiCad's Cleanup would delete as a track
     ///    inside the pad (its in-pad vertex was placed for the full width, e.g. the pad-tip axis
     ///    point one trace radius in) moved out of that delete ([`stub_out_of_pad`]), so the trace
     ///    still ends at the pad centre (qmtech det s0: 7 ends off centre, up to 0.83 mm).
     ///
-    /// Only narrows, and moves a vertex only inside the full width's copper (a disc of radius
-    /// w/2 round it): the result lies inside the envelope of the same run at full width, so it
-    /// hits nothing new (the callers still check it). Debug arms (`TOPO_FD45_OFF`): `dab_mono`,
-    /// `dab_stub`. O(tracks + end pads of the net).
+    /// The neck profile (never wider again after a neck, user 2026-11-26) is not made here:
+    /// defaults-flip-a1 (user 2026-11-27, one never-widen implementation) leaves it to
+    /// `Drawer::monotone_necks` after the wire's last run, the step every drawing path takes
+    /// (with `[search] neck_from_pad`, across the wire's vias; r2's own per-run step
+    /// `one_neck_stretch` is gone).
+    ///
+    /// Moves a vertex only inside the full width's copper (a disc of radius w/2 round it): the
+    /// result lies inside the envelope of the same run at full width, so it hits nothing new (the
+    /// callers still check it). Debug arm (`TOPO_FD45_OFF`): `dab_stub`. O(tracks + end pads of
+    /// the net).
     pub(super) fn a1_finish(&self, w: WireId, items: Vec<Item>) -> (Vec<Item>, A1Fix) {
         let wi = &self.st.wires[w];
         let mut fix = A1Fix::default();
-        let mut ws = Vec::with_capacity(items.len());
-        let mut ls = Vec::with_capacity(items.len());
-        for it in &items {
-            let Item::Track(t) = it else { return (items, fix) };
-            let (a, b) = (t.prim.start(), t.prim.end());
-            ws.push(t.width as f64);
-            ls.push(f64::hypot(f64::from(a.x) - f64::from(b.x), f64::from(a.y) - f64::from(b.y)));
-        }
-        let mut items = items;
-        if !super::octi::fd45_off("dab_mono") {
-            if let Some(nw) = one_neck_stretch(&ws, &ls) {
-                for (k, it) in items.iter_mut().enumerate() {
-                    if let Item::Track(t) = it {
-                        if nw[k] < ws[k] - 0.5 {
-                            fix.mono_nm += ls[k];
-                            t.width = nw[k].round() as i64;
-                        }
-                    }
-                }
-            }
+        if items.iter().any(|it| !matches!(it, Item::Track(_))) {
+            return (items, fix);
         }
         let mut items = merge_collinear(items);
         if !super::octi::fd45_off("dab_stub") {
@@ -718,33 +695,6 @@ impl<'a> Drawer<'a> {
         }
         CutClass::Junction
     }
-}
-
-/// draw-absorb A1 r2 (verifier vfy-draw-absorb-r1 F1; user 2026-11-07 "never narrow-wide-narrow",
-/// 2026-11-26 "never widen again after a neck"; lead 2026-11-27: at most one necked stretch per
-/// run, touching a run end, or the whole run; the invariant of branch neck-regrow): the track
-/// widths `ws` (lengths `ls`) of one run in path order, narrowed so that seen from one of the run's
-/// ends the width never grows again: the cheaper (narrowed width x length) of the running minimum
-/// from the start (every neck reaches on to the run's end) and from the end (back to its start).
-/// One neck in the middle so goes to the nearer end; two necks that would make two stretches join
-/// over the stretch between them, and the whole run is necked where both ends are. Only narrows,
-/// to widths the run already has. `None`: the run is already one stretch. O(n).
-pub fn one_neck_stretch(ws: &[f64], ls: &[f64]) -> Option<Vec<f64>> {
-    let n = ws.len();
-    let mut fwd = ws.to_vec();
-    for i in 1..n {
-        fwd[i] = fwd[i].min(fwd[i - 1]);
-    }
-    let mut bwd = ws.to_vec();
-    for i in (0..n.saturating_sub(1)).rev() {
-        bwd[i] = bwd[i].min(bwd[i + 1]);
-    }
-    let same = |v: &[f64]| v.iter().zip(ws).all(|(a, b)| (a - b).abs() <= 0.5);
-    if same(&fwd) || same(&bwd) {
-        return None;
-    }
-    let cost = |v: &[f64]| v.iter().zip(ws).zip(ls).map(|((a, b), l)| (b - a) * l).sum::<f64>();
-    Some(if cost(&bwd) < cost(&fwd) { bwd } else { fwd })
 }
 
 /// Consecutive tracks of `items` (one run, path order) with the same net, layer and width that
@@ -836,8 +786,10 @@ pub fn stub_out_of_pad(items: &mut [Item], full_w: f64, in_pad: &dyn Fn(crate::g
 
 /// draw-absorb A1 r2: the necked stretch of one run's tracks `items` (path order, KiCad frame) of
 /// a wire of width `full_w`: `(the run end it touches, math frame; its narrowest width; its
-/// length)`, nm; `None` when nothing is narrower. After [`one_neck_stretch`] there is one stretch,
-/// touching an end (the start when both: the whole run). O(n).
+/// length)`, nm; `None` when nothing is narrower. The point is the run end the neck touches (the
+/// start when both: the whole run), else (a neck in mid-run, which `Drawer::monotone_necks`
+/// reaches on to a wire end where `[search] neck_from_pad` is on) the start of its first narrow
+/// track. O(n).
 pub fn neck_of(items: &[Item], full_w: f64) -> Option<(Vec2, f64, f64)> {
     let tr: Vec<&crate::model::TrackItem> = items.iter().filter_map(|i| if let Item::Track(t) = i { Some(t) } else { None }).collect();
     let narrow = |t: &crate::model::TrackItem| (t.width as f64) < full_w - 0.5;
@@ -849,7 +801,13 @@ pub fn neck_of(items: &[Item], full_w: f64) -> Option<(Vec2, f64, f64)> {
     if len <= 0.0 || !wmin.is_finite() {
         return None;
     }
-    let p = if tr.first().is_some_and(|t| narrow(t)) || !tr.last().is_some_and(|t| narrow(t)) { tr[0].prim.start() } else { tr[tr.len() - 1].prim.end() };
+    let p = if tr.first().is_some_and(|t| narrow(t)) {
+        tr[0].prim.start()
+    } else if tr.last().is_some_and(|t| narrow(t)) {
+        tr[tr.len() - 1].prim.end()
+    } else {
+        tr.iter().find(|t| narrow(t)).map_or(tr[0].prim.start(), |t| t.prim.start())
+    };
     Some((Vec2 { x: f64::from(p.x), y: -f64::from(p.y) }, wmin, len))
 }
 
@@ -870,8 +828,6 @@ pub fn tally<'w>(drawn: impl Iterator<Item = &'w WireOut>, j: &JointState, keep:
         octi_rescued: j.octi_rescued,
         gap_kept: j.gap_kept.len(),
         gap_shrunk: j.gap_shrunk,
-        a1_one_stretch: j.a1_mono,
-        a1_one_stretch_mm: j.a1_mono_nm / 1e6,
         a1_stub_out: j.a1_stubs,
         forced_shrunk: j.a1_forced,
         unnecked: j.unnecked.len(),
@@ -1042,37 +998,10 @@ mod tests {
         assert_eq!(j.lost_to_other, 1);
     }
 
-    // ---- draw-absorb A1 r2: one neck stretch per run, pad stubs out of the in-pad delete ----
+    // ---- draw-absorb A1 r2: zone cuts merged, pad stubs out of the in-pad delete ----
 
     const F: f64 = 250_000.0;
     const N: f64 = 90_000.0;
-
-    /// User rule "never widen again after a neck" (lead 2026-11-27): a neck in the middle goes to
-    /// the nearer run end; a neck at an end, a staircase down from one end and the whole run are
-    /// already one stretch; two necks join over the stretch between them, from the end where that
-    /// narrows less; necks at both ends make the whole run.
-    #[test]
-    fn one_neck_stretch_reaches_the_nearer_run_end() {
-        let l = |v: &[f64]| v.to_vec();
-        // already one stretch
-        assert_eq!(one_neck_stretch(&[N, N, F, F], &[1.0; 4]), None);
-        assert_eq!(one_neck_stretch(&[F, F, N], &[1.0; 3]), None);
-        assert_eq!(one_neck_stretch(&[F, 200_000.0, N], &[1.0; 3]), None, "a staircase down from one end");
-        assert_eq!(one_neck_stretch(&[N, N], &[1.0; 2]), None, "the whole run");
-        assert_eq!(one_neck_stretch(&[F, F], &[1.0; 2]), None);
-        // a mid neck nearer the end: to the end
-        assert_eq!(one_neck_stretch(&[F, F, N, F], &l(&[5.0, 5.0, 1.0, 1.0])), Some(vec![F, F, N, N]));
-        // nearer the start: to the start
-        assert_eq!(one_neck_stretch(&[F, N, F, F], &l(&[1.0, 1.0, 5.0, 5.0])), Some(vec![N, N, F, F]));
-        // by length, not by item count
-        assert_eq!(one_neck_stretch(&[F, F, F, N, F], &l(&[0.1, 0.1, 0.1, 1.0, 3.0])), Some(vec![N, N, N, N, F]));
-        // two mid necks: one stretch over both, from the cheaper end
-        assert_eq!(one_neck_stretch(&[F, N, F, N, F], &l(&[1.0, 1.0, 1.0, 1.0, 9.0])), Some(vec![N, N, N, N, F]));
-        // necks at both ends: the whole run
-        assert_eq!(one_neck_stretch(&[N, F, F, N], &[1.0; 4]), Some(vec![N, N, N, N]));
-        // two widths: the running minimum (never wider again)
-        assert_eq!(one_neck_stretch(&[200_000.0, F, N, F], &l(&[1.0, 1.0, 1.0, 9.0])), Some(vec![N, N, N, F]));
-    }
 
     fn tr(w: f64, a: (i32, i32), b: (i32, i32)) -> Item {
         use crate::geom::quant::{IVec2, TrackPrim};
