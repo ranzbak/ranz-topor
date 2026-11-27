@@ -260,6 +260,14 @@ copper (hash on 4 boards).
     after it take other forms, and USB1 TX0-/TX1-/TXC- detour goes 1.06 -> 1.36.
   - The key stays off. It contradicts Q3 at the tip, and the planned room main's wider copper would take is 0 on
     these boards.
+- **r4, octilinear half only (lead 2026-11-27):** the re-anchor half is dropped. Its tip drop is only metered: the
+  dropped neck is the plan's hook into the pad side, and Q3 wants the pad-axis entry at full width.
+  - Measured (det s0 C1, 5cb24861, vs off): octi_wider 5 -> 0 on qmtech and 1 -> 0 on esp (kept_neck 11 / 1).
+  - DRC, unconnected, vias, detour and every KiCad F class are unchanged on both boards; 0 connections changed.
+    esp copper equals off.
+  - Opt-in, default off.
+  - Fixture: `model-a1b_octi_crop.json`, a public qmtech crop (harness.abstract_crop, window 97.5..105 x
+    49.5..57 mm) where main draws 2 octi_wider forms. Test: `an_octilinear_form_keeps_the_reserved_neck`.
 
 ### A2. Re-taut neighbours of a forced wire (local rubber-band update, RBU)
 - **What.** Before a wire W is forced:
@@ -342,6 +350,19 @@ copper (hash on 4 boards). It lives in `erbs.rs` `band_passes`, after a layer's 
     (134.50, 126.08). shorting_items 7 -> 9.
   - esp: 10 / 10 / 52 / 11, all = main.
   - So the det s0 gain does not carry over to real settings on qmtech, and the key stays off.
+- **The JS2_2 / JS2_3 real-settings cluster (per connection, dab11: the same run again on ccx33 with
+  `TOPO_A3DBG`; its copper equals dab9q).** It is A3's doing, not loop noise:
+  - The plan is the same. JS2_2's copper prefix up to (130.5, 124.4) is identical.
+  - The only pass kept in that area is JS2_6's band (st 198, from U6 pad (143.407, 124.46)). It is pushed off JS2_3's
+    band (model gap 0.131 mm -> 0), and the fixpoint leaves it clean against JS2_2's band. JS2_2's own try (st 199)
+    was reverted.
+  - The loss is in the drawing that follows:
+    - JS2_2's band is unchanged, but next to JS2_6's new copper its octilinear form becomes a 0.3 mm staircase
+      (27.77 -> 28.58 mm). Main drew a free-angle stretch there.
+    - JS2_3, already a forced run on main (6 items), now hits JS2_2's staircase at 10.
+  - A3's step is correct in the band model, so no A3 gate (no-monotone-gates rule). The fault is the octilinear
+    staircase in a full passage next to a forced run: a drawing item (A2 re-taut / octi form), not A3.
+  - PNG: reports/draw-absorb-a3-data/qm-real-00-JS2_2.png.
 - **Gaps left:** most remaining tries do not move the violation. The wall sits at a terminal or settled gate, or the
   push runs into a feature (gap squeeze) and the price reverts it. That is the joint-sweep item below.
 

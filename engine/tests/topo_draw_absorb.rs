@@ -444,3 +444,24 @@ fn a_gap_neck_survives_the_octilinear_form_and_the_reanchor() {
     assert_eq!(on.routed, off.routed);
 }
 
+
+/// A1b octilinear half on a public qmtech crop (window 97.5..105 x 49.5..57 mm, the 0.4 mm net
+/// of wires 6 / 812 on the full board; harness.abstract_crop, one cycle, octilinear): main draws
+/// two reserved-necked bands' octilinear forms wider than reserved (`octi_wider`, 0.67 + 0.74 mm).
+/// With reserved_keep_neck both keep the reserved neck (`kept_neck` 2, no `octi_wider`): more
+/// copper between the floor and the nominal width, no violation added, nothing unrouted.
+#[test]
+fn an_octilinear_form_keeps_the_reserved_neck() {
+    let m = fixture("dvn", "a1b_octi_crop");
+    let o = one_cycle("octilinear");
+    let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
+    let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert_eq!(eo.unnecked_list.iter().filter(|u| u.at == "octi_wider").count(), 2, "{:?}", eo.unnecked_list);
+    assert_eq!(eo.kept_neck, 0);
+    assert!(en.unnecked_list.is_empty() && en.kept_neck == 2, "{:?} kept {}", en.unnecked_list, en.kept_neck);
+    let mid = |r: &RouteResult| tracks(r).iter().filter(|t| t.0 > 150_000 && t.0 < 330_000).map(|t| t.1).sum::<f64>();
+    assert!(mid(&on) > mid(&off) + 0.3 * MM, "necked {} -> {}", mid(&off) / MM, mid(&on) / MM);
+    assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
+    assert_eq!(on.routed, off.routed);
+}
