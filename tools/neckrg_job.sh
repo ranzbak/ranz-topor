@@ -39,8 +39,8 @@ xunit() {  # clippy, targeted release tests, the crop tool's tests, arm and sour
   cargo clippy --release --all-targets > $OUT/clippy.log 2>&1 9>&-; note "clippy rc $?"
   RUST_TEST_THREADS=4 cargo test --release --no-fail-fast $TESTS > $OUT/tests.log 2>&1 9>&-; note "tests rc $?"
   cd $ROOT; python -m pytest -q -p no:cacheprovider tests/test_abstract_crop.py tests/test_engine_surface.py tests/test_docs_links.py tests/plugin/test_config_docs.py > $OUT/pytest-crop.log 2>&1; note "pytest crop rc $?"; cd $ROOT/engine
-  for a in nrg_join nrg_contig nrg_relax nrg_near nrg_edge nrg_ownpad nrg_taut nrg_axis; do
-    TOPO_FD45_OFF=$a cargo test --release --test topo_neck_regrow --test topo_dvn > $OUT/mut-$a.log 2>&1 9>&-; note "mutant arm $a rc $? (want != 0)"
+  for a in ${XARMS:-nrg_join nrg_contig nrg_relax nrg_near nrg_edge nrg_ownpad nrg_taut nrg_axis}; do
+    TOPO_FD45_OFF=$a cargo test --release --test topo_neck_regrow --test topo_dvn --lib > $OUT/mut-$a.log 2>&1 9>&-; note "mutant arm $a rc $? (want != 0)"
   done
   M=$OUT/mut; mkdir -p $M; cp -r $ROOT/engine $M/; cp $ROOT/Cargo.* $M/ 2>/dev/null
   mut() {  # mut NAME FILE SED_EXPR TESTARGS...
@@ -50,6 +50,18 @@ xunit() {  # clippy, targeted release tests, the crop tool's tests, arm and sour
     (cd $M/engine && CARGO_TARGET_DIR=/root/nrg-mut-target cargo test --release "$@" > $OUT/mut-$n.log 2>&1 9>&-); note "mutant $n rc $? (want != 0)"
     cp $ROOT/engine/$f $M/engine/$f
   }
+  if [ -n "${R6MUT:-}" ]; then  # r6: source mutants of the lines this round changed only
+    mut fitcmp src/topo/draw.rs 's/v < b.0 || (v == b.0 \&\& l < b.1 - 1.0)/l < b.1 - 1.0/' --lib topo::draw
+    mut monotie src/topo/draw.rs 's/let pick = if cost(\&pre) <= cost(\&suf)/let pick = if cost(\&pre) < cost(\&suf)/' --lib topo::draw
+    mut monoany src/topo/draw.rs 's/pick.iter().zip(ws).any(|(a, b)| \*a < b - 0.5)/pick.iter().zip(ws).any(|(a, b)| *a < b + 0.5)/' --lib topo::draw
+    mut stretchadj src/topo/draw.rs 's/Some(s) if s.1 + 1 == k => {/Some(s) => {/' --lib topo::draw
+    mut necksrec src/topo/draw.rs 's/if new.is_some() || st.len() != out.necks.len() {/if new.is_some() {/' --lib topo::draw
+    mut neckpos src/topo/draw.rs 's/(if i > 0 \&\& j + 1 == n { at(j, false) } else { at(i, true) }, wn, l)/(at(i, true), wn, l)/' --lib topo::draw
+    mut monopair src/topo/draw.rs 's/ || self.model.rules.pair_disc(wi.net) || super::octi::fd45_off("nrg_mono")/ || super::octi::fd45_off("nrg_mono")/' --lib topo::draw
+    mut monofrompad src/topo/draw.rs 's/if !self.opts.neck_from_pad || self.widths.is_some()/if self.widths.is_some()/' --lib topo::draw
+    mut monoline src/topo/core.rs 's/(s.mono_wires > 0).then/(s.mono_wires >= 0).then/' --lib mono_line
+    return
+  fi
   mut ownpad src/topo/state.rs 's/(ownpad || !inside(k))/true/' --test topo_neck_regrow
   mut taut src/topo/state.rs 's/        if tc.is_none() {/        if false \&\& tc.is_none() {/' --test topo_neck_regrow
   mut axis src/topo/state.rs 's/pad_axis(\&me.poly, me.center, pts\[1\] - pts\[0\])/pad_axis(\&me.poly, me.center, pts[1] - pts[0]).filter(|_| false)/' --test topo_neck_regrow
@@ -60,6 +72,31 @@ C1="--set optimize.runs=1 --set optimize.rounds=1 --set capacity.compass_cut_che
 bunit() { local a=$1 n=$2 pcb=$3; python -m harness.score_runs "$OUT/$a-$n" "$pcb" --only 0 --no-png --threads 4 $C1 > "$OUT/$a-$n.log" 2>&1 9>&-; note "$a-$n rc $?"; }
 case ${1:-} in
   xunit) xunit ;;
+  r6x)  # r6: clippy, targeted tests, the r6 arms + source mutants only, the touched pytest files
+    XARMS="nrg_fitslot nrg_fitcheck nrg_trimcheck nrg_mono nrg_pairjoin" R6MUT=1 xunit
+    cd $ROOT; CI=1 python -m pytest -q -p no:cacheprovider tests/plugin/test_postrun.py tests/plugin/test_messages.py tests/test_abstract_crop.py > $OUT/pytest-r6.log 2>&1; note "pytest r6 rc $?" ;;
+  r6pats)  # r6: the patterns at the default (T) and with [search] exit_taut on (taut), PNGs; then both with TOPO_NECKDBG
+    mkdir -p $P/runs; python - $P/runs/labels.json <<'PY'
+import json, sys
+json.dump({"T": "tip (exit_taut false)", "taut": "tip, exit_taut true"}, open(sys.argv[1], "w"))
+PY
+    pats T; pats taut --set search.exit_taut=true
+    for a in T taut; do for n in $NAMES; do d=$OUT/patdbg/$a/$n; mkdir -p $d
+      ( [ $a = taut ] && set -- --set search.exit_taut=true || set --; TOPO_NECKDBG=1 tools/route_board.sh $P/boards/$n/problem/$n.kicad_pcb $d/s0 --keep-copper --no-png --set optimize.runs=1 --set optimize.rounds=1 "$@" > $d/route.log 2>&1 9>&- ); note "patdbg $a $n rc $?"
+    done; done ;;
+  dbg2)  # the verifier's pending debug bucket 2 + doc tests (vfy-dvn6 split)
+    B=scratch/boards/vfy-dvn6; a=$(python3 $B/dbgsplit.py $B/dbgtimes.txt 3 2 2> $OUT/dbg2.split)
+    CARGO_TARGET_DIR=/root/nrg6-dbg-target RUST_TEST_THREADS=4 cargo test --workspace --no-fail-fast $a > $OUT/cargo-debug2.log 2>&1 9>&-; note "debug2 rc $?"
+    CARGO_TARGET_DIR=/root/nrg6-dbg-target cargo test --workspace --doc > $OUT/cargo-debugDoc.log 2>&1 9>&-; note "debugDoc rc $?" ;;
+  pyfull) CI=1 python -m pytest -q -rs -p no:cacheprovider > $OUT/pytest-full.log 2>&1 9>&-; note "pytest full rc $?" ;;
+  r6)  # r6 TAG: 5 hzq units, the long ones first
+    T=$2
+    hzq run --threads 4 --name $T-dbg2 -- bash $ROOT/tools/neckrg_job.sh dbg2 > $OUT/u-dbg2.log 2>&1 9>&- & sleep 3
+    hzq run --threads 4 --name $T-py -- bash $ROOT/tools/neckrg_job.sh pyfull > $OUT/u-py.log 2>&1 9>&- & sleep 3
+    hzq run --threads 4 --name $T-b1 -- bash $ROOT/tools/neckrg_job.sh bunits qm ep > $OUT/u-b1.log 2>&1 9>&- & sleep 3
+    hzq run --threads 4 --name $T-b2 -- bash $ROOT/tools/neckrg_job.sh bunits esp wic > $OUT/u-b2.log 2>&1 9>&- & sleep 3
+    hzq run --threads 4 --name $T-x -- bash -c "bash $ROOT/tools/neckrg_job.sh r6x; bash $ROOT/tools/neckrg_job.sh r6pats" > $OUT/u-x.log 2>&1 9>&- &
+    wait; find $OUT -name '*.log' -size +20M -exec gzip -9 {} + 2>/dev/null; note "all done" ;;
   espdbg)  # esp det s0 C1 with TOPO_NECKDBG (the plan's exit decisions)
     ESP=scratch/boards/esp-rust-board/4907cec7fec3/esp-rust-board.kicad_pcb; mkdir -p $OUT/espdbg
     TOPO_NECKDBG=1 tools/route_board.sh $ESP $OUT/espdbg/s0 --no-png --set optimize.runs=1 --set optimize.rounds=1 > $OUT/espdbg/route.log 2>&1 9>&-; note "espdbg rc $?"

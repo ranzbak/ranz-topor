@@ -120,3 +120,24 @@ def test_crop_classes_carry_the_hand_widths_of_default_nets(tmp_path):
         assert of == {"": "Default", "SDA": "crop_w127um,Default", "SDA__crop1": "crop_w127um,Default",
                       "/S/D": "crop_w127um,Default", "VCC1": "PWR,Default", "WIDE": "Default"}
     assert ac.carry_widths(tmp_path / "missing.kicad_pro", pcbs, hand, []) == {}
+
+
+def test_crop_classes_of_widths_rounding_to_the_same_um_stay_apart(tmp_path):
+    """Two hand widths that round to the same um (0.1270 and 0.1274 mm) get a class each, by nm (verifier neck-regrow r5
+    finding 6: the second width silently took the first one's class); a lone width keeps its um name."""
+    from toporlib.rules import netclass_of_from_pro
+
+    src = tmp_path / "src.kicad_pro"
+    src.write_text(json.dumps({"net_settings": {
+        "classes": [{"name": "Default", "track_width": 0.25, "clearance": 0.15, "priority": 2147483647}],
+        "netclass_assignments": {}, "netclass_patterns": []}}))
+    pcb = tmp_path / "a" / "x.kicad_pcb"
+    pcb.parent.mkdir()
+    hand = {"A": 127_000, "B": 127_400, "C": 150_000}
+    assert ac.carry_widths(src, [pcb], hand, []) == hand
+    pro = json.loads(pcb.with_suffix(".kicad_pro").read_text())
+    cls = {c["name"]: c["track_width"] for c in pro["net_settings"]["classes"]}
+    assert cls["crop_w127000nm"] == pytest.approx(0.127) and cls["crop_w127400nm"] == pytest.approx(0.1274)
+    assert cls["crop_w150um"] == pytest.approx(0.15) and "crop_w127um" not in cls
+    of = netclass_of_from_pro(pro, ["A", "B", "C"])
+    assert (of["A"], of["B"], of["C"]) == ("crop_w127000nm,Default", "crop_w127400nm,Default", "crop_w150um,Default")

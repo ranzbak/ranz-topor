@@ -618,6 +618,57 @@ fn kicad_pt(p: Vec2) -> IVec2 {
     IVec2 { x: p.x.round() as i32, y: (-p.y).round() as i32 }
 }
 
+/// Length of a track primitive (nm; an arc by its two chords through the mid point).
+fn prim_len(p: &TrackPrim) -> f64 {
+    let d = |a: IVec2, b: IVec2| ((a.x as f64 - b.x as f64).powi(2) + (a.y as f64 - b.y as f64).powi(2)).sqrt();
+    match *p {
+        TrackPrim::Seg { a, b } => d(a, b),
+        TrackPrim::Arc { start, mid, end } => d(start, mid) + d(mid, end),
+    }
+}
+
+/// neck-regrow r6: the track widths `ws` (nm, lengths `ls`, in order from one end of a wire to
+/// the other) made monotone by narrowing only, or `None` when they are monotone already (within
+/// 0.5 nm). Of the two narrowings, the running minimum from the start (never wider again towards
+/// the end) and from the end, the one that narrows less (sum of narrowed width x length; the
+/// running minimum from the start on a tie). A narrow | full | narrow profile becomes one neck
+/// over the whole wire at the end necks' widths. O(n).
+pub(super) fn monotone_widths(ws: &[f64], ls: &[f64]) -> Option<Vec<f64>> {
+    let n = ws.len();
+    let mut pre = ws.to_vec();
+    for i in 1..n {
+        pre[i] = pre[i].min(pre[i - 1]);
+    }
+    let mut suf = ws.to_vec();
+    for i in (0..n.saturating_sub(1)).rev() {
+        suf[i] = suf[i].min(suf[i + 1]);
+    }
+    let cost = |v: &[f64]| ws.iter().zip(v).zip(ls).map(|((a, b), l)| (a - b) * l).sum::<f64>();
+    let pick = if cost(&pre) <= cost(&suf) { pre } else { suf };
+    pick.iter().zip(ws).any(|(a, b)| *a < b - 0.5).then_some(pick)
+}
+
+/// neck-regrow r6: the necked stretches of a wire's tracks (widths `ws` nm, lengths `ls`, in
+/// path order): every maximal run of tracks narrower than `nominal` (by more than 0.5 nm), as
+/// `(first track, last track, narrowest width, length)`. O(n).
+pub(super) fn neck_stretches(ws: &[f64], ls: &[f64], nominal: f64) -> Vec<(usize, usize, f64, f64)> {
+    let mut out: Vec<(usize, usize, f64, f64)> = Vec::new();
+    for (k, (&x, &l)) in ws.iter().zip(ls).enumerate() {
+        if x >= nominal - 0.5 {
+            continue;
+        }
+        match out.last_mut() {
+            Some(s) if s.1 + 1 == k => {
+                s.1 = k;
+                s.2 = s.2.min(x);
+                s.3 += l;
+            }
+            _ => out.push((k, k, x, l)),
+        }
+    }
+    out
+}
+
 /// A track item for the segment `a -> b` (math frame in, KiCad frame out).
 /// Clearance a via of `net` (copper diameter `d`, drill `drill`, nm) demands around its copper
 /// disc: the net's copper clearance, or more where the hole clearance to its drill
@@ -727,6 +778,10 @@ pub struct DrawStats {
     pub forced_free_runs: usize,
     pub forced_free_stretches: usize,
     pub forced_free_mm: f64,
+    /// neck-regrow r6 ([`Drawer::monotone_necks`]): wires whose tracks were narrowed to a
+    /// monotone width profile (never wider again after a neck) and the narrowed length (mm).
+    pub mono_wires: usize,
+    pub mono_mm: f64,
     /// M-45: runs redrawn octilinear; octilinear runs the checker rejected (the taut run kept);
     /// seconds in the octilinear search.
     pub octi_ok: usize,
@@ -4397,8 +4452,7 @@ impl<'a> Drawer<'a> {
                             let mut zones = (*pn, wmin, self.neck_items(w, lid, &pts, pn, pn.min_w).1);
                             if vs.is_empty() {
                                 if let Some((wn, _, _)) = self.plan_neck_run(w, lid, &pts, pn) {
-                                    let tz = self.neck_out_of_pads(w, lid, &pts, self.trim_neck(w, lid, &pts, pn, wn));
-                                    let (its, ls) = self.neck_items(w, lid, &pts, &tz, wn);
+                                    let (tz, its, ls) = self.trim_checked(w, lid, &pts, pn, wn);
                                     if self.track_own_pad_ok(w, &its) {
                                         items = its;
                                         zones = (tz, wn, ls);
@@ -4492,6 +4546,8 @@ impl<'a> Drawer<'a> {
                 return out;
             }
         }
+        // neck-regrow r6: never wider again after a neck, along the whole wire (its runs and vias).
+        self.monotone_necks(w, &mut out, &committed);
         // exist-term: the planned leads of continued dangling ends (the wire's terminal is the
         // lead's end; the lead joins it to the hand-started track along its direction).
         let bd = self.b;
@@ -5091,6 +5147,85 @@ impl<'a> Drawer<'a> {
         (items, lens)
     }
 
+    /// neck-regrow r6 (verifier r5 finding 4, lead r6 brief 2): the drawn wire `out` never gets
+    /// wider again after a neck, along the whole wire from end `a` to end `b`, across its vias
+    /// too (user 2026-11-07 never narrow-wide-narrow, 2026-11-26 never widen after a neck). Each
+    /// run is necked on its own (`plan_neck_run`: full width first, the plan's zones trimmed per
+    /// run), so a via wire whose both ends needed a neck (`plan_neck`'s whole-wire zone, option
+    /// a) could come out narrow | full | narrow across its vias. Its track widths are made
+    /// monotone by narrowing only ([`monotone_widths`]: the cheaper of the running minimum from
+    /// either end, by narrowed width x length): narrower copper keeps every clearance it had and
+    /// grazes no own-net pad it did not graze (`track_own_pad_ok` only gains from a smaller half
+    /// width), so no rule breaks; the wire keeps its geometry, and its widths are ones it already
+    /// has (at or above the neck floor). Then the wire's necked stretches are read off its copper
+    /// (one entry per contiguous stretch: a whole-wire neck over several runs is one stretch, so
+    /// the whole-supply warning sees it; a narrowed stretch nobody recorded gets its entry).
+    /// Not for a coupled pair's envelope (its end necks are the fan-out zones), per-segment
+    /// widths (`Drawer::widths`), or `neck_from_pad = false` (necks in the middle are wanted
+    /// there). Debug arm `TOPO_FD45_OFF=nrg_mono`: off. O(tracks).
+    fn monotone_necks(&mut self, w: WireId, out: &mut WireOut, committed: &[usize]) {
+        let wi = &self.st.wires[w];
+        if !self.opts.neck_from_pad || self.widths.is_some() || self.model.rules.pair_disc(wi.net) || super::octi::fd45_off("nrg_mono") {
+            return;
+        }
+        let n = out.items.len();
+        if n == 0 || n != committed.len() {
+            return;
+        }
+        let mut ws = Vec::with_capacity(n);
+        let mut ls = Vec::with_capacity(n);
+        for it in &out.items {
+            let Item::Track(t) = it else { return };
+            ws.push(t.width as f64);
+            ls.push(prim_len(&t.prim));
+        }
+        if ws.iter().all(|&x| x >= wi.w - 0.5) {
+            return;
+        }
+        let new = monotone_widths(&ws, &ls);
+        if let Some(nw) = &new {
+            let narrowed: Vec<Item> = out
+                .items
+                .iter()
+                .zip(nw)
+                .map(|(it, &x)| match it {
+                    Item::Track(t) if x < t.width as f64 - 0.5 => Item::Track(TrackItem { width: x.round() as i64, ..t.clone() }),
+                    other => other.clone(),
+                })
+                .collect();
+            for (k, it) in narrowed.into_iter().enumerate() {
+                if nw[k] < ws[k] - 0.5 {
+                    self.stats.mono_mm += ls[k] / 1e6;
+                    self.recommit(committed[k], &it);
+                    out.items[k] = it;
+                    ws[k] = nw[k].round();
+                }
+            }
+            self.stats.mono_wires += 1;
+            if std::env::var("TOPO_NECKDBG").is_ok() {
+                eprintln!("NECKMONO wire {w} narrowed to a monotone profile: {:?}", ws.iter().map(|x| (x / 1e3).round()).collect::<Vec<_>>());
+            }
+        }
+        let st = neck_stretches(&ws, &ls, wi.w);
+        if new.is_some() || st.len() != out.necks.len() {
+            let at = |k: usize, start: bool| -> Vec2 {
+                let Item::Track(t) = &out.items[k] else { unreachable!("tracks only") };
+                let p = if start { t.prim.start() } else { t.prim.end() };
+                Vec2 { x: p.x as f64, y: -(p.y as f64) }
+            };
+            out.necks = st.iter().map(|&(i, j, wn, l)| (if i > 0 && j + 1 == n { at(j, false) } else { at(i, true) }, wn, l)).collect();
+        }
+    }
+
+    /// Replace the copper of `handle` by `item` (same handle: the run's crossings and the
+    /// rollback lists keep pointing at it).
+    fn recommit(&mut self, handle: usize, item: &Item) {
+        self.uncommit(handle);
+        let i = self.idx.insert(item);
+        let e = self.add_dynamic(item);
+        self.handles[handle] = (i, e);
+    }
+
     /// The run drawn with the plan's necks (M-C) at the widest width in `[floor, nominal]` the
     /// checker accepts (TopoR 6.3 manual p. 56: the minimum width only where needed); `None`
     /// when even the floor is rejected. Returns `(width, items, necked length per zone)`.
@@ -5120,6 +5255,16 @@ impl<'a> Drawer<'a> {
         let wn = lo.floor().max(neck.min_w);
         let nk = if self.opts.neck_trim { self.fit_neck(w, lid, pts, neck, wn) } else { *neck };
         let (items, lens) = self.neck_items(w, lid, pts, &nk, wn);
+        // neck-regrow r6 (verifier r5 finding 1): the caller takes these items as legal, so the
+        // fitted zones are checked; where they break a rule the plan's zones (which passed at
+        // `wn` above) are drawn instead. Never a violation without a report.
+        if nk.ends != neck.ends && !super::octi::fd45_off("nrg_fitcheck") && !self.checker.check_against(&self.idx, &items, &[]).violations.is_empty() {
+            if std::env::var("TOPO_NECKDBG").is_ok() {
+                eprintln!("NECKFITBAD wire {w} wn {wn:.0}: the fitted zones break a rule, the plan's zones are drawn");
+            }
+            let (items, lens) = self.neck_items(w, lid, pts, neck, wn);
+            return Some((wn, items, lens));
+        }
         Some((wn, items, lens))
     }
 
@@ -5173,20 +5318,29 @@ impl<'a> Drawer<'a> {
         let ext = |c: Vec2| pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0;
         let len_of = |n: &super::exact::Neck| self.neck_items(w, lid, pts, n, wn).1.iter().sum::<f64>();
         // A zone over the whole wire: from the end where the shorter neck does.
+        // neck-regrow r6 (verifier r5 finding 1, esp USB_D-): the candidate from end `a` is zone 0,
+        // the one from end `b` zone 1 (`neck_items` narrows zone 0 only as the prefix of a run
+        // that starts at `a`, zone 1 only as the suffix of a run that ends at `b`). r5 put both in
+        // the whole-wire zone's slot 0: from `b` on the last run of a via wire it narrowed nothing,
+        // `trim_neck` then dropped it (no violation more than its own base), and the shortest
+        // "neck" won, length 0, the run at full width with its violations. A candidate is judged
+        // by its violations first, then by its necked length.
         let mut base = *neck;
         if let Some(i) = neck.ends.iter().position(|z| z.is_some_and(|(_, r)| !r.is_finite())) {
             let pr = &self.b.proj;
-            let mut best: Option<(f64, super::exact::Neck)> = None;
-            for c in [pr.pos[wi.a], pr.pos[wi.b]] {
+            let nv = |n: &super::exact::Neck| self.checker.check_against(&self.idx, &self.neck_items(w, lid, pts, n, wn).0, &[]).violations.len();
+            let mut best: Option<(usize, f64, super::exact::Neck)> = None;
+            for (k, c) in [(0usize, pr.pos[wi.a]), (1, pr.pos[wi.b])] {
                 let mut n = *neck;
-                n.ends[i] = Some((c, ext(c)));
+                n.ends[i] = None;
+                n.ends[if super::octi::fd45_off("nrg_fitslot") { i } else { k }] = Some((c, ext(c)));
                 let t = self.trim_neck(w, lid, pts, &n, wn);
-                let l = len_of(&t);
-                if best.as_ref().is_none_or(|b| l < b.0 - 1.0) {
-                    best = Some((l, n));
+                let (v, l) = (nv(&t), len_of(&t));
+                if best.as_ref().is_none_or(|b| v < b.0 || (v == b.0 && l < b.1 - 1.0)) {
+                    best = Some((v, l, n));
                 }
             }
-            base = best.map_or(base, |b| b.1);
+            base = best.map_or(base, |b| b.2);
         }
         let mut nk = self.trim_neck(w, lid, pts, &base, wn);
         let trimmed_dbg = nk;
@@ -5283,6 +5437,24 @@ impl<'a> Drawer<'a> {
             nk.ends[i] = Some((c, hi));
         }
         nk
+    }
+
+    /// The plan's zones `neck` of the run `pts` necked to `wn` (at which they pass the checker)
+    /// trimmed to the stretch this geometry needs ([`Drawer::trim_neck`], then
+    /// [`Drawer::neck_out_of_pads`]), with their items and necked lengths. neck-regrow r6: when
+    /// the trimmed zones break a rule (a whole-wire zone on a run that touches neither end of the
+    /// wire narrows nothing once it is a circle round end `a`), `neck` itself: the caller takes
+    /// the copper as legal, never silently otherwise. Debug arm `TOPO_FD45_OFF=nrg_trimcheck`:
+    /// unchecked (r5). O(zones x 13 checks of the run).
+    #[allow(clippy::type_complexity)]
+    fn trim_checked(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> (super::exact::Neck, Vec<Item>, [f64; super::exact::NECK_ZONES]) {
+        let tz = self.neck_out_of_pads(w, lid, pts, self.trim_neck(w, lid, pts, neck, wn));
+        let (its, ls) = self.neck_items(w, lid, pts, &tz, wn);
+        if tz.ends != neck.ends && !super::octi::fd45_off("nrg_trimcheck") && !self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() {
+            let (its, ls) = self.neck_items(w, lid, pts, neck, wn);
+            return (*neck, its, ls);
+        }
+        (tz, its, ls)
     }
 
     /// draw-via-neck r6 ([`neck_out_of_pad`]) at both pad ends of the run `pts` of wire `w` on
@@ -6726,5 +6898,233 @@ mod tests {
         assert!(k >= 1 && got.len() < run.len(), "part 2 straightened: {k} {got:?}");
         assert!(east(got[0], got[1]) && (got[1] - got[0]).len() + 1e3 >= 0.3 * FMM, "part 2: A's exit leg turned or cut: {got:?}");
         assert!(octilinear(&got), "{got:?}");
+    }
+
+
+    /// neck-regrow r6: the fixture of the whole-wire neck tests: wire A (5, 15) - B (35, 15) of
+    /// net 1 at 0.25 mm and net-2 tracks (0.1 mm) 0.33 mm above and below y = 15 over `xs`:
+    /// the wire's 0.25 mm breaks their 0.2 mm clearance there (0.375 needed), 0.1 mm passes
+    /// (0.3 needed). The whole-wire zone of `plan_neck` (both ends necked, option a), floor 0.1.
+    fn fx_whole_neck(m: &BoardModel, xs: &[(f64, f64)], f: impl FnOnce(&mut Drawer, WireId, super::super::exact::Neck)) {
+        let b = super::super::board::build(m, &super::super::board::BuildOpts::default()).unwrap();
+        let pr = &b.proj;
+        let o = Options::default();
+        let ck = Checker::new(m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..pr.obstacles.len()).find(|&i| (pr.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(5.0, 15.0), obs(35.0, 15.0));
+        let mut dr = Drawer::new(m, &o, &b, &st, &ck);
+        for &(x0, x1) in xs {
+            for y in [15.0 - 0.33, 15.0 + 0.33] {
+                dr.commit(&track_item(2, 0, 0.1 * FMM, fp(x0, y), fp(x1, y), None));
+            }
+        }
+        let mut ends = [None; super::super::exact::NECK_ZONES];
+        ends[0] = Some((pr.pos[st.wires[w].a], f64::INFINITY));
+        f(&mut dr, w, super::super::exact::Neck { min_w: 0.1 * FMM, ends });
+    }
+
+    /// Track pieces `(width mm, x0 mm, x1 mm)` of horizontal items.
+    fn widths_along(items: &[Item]) -> Vec<(f64, f64, f64)> {
+        items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Track(TrackItem { width, prim: TrackPrim::Seg { a, b }, .. }) => Some((*width as f64 / FMM, f64::from(a.x.min(b.x)) / FMM, f64::from(a.x.max(b.x)) / FMM)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// neck-regrow r6 (verifier r5 finding 1, esp USB_D- U4.20 -> U3.26): the last run of a via
+    /// wire (from its via at (20, 15) to end B) with the plan's whole-wire zone and the bottleneck
+    /// at B. `fit_neck` trims the zone from B as a suffix of the run (zone 1): legal copper,
+    /// narrow only near B. r5 put the candidate from B in zone 0 (a prefix from A, which this run
+    /// does not touch): nothing narrowed, the zone dropped, the run drawn at full width with its
+    /// violations and no neck recorded. Kills `TOPO_FD45_OFF=nrg_fitslot` (then the plan's whole
+    /// run is necked, the fit check's fallback) and, with it, `nrg_fitcheck` (silent violations).
+    #[test]
+    fn a_whole_wire_neck_on_the_last_run_of_a_via_wire_is_trimmed_from_its_end() {
+        let m = fx_model(&[(1, 5.0, 15.0), (1, 35.0, 15.0)]);
+        fx_whole_neck(&m, &[(31.0, 34.0)], |dr, w, neck| {
+            let pts = vec![fp(20.0, 15.0), fp(35.0, 15.0)];
+            assert!(!dr.checker.check_against(&dr.idx, &dr.run_items(w, 0, &pts), &[]).violations.is_empty(), "precondition: full width breaks a rule");
+            let (wn, items, lens) = dr.plan_neck_run(w, 0, &pts, &neck).expect("the floor passes");
+            assert!(dr.checker.check_against(&dr.idx, &items, &[]).violations.is_empty(), "legal: {:?}", widths_along(&items));
+            assert!(wn < 0.25 * FMM - 0.5, "necked: {wn}");
+            let pcs = widths_along(&items);
+            assert!(pcs.iter().filter(|p| p.0 < 0.25 - 1e-6).all(|p| p.1 > 29.0), "narrow only near B: {pcs:?}");
+            assert!(pcs.iter().any(|p| p.0 > 0.25 - 1e-6 && p.1 < 25.0), "full width from the via: {pcs:?}");
+            assert!(lens[1] > 0.0 && lens[0] == 0.0, "the neck is zone 1's (end B): {lens:?}");
+        });
+    }
+
+    /// neck-regrow r6: a middle run of a via wire (via (10, 15) to via (30, 15)) with the
+    /// whole-wire zone and a bottleneck in its middle: neither end's trim narrows it (the run
+    /// touches neither end), so the fitted zones would draw it at full width through the
+    /// bottleneck. `plan_neck_run` checks the fitted copper and draws the plan's zones instead:
+    /// the whole run necked, legal; so does `trim_checked` (the forced path's trim). Kills
+    /// `TOPO_FD45_OFF=nrg_fitcheck` and `nrg_trimcheck`.
+    #[test]
+    fn a_fitted_neck_that_breaks_a_rule_falls_back_to_the_plan_zones() {
+        let m = fx_model(&[(1, 5.0, 15.0), (1, 35.0, 15.0)]);
+        fx_whole_neck(&m, &[(18.0, 22.0)], |dr, w, neck| {
+            let pts = vec![fp(10.0, 15.0), fp(30.0, 15.0)];
+            let (wn, items, _) = dr.plan_neck_run(w, 0, &pts, &neck).expect("the floor passes");
+            assert!(dr.checker.check_against(&dr.idx, &items, &[]).violations.is_empty(), "legal: {:?}", widths_along(&items));
+            assert!(widths_along(&items).iter().all(|p| (p.0 - wn / FMM).abs() < 1e-6), "the whole run at the neck width: {:?}", widths_along(&items));
+            // The forced runs' trim (`trim_checked`, a forced run that came out legal) likewise.
+            let (_, its, _) = dr.trim_checked(w, 0, &pts, &neck, wn);
+            assert!(dr.checker.check_against(&dr.idx, &its, &[]).violations.is_empty(), "trim_checked legal: {:?}", widths_along(&its));
+        });
+    }
+
+    /// neck-regrow r6: monotone width profiles by narrowing only, the cheaper end first.
+    #[test]
+    fn monotone_widths_narrows_the_valley_from_the_cheaper_end() {
+        let l1 = [1.0; 4];
+        // narrow | full | full | narrow: the running minimum from B narrows less (260 < 320).
+        assert_eq!(monotone_widths(&[100.0, 250.0, 250.0, 120.0], &l1), Some(vec![100.0, 120.0, 120.0, 120.0]));
+        assert_eq!(monotone_widths(&[120.0, 250.0, 250.0, 100.0], &l1), Some(vec![120.0, 120.0, 120.0, 100.0]));
+        // Lengths weigh: a long first track narrowed costs more.
+        assert_eq!(monotone_widths(&[100.0, 250.0, 120.0], &[1.0, 1.0, 10.0]), Some(vec![100.0, 120.0, 120.0]));
+        assert_eq!(monotone_widths(&[100.0, 250.0, 90.0], &[1.0, 10.0, 1.0]), Some(vec![100.0, 100.0, 90.0]));
+        // Monotone already (a pad-end neck, the whole wire, full width): nothing.
+        assert_eq!(monotone_widths(&[100.0, 250.0, 250.0], &[1.0; 3]), None);
+        assert_eq!(monotone_widths(&[250.0, 250.0, 100.0], &[1.0; 3]), None);
+        assert_eq!(monotone_widths(&[100.0, 100.0], &[1.0; 2]), None);
+        assert_eq!(monotone_widths(&[250.0, 100.4, 100.0, 250.0, 100.2], &[1.0; 5]), Some(vec![250.0, 100.4, 100.0, 100.0, 100.0]));
+        assert_eq!(monotone_widths(&[250.0, 100.0, 100.4], &[1.0; 3]), None, "within 0.5 nm");
+        assert_eq!(monotone_widths(&[], &[]), None);
+        // wide | narrow | wide (equal price both ways): from the start (the tie).
+        assert_eq!(monotone_widths(&[250.0, 100.0, 250.0], &[1.0; 3]), Some(vec![250.0, 100.0, 100.0]));
+    }
+
+    /// neck-regrow r6: necked stretches are the maximal runs of tracks below the nominal width.
+    #[test]
+    fn neck_stretches_are_the_maximal_narrow_runs() {
+        let ls = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(neck_stretches(&[100.0, 120.0, 250.0, 110.0, 250.0], &ls, 250.0), vec![(0, 1, 100.0, 3.0), (3, 3, 110.0, 4.0)]);
+        assert_eq!(neck_stretches(&[249.6, 250.0, 250.0, 250.0, 249.4], &ls, 250.0), vec![(4, 4, 249.4, 5.0)], "within 0.5 nm is full width");
+        assert_eq!(neck_stretches(&[100.0; 5], &ls, 250.0), vec![(0, 4, 100.0, 15.0)]);
+        assert!(neck_stretches(&[250.0; 5], &ls, 250.0).is_empty());
+    }
+
+    /// The tracks `(width mm, x0, x1)` of a drawn wire along y = 15 from A (5) to B (35), committed.
+    fn fx_profile(dr: &mut Drawer, w: WireId, pcs: &[(f64, f64, f64)]) -> (WireOut, Vec<usize>) {
+        let items: Vec<Item> = pcs.iter().map(|&(wd, x0, x1)| track_item(1, 0, wd * FMM, fp(x0, 15.0), fp(x1, 15.0), Some(w))).collect();
+        let handles: Vec<usize> = items.iter().map(|it| dr.commit(it)).collect();
+        (WireOut { wire: w, ok: true, items, handles: handles.clone(), ..WireOut::default() }, handles)
+    }
+
+    /// neck-regrow r6 (lead r6 brief 2, verifier r5 finding 4): a via wire drawn narrow | full |
+    /// narrow across its vias (each run fitted on its own) is narrowed to one monotone neck; its
+    /// copper in the index is the narrowed copper; the necks are read off the copper (one stretch,
+    /// the whole wire, so the whole-supply warning can see it). A wire narrow at one end only, or
+    /// a pair envelope, is left alone; per-run neck entries of one contiguous stretch are merged.
+    #[test]
+    fn monotone_necks_joins_the_end_necks_of_a_via_wire() {
+        let m = fx_model(&[(1, 5.0, 15.0), (1, 35.0, 15.0)]);
+        fx_whole_neck(&m, &[], |dr, w, _| {
+            let (mut out, hs) = fx_profile(dr, w, &[(0.12, 5.0, 8.0), (0.25, 8.0, 20.0), (0.25, 20.0, 31.0), (0.1, 31.0, 35.0)]);
+            out.necks = vec![(fp(5.0, 15.0), 0.12 * FMM, 3.0 * FMM), (fp(35.0, 15.0), 0.1 * FMM, 4.0 * FMM)];
+            dr.monotone_necks(w, &mut out, &hs);
+            let ws: Vec<f64> = widths_along(&out.items).iter().map(|p| p.0).collect();
+            assert_eq!(ws, vec![0.12, 0.12, 0.12, 0.1], "running minimum from A (cheaper): {ws:?}");
+            assert_eq!(out.necks.len(), 1, "{:?}", out.necks);
+            assert!((out.necks[0].1 - 0.1 * FMM).abs() < 0.5 && (out.necks[0].2 - 30.0 * FMM).abs() < 2.0, "{:?}", out.necks);
+            assert_eq!(dr.stats.mono_wires, 1);
+            assert!((dr.stats.mono_mm - 23.0).abs() < 1e-3, "{}", dr.stats.mono_mm);
+            // The index holds the narrowed copper: a 0.1 mm net-2 probe 0.3 mm off the centre line
+            // clears 0.12 mm copper (0.3 - 0.06 - 0.05 = 0.19 < 0.2: no; at 0.32: 0.21) but not 0.25.
+            let probe = track_item(2, 0, 0.1 * FMM, fp(12.0, 15.32), fp(16.0, 15.32), None);
+            assert!(dr.checker.check_against(&dr.idx, std::slice::from_ref(&probe), &[]).violations.is_empty(), "the old 0.25 copper is gone");
+            // A pad-end neck only: monotone, kept; its one entry stays.
+            let (mut o2, h2) = fx_profile(dr, w, &[(0.1, 5.0, 8.0), (0.25, 8.0, 35.0)]);
+            o2.necks = vec![(fp(5.0, 15.0), 0.1 * FMM, 3.0 * FMM)];
+            let before = o2.necks.clone();
+            dr.monotone_necks(w, &mut o2, &h2);
+            assert_eq!(widths_along(&o2.items).iter().map(|p| p.0).collect::<Vec<_>>(), vec![0.1, 0.25]);
+            assert_eq!(o2.necks, before);
+            // One stretch over two runs recorded per run: one entry, the whole wire.
+            let (mut o3, h3) = fx_profile(dr, w, &[(0.1, 5.0, 20.0), (0.1, 20.0, 35.0)]);
+            o3.necks = vec![(fp(5.0, 15.0), 0.1 * FMM, 15.0 * FMM), (fp(5.0, 15.0), 0.1 * FMM, 15.0 * FMM)];
+            dr.monotone_necks(w, &mut o3, &h3);
+            assert_eq!(o3.necks.len(), 1);
+            assert!((o3.necks[0].2 - 30.0 * FMM).abs() < 2.0);
+            // A narrowed stretch nobody recorded gets its entry (never silent).
+            let (mut o4, h4) = fx_profile(dr, w, &[(0.25, 5.0, 30.0), (0.1, 30.0, 35.0)]);
+            dr.monotone_necks(w, &mut o4, &h4);
+            assert_eq!(o4.necks.len(), 1);
+            assert!((o4.necks[0].0 - fp(35.0, 15.0)).len() < 2.0, "the stretch's end B: {:?}", o4.necks);
+            assert_eq!(dr.stats.mono_wires, 1, "no narrowing in these three");
+        });
+    }
+
+    /// neck-regrow r6: a coupled pair's envelope keeps its end necks (the fan-out zones), and
+    /// `neck_from_pad = false` keeps its necks in the middle.
+    #[test]
+    fn monotone_necks_leaves_pair_envelopes_and_mid_necks_alone() {
+        let mut j = fx_json(&[(1, 5.0, 15.0), (1, 35.0, 15.0)], true);
+        j["rules"]["per_net"]["1"]["pair_disc"] = serde_json::json!(true);
+        let m = BoardModel::from_json(&j.to_string()).unwrap();
+        assert!(m.rules.pair_disc(1), "fixture: net 1 is a coupled pair's envelope");
+        fx_whole_neck(&m, &[], |dr, w, _| {
+            let (mut out, hs) = fx_profile(dr, w, &[(0.12, 5.0, 8.0), (0.25, 8.0, 31.0), (0.1, 31.0, 35.0)]);
+            dr.monotone_necks(w, &mut out, &hs);
+            assert_eq!(widths_along(&out.items).iter().map(|p| p.0).collect::<Vec<_>>(), vec![0.12, 0.25, 0.1]);
+        });
+        let m = fx_model(&[(1, 5.0, 15.0), (1, 35.0, 15.0)]);
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let o = Options { neck_from_pad: false, ..Options::default() };
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let pr = &b.proj;
+        let obs = |x: f64, y: f64| (0..pr.obstacles.len()).find(|&i| (pr.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(5.0, 15.0), obs(35.0, 15.0));
+        let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+        let (mut out, hs) = fx_profile(&mut dr, w, &[(0.25, 5.0, 15.0), (0.1, 15.0, 20.0), (0.25, 20.0, 35.0)]);
+        dr.monotone_necks(w, &mut out, &hs);
+        assert_eq!(widths_along(&out.items).iter().map(|p| p.0).collect::<Vec<_>>(), vec![0.25, 0.1, 0.25]);
+    }
+
+
+    /// neck-regrow r6 (verifier r5 finding 3): the approved pattern neck_both_ends' plan (both
+    /// channel ends necked, full-width room between) gives `plan_neck` the whole-wire zone for a
+    /// single track (option a), but not for a coupled pair's envelope (`NetRule::pair_disc`): its
+    /// end necks are the pair's fan-out zones (qmtech ADV_TXC+/-: the whole envelope necked put
+    /// ADV_TXC- over ADV_TXC+'s pad 33, KiCad's Cleanup deleted both tracks). Kills
+    /// `TOPO_FD45_OFF=nrg_pairjoin` (and `nrg_join`).
+    #[test]
+    fn plan_neck_joins_both_end_necks_of_a_single_track_but_not_of_a_pair_envelope() {
+        let path = format!("{}/tests/fixtures/neckrg/model-neck_both_ends.json", env!("CARGO_MANIFEST_DIR"));
+        let mut j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for pair in [false, true] {
+            j["rules"]["per_net"]["1"]["pair_disc"] = serde_json::json!(pair);
+            let m = BoardModel::from_json(&j.to_string()).unwrap();
+            assert_eq!(m.rules.pair_disc(1), pair);
+            let b = super::super::board::build(&m, &super::super::board::BuildOpts { existing_vias: true, keepouts: true, copper_shapes: true, ..Default::default() }).unwrap();
+            let ob = |r: &str| {
+                let i = m.pads.iter().position(|p| p.ref_ == r).unwrap();
+                b.pad_of.iter().position(|&x| x == i).unwrap()
+            };
+            let (pa, pb) = (ob("P1"), ob("P2"));
+            let mut st = State::new(&b.proj);
+            st.floors.insert(1, 0.2 * FMM);
+            let c = super::super::init::Conn { net: 1, pa, pb, a: b.centre[pa].unwrap(), b: b.centre[pb].unwrap(), w: 0.5 * FMM, s: 0.2 * FMM };
+            let w = st.route_conn(&c, &super::super::init::InitWeights::default(), 1.0).expect("routed").0;
+            st.refit_wire(w);
+            let (na, nb, mid) = st.neck_runs(w);
+            assert!(na > 0 && nb > 0 && na + nb < st.wires[w].passes.len() && mid.is_empty(), "precondition: a neck at each end, full width between ({na}, {nb})");
+            let o = Options::default();
+            let ck = Checker::new(&m, &o);
+            let dr = Drawer::new(&m, &o, &b, &st, &ck);
+            let nk = dr.plan_neck(w).expect("necked");
+            let whole = nk.ends.iter().flatten().any(|z| !z.1.is_finite());
+            if pair {
+                assert!(!whole && nk.ends[0].is_some() && nk.ends[1].is_some(), "a pair envelope keeps its two end zones (fan-out)");
+            } else {
+                assert!(whole && nk.ends.iter().flatten().count() == 1, "one zone over the whole wire");
+            }
+        }
     }
 }

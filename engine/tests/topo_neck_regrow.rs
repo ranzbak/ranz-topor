@@ -220,3 +220,56 @@ fn neck_reentry_has_one_neck_at_p1() {
     assert!(n == 1 && touches, "one neck from P1: {ch:?}");
     assert!(ch.last().unwrap().0 > 0.5 - 1e-4, "full width into P2: {ch:?}");
 }
+
+/// neck_both_ends with B.Cu open, the middle pads gone and an F.Cu wall across the board at
+/// x = 6.5 (y 0.2..5.8): PWR leaves P1's channel on F.Cu, crosses the wall on B.Cu (two vias) and
+/// comes back up into P2's channel. Both channels need the neck, the B.Cu run has room.
+fn via_both_ends_model() -> BoardModel {
+    let path = format!("{}/tests/fixtures/neckrg/model-neck_both_ends.json", env!("CARGO_MANIFEST_DIR"));
+    let mut j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    j["keepouts"] = serde_json::json!([]);
+    let pads = j["pads"].as_array_mut().unwrap();
+    pads.retain(|p| p["ref"] != "M");
+    let mut wall = pads.iter().find(|p| p["ref"] == "WL").unwrap().clone();
+    wall["ref"] = serde_json::json!("WM");
+    wall["uuid"] = serde_json::json!("00000000-0000-4000-8000-00000000a11a");
+    wall["center"] = serde_json::json!([6_500_000, 3_000_000]);
+    wall["shapes"] = serde_json::json!({"0": {"kind": "rect", "w": 300_000, "h": 5_600_000}});
+    pads.push(wall);
+    BoardModel::from_json(&j.to_string()).unwrap()
+}
+
+/// (2, r6, lead r6 brief 2, verifier r5 finding 4) A via wire whose ends both need the neck: each
+/// run is necked on its own (P1's run from P1, P2's run from P2, the B.Cu run at full width), so
+/// r5 drew it narrow | full | narrow across its vias. The whole wire is one neck (never wider
+/// again after a neck), the whole-supply warning names it (PWR 0.5 mm > the default 0.25), and
+/// the copper keeps every clearance (narrowing only). Kills `TOPO_FD45_OFF=nrg_mono`.
+#[test]
+fn a_via_wire_necked_at_both_ends_is_one_neck_across_its_vias() {
+    let m = via_both_ends_model();
+    let mut val = serde_json::to_value(Options::default()).unwrap();
+    val["runs"] = serde_json::json!(1);
+    let o: Options = serde_json::from_value(val).unwrap();
+    let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
+    assert_eq!(r.connections_total - r.routed, 0, "{:?}", r.warnings);
+    assert!(r.vias >= 1, "the wall is crossed on B.Cu: {} vias", r.vias);
+    let tracks: Vec<Piece> = r
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Track(t) => match t.prim {
+                TrackPrim::Seg { a, b } => Some((t.width as f64 / MM, (a.x as f64 / MM, a.y as f64 / MM), (b.x as f64 / MM, b.y as f64 / MM))),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    // Path order from P1 (1.5, 3.0): by the x of each piece's middle (the wire runs east).
+    let mut ch = tracks.clone();
+    ch.sort_by(|p, q| (p.1 .0 + p.2 .0).total_cmp(&(q.1 .0 + q.2 .0)));
+    let (n, touches) = necked_stretches(&ch);
+    assert!(n == 1 && touches && ch.iter().all(|x| x.0 < 0.5 - 1e-4), "one neck along the whole wire: {ch:?}");
+    assert!(r.warnings.iter().any(|w| w.contains(": necked from 0.500 mm") && w.contains("the whole wire")), "the whole-supply warning: {:?}", r.warnings.iter().filter(|w| w.contains("neck")).collect::<Vec<_>>());
+    assert!(r.warnings.iter().any(|w| w.contains("0 connections written with 0 rule violations (none)")), "legal copper: {:?}", r.warnings.iter().filter(|w| w.contains("violation")).collect::<Vec<_>>());
+    assert!(r.warnings.iter().any(|w| w.starts_with("neck profile (never wider again after a neck): ")), "the join is reported");
+}

@@ -23,7 +23,8 @@ Writes `<out>/<NAME>/`:
 - Track widths: the router takes a Default-class net's width from its existing copper (toporlib.rules,
   width_source existing_copper), which the problem has none of. So every Default-class net whose hand copper (median
   over the whole source board, as the plugin measures it) differs from the Default class width gets a crop net class
-  `crop_w<um>` (a copy of Default with that track width) in both crops' .kicad_pro, by exact-name
+  `crop_w<um>um` (`crop_w<nm>nm` where two widths round to the same um; a copy of Default with that track width)
+  in both crops' .kicad_pro, by exact-name
   netclass_patterns, split pieces (`NET__crop<k>`) included: the crop is routed at the board's widths
   (`crop.json` "net_widths").
 - `reference/NAME.kicad_pcb`: the same board plus the hand copper inside the window (tracks clipped at the
@@ -402,7 +403,8 @@ def _hand_widths(b) -> dict[str, int]:
 
 def carry_widths(src_pro: Path, pcbs, hand_w: dict[str, int], splits) -> dict[str, int]:
     """Give every Default-class net (by ``toporlib.rules.netclass_of_from_pro`` of the source project) whose hand width
-    `hand_w` differs from the Default track width a crop class ``crop_w<um>`` (Default with that track width) in the
+    `hand_w` differs from the Default track width a crop class ``crop_w<um>um`` (``crop_w<nm>nm`` for widths that round
+    to the same um; Default with that track width) in the
     .kicad_pro next to each of `pcbs`, by exact-name netclass_patterns; split pieces (`splits`) take their net's
     width. A name with a wildcard or regex character is left out (no exact pattern). Returns {net: width nm} of the
     nets given a class. O(N + P)."""
@@ -427,13 +429,18 @@ def carry_widths(src_pro: Path, pcbs, hand_w: dict[str, int], splits) -> dict[st
     if not want:
         return {}
     have = {c.get("name") for c in classes}
-    for w in sorted(set(want.values())):
-        name = f"crop_w{round(w / 1000)}um"
+    # One class per distinct width: `crop_w<um>um`, or `crop_w<nm>nm` for widths that round to the same um (verifier
+    # neck-regrow r5 finding 6: the second width took the first one's class).
+    ws = sorted(set(want.values()))
+    um = [round(w / 1000) for w in ws]
+    cls_of = {w: (f"crop_w{u}um" if um.count(u) == 1 else f"crop_w{w}nm") for w, u in zip(ws, um)}
+    for w in ws:
+        name = cls_of[w]
         if name not in have:
             classes.append(dict(dflt, name=name, track_width=w / MM, priority=int(dflt.get("priority", 2147483647)) - 1))
             have.add(name)
     pats = ns.get("netclass_patterns") or []
-    ns["netclass_patterns"] = pats + [{"netclass": f"crop_w{round(w / 1000)}um", "pattern": n} for n, w in want.items()]
+    ns["netclass_patterns"] = pats + [{"netclass": cls_of[w], "pattern": n} for n, w in want.items()]
     for pcb in pcbs:
         Path(pcb).with_suffix(".kicad_pro").write_text(json.dumps(pro, indent=2) + "\n")
     return want

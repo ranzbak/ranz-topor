@@ -560,7 +560,7 @@ bug](../dev/debug.md#filing-a-bug). `[output] plan_report = false` stops writing
 
 *Severity: info.*
 
-**Cause.** Some traces leave their pad narrower than the net's track width (necking) because the full width does not fit out of the pad; the rest of the trace keeps its width.
+**Cause.** Some traces leave their pad narrower than the net's track width (necking) because the full width does not fit out of the pad; the rest of the trace keeps its width. A trace that needs the neck at both ends is necked along its whole length (it never gets wider again after a neck); on a supply-width net that limits its current to the neck's.
 
 **Fix.** Accept them, or forbid it with search.neck_to_pad = false; the narrowest allowed width is KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width.
 

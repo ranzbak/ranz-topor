@@ -128,3 +128,29 @@ pricing (search approximation only; the copper uses `neck_items`).
   whole-supply warning; crop widths; crop_q3 checks the hook geometry.
 - Debug arms (TOPO_FD45_OFF): nrg_exit (main's test even with the key on), nrg_ownpad, nrg_taut,
   nrg_axis, nrg_near, nrg_edge, nrg_relax, nrg_join, nrg_contig.
+
+## As built (r6, verifier r5 findings)
+
+- **Silent full-width run (esp USB_D- U4.20 -> U3.26, +2 clearance at U3.27).** Not a later stage: the run was
+  drawn so. `Drawer::fit_neck` turns the plan's whole-wire zone (slot 0, unbounded) into a circle round end `a` or
+  end `b` and keeps the shorter neck. r5 put both candidates in slot 0, but since R-b (`neck_items`) slot 0 is the
+  prefix of a run that starts at `a`, slot 1 the suffix of a run that ends at `b`. On the last run of a via wire
+  (via -> U3.26) neither candidate narrowed anything, `trim_neck` dropped the zone (no violation more than its own
+  base), the "shortest neck" (0 mm) won, and `plan_neck_run` returned the run at full width as legal: no NECKED, no
+  VIOLATION (log: `NECKFIT wire 136 wn 134485 plan [inf] trim [] fit []`). Fix: the candidate from `b` goes to
+  slot 1, and a candidate is judged by its violations first, then by its length. Guard (never silent): the fitted
+  copper is checked (`plan_neck_run`; `trim_checked` for a forced run that came out legal); where it breaks a rule
+  the plan's zones, which passed at that width, are drawn.
+- **Never wider again after a neck, across vias.** Each run is necked on its own (full width first), so a via wire
+  whose two ends both need the neck came out narrow | full | narrow across its vias. `Drawer::monotone_necks`, after
+  the last run: the wire's track widths from `a` to `b` are made monotone by narrowing only (the cheaper of the
+  running minimum from either end, by narrowed width x length). Narrower copper keeps every clearance and grazes
+  no own-net pad it did not graze, so no rule breaks, and the widths are ones the wire already has. Not for pair
+  envelopes, `Drawer::widths`, or `neck_from_pad = false`. Then the necks are read off the copper (one entry per
+  contiguous stretch), so a whole-wire neck over several runs is one stretch and the whole-supply warning fires.
+  Reported: "neck profile (never wider again after a neck): ...".
+- Tests: in-module `draw.rs` (the last run's trim from `b`, the fit check on a middle run, the profile helpers,
+  `monotone_necks`, `plan_neck` on a pair envelope vs a single), `topo_neck_regrow`
+  `a_via_wire_necked_at_both_ends_is_one_neck_across_its_vias` (neck_both_ends with B.Cu open and an F.Cu wall
+  across: two vias; r5 drew the run into P2's channel at full width, silently). Debug arms (`TOPO_FD45_OFF`):
+  nrg_fitslot, nrg_fitcheck, nrg_trimcheck, nrg_mono.

@@ -77,6 +77,18 @@ fn forced_free_line(octi_on: bool, s: &draw::DrawStats) -> Option<String> {
     })
 }
 
+/// neck-regrow r6 ([`draw::Drawer`]'s `monotone_necks`): the drawings whose end necks had to be
+/// joined into one neck over the whole wire (never wider again after a neck), so the join is not
+/// silent; `None` when none. Counts every drawing of the round (trial redraws too).
+fn mono_line(s: &draw::DrawStats) -> Option<String> {
+    (s.mono_wires > 0).then(|| {
+        format!(
+            "neck profile (never wider again after a neck): {} wire drawings narrowed at both ends were narrowed between them too, one neck along the whole wire ({:.2} mm narrowed)",
+            s.mono_wires, s.mono_mm
+        )
+    })
+}
+
 /// first-draw-45 r9 forensics (`TOPO_FREEDBG`, copper-neutral): the free-angle segments (not at
 /// 0/45/90 degrees) of every drawn wire after the step `stage` of the drawing, one stderr line
 /// each (mm, KiCad frame), so a segment of the final copper can be traced to the step that wrote
@@ -127,7 +139,8 @@ fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci
     o.ends = (pad(st.wires[w].pa), pad(st.wires[w].pb));
     for n in &wo.necks {
         // neck-regrow: a neck over the whole wire (both ends needed it, joined) of a wire wider
-        // than the board's default width (a supply net) is named apart in the warning.
+        // than the board's default width (a supply net) is named apart in the warning. r6: a
+        // neck over several runs (vias) is one stretch (`Drawer::monotone_necks`).
         let supply = whole_supply_neck(st.wires[w].w, n.1, n.2, wo.length_nm, dflt_w);
         necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM, whole_supply: supply }));
     }
@@ -10225,6 +10238,9 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             forced_stats.octi_ok, forced_stats.octi_rejected, forced_stats.octi_s
         ));
     }
+    if let Some(line) = mono_line(&forced_stats) {
+        warnings.push(line);
+    }
     // Never drop (M-B1): a summary and one line per rule the written copper breaks (place, type,
     // cause), at the `violation` factor's report level.
     if opts.allow_violations {
@@ -10972,6 +10988,19 @@ mod tests {
         s.forced_free_mm = 12.34;
         let line = super::forced_free_line(true, &s).expect("a line");
         assert!(line.starts_with("never drop, octilinear: 3 of 4 forced runs drawn in their octilinear form; 1 forced runs keep 2 free-angle stretches (12.3 mm)"), "{line}");
+    }
+
+    /// neck-regrow r6: the neck-profile line, both cases of its text (no join: no line).
+    #[test]
+    fn mono_line_names_the_joined_necks() {
+        let mut s = super::draw::DrawStats::default();
+        assert_eq!(super::mono_line(&s), None);
+        s.mono_wires = 2;
+        s.mono_mm = 12.345;
+        assert_eq!(
+            super::mono_line(&s).as_deref(),
+            Some("neck profile (never wider again after a neck): 2 wire drawings narrowed at both ends were narrowed between them too, one neck along the whole wire (12.35 mm narrowed)")
+        );
     }
 
     /// TW7 B `[optimize] pattern_stuck`: the order falls with every fruitless try, never to 0,
