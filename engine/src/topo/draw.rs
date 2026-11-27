@@ -4207,9 +4207,13 @@ impl<'a> Drawer<'a> {
                                 if self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its) {
                                     return Some((its, Some((z.min_w, ls))));
                                 }
-                                // r2 (qm JS1_4 RCA): a necked form that breaks a rule falls back
+                                // r2 (a1b_octi_crop): a necked form that breaks a rule falls back
                                 // to main's realise of the same form (legal or None), so the
-                                // band never loses its octilinear form to the neck.
+                                // band never loses its octilinear form to the neck. Debug arm
+                                // (`TOPO_FD45_OFF=dab_ofb`): r1's reject.
+                                if super::octi::fd45_off("dab_ofb") {
+                                    return None;
+                                }
                                 let main = self.realise(w, layer, lid, o_pts, &pneck);
                                 if std::env::var_os("TOPO_ABSORBDBG").is_some() {
                                     eprintln!("ABSORBDBG a1z octi fail wire {w} net {} run {r}: main realise {}", wi.net, if main.is_some() { "ok" } else { "none" });

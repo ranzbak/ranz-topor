@@ -647,3 +647,38 @@ fn a_band_pass_lets_the_partner_yield_when_the_first_yielder_is_put_back() {
     assert!(on.violations.len() < off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
     assert_eq!(on.routed, off.routed);
 }
+
+/// Tracks (start to end) off the 45 degree directions (more than 0.01 degrees), over 50 um long.
+fn any_angle(r: &RouteResult) -> usize {
+    r.items
+        .iter()
+        .filter_map(|it| match it {
+            topor_engine::model::Item::Track(t) => {
+                let (a, b) = (t.prim.start(), t.prim.end());
+                Some(((b.x - a.x) as f64, (b.y - a.y) as f64))
+            }
+            _ => None,
+        })
+        .filter(|&(dx, dy)| dx.hypot(dy) > 50_000.0 && {
+            let deg = dy.atan2(dx).to_degrees().rem_euclid(45.0);
+            deg.min(45.0 - deg) > 0.01
+        })
+        .count()
+}
+
+/// A1 r2 (qm JS1_4 RCA) on a1b_octi_crop (octilinear, one cycle): the joint commit necks
+/// Net 7's band against a gap partner; its necked octilinear form breaks a rule, so the band
+/// takes main's realise of the same form (necked at the pad end only) instead of losing the form
+/// (r1: the band fell back to its any-angle ERBS, necked 0.140 mm over 0.9 mm). Any-angle
+/// tracks: main 13, r2 14, r1's reject (`TOPO_FD45_OFF=dab_ofb`) 17; nothing worse.
+#[test]
+fn a_necked_band_that_breaks_a_rule_keeps_its_octilinear_form() {
+    let (_, m, o) = a1_cases().into_iter().find(|c| c.0 == "a1b_octi_crop").unwrap();
+    let (off, on) = (route(&m, &opts_shrink(&o, false)), route(&m, &opts_shrink(&o, true)));
+    let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
+    assert!(en.gap_shrunk >= 1, "{en:?}");
+    assert!(en.octi_form >= eo.octi_form, "octi forms off {} on {}", eo.octi_form, en.octi_form);
+    assert!(any_angle(&on) <= any_angle(&off) + 1, "any-angle off {} on {}", any_angle(&off), any_angle(&on));
+    assert!(on.violations.len() <= off.violations.len());
+    assert_eq!(on.routed, off.routed);
+}
