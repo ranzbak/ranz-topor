@@ -19,7 +19,7 @@ Codes (catalogued in messages.py, one section each in docs/user/troubleshoot.md)
                         to the pour's filled copper (planes.terminals) or to another pad of the net
     PLANE_VIA_OUTSIDE_POUR  a plane stub via that ended outside the filled copper of its plane
     VIA_SQUEEZE         vias placed in a narrow pass (the via_squeeze social factor's report)
-    NECKED              stretches drawn narrower than the net width to get out of a pad (info)
+    NECKED              stretches drawn narrower than the net width to get out of a pad, or along a whole wire (info)
     IGNORED_RULE        copper that breaks a KiCad check set to "ignore" (priced, not forbidden)
     VIOLATIONS          never drop: copper written although it breaks a rule (the drawing found no legal
                         geometry), one item per violation with place, type and cause (``result["violations"]``)
@@ -207,8 +207,13 @@ def route_findings(result: dict | None) -> list:
                        lines(contains="via in a narrow pass")))
     nk = lines(contains=": necked from ")
     if nk:
-        out.append(_mk("NECKED", f"{len(nk)} stretch(es) are narrower than their net's track width (to get out of "
-                       "a pad).", nk))
+        # neck-regrow: the engine names a neck over the whole wire of a supply-width net apart
+        # (factors/necking.rs describe, "..., the whole wire (both ends needed a neck; ...").
+        whole = [x for x in nk if ", the whole wire (" in x]
+        why = ("to get out of a pad" if not whole else
+               f"{len(nk) - len(whole)} to get out of a pad, {len(whole)} along the whole wire of a supply-width net: both "
+               "ends needed a neck, so its current is limited to the neck's")
+        out.append(_mk("NECKED", f"{len(nk)} stretch(es) are narrower than their net's track width ({why}).", nk))
     viol = result.get("violations") or []
     if viol:
         by = Counter(str(v.get("kind")) for v in viol)

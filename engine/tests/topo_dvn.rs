@@ -116,18 +116,59 @@ fn neck_shared_channel_reaches_where_s_leaves() {
 }
 
 /// C (+B) on the crop of the user's Q3 spot (ADV7511 row): the ADV_AVDD bar under the row ends
-/// on the x 134.72 pad's axis below its tip at the full 0.28 mm; no diagonal into the pad's side,
-/// necked by the next pad. (The 0.09 mm stretch at the crop's boundary terminal, x < 133.7, is the
-/// crop's board edge.)
+/// on the axes of its pads (x 134.72 and 137.22, 0.3 x 1.6 mm, tips at y 70.959) at the full
+/// 0.28 mm: no hook (a diagonal into a pad's long side) and no neck by the next pad. (The 0.09 mm
+/// stretch at the crop's boundary terminal, x < 133.7, is the crop's board edge.) neck-regrow r3
+/// (lead 2026-11-27): the option-off half asserted "necked > 0.1 mm" with pad_tip_anchor off; that
+/// neck was the plan's phantom tight exit (`State::exit_tight` judged pass points inside the pad's
+/// own corner fan), which pushed the plan's band into the pad's side. With the exit judged right
+/// the plan reaches both pads along their axes, so both halves check the hook geometry itself
+/// (with `[search] exit_taut`, the taut exit test; it is off by default until the plan's via-site
+/// truth lands, so the option-off half runs with it on; the defaults run the on half):
+/// every ADV_AVDD piece that comes within half its width of a pad's long side (alongside the pad,
+/// above its tip) lies on that pad's axis, each pad is reached on its axis, and the bar keeps
+/// the clearance below the tips.
 #[test]
 fn crop_q3_avdd_enters_along_the_pad_axis() {
     let near_row = |s: &Seg| s.a.0.min(s.b.0) > 133.8 && s.a.1.min(s.b.1) < 72.5;
-    let r = route("dvn_crop_q3", &[]);
-    assert_eq!(r.unrouted, 0);
-    let (_, l) = necked(&r, "ADV_AVDD", 0.28, near_row);
-    assert!(l < 1e-6, "ADV_AVDD necked {l} mm at the row");
-    let (_, l_off) = necked(&route("dvn_crop_q3", &off("pad_tip_anchor")), "ADV_AVDD", 0.28, near_row);
-    assert!(l_off > 0.1, "pad_tip_anchor off: the side hook ({l_off} mm necked)");
+    let (tip, hw, w) = (70.959, 0.15, 0.28);
+    // Distance from a point to the pad's box round (px, 70.159).
+    let to_pad = |px: f64, q: (f64, f64)| {
+        let dx = ((q.0 - px).abs() - hw).max(0.0);
+        let dy = ((q.1 - 70.159).abs() - 0.8).max(0.0);
+        (dx * dx + dy * dy).sqrt()
+    };
+    let taut = ("exit_taut", serde_json::json!(true));
+    for arm in [vec![], vec![taut.clone()], vec![taut.clone(), off("pad_tip_anchor")[0].clone()]] {
+        let r = route("dvn_crop_q3", &arm);
+        assert_eq!(r.unrouted, 0, "{arm:?}");
+        let (_, l) = necked(&r, "ADV_AVDD", w, near_row);
+        assert!(l < 1e-6, "{arm:?}: ADV_AVDD necked {l} mm at the row");
+        let avdd: Vec<&Seg> = r.segs.iter().filter(|s| s.net == "ADV_AVDD").collect();
+        for px in [134.72, 137.22] {
+            let mut entered = false;
+            for s in &avdd {
+                // Closest approach of the piece to the pad alongside its body (above the tip: a
+                // piece there that is off the axis enters through the long side), sampled.
+                let pts = (0..=40).map(|i| {
+                    let t = i as f64 / 40.0;
+                    (s.a.0 + t * (s.b.0 - s.a.0), s.a.1 + t * (s.b.1 - s.a.1))
+                });
+                let side = pts.filter(|q| q.1 < tip - 1e-3).map(|q| to_pad(px, q)).fold(f64::INFINITY, f64::min);
+                let on_axis = (s.a.0 - px).abs() < 1e-3 && (s.b.0 - px).abs() < 1e-3;
+                if side < 0.5 * w - 1e-3 {
+                    assert!(on_axis, "{arm:?}: hook into pad x {px}: ({:.3},{:.3})-({:.3},{:.3})", s.a.0, s.a.1, s.b.0, s.b.1);
+                }
+                entered |= on_axis && s.a.1.min(s.b.1) < tip;
+            }
+            assert!(entered, "{arm:?}: ADV_AVDD does not reach pad x {px}");
+        }
+        // The bar under the row (horizontal pieces between the two pads) clears the tips.
+        let bar = avdd.iter().filter(|s| (s.a.1 - s.b.1).abs() < 1e-3 && s.a.0.min(s.b.0) < 135.0 && s.a.0.max(s.b.0) > 137.0);
+        for s in bar {
+            assert!(s.a.1 - 0.5 * w - tip > 0.1, "{arm:?}: bar at y {} too close to the tips", s.a.1);
+        }
+    }
 }
 
 /// B on the crop of the user's Q2 spot (U9 fan-out), as a guard: CTS necks at most through the
@@ -283,4 +324,58 @@ fn centre_misses(m: &BoardModel, r: &topor_engine::route::RouteResult) -> Vec<(S
         }
     }
     out
+}
+
+/// neck-regrow r4: the B patterns keep their answers with `[search] exit_taut` on (the taut exit
+/// test, off by default until the plan's via-site truth lands). Its nearer-end rule keeps the
+/// free end of neck_in_pad_row / neck_shared_channel from judging the other end's bottleneck, and
+/// its board-outline walls make neck_edge_terminal's exit tight (arms nrg_near / nrg_edge).
+#[test]
+fn neck_answers_hold_with_the_taut_exit_test() {
+    let taut = [("exit_taut", serde_json::json!(true))];
+    let r = route("neck_in_pad_row", &taut);
+    assert_eq!((r.unrouted, r.violations), (0, 0));
+    let (y, _) = necked(&r, "PWR", 0.5, |_| true);
+    assert!(y > 4.4 && y < 4.8, "neck_in_pad_row: neck ends at y {y}, expected about 4.686");
+    let r = route("neck_shared_channel", &taut);
+    assert_eq!((r.unrouted, r.violations), (0, 0));
+    let (y, _) = necked(&r, "PWR", 0.5, |_| true);
+    assert!(y > 6.4 && y < 7.15, "neck_shared_channel: neck ends at y {y}");
+    let r = route("neck_edge_terminal", &taut);
+    assert_eq!(r.unrouted, 0);
+    let thin = r.segs.iter().filter(|s| s.net == "PWR" && s.w < 0.5 - 1e-4).map(|s| s.w).fold(f64::INFINITY, f64::min);
+    assert!(thin > 0.29, "neck_edge_terminal: PWR necked to {thin}");
+    assert_eq!(r.violations, 1, "neck_edge_terminal: only the terminal's edge clearance");
+}
+
+/// pad-centre-price (docs/dev/design/pad-centre-price.md, `[factors] pad_off_centre`): on the Q3
+/// crop ADV_AVDD's trace into C19.2 ends 0.26 mm off the pad's centre at weight 0 (main's copper:
+/// a first leg inside the pad that KiCad's Cleanup deletes, so the run ends at its far joint);
+/// weight 5 prices that end in the drawing and the trace ends at the centre, with no new
+/// violation, via or unrouted connection and at most 0.5 mm more copper. Routed with main's
+/// defaults. The fuse's pad-end price makes the change here (mutants pcp4: dropping its far end
+/// leg term or its T-point term fails this test; the DP's weight term alone does not).
+#[test]
+fn crop_q3_pad_off_centre_ends_c19_at_the_centre() {
+    let arm = |w: f64| {
+        // main's defaults (not route_items' pinned tw-on values: with those the plan already
+        // ends C19.2 at the centre at weight 0, so the price has nothing to choose).
+        let path = format!("{}/tests/fixtures/dvn/model-dvn_crop_q3.json", env!("CARGO_MANIFEST_DIR"));
+        let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut val = serde_json::to_value(Options::default()).unwrap();
+        val["runs"] = serde_json::json!(1);
+        val["factors"]["weight"]["pad_off_centre"] = serde_json::json!(w);
+        let o: Options = serde_json::from_value(val).unwrap();
+        let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
+        let off: f64 = topor_engine::topo::tidy::pad_end_breaches(&m, &r.items).iter().filter(|h| h.hint() && h.pad == "C19.2").map(|h| h.off / MM).fold(0.0, f64::max);
+        let viol: usize = r.connections.iter().map(|c| c.violations).sum();
+        eprintln!("PADOFF w {w}: C19.2 off {off:.3} mm, viol {viol}, vias {}, unrouted {}, len {:.3} mm", r.vias, r.connections_total - r.routed, r.total_length_nm as f64 / MM);
+        (off, viol, r.vias, r.connections_total - r.routed, r.total_length_nm as f64 / MM)
+    };
+    let (off0, viol0, vias0, un0, len0) = arm(0.0);
+    let (off5, viol5, vias5, un5, len5) = arm(5.0);
+    assert!(off0 > 0.2, "weight 0 (main) ends C19.2 off centre: {off0} mm");
+    assert!(off5 < 1e-3, "weight 5 ends C19.2 at the centre: {off5} mm");
+    assert!(viol5 <= viol0 && vias5 <= vias0 && un5 <= un0, "viol {viol0}->{viol5} vias {vias0}->{vias5} unrouted {un0}->{un5}");
+    assert!(len5 < len0 + 0.5, "length {len0} -> {len5} mm");
 }

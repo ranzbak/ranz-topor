@@ -70,7 +70,8 @@ pub enum Event {
     /// `wire` cuts the plane of `layer` (a slot in the reference plane).
     PlaneCut { wire: WireId, layer: usize },
     /// A necked stretch: `wire` narrowed from `from_nm` to `to_nm` over `mm`.
-    Necking { wire: WireId, from_nm: f64, to_nm: f64, mm: f64 },
+    /// `whole_supply`: the neck covers the whole wire of a net wider than the board default (neck-regrow).
+    Necking { wire: WireId, from_nm: f64, to_nm: f64, mm: f64, whole_supply: bool },
     /// A pass through an edge whose room is exceeded (a violation the search prices).
     Overflow { wire: WireId, edge: EdgeId },
     /// A pass of `wire` through `edge` between two other stretches that leaves `slack_nm` of the
@@ -287,6 +288,8 @@ pub fn standard_factors() -> Vec<Box<dyn Factor>> {
         Box::new(via_site_social::ViaSiteSocial),
         // grid-snap: after the last, so the draws of every factor before it stay as they were.
         Box::new(style::OffGrid),
+        // pad-centre-price: after the last, so the draws of every factor before it stay as they were.
+        Box::new(style::PadOffCentre),
     ]
 }
 
@@ -537,7 +540,7 @@ mod tests {
         assert_eq!(r.price(&Event::Crossing { a: 0, b: 1, tri: 0, same_net: true }, &w), 0.0);
         assert_eq!(r.price(&Event::PlaneLength { wire: 0, layer: 1, mm: 2.0 }, &w), 20.0);
         assert_eq!(r.price(&Event::PlaneCut { wire: 0, layer: 1 }, &w), 25.0);
-        assert_eq!(r.price(&Event::Necking { wire: 0, from_nm: 200e3, to_nm: 150e3, mm: 4.0 }, &w), 37.5);
+        assert_eq!(r.price(&Event::Necking { wire: 0, from_nm: 200e3, to_nm: 150e3, mm: 4.0, whole_supply: false }, &w), 37.5);
     }
 
     #[test]
