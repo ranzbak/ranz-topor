@@ -4965,7 +4965,15 @@ impl<'a> Drawer<'a> {
         let mut ends = [None; super::exact::NECK_ZONES];
         // neck-regrow (user 2026-11-26, option a): necks at both ends are drawn as one over the
         // whole wire (never narrow-wide-narrow); the plan keeps the middle's full-width room.
-        if na == n || (na > 0 && nb > 0 && !super::octi::fd45_off("nrg_join")) {
+        // r5: not a coupled pair's envelope (`NetRule::pair_disc`, D7 `diffpair`): its end necks
+        // are the pair's fan-out zones to its two pads, the coupled middle is two tracks at their
+        // own width `+-p/2` off the centre line (`diffpair::realise`). Necking the whole envelope
+        // drew the centre line at the narrow envelope's clearance, and the offset tracks then lay
+        // over the next pad (qmtech ADV_TXC-: out of pad 32 diagonally across ADV_TXC+'s pad 33,
+        // 22 violations, KiCad's Cleanup deleting both tracks). Debug arm `nrg_pairjoin`: join
+        // pair envelopes too (r4).
+        let pair = self.model.rules.pair_disc(wi.net) && !super::octi::fd45_off("nrg_pairjoin");
+        if na == n || (na > 0 && nb > 0 && !pair && !super::octi::fd45_off("nrg_join")) {
             let c = pr.pos[wi.a];
             ends[0] = Some((c, f64::INFINITY));
             return Some(super::exact::Neck { min_w, ends });
