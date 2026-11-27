@@ -592,8 +592,9 @@ pub struct Frame<'a> {
     /// factor of its taut direction), as [`CapModel::items`] makes it; filled at the build
     /// (static for the model's life: the state and the directions are borrowed).
     item0: Vec<PackItem>,
-    /// Per pass of a live wire (as `item0`): the oblique factor it reaches by turning within its
-    /// taut turn ([`super::pack::Taut::sq`], bundle-turn `[capacity] oblique_price`).
+    /// Per pass of a live wire (as `item0`): the oblique factor it reaches inside its sleeve, from
+    /// its previous portal to its next ([`super::pack::Taut::sq`], bundle-turn `[capacity]
+    /// oblique_price`).
     isq0: Vec<f64>,
     /// Per wire: the via disc diameter its passes get ([`Packer::via_d`] of its net).
     wire_d: Vec<f64>,

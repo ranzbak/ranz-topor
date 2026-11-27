@@ -4381,64 +4381,92 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         if pairs.is_empty() {
             return;
         }
-        let pj = super::prof::g(super::prof::K::XrJudge);
-        let before = score(st, lr);
-        let saved = (st.clone(), wire_conn.clone(), reroutes.clone(), lr.clone(), *ripped_total);
-        drop(pj);
-        let pr = super::prof::g(super::prof::K::XrReplan);
-        let mut topo = Topo {
-            reg: if opts.fluctuation > 0.0 { reg.fluctuated(seed_of(opts.seed, round, 2000 + stage), opts.fluctuation) } else { reg.clone() },
-            conns: conns.clone(),
-            tiers: (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect(),
-            wire_conn: wire_conn.clone(),
-            reroutes: reroutes.clone(),
-            ws0,
-            cap,
-            evals: 0,
-            max_evals: opts.max_moves.max(1),
-            ripped: *ripped_total,
-            max_ripped: opts.max_ripped,
-            tight: Vec::new(),
-            over_mm: priced.then_some(overflow_mm),
-            tally: Tally::default(),
-        };
-        let mut resolved = 0usize;
+        // bundle-turn r2: the pass is judged as a group (its pairs re-planned together, then one
+        // layering and one score). A group the score refuses is split in two and each half is
+        // tried again from the state before it, the first half kept (or not) before the second
+        // is tried, down to `[optimize] crossing_split` levels. Before, one refused pass dropped
+        // every resolution in it: on qmtech with the oblique price on, the second pass (JS_CS /
+        // JS_MOSI clinched at U5, ADV_D6 round the ADV7511) was refused as a whole and those
+        // wires kept their detours (+11 mm, +15 mm) though their own re-plan was cheaper.
+        let mut groups: Vec<(std::ops::Range<usize>, usize)> = vec![(0..pairs.len(), 0)];
         let mut gone: BTreeSet<WireId> = BTreeSet::new();
-        for p in &pairs {
+        while let Some((range, depth)) = groups.pop() {
             if expired() {
                 break;
             }
-            if gone.contains(&p.first) || gone.contains(&p.second) || !st.wires[p.first].alive || !st.wires[p.second].alive {
+            let pj = super::prof::g(super::prof::K::XrJudge);
+            let before = score(st, lr);
+            let saved = (st.clone(), wire_conn.clone(), reroutes.clone(), lr.clone(), *ripped_total);
+            drop(pj);
+            let pr = super::prof::g(super::prof::K::XrReplan);
+            let mut topo = Topo {
+                reg: if opts.fluctuation > 0.0 { reg.fluctuated(seed_of(opts.seed, round, 2000 + stage), opts.fluctuation) } else { reg.clone() },
+                conns: conns.clone(),
+                tiers: (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect(),
+                wire_conn: wire_conn.clone(),
+                reroutes: reroutes.clone(),
+                ws0,
+                cap,
+                evals: 0,
+                max_evals: opts.max_moves.max(1),
+                ripped: *ripped_total,
+                max_ripped: opts.max_ripped,
+                tight: Vec::new(),
+                over_mm: priced.then_some(overflow_mm),
+                tally: Tally::default(),
+            };
+            let mut resolved = 0usize;
+            let mut moved: BTreeSet<WireId> = BTreeSet::new();
+            for p in &pairs[range.clone()] {
+                if expired() {
+                    break;
+                }
+                if gone.contains(&p.first) || gone.contains(&p.second) || moved.contains(&p.first) || moved.contains(&p.second) || !st.wires[p.first].alive || !st.wires[p.second].alive {
+                    continue;
+                }
+                if depth == 0 {
+                    xadd(1, 1);
+                }
+                // Route the rule's first wire first, the interfering one after it (try_joint routes
+                // its second argument first).
+                if topo.try_joint(st, p.second, p.first).is_some() {
+                    moved.extend([p.first, p.second]);
+                    resolved += 1;
+                } else if topo.try_reroute(st, p.second).is_some() {
+                    moved.insert(p.second);
+                    resolved += 1;
+                }
+            }
+            drop(pr);
+            if resolved == 0 {
                 continue;
             }
-            xadd(1, 1);
-            // Route the rule's first wire first, the interfering one after it (try_joint routes
-            // its second argument first).
-            if topo.try_joint(st, p.second, p.first).is_some() {
-                gone.extend([p.first, p.second]);
-                resolved += 1;
-            } else if topo.try_reroute(st, p.second).is_some() {
-                gone.insert(p.second);
-                resolved += 1;
+            let _pj = super::prof::g(super::prof::K::XrJudge);
+            st.uncross_all(50);
+            let lr2 = assign(st);
+            let after = score(st, &lr2);
+            let keep = p4_better(&after, &before);
+            if std::env::var_os("TOPO_XRDBG").is_some() {
+                let cs: Vec<usize> = moved.iter().filter_map(|&w| topo.wire_conn.get(w).copied()).collect();
+                eprintln!("XRDBG stage {stage} depth {depth} pairs {}..{} resolved {resolved} score {:.3}+{:.3} viol {} -> {:.3}+{:.3} viol {}: {} conns {cs:?}", range.start, range.end, before.0, before.3, before.1, after.0, after.3, after.1, if keep { "kept" } else { "refused" });
             }
-        }
-        drop(pr);
-        if resolved == 0 {
-            return;
-        }
-        let _pj = super::prof::g(super::prof::K::XrJudge);
-        st.uncross_all(50);
-        let lr2 = assign(st);
-        let after = score(st, &lr2);
-        if p4_better(&after, &before) {
-            *wire_conn = topo.wire_conn;
-            *reroutes = topo.reroutes;
-            *ripped_total = topo.ripped;
-            *lr = lr2;
-            xadd(2, resolved);
-            xadd(3, 1);
-        } else {
-            (*st, *wire_conn, *reroutes, *lr, *ripped_total) = saved;
+            if keep {
+                *wire_conn = topo.wire_conn;
+                *reroutes = topo.reroutes;
+                *ripped_total = topo.ripped;
+                *lr = lr2;
+                gone.extend(moved);
+                xadd(2, resolved);
+                xadd(3, 1);
+            } else {
+                (*st, *wire_conn, *reroutes, *lr, *ripped_total) = saved;
+                if depth < opts.crossing_split && range.len() >= 2 {
+                    let mid = range.start + range.len() / 2;
+                    // Last in, first out: the first half is tried first.
+                    groups.push((mid..range.end, depth + 1));
+                    groups.push((range.start..mid, depth + 1));
+                }
+            }
         }
     };
     crossing_pass(&mut st, &mut wire_conn, &mut reroutes, &mut lr, &mut ripped_total, 0);

@@ -1036,6 +1036,11 @@ pub struct Options {
     /// the two traces locally in the other order (Luzin & Popov 2012; Polubasov 2010), kept when
     /// the plan gets better.
     pub crossing_rules: bool,
+    /// bundle-turn r2 (`[optimize] crossing_split`): a crossing-rules pass the plan's score
+    /// refuses as a whole is split in two and each half is tried again (the first half kept or
+    /// not before the second), down to this many levels (at most 2^levels groups, each one
+    /// layering and one score more). 0 = the whole pass or nothing (before bundle-turn r2).
+    pub crossing_split: usize,
     /// TW7 part B (`[optimize] pattern_moves`, docs/dev/design/tw7-moves.md): the pattern kinds
     /// that, in every cycle of the TopoR loop, become one targeted move each instead of the batch
     /// crossing pass: per found pattern its wires are laid again in the rule's order and the move
@@ -1824,10 +1829,11 @@ pub struct Options {
     /// bundle-turn (`[capacity] oblique_price`, docs/dev/design/bundle-turn.md item 4): per-edge
     /// model, the price (mm per mm) of the room an edge-layer lacks only because its wires cross
     /// it obliquely along their taut paths. Such an edge-layer is over-full only when its wires do
-    /// not fit at the factors they reach by turning within their taut turn (`pack::Taut::sq`; the
-    /// cut condition, Leiserson & Maley 1985; a straight wire keeps its factor, Maley 1987 p. 32);
-    /// the rest is this graded price (the length the wires spend to cross squarer). 0 = the oblique
-    /// overage counts as over-full (before bundle-turn). Default 1.
+    /// not fit at the factors they can reach inside their sleeves (`pack::Taut::sq`: the crossing
+    /// directions from a point of the pass's previous portal to a point of its next one; the cut
+    /// condition, Leiserson & Maley 1985; a wire in a straight oblique sleeve keeps its factor,
+    /// Maley 1987 p. 32); the rest is this graded price (the length the wires spend to cross
+    /// squarer). 0 = the oblique overage counts as over-full (before bundle-turn). Default 1.
     pub oblique_price: f64,
     /// tw4-r2 (2b) (`[capacity] via_disc_height`, docs/dev/design/tw4-r2.md (2b)): with via_cuts,
     /// a planned via's disc packs on the two edges its wire crosses round it at the via point's
@@ -2018,6 +2024,7 @@ impl Default for Options {
             history_fade: 0.5,
             soft_cuts: true,
             crossing_rules: true,
+            crossing_split: 3,
             pattern_moves: Vec::new(),
             pattern_share: 0.25,
             pattern_stuck: 1.0,

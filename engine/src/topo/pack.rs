@@ -429,8 +429,9 @@ pub struct Packer<'a> {
     /// overage ([`super::viacut::price`]); 0 = the step at zero.
     pub via_ramp: f64,
     /// bundle-turn (`[capacity] oblique_price`, mm per mm): the per-edge model counts an
-    /// edge-layer over-full only when it does not fit square (oblique factor 1); the oblique
-    /// overage beyond that is priced at this weight ([`Packer::oblique_split`]). 0 = off.
+    /// edge-layer over-full only when it does not fit at the factors its passes reach inside
+    /// their sleeves ([`Taut::sq`]); the oblique overage beyond that is priced at this weight
+    /// ([`Packer::oblique_split`]). 0 = off.
     pub oblique_price: f64,
     /// tw4-r2 (2b) (`[capacity] via_disc_height`): a planned via's disc packs on its wire's entry
     /// and exit edges at its height off each edge line ([`pair_req`], [`disc_margin`]).
@@ -927,7 +928,7 @@ impl<'a> Packer<'a> {
                 }
             }
         }
-        // bundle-turn: the factor reachable within the taut turn, from the real directions
+        // bundle-turn: the factor reachable inside the sleeve (portal to portal), from the real directions
         // (before the octilinear rewrite below, which keeps only the angle to the own edge).
         let mut sq = Vec::with_capacity(n);
         for (k, &i) in pass_port.iter().enumerate() {
@@ -1126,8 +1127,8 @@ impl<'a> Packer<'a> {
     /// bundle-turn item 4 (`[capacity] oblique_price`): the over-fill `over` of `items` on edge
     /// `e` (spans `lo`, `hi`, oblique factors from the taut paths) split into `(over, price)`.
     /// `over` stays when the price is off, when it fits, or when no item can cross squarer. Else
-    /// the items are packed again at `isq` (per item the factor it reaches by turning within its
-    /// own taut turn, [`Taut::sq`]; 1 for a disc; the cut condition of Leiserson & Maley 1985
+    /// the items are packed again at `isq` (per item the factor it reaches inside its sleeve,
+    /// [`Taut::sq`]; 1 for a disc; the cut condition of Leiserson & Maley 1985
     /// counts no angle, Maley 1987 p. 32: a straight wire crosses every cut on its way, so its
     /// factor stays): that over-fill
     /// is the one returned, and the part only the oblique crossing lacks, `over - max(square, 0)`,

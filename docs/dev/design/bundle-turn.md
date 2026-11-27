@@ -16,6 +16,19 @@ neighbour's planned point beyond: its crossing of its own next edge (ERBS, else 
 when it ends inside the triangle. That point is offset by the lane spacing towards the wire. A neighbour that changes
 layer in the triangle is skipped, because its via has its own walls. The zone is a graded price like every zone, not a wall.
 
+**Depth (fix round r2, 2026-11-27).** The r1 zone was a half plane, unbounded in depth. A leg of the same run 2.6 mm
+away, past the neighbour itself, paid `(d / pitch)^2` per mm, and the DP bent the run's pad end leg 30 µm off the pad
+axis to pay less: qmtech crop Q3, ADV_AVDD at x 137.22, a hook into C19.2 (topo_dvn `crop_q3_avdd_enters_along_the_pad_axis`).
+The fork zone now ends on the far side of the neighbour, `2 gap` deep: from the bound line, `gap` to the neighbour,
+`gap` past it. The price is a tent, `x = min(d, 2 gap - d) / pitch`, highest on the neighbour's line. Zones between two
+bounds keep `x = d / pitch` (infinite depth). RoomPre carries the depth, bit-identical to the reference scan (fuzz test
+`room_and_follow_indexes_match_the_scans`, half its zones finite).
+
+**Run ends (r2).** A fork zone that covers the run's own end (its pad or via) is not added. The end is fixed there,
+closer to the neighbour than the lane spacing, and the two wires neck down to each other at their pads. Pricing that
+room bent the approach away from the end: judge pattern `distant_radius`, W1 14.309 mm against its ERBS 14.234 mm
+(topo_m3_patterns). Item 1's effect stays: in `turn_fork_corner` N2 has its reference 3 bends, 4 with the arm off.
+
 **Literature.** Bast, Brosi & Storandt 2020 §4.3 p. 7 (room kept for lines drawn later). TopoR 6.3 manual p. 239
 (wires stay apart where there is room).
 
@@ -36,6 +49,11 @@ is used only when no local set gives a path at any f, so never-drop is unchanged
 only in the narrowest spots.
 
 **Debug arm.** `TOPO_FD45_OFF=relaxloc`.
+
+**Test (r2).** exact.rs `forced_runs_are_relaxed_only_at_their_bottleneck`: a two-track gap that is illegal at the
+full clearance and an object C 3 mm further on, close to the straight run but legal at its clearance. The local repair
+relaxes the gap's two tracks only and keeps C at the nominal clearance; the run-wide repair relaxes C too. It fails when
+`need_of` ignores `relax_on` and when the set never grows.
 
 ## 3. Re-fit after straightening (core.rs straightening block, draw.rs `refit_forced`)
 
@@ -74,13 +92,15 @@ diagonally: 1.31 on the horizontal edges and 1.9 on the diagonal one. With that 
 0.314 mm.
 
 **Change.** The per-edge model packs an over-full edge-layer a second time. In that second packing each pass gets the
-oblique factor it can reach by turning within its own taut turn (pack.rs `Taut::sq`, `reach_factor`).
+oblique factor it can reach inside its sleeve (pack.rs `Taut::sq`, `reach_factor`).
 
-- The turn cone runs from the pass's taut crossing direction at the previous pass, through this one, to the next.
-- The reachable factor is the smallest factor over that cone, sampled every 1/8 of each arc, plus the edge normal when it
-  lies inside the cone.
-- A wire that runs straight on keeps its full factor. A wire that turns there crosses squarer, down to 1. Both are graded,
-  with no angle threshold.
+- The sleeve cone: the crossing directions of the lines from a point of the pass's previous portal to a point of its
+  next portal. A portal is the wire's free span on that edge, or a point at a terminal or a turn vertex. The extreme
+  directions are among the four end-to-end lines.
+- The reachable factor is the smallest factor over that cone, sampled every 1/8 of each side of the taut direction, plus
+  the edge normal when it lies inside the cone.
+- A wire in a straight oblique sleeve keeps its full factor. A narrow channel that the zero-width taut path cuts across
+  diagonally allows a square crossing, down to 1. Both are graded, with no angle threshold.
 - What that second packing lacks is the over-fill: over-full, rip-up victims, and the predicted violation.
 - The part only the taut crossing lacks, `over - max(reachable, 0)`, is a graded price of `oblique_price` mm per mm, in
   the squeeze channel.
@@ -118,8 +138,11 @@ edges. TopoR 6.3 manual p. 237.
 
 ## Tests
 
-- The two approved patterns, run end to end (det s0): each mechanism, and each arm off, shows its failure.
-- Unit tests on `exact_fix_local` (relaxed only near the bottleneck) and on `refit_line` / `straighten_line` (both forms).
+- The two approved patterns, run end to end (det s0). `turn_fork_corner_no_violation_no_detour` covers items 4 (N3 keeps
+  the corridor) and 1 (N2's 3 bends, 4 with the arm off).
+- Unit tests on `exact_fix_local` (item 2, see above), on `reach_factor` (pack.rs
+  `reach_factor_keeps_the_oblique_sleeve_and_finds_the_normal`: a straight 45° sleeve keeps 1/sin, the normal between two
+  samples gives exactly 1) and on `refit_line` / `straighten_line` (both forms).
 - Mutants on each changed line.
 - Boards: det s0 with 4 boards against main (`ladder_diff --json`); the qm crop PNG at RN2 and under H2; real KiCad
   Cleanup per net with A1 off and on.

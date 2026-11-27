@@ -1752,9 +1752,9 @@ impl<'a> Drawer<'a> {
         let n = items.len();
         let mut bnd = self.packer.bounds(e, l, &pitems);
         // bundle-turn item 4 (`[capacity] oblique_price`): an edge-layer whose passes do not fit
-        // at their taut crossing angles but fit at the factors they reach by turning within
-        // their own taut turn ([`super::pack::Taut::sq`]) is packed at those, as the plan counts
-        // it; a pass that runs straight on keeps its full factor (Maley 1987 p. 32), so a
+        // at their taut crossing angles but fit at the factors they reach inside their sleeves
+        // (portal to portal, [`super::pack::Taut::sq`]) is packed at those, as the plan counts
+        // it; a pass in a straight oblique sleeve keeps its full factor (Maley 1987 p. 32), so a
         // straight oblique bundle is never packed tighter than it is drawn. Unchanged where it
         // fits at the taut angles.
         if !bnd.fits() && self.packer.oblique_price > 0.0 && pitems.iter().any(|i| i.infl > 1.0) {

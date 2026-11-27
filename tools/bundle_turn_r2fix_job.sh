@@ -39,10 +39,10 @@ case "${1:-}" in
   mut)
     BINS="--test topo_bundle_turn --test topo_first_draw_45 --test topo_thick_layer --test topo_dvn --test topo_m3_patterns --test topo_drawing_grace --test topo_site_social --test tw5_escape --test loop_local --test topo_cm1_room --test topo_q14 --test topo_p5_price --test topo_disc_height"
     M=/root/bt2mut; rm -rf $M; mkdir -p $M
-    git ls-files engine Cargo.toml Cargo.lock | tar -cf - -T - | (cd $M && tar -xf -)
+    tar -cf - --exclude=target engine Cargo.toml Cargo.lock 2>/dev/null | (cd $M && tar -xf -)
     mut() {  # mut NAME FILE PYTHON-OLD PYTHON-NEW [lib]
       local n=$1 f=$2 old=$3 new=$4 lib=${5:-}
-      ( cd $M && git -C $ROOT show HEAD:$f > $f ) 2>/dev/null || cp $ROOT/$f $M/$f
+      cp $ROOT/$f $M/$f
       python3 - "$M/$f" "$old" "$new" <<'EOF' || { note "mut $n: pattern not found"; return; }
 import sys
 p, old, new = sys.argv[1:4]
@@ -67,8 +67,13 @@ EOF
     sed -i 's/^            oblique_price: 1\.0,$/            oblique_price: 0.0,/' $M/engine/src/model.rs
     ( cd $M/engine && CARGO_TARGET_DIR=/root/target-bt2m cargo test --release --no-fail-fast --test loop_local --test tw5_escape --test topo_site_social -- --nocapture local_depth_two loop_p4_rounds_fold a_strict_detour > $OUT/obl0-loops.log 2>&1 9>&- ); note "obl0 loop tests rc $? (default changed: $(grep -c 'oblique_price: 0.0,' $M/engine/src/model.rs))"
     cp $ROOT/engine/src/model.rs $M/engine/src/model.rs
-    ( cd engine && TOPO_FD45_OFF=relaxloc CARGO_TARGET_DIR=/root/target-bt2s cargo test --release --no-fail-fast $BINS > $OUT/mut-env-relaxloc.log 2>&1 9>&- )
-    note "mut env-relaxloc rc $? (killed if != 0): $(grep -E '^test .* FAILED' $OUT/mut-env-relaxloc.log | sed 's/^test //; s/ \.\.\. FAILED//' | tr '\n' ' ')" ;;
+    [ -n "${MUT_NO_ENV:-}" ] || ( cd engine && TOPO_FD45_OFF=relaxloc CARGO_TARGET_DIR=/root/target-bt2s cargo test --release --no-fail-fast $BINS > $OUT/mut-env-relaxloc.log 2>&1 9>&- )
+    [ -n "${MUT_NO_ENV:-}" ] || note "mut env-relaxloc rc $? (killed if != 0): $(grep -E '^test .* FAILED' $OUT/mut-env-relaxloc.log | sed 's/^test //; s/ \.\.\. FAILED//' | tr '\n' ' ')"
+    # the re-run unit (MUT_NO_ENV) also renders the crops once the four board arms are in
+    if [ -n "${MUT_NO_ENV:-}" ]; then
+      for i in $(seq 1 120); do [ $(grep -cE "^(tip|obl0|main)-(qm|esp) rc" $OUT/rc.txt) -ge 6 ] && break; sleep 15; done
+      bash $ROOT/tools/bundle_turn_r2fix_job.sh crops
+    fi ;;
   crops)
     NETS_QM="JS_CS JS_MOSI ADV_D6 ADV_CEC FPGA_SD_CLK USB_VBUS"; NETS_ESP="IO4 IO8_SCL IO10_SDA GND"
     pcb() { echo $OUT/$1-$2/$3/s0/$3-topor/$3.kicad_pcb; }
