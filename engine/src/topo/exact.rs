@@ -2692,3 +2692,59 @@ mod tests {
         }
     }
 }
+#[cfg(test)]
+/// pad-centre-price (docs/dev/design/pad-centre-price.md): the octilinear DP's pad-end price
+/// (`OctiCfg::pad_off_nm`, `octi::end_stub_price`) on a 2-pad run beside a channel (verifier r1 probe).
+mod pad_off_dp {
+    const MM: f64 = 1e6;
+    use super::*;
+    use crate::check::Checker;
+    use crate::model::{BoardModel, Options};
+    use crate::topo::board::{self, BuildOpts};
+    use crate::topo::init::InitWeights;
+    use crate::topo::state::State;
+
+    fn js(x0: f64, g: f64) -> String {
+        let p = |v: f64| (v * MM) as i64;
+        let pad = |i: usize, net: i32, x: f64, y: f64, w: f64, h: f64| format!(r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":{net},"attr":"smd","center":[{x},{y}],"rotation_deg":0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{w},"h":{h}}}}},"drill":null}}"#, x = p(x), y = p(y), w = p(w), h = p(h));
+        let c = [(0.0, 0.0), (24.0, 0.0), (24.0, 24.0), (0.0, 24.0)];
+        let segs: Vec<String> = (0..4).map(|i| format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(c[i].0), p(c[i].1), p(c[(i + 1) % 4].0), p(c[(i + 1) % 4].1))).collect();
+        let (cx, ww) = ((x0 + 7.0) / 2.0, 7.0 - x0);
+        format!(r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}},{{"code":2,"name":"B"}}],"pads":[{},{},{},{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+            pad(0, 1, 2.0, 12.0, 1.0, 1.0), pad(1, 1, 8.0, 11.8, 1.0, 1.0), pad(2, 2, cx, 11.8 - g - 0.5, ww, 1.0), pad(3, 2, cx, 11.8 + g + 0.5, ww, 1.0), segs.join(","))
+    }
+
+    /// A (2, 12) to B (8, 11.8), 1 x 1 mm pads, past a net-B channel (x 2.7..7, gap 0.33 mm). At
+    /// weight 0 (main) the DP leaves A over a 45 deg leg (2, 12) - (2.2, 11.8) wholly inside A: KiCad's
+    /// Cleanup deletes it and the trace ends 0.28 mm off A's centre. At weight 5 the first leg
+    /// reaches past A's edge (kept by Cleanup): the end stays at the centre.
+    #[test]
+    fn dp_pad_off_price_keeps_the_end_at_the_pad_centre() {
+        let m = BoardModel::from_json(&js(2.7, 0.33)).unwrap();
+        let bd = board::build(&m, &BuildOpts::default()).unwrap();
+        let conns = bd.connections(&m);
+        let mut st = State::new(&bd.proj);
+        let cn = conns.iter().find(|c| c.w > 0.0 && c.net == 1).expect("net A connection");
+        assert!(st.route_conn(cn, &InitWeights::default(), (cn.w + cn.s) / 400_000.0).is_some());
+        let opts = Options::default();
+        let checker = Checker::new(&m, &opts);
+        let a = Vec2 { x: 2.0 * MM, y: -12.0 * MM };
+        let b = Vec2 { x: 8.0 * MM, y: -11.8 * MM };
+        // The end Cleanup leaves: the first leg's far joint when that leg lies inside A (its
+        // copper within A's 1 x 1 mm square), else A's centre.
+        let inner = 0.5 * MM - cn.w / 2.0;
+        let end_off = |pts: &[Vec2]| {
+            let j = pts[1];
+            if (j.x - a.x).abs() <= inner && (j.y - a.y).abs() <= inner { (j - a).len() / MM } else { 0.0 }
+        };
+        let draw = |wt: f64| {
+            let mut dr = Drawer::new(&m, &opts, &bd, &st, &checker);
+            dr.octi = crate::topo::octi::OctiCfg { on: true, pad_off_nm: wt * MM, ..dr.octi };
+            let k1 = dr.st.wires[0].passes.len();
+            dr.octilinear(0, 0, k1, 0, &[a, b], None, [None, None], None).expect("a DP shape").pts
+        };
+        let (p0, p5) = (draw(0.0), draw(5.0));
+        assert!(end_off(&p0) > 0.25, "weight 0 (main): {p0:?} ends {} mm off", end_off(&p0));
+        assert!(end_off(&p5) < 1e-6, "weight 5: {p5:?} ends {} mm off", end_off(&p5));
+    }
+}

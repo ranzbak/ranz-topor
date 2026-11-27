@@ -30,8 +30,10 @@ path made each one; that table goes into the report.
    (graded from that pad's centre) and the run's far end leg (`end_stub_price`, as the DP). Weight 0: `end_mm` is
    `None`, the gain is main's.
 3. Warning count (every run, any weight): `pad_off_centre: N trace ends inside a pad of their net off its centre
-   (Terminal a, Junction b, Tee c, PassThrough d), largest x mm`, from `tidy::pad_end_breaches` hints on the written
-   copper (KiCad keeps them: a hint, not a failure). The old `pad ends off centre` line stays.
+   after KiCad's Cleanup (every kind: Terminal a, Junction b, Tee c, PassThrough d; ...), largest x mm`, from
+   `tidy::pad_end_breaches` hints (KiCad keeps them: a hint, not a failure). The old `pad ends off centre` line stays
+   and says what it counts: free ends as written, before Cleanup, no T joins or pass-throughs. The two differ on every
+   board (esp weight 8: 11 vs 16): a leg Cleanup deletes moves a free end, and T joins / trunks count only in the new one.
 
 **Invariants.** weight 0: copper bit-identical to main (copper hash, 4 boards). Any weight: no new DRC, unconnected,
 detour > 1.5 or vias against main per connection; real KiCad Cleanup deletes nothing main keeps; copper identical
@@ -44,7 +46,7 @@ centred. Boards det s0 4 boards weight 0 (hash = main) and 2-3 weights; default 
 
 **Literature.** KiCad 10.0 as the spec: `tracks_cleaner.cpp` `deleteTracksInPads` (the leg Cleanup deletes),
 `pns_node.cpp` `NODE::addSolid` (PNS links a pad at its anchor only: why the centre matters for drag). Price shape:
-Bast, Brosi & Storandt 2020 sec. 4.3 (graded prices in the octilinear DP), as `planned_room`.
+Bast, Brosi & Storandt 2020, sections 3-4 (prices per bend and leg in the octilinear shortest path) and section 4.3 p. 7 (room as a cost, not a limit), as `planned_room`.
 
 **Not reached by the drawing price (r1 measurements, lead 2026-11-26).** The price changes only the drawing's choice
 between shapes it already has. Left off centre at every weight: (a) PassThrough / Junction (a trunk through its own
