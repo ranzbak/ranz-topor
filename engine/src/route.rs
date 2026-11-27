@@ -753,12 +753,35 @@ fn finish_copper(model: &BoardModel, opts: &Options, r: &mut RouteResult) {
             r.warnings.push(st.line());
         }
     }
-    // pad-snap (A1b): track ends inside a pad of their net but off its centre, as written
+    // pad-snap (A1b): free track ends inside a pad of their net but off its centre, as written
+    // (before Cleanup; T joins and pass-throughs not counted). The pad_off_centre line below counts
+    // every kind where Cleanup leaves the end (a deleted in-pad leg moves it), so the two differ.
     let (n, worst) = crate::topo::tidy::off_centre_pad_ends(model, &r.items);
     r.warnings.push(format!(
-        "pad ends off centre: {n} track ends end inside a pad of their net off its centre (KiCad connects them, but its interactive router links a pad only at its centre: loose for drag and footprint moves), largest {:.3} mm",
+        "pad ends off centre: {n} track ends end inside a pad of their net off its centre (free ends as written, before KiCad's Cleanup; T joins and trunks through a pad not counted, see pad_off_centre; KiCad connects them, but its interactive router links a pad only at its centre: loose for drag and footprint moves), largest {:.3} mm",
         worst / 1e6
     ));
+    // pad-centre-price: every trace end KiCad's Cleanup keeps inside its pad off the centre (the
+    // centre-distance hints of `pad_end_breaches`, by kind), the count the `pad_off_centre` factor
+    // works on.
+    r.warnings.push(pad_off_centre_line(&crate::topo::tidy::pad_end_breaches(model, &r.items)));
+}
+
+/// pad-centre-price: the report line of the centre-distance hints ([`crate::topo::tidy::PadEndBreach::hint`]).
+pub(crate) fn pad_off_centre_line(bs: &[crate::topo::tidy::PadEndBreach]) -> String {
+    use crate::topo::tidy::PadEndKind as K;
+    let hints: Vec<&crate::topo::tidy::PadEndBreach> = bs.iter().filter(|b| b.hint() && b.off > 1_000.0).collect();
+    let n = |k: K| hints.iter().filter(|b| b.kind == k).count();
+    let worst = hints.iter().map(|b| b.off).fold(0.0, f64::max);
+    format!(
+        "pad_off_centre: {} trace ends inside a pad of their net off its centre after KiCad's Cleanup (every kind: Terminal {}, Junction {}, Tee {}, PassThrough {}; a free end counts where Cleanup leaves it, so it can differ from 'pad ends off centre'; Cleanup keeps them, its interactive router links a pad only at its centre; priced by [factors] pad_off_centre), largest {:.3} mm",
+        hints.len(),
+        n(K::Terminal),
+        n(K::Junction),
+        n(K::Tee),
+        n(K::PassThrough),
+        worst / 1e6
+    )
 }
 
 /// Decompose `model` on its routable layers and report every connection as failed with
@@ -910,6 +933,20 @@ pub(crate) fn unrouted(model: &BoardModel, opts: &Options, reason: &str) -> Rout
 
 #[cfg(test)]
 mod tests {
+
+    /// pad-centre-price: the count line names every kind, counts only the hints (not an
+    /// edge-clear or blocked-centre end, not one within 1 um of the centre) and the largest.
+    #[test]
+    fn pad_off_centre_line_counts_the_hints_by_kind() {
+        use super::pad_off_centre_line;
+        use crate::topo::tidy::{PadEndBreach, PadEndKind as K};
+        let b = |kind: K, off: f64, edge: bool, blocked: bool| PadEndBreach { kind, net: 1, layer: 0, pad: "U1.1".into(), at: (0, 0), off, edge, centre_blocked: blocked, wire: None };
+        assert!(pad_off_centre_line(&[]).starts_with("pad_off_centre: 0 trace ends inside a pad of their net off its centre after KiCad's Cleanup (every kind: Terminal 0, Junction 0, Tee 0, PassThrough 0;"));
+        let l = pad_off_centre_line(&[b(K::Terminal, 250_000.0, false, false), b(K::Terminal, 100_000.0, false, false), b(K::Junction, 50_000.0, false, false), b(K::Tee, 700_000.0, false, false), b(K::Tee, 300_000.0, false, false), b(K::PassThrough, 30_000.0, false, false), b(K::PassThrough, 0.0, false, false), b(K::Terminal, 900_000.0, true, false), b(K::Terminal, 900_000.0, false, true)]);
+        assert!(l.starts_with("pad_off_centre: 6 trace ends inside a pad of their net off its centre after KiCad's Cleanup (every kind: Terminal 2, Junction 1, Tee 2, PassThrough 1;"), "{l}");
+        assert!(l.ends_with("largest 0.700 mm"), "{l}");
+    }
+
     use super::{exit_pins, violation_class};
     use crate::geom::Vec2;
 

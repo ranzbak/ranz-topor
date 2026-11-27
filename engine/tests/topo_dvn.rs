@@ -284,3 +284,35 @@ fn centre_misses(m: &BoardModel, r: &topor_engine::route::RouteResult) -> Vec<(S
     }
     out
 }
+
+/// pad-centre-price (docs/dev/design/pad-centre-price.md, `[factors] pad_off_centre`): on the Q3
+/// crop ADV_AVDD's trace into C19.2 ends 0.26 mm off the pad's centre at weight 0 (main's copper:
+/// a first leg inside the pad that KiCad's Cleanup deletes, so the run ends at its far joint);
+/// weight 5 prices that end in the drawing and the trace ends at the centre, with no new
+/// violation, via or unrouted connection and at most 0.5 mm more copper. Routed with main's
+/// defaults. The fuse's pad-end price makes the change here (mutants pcp4: dropping its far end
+/// leg term or its T-point term fails this test; the DP's weight term alone does not).
+#[test]
+fn crop_q3_pad_off_centre_ends_c19_at_the_centre() {
+    let arm = |w: f64| {
+        // main's defaults (not route_items' pinned tw-on values: with those the plan already
+        // ends C19.2 at the centre at weight 0, so the price has nothing to choose).
+        let path = format!("{}/tests/fixtures/dvn/model-dvn_crop_q3.json", env!("CARGO_MANIFEST_DIR"));
+        let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut val = serde_json::to_value(Options::default()).unwrap();
+        val["runs"] = serde_json::json!(1);
+        val["factors"]["weight"]["pad_off_centre"] = serde_json::json!(w);
+        let o: Options = serde_json::from_value(val).unwrap();
+        let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
+        let off: f64 = topor_engine::topo::tidy::pad_end_breaches(&m, &r.items).iter().filter(|h| h.hint() && h.pad == "C19.2").map(|h| h.off / MM).fold(0.0, f64::max);
+        let viol: usize = r.connections.iter().map(|c| c.violations).sum();
+        eprintln!("PADOFF w {w}: C19.2 off {off:.3} mm, viol {viol}, vias {}, unrouted {}, len {:.3} mm", r.vias, r.connections_total - r.routed, r.total_length_nm as f64 / MM);
+        (off, viol, r.vias, r.connections_total - r.routed, r.total_length_nm as f64 / MM)
+    };
+    let (off0, viol0, vias0, un0, len0) = arm(0.0);
+    let (off5, viol5, vias5, un5, len5) = arm(5.0);
+    assert!(off0 > 0.2, "weight 0 (main) ends C19.2 off centre: {off0} mm");
+    assert!(off5 < 1e-3, "weight 5 ends C19.2 at the centre: {off5} mm");
+    assert!(viol5 <= viol0 && vias5 <= vias0 && un5 <= un0, "viol {viol0}->{viol5} vias {vias0}->{vias5} unrouted {un0}->{un5}");
+    assert!(len5 < len0 + 0.5, "length {len0} -> {len5} mm");
+}

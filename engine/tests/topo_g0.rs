@@ -320,6 +320,7 @@ fn the_factor_reference_matches_the_schema_text() {
         ("neck_depth", 0.0),
         ("via_site_social", 0.0),
         ("off_grid", 0.15),
+        ("pad_off_centre", 0.0),
     ];
     assert_eq!(got, want);
 }

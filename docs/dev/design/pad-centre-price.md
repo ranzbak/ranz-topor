@@ -1,0 +1,58 @@
+# pad-centre-price: off-centre in-pad trace ends as a graded drawing price
+
+**What (user 2026-11-26).** KiCad's real Cleanup keeps an off-centre trace end inside its pad and an in-pad T join
+(fixture `tests/fixtures/kicad_accepts/pad_centre`), so pad-centre distance is a hint today
+(`tidy::PadEndBreach::hint`). The user wants it to be a soft price: the drawing should prefer a pad entry/end at
+the centre wherever that costs little, and the run reports how many off-centre ends are left.
+
+**Where the off-centre ends come from (main a18b3716, C1 det s0, `pad_centre_check.py`, before Cleanup).** qmtech 40
+hints (25 Terminal, 12 PassThrough, 2 Tee, 1 Junction), esp 22, wiccon 5, eprom 0. Most Terminals are a first leg of
+a run from the pad centre that lies wholly inside the pad: tidy (and KiCad's `deleteTracksInPads`) drops it, the run
+then starts at the leg's far joint `j`, `|j - c|` off the centre (qmtech R12.2 0.106 mm at 45 deg, RN3.2 0.15 / 0.23
+mm either side, U3.4 0.5 mm, L2.1 / L3.1 / F4.1 0.02-0.04 mm along the axis). The octilinear DP already prices that
+leg (`octi::stub_price`, pad-snap: `stub_nm x (1 + off / extent)`, about 1-2 mm at the defaults), so where it still
+draws one, every centred alternative it had cost more than ~1-2 mm (bend + jog prices of the leave shapes) or was
+illegal. The VM diagnosis (`TOPO_PADSNAPDBG` PADSTUB wire ids + `TOPO_RUNPROV` run provenance) names which drawing
+path made each one; that table goes into the report.
+
+**Change.**
+1. New factor `[factors] pad_off_centre` (weight, mm of length per unit; **default 0 = off = main's copper**). The
+   unit: one end `x` pitches off its pad's centre costs `x + x^2` units (`x = off / (w + s)`; smooth, 0 at the centre,
+   no cutoff; the `planned_room` shape). `off` is the distance from the PAD centre (`obstacles[ob].center`, also for a
+   branch end in its pad) of the end the copper will have after KiCad's Cleanup: the leg's far joint `j` when the
+   first (last) leg is one Cleanup deletes (KiCad's test, the same predicate `stub_price` uses), else the run's own
+   end (constant across the DP's choices, so not priced).
+2. The DP's `stub(end, j)` price = pad-snap's stub price + `weight x (x + x^2)`, the sum capped at 0.8 x one violation
+   unit (`STUB_VIOL_SHARE` rule: short > clearance > off-centre end holds for every weight). Costly, not failed: no
+   shape is removed.
+2b. The D6b fuse (`draw::fuse_candidates`, called from `core` `best_of` through `Drawer::fuse_best_legal`) takes the
+   same price off a shortcut's gain (`end_mm`, new minus old run): the T point when it lies inside a pad of the net
+   (graded from that pad's centre) and the run's far end leg (`end_stub_price`, as the DP). Weight 0: `end_mm` is
+   `None`, the gain is main's.
+3. Warning count (every run, any weight): `pad_off_centre: N trace ends inside a pad of their net off its centre
+   after KiCad's Cleanup (every kind: Terminal a, Junction b, Tee c, PassThrough d; ...), largest x mm`, from
+   `tidy::pad_end_breaches` hints (KiCad keeps them: a hint, not a failure). The old `pad ends off centre` line stays
+   and says what it counts: free ends as written, before Cleanup, no T joins or pass-throughs. The two differ on every
+   board (esp weight 8: 11 vs 16): a leg Cleanup deletes moves a free end, and T joins / trunks count only in the new one.
+
+**Invariants.** weight 0: copper bit-identical to main (copper hash, 4 boards). Any weight: no new DRC, unconnected,
+detour > 1.5 or vias against main per connection; real KiCad Cleanup deletes nothing main keeps; copper identical
+for any thread / lane count.
+
+**Tests.** Unit: price 0 at the centre and for a leg that leaves the pad, grows with `off`, weight 0 = old price, cap
+below one violation for every weight. Pattern (PROPOSED, PNG to the lead first): a run into a small pad whose base
+copper ends off centre where a centred exit costs no extra length / via / detour; base (weight 0) off centre, tip
+centred. Boards det s0 4 boards weight 0 (hash = main) and 2-3 weights; default proposal from the numbers.
+
+**Literature.** KiCad 10.0 as the spec: `tracks_cleaner.cpp` `deleteTracksInPads` (the leg Cleanup deletes),
+`pns_node.cpp` `NODE::addSolid` (PNS links a pad at its anchor only: why the centre matters for drag). Price shape:
+Bast, Brosi & Storandt 2020, sections 3-4 (prices per bend and leg in the octilinear shortest path) and section 4.3 p. 7 (room as a cost, not a limit), as `planned_room`.
+
+**Not reached by the drawing price (r1 measurements, lead 2026-11-26).** The price changes only the drawing's choice
+between shapes it already has. Left off centre at every weight: (a) PassThrough / Junction (a trunk through its own
+pad: no hook); (b) a straight run whose planned line is offset from both pad centres of its connection: the price
+only moves the jog to the other pad (qmtech R12.2 -> C65.2 0.106 mm, L2.1 -> C9.1, R18.1 -> U6.15, L3.1 -> C42.1);
+(c) entries along long thin pins (QFP 0.6-0.72 mm) and forced runs where no legal centred shape exists; (d) post-passes
+not attributed (straighten / polish / via reduction). (b) and (c) belong in the plan: the topological terminal of a
+connection is the pad centre and the plan's line through a pad pair should be priced by its distance from both
+centres where it is decided (pad exit / escape point, TopoR way: decide early), not in the drawing.
