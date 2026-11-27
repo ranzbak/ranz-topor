@@ -881,13 +881,16 @@ impl Drawer<'_> {
     /// keeps the run-wide relaxation then). The run keeps the full clearance to every other object
     /// (TopoR 6.3 manual p. 237: the nominal clearance wherever wires can be set apart, the minimal
     /// one only in the narrowest spots; p. 239: wires stay further apart where there is room).
-    /// Returns the path and the number of objects relaxed. O(set x [`Drawer::exact_fix_relaxed`]).
+    /// Returns the path and the number of objects relaxed. `set` starts the search and keeps the
+    /// objects found: the caller's ladder of amounts reuses them (they are the bottleneck's objects
+    /// at some amount of the same run), so each amount after the first repairs about once, not
+    /// once per object (qm: the re-fit's forced draws took 435 s with a fresh set per amount).
+    /// O(new objects x [`Drawer::exact_fix_relaxed`]).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn exact_fix_local(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: Vec<Vec2>, neck: Option<Neck>, relax: f64) -> Option<(Vec<Vec2>, usize)> {
+    pub(super) fn exact_fix_local(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: Vec<Vec2>, neck: Option<Neck>, relax: f64, set: &mut RelaxSet) -> Option<(Vec<Vec2>, usize)> {
         let wi = &self.st.wires[w];
-        let mut set = RelaxSet::default();
         loop {
-            let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax, relax_on: Some(set) };
+            let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax, relax_on: Some(*set) };
             match self.exact_fix_wp(w, k0, k1, layer, pts.clone(), &wp) {
                 Ok(p) => return Some((p, set.len())),
                 Err(hits) => {

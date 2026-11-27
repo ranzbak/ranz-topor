@@ -2536,9 +2536,13 @@ pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, c
 
 /// bundle-turn (3): the re-fit line: `tried` wires drawn with violations (never drop) drawn again
 /// after the straightening moved their neighbours, `kept` of them with fewer violations or shorter
-/// at equal violations, `legal` of those without any violation left.
-pub fn refit_line(tried: usize, kept: usize, legal: usize) -> String {
-    format!("never drop, re-fit after the straightening: {tried} wires drawn with violations drawn again against the straightened neighbours; {kept} kept (fewer violations, or shorter at equal violations), {legal} of them now without violations")
+/// at equal violations, `legal` of those without any violation left; `stopped`: the pass stopped
+/// at Cancel or the time limit before every such wire had its turn.
+pub fn refit_line(tried: usize, kept: usize, legal: usize, stopped: bool) -> String {
+    format!(
+        "never drop, re-fit after the straightening: {tried} wires drawn with violations drawn again against the straightened neighbours; {kept} kept (fewer violations, or shorter at equal violations), {legal} of them now without violations{}",
+        if stopped { "; stopped at Cancel or the time limit ([run] drawing_grace_s) before the rest (they keep their copper)" } else { "" }
+    )
 }
 
 /// The octilinear polish's report line: `n` segments redrawn as an elbow or Z, which changed the
@@ -9169,6 +9173,10 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         // narrowest spots, so a run squeezed where room has become free is fitted again.
         let mut refit_round_done = !opts.allow_violations || super::octi::fd45_off("refit");
         let (mut refit_tried, mut refit_kept) = (0usize, 0usize);
+        // The re-fit is an optional pass of the drawing: it stops at Cancel, at `[run]
+        // drawing_grace_s` (soft limit) or at the time limit (hard); every wire stays drawn.
+        let refit_stop = || ctl.is_cancelled() || ctl.limit.draw_grace_over(t_draw_c) || (!soft() && ctl.deadline().is_some_and(|d| ctl.limit.now() >= d.max(floor)));
+        let mut refit_stopped = false;
         loop {
         while pass_changed && phase < cap {
             pass_changed = false;
@@ -9215,6 +9223,10 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             if drawn.get(&w).is_none_or(|o| o.viol.is_empty()) {
                 continue;
             }
+            if refit_stop() {
+                refit_stopped = true;
+                break;
+            }
             let old = drawn.remove(&w).expect("drawn wire");
             if let Some((key, q)) = joint_of(w, &drawn, &plans) {
                 dr.end_at.insert(key, q);
@@ -9244,8 +9256,8 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         if n_str > 0 || str_refused > 0 {
             warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, cap, !pass_changed, t_str.elapsed().as_secs_f64()));
         }
-        if refit_tried > 0 {
-            warnings.push(refit_line(refit_tried, refit_kept, dr.stats.refit_legal));
+        if refit_tried > 0 || refit_stopped {
+            warnings.push(refit_line(refit_tried, refit_kept, dr.stats.refit_legal, refit_stopped));
         }
     }
     free_snap("straighten", &drawn, &st);

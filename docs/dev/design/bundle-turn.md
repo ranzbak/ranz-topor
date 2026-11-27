@@ -57,7 +57,7 @@ line (fixpoint, or bound reached), and there is a new line for the re-fit.
 
 **Debug arm.** `TOPO_FD45_OFF=refit`.
 
-## 4. Over-full only when it does not fit square (pack.rs `oblique_split`, refine.rs `numbers_in`)
+## 4. Over-full only when it does not fit at the factors a turn reaches (pack.rs `oblique_split`, `Taut::sq`)
 
 **What.** In `turn_fork_corner`, P4 rip-up (core.rs `p4_victims`) marked the corridor edges as over-full: the two
 horizontal edges and the diagonal edge from T1's corners to the wall. It put congestion history on them, and N3 was
@@ -68,21 +68,39 @@ is 0.45 mm. It was over-full only through the oblique factor `infl_dir`, taken f
 diagonally: 1.31 on the horizontal edges and 1.9 on the diagonal one. With that factor the edges were over by 0.084 and
 0.314 mm.
 
-**Change.** The per-edge model packs an over-full edge-layer a second time with every factor at 1.
+**Change.** The per-edge model packs an over-full edge-layer a second time. In that second packing each pass gets the
+oblique factor it can reach by turning within its own taut turn (pack.rs `Taut::sq`, `reach_factor`).
+
+- The turn cone runs from the pass's taut crossing direction at the previous pass, through this one, to the next.
+- The reachable factor is the smallest factor over that cone, sampled every 1/8 of each arc, plus the edge normal when it
+  lies inside the cone.
+- A wire that runs straight on keeps its full factor. A wire that turns there crosses squarer, down to 1. Both are graded,
+  with no angle threshold.
 - What that second packing lacks is the over-fill: over-full, rip-up victims, and the predicted violation.
-- The part only the oblique crossing lacks, `over - max(square, 0)`, is a graded price of `oblique_price` mm per mm,
-  in the squeeze channel. It is continuous and has no angle threshold. It stands for the length the wires spend to cross
-  squarer.
+- The part only the taut crossing lacks, `over - max(reachable, 0)`, is a graded price of `oblique_price` mm per mm, in
+  the squeeze channel.
 - `fits_without` (P4's rip-until-it-fits) uses the same rule.
-- The drawing's lane packing (draw.rs `pack`) packs such an edge-layer square, but only when it does not fit at the
-  taut angles and does fit square. Without this the lanes on the oblique corridor edge collapsed, and N2 jogged 35 µm
-  into N3's slot. Edges that fit at the taut angles get the same copper as before.
+- The drawing's lane packing (draw.rs `pack`) packs such an edge-layer at the reachable factors, but only when it does not
+  fit at the taut angles and does fit at the reachable ones. Edges that fit at the taut angles get the same copper as
+  before.
 - The taut directions are unchanged.
 
 The option is `[capacity] oblique_price`: default 1, and 0 restores the old rule.
 
-**Literature.** Leiserson & Maley 1985 (an any-angle layout is routable iff no cut between two features carries more
-than its length; there is no angle term). TopoR 6.3 manual p. 237.
+**First version and why it changed (bt1r2, 2026-11-27).** The first version used factor 1 for every pass, so every
+oblique crossing counted as square. Arm B (item 4 alone, det s0) moved 156 of 464 qm connections:
+
+- JS2_2 went from 0 to 36 drawing_loss. Its 4-wire bundle runs straight at about 45° through a corridor. P4 no longer
+  ripped it, and `pack` set its lanes at w+s along the edge, so the perpendicular pitch was (w+s)·sin and the lanes
+  overlapped.
+- esp model_gap went from 3 to 10.
+
+A wire that runs straight on also crosses the feature-pair cuts beside the CDT edge, and the oblique factor stands for
+those cuts. Only a wire that turns can trade it for length.
+
+**Literature.** Leiserson & Maley 1985: an any-angle layout is routable iff no cut between two features carries more than
+its length, with no angle term. Maley 1987 p. 32: a wire crosses every cut on its way, not only the triangulation's
+edges. TopoR 6.3 manual p. 237.
 
 ## Invariants
 

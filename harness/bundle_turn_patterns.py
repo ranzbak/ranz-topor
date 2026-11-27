@@ -26,7 +26,7 @@ from pathlib import Path
 from harness.fit_patterns import CLEAR, DEFAULT_CLASS, W_SIG, Fp, Keepout, Pad, Pattern, Track, write_board
 from harness.radii_patterns import EPS
 
-STATUS: dict[str, str] = {}
+STATUS: dict[str, str] = {"turn_fork_corner": "APPROVED (user 2026-11-27)", "hole_bundle_room": "APPROVED (user 2026-11-27)"}
 SQ2 = math.sqrt(2.0)
 NEED = W_SIG / 2 + CLEAR + EPS  # a wire's centre line from foreign copper
 P = W_SIG + CLEAR + EPS  # the bundle pitch (centre to centre)

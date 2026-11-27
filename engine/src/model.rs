@@ -1819,8 +1819,9 @@ pub struct Options {
     /// bundle-turn (`[capacity] oblique_price`, docs/dev/design/bundle-turn.md item 4): per-edge
     /// model, the price (mm per mm) of the room an edge-layer lacks only because its wires cross
     /// it obliquely along their taut paths. Such an edge-layer is over-full only when its wires do
-    /// not fit crossing square (the cut condition, Leiserson & Maley 1985); the oblique overage is
-    /// this graded price instead (the length the wires spend to cross squarer). 0 = the oblique
+    /// not fit at the factors they reach by turning within their taut turn (`pack::Taut::sq`; the
+    /// cut condition, Leiserson & Maley 1985; a straight wire keeps its factor, Maley 1987 p. 32);
+    /// the rest is this graded price (the length the wires spend to cross squarer). 0 = the oblique
     /// overage counts as over-full (before bundle-turn). Default 1.
     pub oblique_price: f64,
     /// tw4-r2 (2b) (`[capacity] via_disc_height`, docs/dev/design/tw4-r2.md (2b)): with via_cuts,

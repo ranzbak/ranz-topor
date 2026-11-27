@@ -1752,11 +1752,21 @@ impl<'a> Drawer<'a> {
         let n = items.len();
         let mut bnd = self.packer.bounds(e, l, &pitems);
         // bundle-turn item 4 (`[capacity] oblique_price`): an edge-layer whose passes do not fit
-        // at their taut crossing angles but fit crossing square is packed square, as the plan
-        // counts it (Leiserson & Maley 1985: the cut condition has no angle term); the
-        // octilinear drawing crosses it squarer. Unchanged where it fits at the taut angles.
+        // at their taut crossing angles but fit at the factors they reach by turning within
+        // their own taut turn ([`super::pack::Taut::sq`]) is packed at those, as the plan counts
+        // it; a pass that runs straight on keeps its full factor (Maley 1987 p. 32), so a
+        // straight oblique bundle is never packed tighter than it is drawn. Unchanged where it
+        // fits at the taut angles.
         if !bnd.fits() && self.packer.oblique_price > 0.0 && pitems.iter().any(|i| i.infl > 1.0) {
-            let sq: Vec<PackItem> = pitems.iter().map(|i| PackItem { infl: 1.0, ..*i }).collect();
+            let sq: Vec<PackItem> = ids
+                .iter()
+                .zip(&pitems)
+                .map(|(&(pid, disc_only), i)| {
+                    let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
+                    let q = if disc_only { 1.0 } else { self.packer.taut(self.st, w).sq.get(k).copied().unwrap_or(i.infl) };
+                    PackItem { infl: q.clamp(1.0, i.infl.max(1.0)), ..*i }
+                })
+                .collect();
             let b2 = self.packer.bounds(e, l, &sq);
             if b2.fits() {
                 bnd = b2;
@@ -4602,10 +4612,11 @@ impl<'a> Drawer<'a> {
                 // the narrowest spots); the run-wide relaxation (all objects) only when no local
                 // one gives a path at any amount. Debug arm `TOPO_FD45_OFF=relaxloc`: run-wide only.
                 let mut local = !super::octi::fd45_off("relaxloc");
+                let mut set = super::exact::RelaxSet::default();
                 let mut try_relax = |f: f64, local: bool, cands: &mut Vec<_>| -> bool {
                     let t_ex = std::time::Instant::now();
                     let got = if local {
-                        self.exact_fix_local(w, k0, k1, layer, base0.clone(), pneck, f * full).map(|(p, _)| p)
+                        self.exact_fix_local(w, k0, k1, layer, base0.clone(), pneck, f * full, &mut set).map(|(p, _)| p)
                     } else {
                         self.exact_fix_relaxed(w, k0, k1, layer, base0.clone(), pneck, f * full)
                     };
