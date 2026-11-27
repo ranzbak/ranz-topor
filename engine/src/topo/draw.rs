@@ -7472,6 +7472,30 @@ mod tests {
         });
     }
 
+    /// defaults-flip-a1 (the stub step of the one never-widen implementation): a full-width pad-end
+    /// stub that `monotone_necks` narrows (a mid-run neck reached on to the cheaper end A) and that
+    /// would then lie wholly inside its 1 mm pad (KiCad's Cleanup deletes such a track, tidy 2a)
+    /// has its joint moved out by half the width difference; the trace keeps its pad-centre end.
+    /// Mutant `TOPO_FD45_OFF=mono_stub` fails it (the joint stays at x 5.4, inside the pad).
+    #[test]
+    fn monotone_necks_moves_a_narrowed_pad_stub_out_of_the_pad() {
+        let m = fx_model(&[(1, 5.0, 15.0), (1, 35.0, 15.0)]);
+        fx_whole_neck(&m, &[], |dr, w, _| {
+            // 0.25 to x 5.4 (its round end reaches 5.525, out of the pad's 5.5 edge: kept by
+            // KiCad), a 0.1 neck in mid-run, 0.25 again: the cheaper profile narrows the 0.4 mm stub.
+            let (mut out, hs) = fx_profile(dr, w, &[(0.25, 5.0, 5.4), (0.1, 5.4, 20.0), (0.25, 20.0, 35.0)]);
+            dr.monotone_necks(w, &mut out, &hs);
+            let pcs = widths_along(&out.items);
+            assert_eq!(pcs.iter().map(|p| p.0).collect::<Vec<_>>(), vec![0.1, 0.1, 0.25], "{pcs:?}");
+            assert_eq!(dr.stats.mono_stubs, 1, "{pcs:?}");
+            assert!((pcs[0].1 - 5.0).abs() < 1e-6, "the trace still ends at the pad centre: {pcs:?}");
+            assert!((pcs[0].2 - 5.475).abs() < 1e-3 && (pcs[1].1 - 5.475).abs() < 1e-3, "joint moved out by 0.075 mm: {pcs:?}");
+            let pad = 0; // P0, the pad at (5, 15)
+            let Item::Track(t) = &out.items[0] else { panic!("track") };
+            assert!(!super::super::tidy::track_in_pad(&m, pad, 0, t.prim.start(), t.prim.end(), t.width as f64), "the moved stub leaves the pad");
+        });
+    }
+
     /// neck-regrow r6: a coupled pair's envelope keeps its end necks (the fan-out zones), and
     /// `neck_from_pad = false` keeps its necks in the middle.
     #[test]

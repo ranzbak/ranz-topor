@@ -177,9 +177,13 @@ fn crop_q3_avdd_enters_along_the_pad_axis() {
 /// Q2 PNGs), not in this one-call route of its model: here CTS keeps its width with every option
 /// off, so this test has no option-off half (r1's half passed only because the unguarded tip
 /// anchor of r1 took CTS's room; B's mutant is killed by the two pattern tests above).
+/// defaults-flip-a1: routed with `[search] exit_taut` pinned off (B's guard, measured before the
+/// flip). With the taut exit test on (the default since then) CTS necks 5.62 mm on this crop
+/// (the plan's taut exit judges the column tight and plans the neck the whole way): an open
+/// finding of reports/defaults-flip-a1-*.md, not an answer this test accepts.
 #[test]
 fn crop_q2_cts_necks_only_at_the_choke() {
-    let r = route("dvn_crop_q2", &[]);
+    let r = route("dvn_crop_q2", &[("exit_taut", serde_json::json!(false))]);
     assert_eq!(r.unrouted, 0);
     let (_, l) = necked(&r, "FPGA_UART1_CTS", 0.25, |_| true);
     assert!(l < 2.0, "CTS necked {l} mm");
@@ -327,7 +331,7 @@ fn centre_misses(m: &BoardModel, r: &topor_engine::route::RouteResult) -> Vec<(S
 }
 
 /// neck-regrow r4: the B patterns keep their answers with `[search] exit_taut` on (the taut exit
-/// test, off by default until the plan's via-site truth lands). Its nearer-end rule keeps the
+/// test, off by default until defaults-flip-a1 2026-11-27, on since). Its nearer-end rule keeps the
 /// free end of neck_in_pad_row / neck_shared_channel from judging the other end's bottleneck, and
 /// its board-outline walls make neck_edge_terminal's exit tight (arms nrg_near / nrg_edge).
 #[test]
@@ -365,6 +369,9 @@ fn crop_q3_pad_off_centre_ends_c19_at_the_centre() {
         let mut val = serde_json::to_value(Options::default()).unwrap();
         val["runs"] = serde_json::json!(1);
         val["factors"]["weight"]["pad_off_centre"] = serde_json::json!(w);
+        // defaults-flip-a1: the pre-flip exit test (with taut exits the plan ends C19.2 at the
+        // centre at weight 0 already: 0.000 mm, so the price has nothing to choose).
+        val["exit_taut"] = serde_json::json!(false);
         let o: Options = serde_json::from_value(val).unwrap();
         let r = topor_engine::route::route_with(&m, &o, &RunControl::new());
         let off: f64 = topor_engine::topo::tidy::pad_end_breaches(&m, &r.items).iter().filter(|h| h.hint() && h.pad == "C19.2").map(|h| h.off / MM).fold(0.0, f64::max);
