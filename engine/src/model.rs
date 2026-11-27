@@ -1686,19 +1686,13 @@ pub struct Options {
     /// plan's own neck against the other band before the gap is kept (the plan necks it there; the
     /// drawing realises that); a forced run (never drop) is necked over the stretches it violates,
     /// down to the net's floor (`State::w_min`), where that removes or shallows its violations.
-    /// Each neck is warned (a shrinkage). r2: one necked stretch per run, from the gap to the
-    /// nearer run end (never widen again after a neck; `joint::one_neck_stretch`), in-pad stubs
-    /// kept off KiCad's in-pad delete, a graded warning per neck on a supply-width net.
-    /// false (default until a verifier) = main's copper.
+    /// Each neck is warned (a shrinkage). In-pad stubs are kept off KiCad's in-pad delete, and a
+    /// neck on a supply-width net gets a graded warning. Never wider again after a neck: the
+    /// drawing's one step for every wire (`Drawer::monotone_necks`, with `[search] neck_from_pad`)
+    /// reaches the neck on to the cheaper wire end (defaults-flip-a1, user 2026-11-27).
+    /// true (default since defaults-flip-a1, user-approved 2026-11-27); false = such places stay
+    /// violations at full width (the copper before the flip).
     pub forced_shrink: bool,
-    /// draw-absorb A1b (`[drawing] reserved_keep_neck`, docs/dev/design/draw-absorb.md): a band
-    /// the joint commit reserved necked (the plan's neck, `Reserved::pneck`) keeps that neck in its
-    /// octilinear form: where main's form would be wider than reserved, the form is realised at
-    /// the plan's zones and the reserved width (never wider than reserved). The pad-tip re-anchor
-    /// (`tip_anchor_reserved`) is not affected: its dropped neck is the plan's hook into the pad
-    /// side and the pad-axis entry is drawn at full width (lead 2026-11-27, Q3); it is only metered.
-    /// false (default until a verifier) = main's copper.
-    pub reserved_keep_neck: bool,
     /// draw-absorb A3 (`[drawing] band_passes`, docs/dev/design/draw-absorb.md): with realise =
     /// "erbs", passes of the iterated band realise per layer before any copper: the band of each
     /// model gap's yielding wire is realised again with its partner's band as a sided obstacle
@@ -2127,8 +2121,7 @@ impl Default for Options {
             octi_own_portals: true,
             octi_straighten: true,
             erbs_gap_keep_max_mm: 0.15,
-            forced_shrink: false,
-            reserved_keep_neck: false,
+            forced_shrink: true,
             band_passes: 0,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,

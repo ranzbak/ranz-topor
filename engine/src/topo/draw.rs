@@ -797,6 +797,9 @@ pub struct DrawStats {
     /// monotone width profile (never wider again after a neck) and the narrowed length (mm).
     pub mono_wires: usize,
     pub mono_mm: f64,
+    /// defaults-flip-a1: pad-end stubs `monotone_necks` narrowed and moved out of KiCad's in-pad
+    /// delete (`joint::stub_out_of_pad`).
+    pub mono_stubs: usize,
     /// M-45: runs redrawn octilinear; octilinear runs the checker rejected (the taut run kept);
     /// seconds in the octilinear search.
     pub octi_ok: usize,
@@ -4157,18 +4160,7 @@ impl<'a> Drawer<'a> {
                 };
                 // draw-absorb A1: the zones of an adopted band the joint commit necked against a
                 // gap partner (its warnings name them; its octilinear form keeps them).
-                // draw-absorb A1b (`[drawing] reserved_keep_neck`): an adopted band reserved with
-                // the plan's neck takes its octilinear form at that neck too (never wider).
-                let a1b = adopted.as_ref().is_some_and(|x| x.zones.is_none() && self.opts.reserved_keep_neck && x.pneck.is_some_and(|p| p.0 < wi.w) && pneck.is_some());
-                let a1z: Option<super::exact::Neck> = adopted.as_ref().and_then(|x| {
-                    x.zones.map(|ends| super::exact::Neck { min_w: x.pneck.map_or(0.0, |p| p.0), ends }).or(match (a1b, x.pneck, &pneck) {
-                        (true, Some((wn, _)), Some(n)) => Some(super::exact::Neck { min_w: wn, ends: n.ends }),
-                        _ => None,
-                    })
-                });
-                // A1b meter: the adopted band's necked length (an octilinear form at full width drops it).
-                let adopted_neck: f64 = adopted.as_ref().and_then(|x| x.pneck).map_or(0.0, |p| p.1.iter().sum());
-                let adopted_wn: Option<f64> = adopted.as_ref().and_then(|x| x.pneck).map(|p| p.0);
+                let a1z: Option<super::exact::Neck> = adopted.as_ref().and_then(|x| x.zones.map(|ends| super::exact::Neck { min_w: x.pneck.map_or(0.0, |p| p.0), ends }));
                 let mut pneck_out: Option<(f64, [f64; super::exact::NECK_ZONES])> = if restored {
                     kept.as_ref().and_then(|k| k.4)
                 } else {
@@ -4258,22 +4250,8 @@ impl<'a> Drawer<'a> {
                         // draw-absorb A1: an adopted band necked against a gap partner takes its
                         // octilinear form at its neck (zones and width), never wider.
                         let real = |o_pts: &[Vec2]| match &a1z {
-                            // A1b: main's realise, unless it draws the band wider than reserved
-                            // (full width, or a wider neck); then the reserved neck where legal.
-                            Some(z) if a1b => {
-                                let main = self.realise(w, layer, lid, o_pts, &pneck);
-                                if main.as_ref().is_some_and(|(_, pn)| pn.is_some_and(|p| p.0 <= z.min_w + 0.5)) {
-                                    return main;
-                                }
-                                let (its, ls) = self.kept_neck_items(w, layer, o_pts, z);
-                                if ls.iter().sum::<f64>() > 0.0 && self.checker.check_against(&self.idx, &its, &[]).violations.is_empty() && self.track_own_pad_ok(w, &its) {
-                                    Some((its, Some((z.min_w, ls))))
-                                } else {
-                                    main
-                                }
-                            }
                             Some(z) => {
-                                // r2: one neck stretch per run, pad stubs kept (`a1_finish`).
+                                // r2: zone cuts merged, pad stubs kept (`a1_finish`).
                                 let (its, _) = self.a1_finish(w, self.neck_items(w, lid, o_pts, z, z.min_w).0);
                                 let mut ls = [0.0; super::exact::NECK_ZONES];
                                 if let (Some((_, _, l)), Some(i)) = (super::joint::neck_of(&its, wi.w), z.ends.iter().position(Option::is_some)) {
@@ -4300,27 +4278,6 @@ impl<'a> Drawer<'a> {
                         let tag = match got {
                             Some(o) => match real(&o.pts) {
                                 Some((its, pn)) => {
-                                    if attempt < 0 && adopted_neck > 0.0 {
-                                        // A1b meter: an octilinear form necked wider than reserved.
-                                        if let (Some((w2, _)), Some(wn)) = (pn, adopted_wn) {
-                                            if w2 > wn + 0.5 && !a1b {
-                                                if std::env::var_os("TOPO_A1BDBG").is_some() {
-                                                    let (a, b) = (o.pts[0], o.pts[o.pts.len() - 1]);
-                                                    eprintln!("A1B octi_wider wire {w} net {} run {r} reserved {:.3} drawn {:.3} mm from ({:.3},{:.3}) to ({:.3},{:.3})", self.st.wires[w].net, wn / 1e6, w2 / 1e6, a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6);
-                                                }
-                                                self.joint.unnecked.push((w, r, adopted_neck, 0.0, "octi_wider"));
-                                            }
-                                        }
-                                        if pn.is_none() {
-                                            let room = match (&pneck, adopted_wn) {
-                                                (Some(n), Some(wn)) => self.room_taken(w, &o.pts, n, wn),
-                                                _ => 0.0,
-                                            };
-                                            self.joint.unnecked.push((w, r, adopted_neck, room, "octi"));
-                                        } else if a1b && pn.is_some_and(|p| adopted_wn.is_some_and(|wn| p.0 <= wn + 0.5)) {
-                                            self.joint.kept_neck += 1;
-                                        }
-                                    }
                                     self.stats.octi_asis += o.asis;
                                     self.stats.octi_asis_below += o.asis_below;
                                     pts = o.pts;
@@ -4734,14 +4691,27 @@ impl<'a> Drawer<'a> {
                     // draw-absorb A1 (`[drawing] forced_shrink`): shrink before violate.
                     if self.opts.forced_shrink && !vs.is_empty() {
                         if let Some((its, neck, fix, v2)) = self.shrink_forced(w, lid, &pts, &items, &vs) {
+                            // defaults-flip-a1 forensics (`TOPO_ABSORBDBG`, copper-neutral): one line
+                            // per forced shrink: the neck and the violations it removed, each with
+                            // the wire it hit (the A1 neck list of the flip report).
+                            if std::env::var_os("TOPO_ABSORBDBG").is_some() {
+                                let nm = |n: i32| self.model.nets.iter().find(|x| x.code == n).map_or("?".to_string(), |x| x.name.clone());
+                                let hit = |v: &Viol| against_item(&v.against).and_then(|id| self.wire_of_item(id)).map_or(v.against.clone(), |(hw, _)| format!("w{hw} {}", nm(self.st.wires[hw].net)));
+                                let q = |p: Vec2| ((p.x / 1e3).round() / 1e3, (-p.y / 1e3).round() / 1e3);
+                                eprintln!(
+                                    "ABSORBDBG forced shrink wire {w} net {} run {r} L{} w {:.3} neck {:?} before {:?} after {}",
+                                    nm(wi.net), lid, wi.w / 1e6,
+                                    neck.map(|(c, wn, l)| (q(c), wn / 1e6, l / 1e6)),
+                                    vs.iter().map(|v| (v.kind, hit(v), (v.depth_nm / 1e3).round() / 1e3, q(v.at))).collect::<Vec<_>>(),
+                                    v2.len()
+                                );
+                            }
                             items = its;
                             vs = v2;
-                            // r2: one stretch, one neck entry (at the run end it touches).
+                            // One neck entry per run (monotone_necks makes the profile).
                             fnecks.extend(neck);
                             self.joint.a1_forced += 1;
                             self.joint.a1_wires.insert(w);
-                            self.joint.a1_mono += usize::from(fix.mono_nm > 0.0);
-                            self.joint.a1_mono_nm += fix.mono_nm;
                             self.joint.a1_stubs += fix.stubs;
                         }
                     }
@@ -5459,14 +5429,43 @@ impl<'a> Drawer<'a> {
                     other => other.clone(),
                 })
                 .collect();
+            let mut narrowed = narrowed;
+            // defaults-flip-a1 (one never-widen step, A1 too): a pad-end stub this step narrowed
+            // from full width that KiCad's Cleanup would then delete as a track wholly inside its
+            // pad (tidy 2a) is moved out of that delete (`joint::stub_out_of_pad`, A1 r2 finding
+            // 2b), so the trace keeps its pad-centre end. Only a stub that was at full width: its
+            // neighbour then has the stub's width (the running minimum), so the moved copper lies
+            // in the full-width disc round the old joint and hits nothing new. Debug arm
+            // `TOPO_FD45_OFF=mono_stub`: off.
+            let mut stubs = 0;
+            if n >= 2 && !super::octi::fd45_off("mono_stub") {
+                let end_ok = |k: usize| ws[k] >= wi.w - 0.5 && nw[k] < ws[k] - 0.5;
+                let ends = [(narrowed[0].clone(), end_ok(0), true), (narrowed[n - 1].clone(), end_ok(n - 1), false)];
+                let ends: Vec<(IVec2, bool)> = ends.iter().filter_map(|(it, ok, first)| match it {
+                    Item::Track(t) => Some((if *first { t.prim.start() } else { t.prim.end() }, *ok)),
+                    _ => None,
+                }).collect();
+                let pads: Vec<usize> = (0..self.model.pads.len()).filter(|&i| self.model.pads[i].net == wi.net && wi.net != 0).collect();
+                let in_pad = |a: IVec2, b: IVec2, width: f64, layer: u32| {
+                    ends.iter().any(|&(p, ok)| ok && p == a) && pads.iter().any(|&pi| super::tidy::track_in_pad(self.model, pi, layer, a, b, width))
+                };
+                stubs = super::joint::stub_out_of_pad(&mut narrowed, wi.w, &in_pad);
+            }
             for (k, it) in narrowed.into_iter().enumerate() {
-                if nw[k] < ws[k] - 0.5 {
-                    self.stats.mono_mm += ls[k] / 1e6;
+                let moved = it != out.items[k];
+                if nw[k] < ws[k] - 0.5 || moved {
+                    if nw[k] < ws[k] - 0.5 {
+                        self.stats.mono_mm += ls[k] / 1e6;
+                    }
                     self.recommit(committed[k], &it);
+                    if let Item::Track(t) = &it {
+                        ls[k] = prim_len(&t.prim);
+                    }
                     out.items[k] = it;
-                    ws[k] = nw[k].round();
+                    ws[k] = nw[k].round().min(ws[k]);
                 }
             }
+            self.stats.mono_stubs += stubs;
             self.stats.mono_wires += 1;
             if std::env::var("TOPO_NECKDBG").is_ok() {
                 eprintln!("NECKMONO wire {w} narrowed to a monotone profile: {:?}", ws.iter().map(|x| (x / 1e3).round()).collect::<Vec<_>>());
@@ -5592,7 +5591,7 @@ impl<'a> Drawer<'a> {
             *z = Some(v);
         }
         let nk0 = super::exact::Neck { min_w, ends };
-        // r2: the copper as drawn: one neck stretch per run, pad stubs kept ([`Drawer::a1_finish`]).
+        // r2: the copper as drawn: zone cuts merged, pad stubs kept ([`Drawer::a1_finish`]).
         let eval = |nk: &super::exact::Neck, wn: f64| {
             let (its, fix) = self.a1_finish(w, self.neck_items(w, lid, pts, nk, wn).0);
             let rep = self.checker.check_against(&self.idx, &its, &[]);
@@ -5672,28 +5671,6 @@ impl<'a> Drawer<'a> {
         lo.floor().max(neck.min_w)
     }
 
-    /// draw-absorb A1b meter: length (nm) of the run `pts` of wire `w` inside the zones of `neck`
-    /// where its full width takes planned room of wires not drawn yet that the width `wn` leaves
-    /// free (the room price of [`Drawer::via_plan_price`], as [`Drawer::fit_neck`] grows a neck
-    /// by it). 0 = the full width there costs no other trace room. O(samples x traversals).
-    pub(super) fn room_taken(&self, w: WireId, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> f64 {
-        let wi = &self.st.wires[w];
-        let last = wi.tris.len().saturating_sub(1);
-        let mut l = 0.0;
-        for s in pts.windows(2) {
-            let sl = (s[1] - s[0]).len();
-            let n = ((sl / 5.0e4).ceil() as usize).max(1);
-            for j in 0..n {
-                let q = s[0] + (s[1] - s[0]) * ((j as f64 + 0.5) / n as f64);
-                let inside = neck.ends.iter().flatten().any(|&(c, r)| (q - c).len() <= r);
-                if inside && self.via_plan_price(w, 0, last, q, wi.w) > self.via_plan_price(w, 0, last, q, wn) {
-                    l += sl / n as f64;
-                }
-            }
-        }
-        l
-    }
-
     /// draw-via-neck B (`[drawing] neck_trim`): the plan's neck zones of the run `pts` (necked to
     /// `wn`) cut to where the room ends. Each zone first shrinks to the smallest radius the checker
     /// accepts ([`Drawer::trim_neck`]; a zone over the whole wire is tried from either end, the
@@ -5704,13 +5681,6 @@ impl<'a> Drawer<'a> {
     /// only where another trace needs that room (TopoR 6.3 manual p. 56, the minimum width only
     /// where needed). Graded, no cutoff. O(zones x 14 checks of the run + zones x 65 x segments).
     pub(super) fn fit_neck(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64) -> super::exact::Neck {
-        self.fit_neck_with(w, lid, pts, neck, wn, false)
-    }
-
-    /// [`Drawer::fit_neck`]; `grow_trimmed` (draw-absorb A1b, `[drawing] reserved_keep_neck`): a
-    /// zone the checker does not need (trimmed away) still grows from radius 0 where the full
-    /// width would take planned room of traces not drawn yet (the room the reserved neck kept).
-    pub(super) fn fit_neck_with(&self, w: WireId, lid: u32, pts: &[Vec2], neck: &super::exact::Neck, wn: f64, grow_trimmed: bool) -> super::exact::Neck {
         let wi = &self.st.wires[w];
         let ext = |c: Vec2| pts.iter().map(|&p| (p - c).len()).fold(0.0, f64::max) + 1.0;
         let len_of = |n: &super::exact::Neck| self.neck_items(w, lid, pts, n, wn).1.iter().sum::<f64>();
@@ -5751,11 +5721,7 @@ impl<'a> Drawer<'a> {
         let extra = |q: Vec2| ((self.via_plan_price(w, 0, last, q, wi.w) - self.via_plan_price(w, 0, last, q, wn)) / pitch).max(0.0);
         for i in 0..super::exact::NECK_ZONES {
             let Some((c, r1)) = base.ends[i] else { continue };
-            let r0 = match nk.ends[i] {
-                Some((_, r0)) => r0,
-                None if grow_trimmed => 0.0,
-                None => continue,
-            };
+            let Some((_, r0)) = nk.ends[i] else { continue };
             let r1 = if r1.is_finite() { r1 } else { ext(c) };
             if room <= 0.0 || r1 <= r0 + 1.0 {
                 continue;
@@ -7503,6 +7469,30 @@ mod tests {
             assert_eq!(o4.necks.len(), 1);
             assert!((o4.necks[0].0 - fp(35.0, 15.0)).len() < 2.0, "the stretch's end B: {:?}", o4.necks);
             assert_eq!(dr.stats.mono_wires, 1, "no narrowing in these three");
+        });
+    }
+
+    /// defaults-flip-a1 (the stub step of the one never-widen implementation): a full-width pad-end
+    /// stub that `monotone_necks` narrows (a mid-run neck reached on to the cheaper end A) and that
+    /// would then lie wholly inside its 1 mm pad (KiCad's Cleanup deletes such a track, tidy 2a)
+    /// has its joint moved out by half the width difference; the trace keeps its pad-centre end.
+    /// Mutant `TOPO_FD45_OFF=mono_stub` fails it (the joint stays at x 5.4, inside the pad).
+    #[test]
+    fn monotone_necks_moves_a_narrowed_pad_stub_out_of_the_pad() {
+        let m = fx_model(&[(1, 5.0, 15.0), (1, 35.0, 15.0)]);
+        fx_whole_neck(&m, &[], |dr, w, _| {
+            // 0.25 to x 5.4 (its round end reaches 5.525, out of the pad's 5.5 edge: kept by
+            // KiCad), a 0.1 neck in mid-run, 0.25 again: the cheaper profile narrows the 0.4 mm stub.
+            let (mut out, hs) = fx_profile(dr, w, &[(0.25, 5.0, 5.4), (0.1, 5.4, 20.0), (0.25, 20.0, 35.0)]);
+            dr.monotone_necks(w, &mut out, &hs);
+            let pcs = widths_along(&out.items);
+            assert_eq!(pcs.iter().map(|p| p.0).collect::<Vec<_>>(), vec![0.1, 0.1, 0.25], "{pcs:?}");
+            assert_eq!(dr.stats.mono_stubs, 1, "{pcs:?}");
+            assert!((pcs[0].1 - 5.0).abs() < 1e-6, "the trace still ends at the pad centre: {pcs:?}");
+            assert!((pcs[0].2 - 5.475).abs() < 1e-3 && (pcs[1].1 - 5.475).abs() < 1e-3, "joint moved out by 0.075 mm: {pcs:?}");
+            let pad = 0; // P0, the pad at (5, 15)
+            let Item::Track(t) = &out.items[0] else { panic!("track") };
+            assert!(!super::super::tidy::track_in_pad(&m, pad, 0, t.prim.start(), t.prim.end(), t.width as f64), "the moved stub leaves the pad");
         });
     }
 

@@ -384,21 +384,6 @@ pub struct ErbsGapKept {
     pub layer: u32,
 }
 
-/// draw-absorb A1b meter: one reserved band the plan had necked, redrawn at full width.
-#[derive(Clone, Debug, Default, Serialize, PartialEq)]
-pub struct ErbsUnnecked {
-    pub wire: usize,
-    pub run: usize,
-    /// Necked length of the reserved band (mm) that the redraw dropped.
-    pub mm: f64,
-    /// Of the full-width redraw, the length (mm) inside the plan's neck zones where the full
-    /// width takes planned room of traces not drawn yet that the reserved width left free.
-    pub room_mm: f64,
-    /// `tip` (pad-tip re-anchor), `octi` (the adopted band's octilinear form at full width) or
-    /// `octi_wider` (that form necked wider than reserved).
-    pub at: String,
-}
-
 /// TW2: a run of a drawn wire with no ERBS stretch at its ends ([`ErbsRunReport::no_band_list`],
 /// class `cut_no_band`): the wire, run, layer id, connection (net, pad labels) and why: "no
 /// stretch" (the ERBS drawing has none for the wire), "other layer" (none on the run's layer), or
@@ -445,25 +430,15 @@ pub struct ErbsRunReport {
     /// draw-absorb A1 (`[drawing] forced_shrink`): model-gap pairs resolved by realising one band
     /// with its plan's neck against the other (not kept as a violation).
     pub gap_shrunk: usize,
-    /// draw-absorb A1 r2 (`Drawer::a1_finish`): A1 necks joined into one stretch touching a run
-    /// end (never wider again after a neck; per neck taken), the length narrowed for it (mm), and
-    /// the narrowed pad-end stubs moved out of KiCad's in-pad delete (the trace keeps its pad
-    /// centre end).
-    pub a1_one_stretch: usize,
-    pub a1_one_stretch_mm: f64,
+    /// draw-absorb A1 r2 (`Drawer::a1_finish`): the narrowed pad-end stubs moved out of KiCad's
+    /// in-pad delete (the trace keeps its pad centre end). defaults-flip-a1: A1's own one-stretch
+    /// count (`a1_one_stretch`, `a1_one_stretch_mm`) is gone; the neck profile is
+    /// `Drawer::monotone_necks`' (the "neck profile" line).
     pub a1_stub_out: usize,
     /// draw-absorb A1 (`[drawing] forced_shrink`): forced runs (never drop) necked over their
     /// violating stretches, each taken only where it makes the violations strictly fewer or
     /// shallower (the severity key: shorts, then amount).
     pub forced_shrunk: usize,
-    /// draw-absorb A1b meter: reserved bands the plan had necked that the drawing redrew at their
-    /// full width (pad-tip re-anchor `tip`, adopted band's octilinear form `octi`): count, necked
-    /// length dropped (mm), every one; and with `[drawing] reserved_keep_neck` the redraws that
-    /// kept the neck.
-    pub unnecked: usize,
-    pub unnecked_mm: f64,
-    pub unnecked_list: Vec<ErbsUnnecked>,
-    pub kept_neck: usize,
     /// draw-absorb A3 (`[drawing] band_passes`): passes run, yielding bands realised again and
     /// kept, model gaps between two bands before the passes and after them (the ERBS check).
     pub band_passes: usize,
