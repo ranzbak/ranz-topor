@@ -1039,7 +1039,9 @@ pub struct Options {
     /// bundle-turn r2 (`[optimize] crossing_split`): a crossing-rules pass the plan's score
     /// refuses as a whole is split in two and each half is tried again (the first half kept or
     /// not before the second), down to this many levels (at most 2^levels groups, each one
-    /// layering and one score more). 0 = the whole pass or nothing (before bundle-turn r2).
+    /// layering and one score more). 0 (default, opt-in since bundle-turn r2: at 3 it re-planned
+    /// qmtech's JS_CS / JS_MOSI / FPGA_SD_CLK detours away but drew 44 more DRC errors on qm and
+    /// 11 on wiccon) = the whole pass or nothing.
     pub crossing_split: usize,
     /// TW7 part B (`[optimize] pattern_moves`, docs/dev/design/tw7-moves.md): the pattern kinds
     /// that, in every cycle of the TopoR loop, become one targeted move each instead of the batch
@@ -2024,7 +2026,7 @@ impl Default for Options {
             history_fade: 0.5,
             soft_cuts: true,
             crossing_rules: true,
-            crossing_split: 3,
+            crossing_split: 0,
             pattern_moves: Vec::new(),
             pattern_share: 0.25,
             pattern_stuck: 1.0,
