@@ -123,8 +123,9 @@ pricing (search approximation only; the copper uses `neck_items`).
   reshuffle the plan into vias without a legal site and into crossing-vs-length flips. Both are
   priced too low today: unsited vias go to via-plan r3 (site truth), the flips to CROSS-VS-LENGTH.
   The taut test becomes the default once via-plan r3's site truth has landed.
-- Flip measured (defaults-flip-a1, 2026-11-27, before via-plan r3 landed; reports/defaults-flip-a1-*.md): the
-  warning holds. det s0 C1, exit_taut alone vs main: qm DRC 200 -> 229, unconnected 16 -> 14, detours > 1.5
+- Flip measured and **reverted** (defaults-flip-a1, 2026-11-27, before via-plan r3 landed; lead decision: the
+  default stays false; reports/defaults-flip-a1-20261127-1035.md): the warning holds. **Gate for flipping it after
+  via-plan's site truth lands: each item below gone** (det s0 C1 + real esp, real KiCad Cleanup per net). det s0 C1, exit_taut alone vs main: qm DRC 200 -> 229, unconnected 16 -> 14, detours > 1.5
   23 -> 22 but new ones (FPGA_SD_SW net 32.7 -> 67.0 mm, ADV_CEC 19.4 -> 35.6 mm, ADV_TX2- 1.49 -> 2.93);
   esp 17 -> 37, unconnected 8 -> 11: the USB pair (U4.19/U4.20 -> D8.1/D5.1) dives to B.Cu with vias that have
   no site ("via 1 of 3: no site in its interval"), shorting D8.1, +BATT and IO8_SCL. Real esp 10 -> 31 (30

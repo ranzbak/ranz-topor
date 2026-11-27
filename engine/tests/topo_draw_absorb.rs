@@ -10,10 +10,10 @@ use topor_engine::route::{route, RouteResult};
 const MM: f64 = 1e6;
 
 /// defaults-flip-a1: the A0/A1 fixtures are scenarios where the plan does not neck the gap, so the
-/// drawing has to (or forces the run). With `[search] exit_taut` on (the default since the flip)
-/// the plan judges these exits by the taut path and necks most of them itself; the file pins
-/// exit_taut false so the drawing's step stays under test (`a_planned_neck_with_the_taut_exit_needs_no_shrink`
-/// checks the defaults on the same fixture).
+/// drawing has to (or forces the run). With `[search] exit_taut` on (still opt-in: defaults-flip-a1
+/// measured its flip and the lead reverted it, 2026-11-27) the plan judges these exits by the taut path and necks most of them itself; the file pins
+/// exit_taut false so the drawing's step stays under test whatever the default
+/// (`a_planned_neck_with_the_taut_exit_needs_no_shrink` checks exit_taut on with the A1 default on the same fixture).
 fn opts() -> Options {
     Options::from_json(r#"{"runs": 1, "wall_clock_s": 60.0, "topo_rounds": 3, "exit_taut": false}"#).expect("options parse")
 }
@@ -327,14 +327,14 @@ fn a_forced_run_shrinks_from_the_gap_to_the_nearer_end_instead_of_violating() {
     assert!((a[0] < 250_000) != (b[0] < 250_000), "necked at one pad end, full width at the other: {a:?} {b:?}");
 }
 
-/// defaults-flip-a1 (`[search] exit_taut` and `[drawing] forced_shrink` on by default): on the
-/// A1 pattern fixture the plan's taut exit test sees the gap and necks the wire itself, so
+/// defaults-flip-a1 (`[drawing] forced_shrink` on by default, `[search] exit_taut` on here: its
+/// flip was reverted, lead 2026-11-27): on the A1 pattern fixture the plan's taut exit test sees the gap and necks the wire itself, so
 /// nothing is forced and A1 has nothing to shrink: no violation, one neck from a pad end, no
 /// valley, both ends at their pad centres.
 #[test]
 fn a_planned_neck_with_the_taut_exit_needs_no_shrink() {
     let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
-    let d = route(&m, &Options::from_json(r#"{"runs": 1, "wall_clock_s": 60.0, "topo_rounds": 3}"#).unwrap());
+    let d = route(&m, &Options::from_json(r#"{"runs": 1, "wall_clock_s": 60.0, "topo_rounds": 3, "exit_taut": true}"#).unwrap());
     assert_eq!((d.routed, d.violations.len(), d.erbs.as_ref().unwrap().forced_shrunk), (1, 0, 0), "{:?}", d.violations);
     assert!(valleys(&m, &d).is_empty(), "{:?}", chains(&m, &d));
     assert!(tracks(&d).iter().any(|t| t.0 < 250_000), "the plan necks the gap: {:?}", tracks(&d));
