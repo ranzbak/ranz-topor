@@ -302,6 +302,49 @@ copper (hash on 4 boards).
 - **Patterns.** `band_conflict_pair`: two wires through two consecutive gaps where the per-portal radii disagree.
   Main: one band rejected, then drawn with a detour or forced. Expected: both taut, side by side.
 
+**A3 as built (2026-11-27): `[drawing] band_passes`**, default 0 (range 0-8, since 0.5.0, unreleased); 0 = main
+copper (hash on 4 boards). It lives in `erbs.rs` `band_passes`, after a layer's ERBS and before the joint commit.
+
+- **One pass:**
+  - The model gaps are the non-predicted stretch-stretch violations.
+  - Per gap pair, the yielder is the later band in the given order. When its try failed, the partner yields instead.
+  - The partner's ERBS segments within 2 pitches of the yielder become **walls**: sided gates
+    (`GateSrc::Band`), grown by the pitch. Each wall is sided against the yielder's present ERBS, and a segment that
+    crosses it has no side and is left out. This is spoke creation pushing the bands apart (Dayan p. 32; Su & Dai
+    p. 2).
+  - The yielders are re-realised in parallel. A new path is kept only if two guards hold:
+    - **topology:** its length is not below the old one, and it passes no feature the old one did not;
+    - **price:** length + `PASS_VIOL_W` (10) x the violation amount the stretch takes part in. Otherwise it reverts.
+  - Passes repeat to a fixpoint or `band_passes`.
+- **Counted:** `route.erbs.band_passes`, `band_pass_tried`, `band_pass_moved`, `band_pass_gaps_before/after`. The ERBS
+  warning line names them.
+- **Measured (det s0 C1, r2 4c440a4e and r3 eb306184, the same copper):**
+
+  | board | DRC | KiCad F3 | KiCad F4 | ERBS gaps | gap_kept | forced from gap |
+  |---|---|---|---|---|---|---|
+  | qmtech | 223 -> 198 | 64 -> 40 | 26 -> 25 | 24 -> 18 (46 tried, 10 moved) | 24 -> 22 | 3 -> 2 |
+  | esp | 17 -> 17 | - | 6 -> 6 | 2 -> 1 | 1 -> 0 | - |
+
+  wiccon and eprom are = main.
+
+  qmtech in detail:
+  - No new DRC class: clearance 139 -> 113, hole_clearance 62 -> 63, unconnected 16 -> 17 (GND pour pieces at
+    ADV7511 pads 18/27).
+  - Vias 248 -> 251, all GND.
+  - 13 connections changed. None newly above detour 1.5 (JS_INTB_5V 1.98 -> 2.03 was above already).
+- **Real KiCad Cleanup** (Xephyr, every box on, vs main's dialog runs): the strict list is empty on both boards.
+  - qmtech: removed 180 -> 177. Unconnected after Cleanup 24 -> 24, with C18.2 (ADV_AVDD) and U7.3 (MAX_I2S0) in
+    place of 2 others.
+  - esp: removed 59 -> 59; unconnected 10 -> 10.
+- **Real settings** (ccx33 timing slots, wall clock, timeout 600, vs main a94cde2b dvn7tq/dvn7tr):
+  - qmtech: DRC 119 -> 124, unconnected 17 -> 18, vias 243 -> 242, detour > 1.5 17 -> 17. Passes 33 tried, 7 moved,
+    gaps 18 -> 13. New: a 4-item clearance cluster where JS2_2 (moved, 27.77 -> 28.58 mm) meets JS2_3 at
+    (134.50, 126.08). shorting_items 7 -> 9.
+  - esp: 10 / 10 / 52 / 11, all = main.
+  - So the det s0 gain does not carry over to real settings on qmtech, and the key stays off.
+- **Gaps left:** most remaining tries do not move the violation. The wall sits at a terminal or settled gate, or the
+  push runs into a feature (gap squeeze) and the price reverts it. That is the joint-sweep item below.
+
 **Why no over-full cut predicted the qmtech gap pairs (Goal 3 RCA, 2026-11-27; no code).**
 - Method: `TOPO_ERBS_DUMP` of off qmtech det s0 C1 (the dump now carries every cut with its slack), then
   `tools/draw_absorb_gap_rca.py`.
