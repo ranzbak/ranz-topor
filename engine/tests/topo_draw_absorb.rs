@@ -630,6 +630,10 @@ fn an_a1_neck_on_a_supply_width_net_is_warned_graded() {
     assert!(route(&supply, &opts_shrink(&opts(), false)).warnings.iter().all(|w| !w.contains("supply-width net necked")));
     let dflt = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
     assert!(route(&dflt, &opts_shrink(&opts(), true)).warnings.iter().all(|w| !w.contains("supply-width net necked")), "a default-width net is no supply net");
+    // Only A1's necks: the plan's own necks of wide nets (main, A1 off) keep their NECKED lines only.
+    for (name, m, o) in a1_cases() {
+        assert!(route(&m, &opts_shrink(&o, false)).warnings.iter().all(|w| !w.contains("supply-width net necked")), "{name}: off warns an A1 neck");
+    }
 }
 
 /// A3's partner swap (design note §4 A1: the band that yields by key first, then the other) on
