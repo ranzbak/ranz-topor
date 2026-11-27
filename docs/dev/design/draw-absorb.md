@@ -251,13 +251,26 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
     inside the full-width envelope and is no longer wholly inside the pad (`tidy::track_in_pad`, the same test as
     tidy 2a).
   - Counted: `route.erbs.a1_stub_out`.
-- **Octilinear form of a necked band (finding 2a, the qm JS1_4/JS1_5/JS1_9 cluster at 163.55, 125.47).**
-  - r1: JS1_4 (w734) was necked in the joint commit against JS1_5 (gap 7.4 um). Its adopted band's octilinear form
-    was then accepted only if the necked copper broke no rule. When it did, the form was rejected, the band fell to
-    a later attempt, and that attempt drew another staircase from U6 onwards. JS1_3, nested beside it, followed.
-    JS1_9 (forced, drawn last) was left 0.27 mm between JS1_4 and JS1_5 where it needs 0.52 mm.
+- **The qm JS1_4 / JS1_5 / JS1_9 cluster (finding 2a, at 163.55, 125.47).**
+  - Debug runs: `TOPO_ABSORBDBG` (the joint commit's pairs) and a one-off octilinear input dump (dab14, not kept).
+  - The joint commit necks JS1_4 (w734) against JS1_5 (w1275, gap 7.4 um) at RN2, and the reservation keeps that neck.
+  - Off: the adopted band's octilinear form fails, and the run is drawn by the next attempt, a sequential path.
+  - A1: the band is drawn as reserved. Its form is searched with the plan neck (the same ERBS points), so it takes
+    another legal staircase from U6 onwards, and JS1_3, nested beside it, follows.
+  - JS1_9 has no legal path in either arm. Off forces it with 11 violations (the cluster at 155.87, 122.73). A1
+    forces and necks it to 0.09 mm between JS1_4 and JS1_5 at RN2 with 9 (163.51, 125.43, 5 + 1 items), where it
+    needs 0.52 mm and has 0.27 mm.
+  - So the "new" cluster is the same connection's fault moved and made smaller, not one A1 makes. The cause is the
+    plan (no room for JS1_9 at RN2), so a drawing option cannot remove it.
+  - Tried in r2 and dropped (det s0, dab15): main's full-width form first for an A1 band. It does not fire for
+    JS1_4, because main's form breaks a rule there. qm DRC and clusters are equal to r2, and the a1b_octi_crop
+    any-angle count goes 14 -> 15.
+- **Octilinear form of a necked band (found on a1b_octi_crop).**
+  - r1 accepted the adopted band's necked form only when it broke no rule. Otherwise the band lost its octilinear
+    form: Net 7 was drawn any-angle, necked 0.140 mm.
   - r2: a necked form that breaks a rule falls back to main's `realise` of the same form (legal, or None as in main).
-    The band keeps an octilinear form, and is never worse than main's.
+  - On qmtech it fires once (w655, main realise none), so qm copper equals the copper without it.
+  - Test: `a_necked_band_that_breaks_a_rule_keeps_its_octilinear_form`. Debug arm: `TOPO_FD45_OFF=dab_ofb`.
 - **Supply nets:** one warning per A1 neck on a net wider than the board default width (VIN5V, VBUS, vbat, ...). It
   gives the width left in % and a graded severity = (1 - left) x necked length in mm, sorted most severe first
   (`core::a1_supply_grade`). It is a warning, not a cutoff (graded factors rule).
@@ -271,7 +284,24 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
   - `an_a1_neck_on_a_supply_width_net_is_warned_graded`;
   - unit tests in joint.rs;
   - `a_band_pass_lets_the_partner_yield_when_the_first_yielder_is_put_back`, which kills A3's a3_no_swap mutant.
+  - `a_necked_band_that_breaks_a_rule_keeps_its_octilinear_form`.
   - The board check is `tools/vfy_neck_regrow.py` (valleys, --ends).
+- **Measured (det s0 C1, vs off = main hash; dab12/dab13):**
+
+  | board | DRC new | unconnected | vias | detour > 1.5 | mid-run valleys | loose ends |
+  |---|---|---|---|---|---|---|
+  | qmtech off | 223 | 16 | 248 | 23 | 0 | 29 |
+  | qmtech A1 r1 | 148 | 15 | 253 | 24 | 13 | 34 |
+  | qmtech A1 r2 | 147 | 15 | 253 | 24 | 0 | 27 (subset of off's) |
+  | esp off | 17 | 8 | 64 | 12 | 0 | 17 |
+  | esp A1 r2 | 15 | 8 | 64 | 12 | 0 | 17 |
+
+  - The DRC clusters off -> r2: qmtech 2 new (the moved JS1_9 fault above), 13 gone (78 items); esp 0 new, 1 gone.
+  - wiccon and eprom A1 = main hash.
+  - Valleys are counted by `tools/vfy_neck_regrow.py`. qmtech and esp keep main's `both_ends` 2 / 1, which are runs
+    necked at both pad ends by the plan.
+  - Real KiCad Cleanup (Xephyr, all options), off vs r2: Cleanup removes no copper that off keeps (strict check
+    empty). Unconnected after: qmtech 24 -> 22, esp 10 -> 10.
 - **Touch points with branch neck-regrow:**
   - `neck_items` is unchanged.
   - New code: joint.rs (`a1_finish`, `one_neck_stretch`, `merge_collinear`, `stub_out_of_pad`, `neck_of`,
