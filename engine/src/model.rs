@@ -1538,12 +1538,11 @@ pub struct Options {
     /// of a full-width run). False: only the bottleneck passes themselves are necked.
     pub neck_from_pad: bool,
     /// neck-regrow (`topor.toml [search] exit_taut`, lead 2026-11-27): how the plan judges a pad
-    /// exit tight (`State::exit_tight`). false (default) = main's test: the stretch through the
-    /// even points of the first two passes. true = the wire's taut path at its nominal width
-    /// (own-pad passes skipped, only the passes nearer to this end, relaxed round the clearance
-    /// discs, board outline as a wall, an elongated pad's axis exit). Default false until the
-    /// plan's via-site truth (via-plan r3) lands: on esp/qmtech the truer exits reshuffle the plan
-    /// into unsited vias and crossing-vs-length flips that are priced too low today.
+    /// exit tight (`State::exit_tight`). true (default since defaults-flip-a1, user-approved
+    /// 2026-11-27; the user patterns neck_reentry and neck_both_ends need it) = the wire's taut
+    /// path at its nominal width (own-pad passes skipped, only the passes nearer to this end,
+    /// relaxed round the clearance discs, board outline as a wall, an elongated pad's axis exit).
+    /// false = the test before: the stretch through the even points of the first two passes.
     pub exit_taut: bool,
     /// Shopping list 5.10 (`topor.toml [search] pad_exit_stubs`): a connection's exit from a
     /// fine-pitch pad (another net's copper beside it closer than the wire could pass) is fixed
@@ -2101,7 +2100,7 @@ impl Default for Options {
             allow_violations: true,
             neck_max_nm: 0,
             neck_from_pad: true,
-            exit_taut: false,
+            exit_taut: true,
             pad_exit_stubs: false,
             draw_style: "octilinear".into(),
             draw_candidates: 4,

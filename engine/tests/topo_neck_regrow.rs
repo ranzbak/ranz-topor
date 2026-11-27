@@ -43,7 +43,7 @@ fn a_row_pad_with_room_on_its_axis_is_no_tight_exit() {
         let m = column(rc);
         let b = tb::build(&m, &opts()).unwrap();
         let mut st = State::new(&b.proj);
-        st.exit_taut = true; // the taut exit test (`[search] exit_taut`, default off)
+        st.exit_taut = true; // the taut exit test (`[search] exit_taut`, the default since defaults-flip-a1)
         st.floors.insert(3, 0.1 * MM);
         let c = conn(&m, &b, 3, "R3", "T");
         let w = st.route_conn(&c, &InitWeights::default(), 1.0).expect("routed").0;
@@ -79,7 +79,7 @@ fn a_row_pad_without_room_on_its_axis_is_a_tight_exit() {
         }
         let b = tb::build(&m, &opts()).unwrap();
         let mut st = State::new(&b.proj);
-        st.exit_taut = true; // the taut exit test (`[search] exit_taut`, default off)
+        st.exit_taut = true; // the taut exit test (`[search] exit_taut`, the default since defaults-flip-a1)
         st.floors.insert(3, 0.1 * MM);
         let c = conn(&m, &b, 3, "R3", "T");
         let w = st.route_conn(&c, &InitWeights::default(), 1.0).expect("routed").0;
@@ -98,7 +98,7 @@ fn neck_reentry_p2_exit_has_room_round_the_wall_corner() {
     let m = BoardModel::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let b = tb::build(&m, &opts()).unwrap();
     let mut st = State::new(&b.proj);
-    st.exit_taut = true; // the taut exit test (`[search] exit_taut`, default off)
+    st.exit_taut = true; // the taut exit test (`[search] exit_taut`, the default since defaults-flip-a1)
     st.floors.insert(1, 0.2 * MM);
     let mut c = conn(&m, &b, 1, "P1", "P2");
     c.w = 0.5 * MM;
@@ -133,7 +133,7 @@ fn necks_at_both_ends_keep_the_full_width_room_in_the_middle_of_the_plan() {
     let m = board(30.0, 20.0, 2, &pads);
     let b = tb::build(&m, &opts()).unwrap();
     let mut st = State::new(&b.proj);
-    st.exit_taut = true; // the taut exit test (`[search] exit_taut`, default off)
+    st.exit_taut = true; // the taut exit test (`[search] exit_taut`, the default since defaults-flip-a1)
     st.floors.insert(1, 0.2 * MM);
     let mut c = conn(&m, &b, 1, "A", "B");
     c.w = 0.4 * MM;

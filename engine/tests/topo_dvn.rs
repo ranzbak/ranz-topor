@@ -123,8 +123,8 @@ fn neck_shared_channel_reaches_where_s_leaves() {
 /// neck was the plan's phantom tight exit (`State::exit_tight` judged pass points inside the pad's
 /// own corner fan), which pushed the plan's band into the pad's side. With the exit judged right
 /// the plan reaches both pads along their axes, so both halves check the hook geometry itself
-/// (with `[search] exit_taut`, the taut exit test; it is off by default until the plan's via-site
-/// truth lands, so the option-off half runs with it on; the defaults run the on half):
+/// (with `[search] exit_taut`, the taut exit test, the default since defaults-flip-a1; the
+/// option-off half sets it explicitly, the defaults run the on half):
 /// every ADV_AVDD piece that comes within half its width of a pad's long side (alongside the pad,
 /// above its tip) lies on that pad's axis, each pad is reached on its axis, and the bar keeps
 /// the clearance below the tips.
