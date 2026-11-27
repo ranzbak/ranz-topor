@@ -228,6 +228,58 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
   (`a_shrink_next_to_a_pad_has_no_width_step_in_the_pad`), plus the joint commit, the graded shallow case and the
   no-floor case.
 
+**A1 r2 (2026-11-27, verifier vfy-draw-absorb-r1; lead decision on finding 1).**
+
+- **Never widen again after a neck** (user rule; the same invariant as branch neck-regrow): at most one necked stretch
+  per wire run, touching a run end, or the whole run.
+  - `neck_items` narrows inside zone circles and draws full width outside. A gap in mid-run therefore gave a valley
+    (full, narrow, full): r1 drew 13 on qmtech det s0.
+  - `Drawer::a1_finish` (joint.rs) runs after `neck_items` on every A1 path: the joint commit (`neck_band`), the
+    forced run (`shrink_forced`) and the adopted band's octilinear form (`a1z`).
+  - `one_neck_stretch` takes the running minimum of the widths from either end. The neck then reaches from the gap to
+    the nearer run end (the pad side, or the T split where the run ends in a T). The cheaper end wins, by narrowed
+    width x length. Two necks that would make two stretches merge into one, which can be the whole run.
+  - `merge_collinear` joins the pieces the cut leaves. `neck_band` takes its width with the finished items, so the
+    checker sees the copper that is drawn.
+- **Pad-centre ends (finding 2b, 29 -> 34 ends on no pad centre / via / T).**
+  - Cause: KiCad's Cleanup (`deleteTracksInPads`, mirrored by tidy.rs step 2a) deletes a track wholly inside a pad. A
+    narrowed in-pad stub is inside the pad outline, where the full-width stub is not, so the trace lost its centre
+    end.
+  - padend.rs:250 (the A1 re-anchor skip) is not the cause. Its debug line (`TOPO_ABSORBDBG`, "tip skip") fires for
+    2 wires on qmtech, and both keep their centre ends.
+  - Fix: `stub_out_of_pad` moves the stub's outer vertex by (full - narrow) / 2 along the stub. The moved stub stays
+    inside the full-width envelope and is no longer wholly inside the pad (`tidy::track_in_pad`, the same test as
+    tidy 2a).
+  - Counted: `route.erbs.a1_stub_out`.
+- **Octilinear form of a necked band (finding 2a, the qm JS1_4/JS1_5/JS1_9 cluster at 163.55, 125.47).**
+  - r1: JS1_4 (w734) was necked in the joint commit against JS1_5 (gap 7.4 um). Its adopted band's octilinear form
+    was then accepted only if the necked copper broke no rule. When it did, the form was rejected, the band fell to
+    a later attempt, and that attempt drew another staircase from U6 onwards. JS1_3, nested beside it, followed.
+    JS1_9 (forced, drawn last) was left 0.27 mm between JS1_4 and JS1_5 where it needs 0.52 mm.
+  - r2: a necked form that breaks a rule falls back to main's `realise` of the same form (legal, or None as in main).
+    The band keeps an octilinear form, and is never worse than main's.
+- **Supply nets:** one warning per A1 neck on a net wider than the board default width (VIN5V, VBUS, vbat, ...). It
+  gives the width left in % and a graded severity = (1 - left) x necked length in mm, sorted most severe first
+  (`core::a1_supply_grade`). It is a warning, not a cutoff (graded factors rule).
+- **Counted:** `route.erbs.a1_one_stretch` (runs whose neck was extended) and `a1_one_stretch_mm` (the extra necked
+  length).
+- **Tests** (`topo_draw_absorb.rs`):
+  - `a_forced_run_shrinks_from_the_gap_to_the_nearer_end_instead_of_violating`, which replaces the valley-shape
+    pattern;
+  - `a1_never_widens_again_after_a_neck` and `a1_keeps_the_pad_centre_ends` on 6 A1 cases (gap 0.05 / 0.1 / 0.2, gap
+    at pad, gap_squeeze, dvn_crop_q2, a1b_octi_crop);
+  - `an_a1_neck_on_a_supply_width_net_is_warned_graded`;
+  - unit tests in joint.rs;
+  - `a_band_pass_lets_the_partner_yield_when_the_first_yielder_is_put_back`, which kills A3's a3_no_swap mutant.
+  - The board check is `tools/vfy_neck_regrow.py` (valleys, --ends).
+- **Touch points with branch neck-regrow:**
+  - `neck_items` is unchanged.
+  - New code: joint.rs (`a1_finish`, `one_neck_stretch`, `merge_collinear`, `stub_out_of_pad`, `neck_of`,
+    `neck_band`), tidy.rs `track_in_pad` (new function) and core.rs (supply warning block).
+  - draw.rs: `shrink_forced` (eval through `a1_finish`, returns the neck), its call site in the forced branch, and the
+    `a1z` arm of the `real` closure (finish + fallback).
+  - neck-regrow's `monotone_widths` is the same rule on its own paths. A later merge can share one helper.
+
 **A1b as built (2026-11-27): `[drawing] reserved_keep_neck`**, default false (since 0.5.0, unreleased); off = main
 copper (hash on 4 boards).
 
