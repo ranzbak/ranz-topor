@@ -315,6 +315,34 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
     `a1z` arm of the `real` closure (finish + fallback).
   - neck-regrow's `monotone_widths` is the same rule on its own paths. A later merge can share one helper.
 
+**A1 r3 (2026-11-27, verifier vfy-draw-absorb-r2; merge with main acdee25b = neck-regrow + pad-centre-price).**
+
+- **Zone slots.** Since neck-regrow, slots 0 and 1 of `exact::Neck::ends` are the end zones of the wire's ends `a`
+  and `b`: `Drawer::neck_items` narrows them only as the contiguous stretch of a run from that end (finite radius).
+  A zone from `exact::MID_ZONE` (2) on narrows every piece inside its circle.
+  - A1's hit zones are mid-run zones. r2 put them in the first free slots, 0.. (`shrink_forced`) or the first free
+    of the plan's (joint-commit gap loop). On the merge, the deepest hit then got no neck, or the whole run when its
+    circle held the run's start (the pattern test: 24 of 24 mm).
+  - r3: both put their zones in the free slots `MID_ZONE..` only (`hit_zones(.., NECK_ZONES - MID_ZONE)`), as the
+    verifier's probe 992503db. `plan_neck`'s mid zones and `neck_items`' test use the same constant.
+  - The per-zone necked length of an A1 run still goes on its first zone (`neck_band`, the `a1z` arm): the
+    deepest hit, or the plan's end zone when the plan has one. That is where the warning names the neck; unchanged.
+  - Tests: `a_forced_run_shrinks_from_the_gap_to_the_nearer_end_instead_of_violating` (forced run; fails on the
+    merge without the fix), `a_mid_band_gap_spot_is_necked_where_it_hits` (erbs/qfn_fan at 0.1 mm floor, joint
+    commit: the deepest spot's circle misses the band's start).
+- **Strict gain (`shrink_forced`).** A forced run is shrunk only when its severity key gets strictly better. Fixture:
+  `a_forced_run_no_width_helps_is_not_necked`, both pads and the way between them inside a track keepout (gap 0 at
+  every width, the checker's containment test). Non-strict, the trim drops the zone and the run is taken as shrunk
+  for nothing (counted, its wire marked as A1's for the supply-width warning, collinear pieces merged).
+  - Counted now: `route.erbs.forced_shrunk` (was the unreported `stats.forced_shrunk`).
+- **Measured (36ee0053 = main acdee25b + r3; base = the off arm = main copper, hash on qm/esp, real off = the
+  verifier's ccx33 off hash too; ladder_diff --json, drc_digest --diff):**
+  - det s0 C1: A1 copper = the probe's on qm and esp. qmtech DRC 200 -> 146 (0 valleys, loose ends a subset 27 ->
+    25), esp 17 -> 15; wiccon and eprom = main. A1b, A3: copper unchanged by r3 (no A1 zones).
+  - Real settings (wall clock, timeout 600, ccx43 below its hzq target): qmtech 152 -> 135 (0 new clusters, 6 gone;
+    old main 119 -> 93), esp 10 -> 8 (0 new, 2 gone; vias 52 -> 50). 0 valleys.
+  - Real KiCad Cleanup (Xephyr, all options), det and real, qm and esp: it deletes no copper that main keeps.
+
 **A1b as built (2026-11-27): `[drawing] reserved_keep_neck`**, default false (since 0.5.0, unreleased); off = main
 copper (hash on 4 boards).
 
