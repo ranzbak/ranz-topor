@@ -10,8 +10,7 @@ TREE, TGT = f"{OUT}/tree-{K}", f"{OUT}/target-{K}"
 E, D, P = "engine/src/topo/erbs.rs", "engine/src/topo/draw.rs", "engine/src/topo/padend.rs"
 MUTS = [
  # A1b
- ("a1b_tip_off", P, "                    (true, Some((wn, _))) => self.plan_neck(w).map(|n| super::exact::Neck { min_w: wn, ends: n.ends }),", "                    (true, Some((wn, _))) => { let _ = wn; None }"),
- ("a1b_no_meter", P, "                            self.joint.unnecked.push((w, r, dropped, room, \"tip\"));", "                            let _ = room;"),
+ ("a1b_no_meter", P, "                    self.joint.unnecked.push((w, r, dropped, room, \"tip\"));", "                    let _ = room;"),
  ("a1b_no_grow", P, "self.fit_neck_with(w, lid, pts, z, z.min_w, true)", "self.fit_neck_with(w, lid, pts, z, z.min_w, false)"),
  ("a1b_no_fit", P, "let nk = if self.opts.neck_trim { self.fit_neck_with(w, lid, pts, z, z.min_w, true) } else { *z };", "let nk = *z;"),
  ("a1b_octi_off", D, "let a1b = adopted.as_ref().is_some_and(|x| x.zones.is_none() && self.opts.reserved_keep_neck", "let a1b = adopted.as_ref().is_some_and(|x| x.zones.is_none() && false"),

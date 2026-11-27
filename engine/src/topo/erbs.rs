@@ -1741,6 +1741,11 @@ pub fn band_passes(sh: &LayerSheet, sts: &[Stretch], o: &LayerOrder, opts: &Erbs
                 cand.retain(|(y, _)| !worse.contains(y));
             }
             st.moved += cand.len();
+            if std::env::var_os("TOPO_A3DBG").is_some() {
+                for (y, e) in &cand {
+                    eprintln!("A3 KEPT L{} st {y} wire {} len {:.4} -> {:.4} path {:?}", sh.l, sts[*y].wire, old_es[at[y]].len / 1e6, e.len / 1e6, e.path.iter().map(|p| ((p.x / 1e3).round() / 1e3, (p.y / 1e3).round() / 1e3)).collect::<Vec<_>>());
+                }
+            }
             let kept: BTreeSet<usize> = cand.iter().map(|(y, _)| *y).collect();
             for (y, ps) in &yields {
                 if !kept.contains(y) {

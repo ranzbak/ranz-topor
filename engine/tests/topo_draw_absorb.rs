@@ -349,28 +349,25 @@ fn fixture(dir: &str, p: &str) -> BoardModel {
 }
 
 /// A1b on the Q3 crop (ADV7511 row, default options, one cycle): main re-anchors a reserved band
-/// the plan had necked (wire 36) at its pad's tip at full width, dropping 1.1 mm of neck of which
-/// a stretch takes planned room of a trace not drawn yet (the meter's `room_mm`). With
-/// reserved_keep_neck the re-anchored band keeps its neck there: no unnecked redraw, the neck is
-/// counted as kept, more copper stays necked and no violation is added.
+/// the plan had necked (wire 36) at its pad's tip at full width, dropping 1.1 mm of neck (the
+/// meter's `tip` entry). The lead's rule (2026-11-27, user-approved Q3 pad-axis entry at full
+/// width): reserved_keep_neck leaves the re-anchor alone, so the tip copper is main's and the drop
+/// is still metered.
 #[test]
-fn a_reanchored_band_keeps_its_reserved_neck() {
+fn a_reanchored_band_enters_at_full_width_with_keep_neck() {
     let m = fixture("dvn", "dvn_crop_q3");
     let o = one_cycle("octilinear");
     let off = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(false))]));
     let on = route(&m, &opts_with(&o, &[("reserved_keep_neck", serde_json::json!(true))]));
     let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
-    let tip: Vec<_> = eo.unnecked_list.iter().filter(|u| u.at == "tip").collect();
-    assert!(!tip.is_empty() && tip.iter().any(|u| u.mm > 0.5 && u.room_mm > 0.0), "main drops a reserved neck holding planned room: {:?}", eo.unnecked_list);
-    assert_eq!((eo.unnecked, eo.kept_neck), (eo.unnecked_list.len(), 0), "{eo:?}");
-    assert!(en.unnecked_list.iter().all(|u| u.at != "tip") && en.kept_neck >= 1, "{:?} kept {}", en.unnecked_list, en.kept_neck);
-    let thin = |r: &RouteResult| tracks(r).iter().filter(|t| t.0 < 280_000).map(|t| t.1).sum::<f64>();
-    assert!(thin(&on) > thin(&off) + 0.3 * MM, "necked {} -> {}", thin(&off) / MM, thin(&on) / MM);
+    let tip = |e: &topor_engine::route::ErbsRunReport| e.unnecked_list.iter().filter(|u| u.at == "tip").cloned().collect::<Vec<_>>();
+    assert!(tip(eo).iter().any(|u| u.mm > 0.5), "main drops a reserved neck at the tip: {:?}", eo.unnecked_list);
+    assert_eq!(tip(eo), tip(en), "the re-anchor is main's with the key on");
+    assert_eq!(eo.unnecked, eo.unnecked_list.len());
     assert!(on.violations.len() <= off.violations.len(), "off {} on {}", off.violations.len(), on.violations.len());
     assert_eq!(on.routed, off.routed);
 }
 
-/// A1b off is main's copper on a crop with no reserved neck to keep (Q2): same items.
 #[test]
 fn keep_neck_without_a_dropped_neck_is_main() {
     let m = fixture("dvn", "dvn_crop_q2");
@@ -446,3 +443,4 @@ fn a_gap_neck_survives_the_octilinear_form_and_the_reanchor() {
     assert!(on.violations.len() <= off.violations.len(), "off {:?}\non {:?}", off.violations, on.violations);
     assert_eq!(on.routed, off.routed);
 }
+

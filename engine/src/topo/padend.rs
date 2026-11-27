@@ -254,21 +254,18 @@ impl Drawer<'_> {
                 let mut skip: Vec<usize> = res.handles.iter().map(|&h| self.handles[h].0).collect();
                 skip.sort_unstable();
                 let (s0, e0) = (res.pts[0], res.pts[res.pts.len() - 1]);
-                // draw-absorb A1b (`[drawing] reserved_keep_neck`): a band reserved necked (the
-                // plan's zones at the width the joint commit took) keeps that neck on its new
-                // tail; never wider than reserved. Off: the anchored band at full width (main).
+                // draw-absorb A1b meter: the reserved neck this re-anchor drops. The anchored band
+                // is drawn at full width (main; lead 2026-11-27: `reserved_keep_neck` does not apply
+                // here, the dropped neck is the plan's hook into the pad side, and the user-approved
+                // Q3 expectation is the pad-axis entry at full width).
                 let dropped = res.pneck.map_or(0.0, |p| p.1.iter().sum::<f64>());
-                let nk: Option<super::exact::Neck> = match (self.opts.reserved_keep_neck, res.pneck) {
-                    (true, Some((wn, _))) => self.plan_neck(w).map(|n| super::exact::Neck { min_w: wn, ends: n.ends }),
-                    _ => None,
-                };
                 let mut p = res.pts.clone();
                 let mut moved = false;
                 for end in [0usize, 1] {
                     if (end == 0 && r != 0) || (end == 1 && r + 1 != n) {
                         continue;
                     }
-                    if let Some(np) = self.tip_anchor_path(w, end, layer, &p, &skip, nk.as_ref()) {
+                    if let Some(np) = self.tip_anchor_path(w, end, layer, &p, &skip) {
                         p = np;
                         moved = true;
                     }
@@ -276,30 +273,17 @@ impl Drawer<'_> {
                 if !moved {
                     continue;
                 }
-                let (items, pneck) = match &nk {
-                    Some(z) => {
-                        let (its, ls) = self.kept_neck_items(w, layer, &p, z);
-                        if ls.iter().sum::<f64>() > 0.0 {
-                            self.joint.kept_neck += 1;
-                            (its, Some((z.min_w, ls)))
-                        } else {
-                            (its, None)
-                        }
+                if dropped > 0.0 {
+                    let room = match (self.plan_neck(w), res.pneck) {
+                        (Some(n), Some((wn, _))) => self.room_taken(w, &p, &n, wn),
+                        _ => 0.0,
+                    };
+                    if std::env::var_os("TOPO_A1BDBG").is_some() {
+                        eprintln!("A1B tip wire {w} net {} run {r} dropped {:.3} mm room {:.3} mm old {:?} new {:?}", self.st.wires[w].net, dropped / 1e6, room / 1e6, res.pts.iter().map(|q| ((q.x / 1e3).round() / 1e3, (-q.y / 1e3).round() / 1e3)).collect::<Vec<_>>(), p.iter().map(|q| ((q.x / 1e3).round() / 1e3, (-q.y / 1e3).round() / 1e3)).collect::<Vec<_>>());
                     }
-                    None => {
-                        if dropped > 0.0 {
-                            let room = match (self.plan_neck(w), res.pneck) {
-                                (Some(n), Some((wn, _))) => self.room_taken(w, &p, &n, wn),
-                                _ => 0.0,
-                            };
-                            if std::env::var_os("TOPO_A1BDBG").is_some() {
-                                eprintln!("A1B tip wire {w} net {} run {r} dropped {:.3} mm room {:.3} mm old {:?} new {:?}", self.st.wires[w].net, dropped / 1e6, room / 1e6, res.pts.iter().map(|q| ((q.x / 1e3).round() / 1e3, (-q.y / 1e3).round() / 1e3)).collect::<Vec<_>>(), p.iter().map(|q| ((q.x / 1e3).round() / 1e3, (-q.y / 1e3).round() / 1e3)).collect::<Vec<_>>());
-                            }
-                            self.joint.unnecked.push((w, r, dropped, room, "tip"));
-                        }
-                        (self.run_items(w, layer, &p), None)
-                    }
-                };
+                    self.joint.unnecked.push((w, r, dropped, room, "tip"));
+                }
+                let items = self.run_items(w, layer, &p);
                 let old = self.joint.reserved.remove(&(w, r)).expect("reserved");
                 let cur = self.joint.cur.replace(w);
                 for h in old.handles {
@@ -316,7 +300,7 @@ impl Drawer<'_> {
                 if let Some(rb) = self.erbs.get_mut(&w).and_then(|v| v.iter_mut().find(|b| b.layer == layer && (b.s - s0).len() < 1000.0 && (b.e - e0).len() < 1000.0)) {
                     rb.path = p.clone();
                 }
-                self.joint.reserved.insert((w, r), super::joint::Reserved { pts: p, items, handles: hs, pneck, octi: false, zones: None });
+                self.joint.reserved.insert((w, r), super::joint::Reserved { pts: p, items, handles: hs, pneck: None, octi: false, zones: None });
                 self.stats.tip_anchored += 1;
                 done.insert((w, r));
                 added = true;
@@ -339,9 +323,7 @@ impl Drawer<'_> {
         self.neck_items(w, lid, pts, &nk, z.min_w)
     }
 
-    /// `neck` (draw-absorb A1b, `[drawing] reserved_keep_neck`): the anchored band is checked with
-    /// these zones at `neck.min_w` (the reservation's neck) instead of at the full width.
-    pub(super) fn tip_anchor_path(&self, w: WireId, end: usize, layer: usize, path: &[Vec2], skip: &[usize], neck: Option<&super::exact::Neck>) -> Option<Vec<Vec2>> {
+    pub(super) fn tip_anchor_path(&self, w: WireId, end: usize, layer: usize, path: &[Vec2], skip: &[usize]) -> Option<Vec<Vec2>> {
         let (st, pr) = (self.st, &self.b.proj);
         let wi = &st.wires[w];
         let ob = if end == 0 { wi.pa } else { wi.pb };
@@ -430,10 +412,7 @@ impl Drawer<'_> {
                 continue;
             }
             let pts: Vec<Vec2> = if end == 1 { np.iter().rev().copied().collect() } else { np.clone() };
-            let items = match neck {
-                Some(z) => self.kept_neck_items(w, layer, &pts[..], z).0,
-                None => self.run_items(w, layer, &pts[..]),
-            };
+            let items = self.run_items(w, layer, &pts[..]);
             if !self.checker.check_against(&self.idx, &items, skip).violations.is_empty() || !self.track_own_pad_ok(w, &items) {
                 if dbg {
                     eprintln!("TIPREJ wire {w} t {:.3}: rules", t / 1e6);

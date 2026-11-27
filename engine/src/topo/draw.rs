@@ -3974,7 +3974,7 @@ impl<'a> Drawer<'a> {
                         if (end == 0 && r != 0) || (end == 1 && r != plan.layers.len() - 1) {
                             continue;
                         }
-                        if let Some(np) = self.tip_anchor_path(w, end, layer, &p, &skip, None) {
+                        if let Some(np) = self.tip_anchor_path(w, end, layer, &p, &skip) {
                             p = np;
                             moved = true;
                         }
@@ -4210,6 +4210,10 @@ impl<'a> Drawer<'a> {
                                         // A1b meter: an octilinear form necked wider than reserved.
                                         if let (Some((w2, _)), Some(wn)) = (pn, adopted_wn) {
                                             if w2 > wn + 0.5 && !a1b {
+                                                if std::env::var_os("TOPO_A1BDBG").is_some() {
+                                                    let (a, b) = (o.pts[0], o.pts[o.pts.len() - 1]);
+                                                    eprintln!("A1B octi_wider wire {w} net {} run {r} reserved {:.3} drawn {:.3} mm from ({:.3},{:.3}) to ({:.3},{:.3})", self.st.wires[w].net, wn / 1e6, w2 / 1e6, a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6);
+                                                }
                                                 self.joint.unnecked.push((w, r, adopted_neck, 0.0, "octi_wider"));
                                             }
                                         }

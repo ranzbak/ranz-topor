@@ -1681,11 +1681,12 @@ pub struct Options {
     /// Each neck is warned (a shrinkage). false (default until a verifier) = main's copper.
     pub forced_shrink: bool,
     /// draw-absorb A1b (`[drawing] reserved_keep_neck`, docs/dev/design/draw-absorb.md): a band
-    /// the joint commit reserved necked (the plan's neck, `Reserved::pneck`) keeps that neck when
-    /// the drawing changes its shape: the pad-tip re-anchor (`tip_anchor_reserved`) draws the new
-    /// tail with the plan's zones at the reserved width, and the adopted band's octilinear form is
-    /// realised at the same zones and width; never wider than reserved. false (default until a
-    /// verifier) = main's copper (both redraw the band at its full width where the checker allows).
+    /// the joint commit reserved necked (the plan's neck, `Reserved::pneck`) keeps that neck in its
+    /// octilinear form: where main's form would be wider than reserved, the form is realised at
+    /// the plan's zones and the reserved width (never wider than reserved). The pad-tip re-anchor
+    /// (`tip_anchor_reserved`) is not affected: its dropped neck is the plan's hook into the pad
+    /// side and the pad-axis entry is drawn at full width (lead 2026-11-27, Q3); it is only metered.
+    /// false (default until a verifier) = main's copper.
     pub reserved_keep_neck: bool,
     /// draw-absorb A3 (`[drawing] band_passes`, docs/dev/design/draw-absorb.md): with realise =
     /// "erbs", passes of the iterated band realise per layer before any copper: the band of each
