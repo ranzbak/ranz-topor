@@ -240,7 +240,7 @@ MESSAGES: dict[str, Msg] = {
         "Some vias stand in a narrow pass: less room than half a via diameter is left next to them (the via_squeeze social factor). They pass KiCad's DRC but leave little room for later edits.",
         "Accept them, or raise the price of narrow passes with factors.weight via_squeeze (topor.toml [factors] weight = { via_squeeze = 10 }) and route again; factors.report via_squeeze = \"off\" hides the list."),
     "NECKED": Msg("info",
-        "Some traces leave their pad narrower than the net's track width (necking) because the full width does not fit out of the pad; the rest of the trace keeps its width.",
+        "Some traces leave their pad narrower than the net's track width (necking) because the full width does not fit out of the pad; the rest of the trace keeps its width. A trace that needs the neck at both ends is necked along its whole length (it never gets wider again after a neck); on a supply-width net that limits its current to the neck's.",
         "Accept them, or forbid it with search.neck_to_pad = false; the narrowest allowed width is KiCad → File → Board Setup → Design Rules → Constraints → Minimum track width."),
     "IGNORED_RULE": Msg("warning",
         "Some copper breaks a KiCad check whose severity is set to ignore; topor prices such places (the ignored_rule social factor) instead of forbidding them, as KiCad's own DRC would not complain.",

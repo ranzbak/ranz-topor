@@ -77,6 +77,18 @@ fn forced_free_line(octi_on: bool, s: &draw::DrawStats) -> Option<String> {
     })
 }
 
+/// neck-regrow r6 ([`draw::Drawer`]'s `monotone_necks`): the drawings whose end necks had to be
+/// joined into one neck over the whole wire (never wider again after a neck), so the join is not
+/// silent; `None` when none. Counts every drawing of the round (trial redraws too).
+fn mono_line(s: &draw::DrawStats) -> Option<String> {
+    (s.mono_wires > 0).then(|| {
+        format!(
+            "neck profile (never wider again after a neck): {} wire drawings narrowed at both ends were narrowed between them too, one neck along the whole wire ({:.2} mm narrowed)",
+            s.mono_wires, s.mono_mm
+        )
+    })
+}
+
 /// first-draw-45 r9 forensics (`TOPO_FREEDBG`, copper-neutral): the free-angle segments (not at
 /// 0/45/90 degrees) of every drawn wire after the step `stage` of the drawing, one stderr line
 /// each (mm, KiCad frame), so a segment of the final copper can be traced to the step that wrote
@@ -98,10 +110,18 @@ fn free_snap(stage: &str, drawn: &BTreeMap<WireId, WireOut>, st: &State) {
 }
 
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
+/// neck-regrow: a neck to `to` (nm) over `neck_len` of a wire of nominal width `w` and drawn
+/// length `wire_len` is a whole-wire neck of a supply net when it spans the wire (within 1 um) and
+/// the wire is wider than the board's default width `dflt_w` (lead 2026-11-26: such necks get a
+/// warning of their own; POWER-NECK-MONOTONE will care about the direction from the source).
+pub(crate) fn whole_supply_neck(w: f64, to: f64, neck_len: f64, wire_len: f64, dflt_w: f64) -> bool {
+    to < w - 0.5 && neck_len >= wire_len - 1_000.0 && w > dflt_w + 0.5
+}
+
 /// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
 /// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
 #[allow(clippy::too_many_arguments)]
-fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State) {
+fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci: usize, w: WireId, wo: &WireOut, b: &board::Board, st: &State, dflt_w: f64) {
     let o = &mut out[ci];
     o.routed = true;
     o.reason.clear();
@@ -118,7 +138,11 @@ fn settle(octi: bool, out: &mut [Outcome], necking: &mut Vec<(usize, Event)>, ci
     let pad = |ob: ObsId| if ob == super::state::NO_OBS { usize::MAX } else { b.pad_of.get(ob).copied().unwrap_or(usize::MAX) };
     o.ends = (pad(st.wires[w].pa), pad(st.wires[w].pb));
     for n in &wo.necks {
-        necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM }));
+        // neck-regrow: a neck over the whole wire (both ends needed it, joined) of a wire wider
+        // than the board's default width (a supply net) is named apart in the warning. r6: a
+        // neck over several runs (vias) is one stretch (`Drawer::monotone_necks`).
+        let supply = whole_supply_neck(st.wires[w].w, n.1, n.2, wo.length_nm, dflt_w);
+        necking.push((ci, Event::Necking { wire: w, from_nm: st.wires[w].w, to_nm: n.1, mm: n.2 / MM, whole_supply: supply }));
     }
     if octi {
         for (_, pts) in &wo.runs {
@@ -3808,6 +3832,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         }
     }
     st.neck_from_pad = opts.neck_from_pad;
+    st.exit_taut = opts.exit_taut;
     let ws0 = (model.rules.default.width + model.rules.default.clearance) as f64;
     let tier_of = |i: usize| dec.connections[i].tier;
     // 4.3 `[optimize] initial = "once"`: a crossing on one layer is a violation (very high price,
@@ -8577,7 +8602,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         if wo.ok {
             via_h.insert(w, vh);
             drawn_ok += 1;
-            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st, model.rules.default.width as f64);
             drawn.insert(w, wo);
         } else {
             for id in ids {
@@ -8716,13 +8741,13 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 for (bw, wb) in redrawn {
                     let cb = conn_of[wire_conn[bw]];
                     necking.retain(|(c, _)| *c != cb);
-                    settle(octi_on, &mut out, &mut necking, cb, bw, &wb, b, &st);
+                    settle(octi_on, &mut out, &mut necking, cb, bw, &wb, b, &st, model.rules.default.width as f64);
                     drawn.insert(bw, wb);
                 }
                 out[cf].reason.clear();
                 via_h.insert(f, ids[..vias_f.len().min(ids.len())].to_vec());
                 placed.insert(f, vias_f);
-                settle(octi_on, &mut out, &mut necking, cf, f, &wf, b, &st);
+                settle(octi_on, &mut out, &mut necking, cf, f, &wf, b, &st, model.rules.default.width as f64);
                 drawn.insert(f, wf);
             } else {
                 // Undo: whatever was drawn in this round goes, the old copper comes back.
@@ -8803,7 +8828,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             }
             placed.insert(w, vs);
             via_h.insert(w, vh);
-            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st, model.rules.default.width as f64);
             drawn.insert(w, wo);
         }
         dr.force = false;
@@ -8933,7 +8958,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                                 if out[ci].cause.is_empty() {
                                     out[ci].cause = "the branch reaches its junction on another layer than its trunk (joined by force)".into();
                                 }
-                                settle(octi_on, &mut out, &mut necking, ci, bw, &wo, b, &st);
+                                settle(octi_on, &mut out, &mut necking, ci, bw, &wo, b, &st, model.rules.default.width as f64);
                                 drawn.insert(bw, wo);
                                 junction_joins += 1;
                                 continue;
@@ -9142,7 +9167,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                     str_nm += wo.length_nm - len0;
                     let ci = conn_of[wire_conn[w]];
                     necking.retain(|(c, _)| *c != ci);
-                    settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+                    settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st, model.rules.default.width as f64);
                 }
                 drawn.insert(w, wo);
             }
@@ -9189,7 +9214,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         for w in changed {
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
-            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st, model.rules.default.width as f64);
         }
         warnings.push(format!(
             "via reduction after drawing: {} wires with vias, {} relabels tried in {} sweeps, {} accepted, {} vias removed ({:.1} s{}); before: {}; after: {}",
@@ -9475,7 +9500,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             }
             let ci = conn_of[wire_conn[w]];
             necking.retain(|(c, _)| *c != ci);
-            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st);
+            settle(octi_on, &mut out, &mut necking, ci, w, &drawn[&w], b, &st, model.rules.default.width as f64);
             if let Some(sv) = saved {
                 // Where the copper changed: the stretch taken away and the new link.
                 let mut path = cut.clone();
@@ -9558,7 +9583,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 n_pol += k;
                 pol_nm += wo.length_nm - len0;
                 necking.retain(|(c, _)| *c != ci);
-                settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st);
+                settle(octi_on, &mut out, &mut necking, ci, w, &wo, b, &st, model.rules.default.width as f64);
             }
             drawn.insert(w, wo);
         }
@@ -10238,6 +10263,9 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             "octilinear drawing ([drawing] style): {} runs redrawn at 0/45/90 degrees, {} octilinear runs rejected by the clearance check (taut run kept), {:.1} s; {n_any} stretches not at 0/45/90 degrees ({mm_any:.1} mm, any_angle), {n_acute} acute bends (acute_bend)",
             forced_stats.octi_ok, forced_stats.octi_rejected, forced_stats.octi_s
         ));
+    }
+    if let Some(line) = mono_line(&forced_stats) {
+        warnings.push(line);
     }
     // Never drop (M-B1): a summary and one line per rule the written copper breaks (place, type,
     // cause), at the `violation` factor's report level.
@@ -10932,6 +10960,21 @@ fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, pour_on: bool,
 
 #[cfg(test)]
 mod tests {
+    /// neck-regrow (lead 2026-11-26): only a neck over the whole wire of a wire wider than the
+    /// default is a supply whole-wire neck.
+    #[test]
+    fn whole_supply_neck_needs_the_whole_wire_and_a_supply_width() {
+        use super::whole_supply_neck as f;
+        let (dflt, wire) = (250_000.0, 10_000_000.0);
+        assert!(f(500_000.0, 300_000.0, wire, wire, dflt));
+        assert!(f(500_000.0, 300_000.0, wire - 999.0, wire, dflt), "within 1 um of the wire's length");
+        assert!(!f(500_000.0, 300_000.0, wire - 1_001.0, wire, dflt), "a neck short of the wire");
+        assert!(!f(250_000.0, 127_000.0, wire, wire, dflt), "a default-width wire");
+        assert!(!f(250_000.4, 127_000.0, wire, wire, dflt), "within 0.5 nm of the default");
+        assert!(f(250_400.0, 127_000.0, wire, wire, dflt), "0.4 um above the default is wider");
+        assert!(!f(500_000.0, 499_999.6, wire, wire, dflt), "no neck (within 0.5 nm of the width)");
+    }
+
     #[test]
     fn sketch_of_carries_the_violation_places_it_is_given() {
         let viols = vec![
@@ -10971,6 +11014,19 @@ mod tests {
         s.forced_free_mm = 12.34;
         let line = super::forced_free_line(true, &s).expect("a line");
         assert!(line.starts_with("never drop, octilinear: 3 of 4 forced runs drawn in their octilinear form; 1 forced runs keep 2 free-angle stretches (12.3 mm)"), "{line}");
+    }
+
+    /// neck-regrow r6: the neck-profile line, both cases of its text (no join: no line).
+    #[test]
+    fn mono_line_names_the_joined_necks() {
+        let mut s = super::draw::DrawStats::default();
+        assert_eq!(super::mono_line(&s), None);
+        s.mono_wires = 2;
+        s.mono_mm = 12.345;
+        assert_eq!(
+            super::mono_line(&s).as_deref(),
+            Some("neck profile (never wider again after a neck): 2 wire drawings narrowed at both ends were narrowed between them too, one neck along the whole wire (12.35 mm narrowed)")
+        );
     }
 
     /// TW7 B `[optimize] pattern_stuck`: the order falls with every fruitless try, never to 0,

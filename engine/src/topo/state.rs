@@ -37,6 +37,32 @@ pub const NO_OBS: ObsId = usize::MAX;
 /// passage (M-C, [`State::refit_wire`]).
 const NECK_JOIN: usize = 2;
 
+/// neck-regrow: the long axis of an elongated pad outline `poly` about `c` (second moments of
+/// its vertices; elongated = long side over 1.2 x the short side, the drawing's `pad_exit` test
+/// in [`super::octi`]) as the unit vector pointing along `toward`, with the outline's extent from
+/// `c` along it. `None` for a round or square pad. O(outline).
+pub(super) fn pad_axis(poly: &[Vec2], c: Vec2, toward: Vec2) -> Option<(Vec2, f64)> {
+    if poly.len() < 3 {
+        return None;
+    }
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for &p in poly {
+        let d = p - c;
+        sxx += d.x * d.x;
+        syy += d.y * d.y;
+        sxy += d.x * d.y;
+    }
+    let th = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    let u = Vec2 { x: th.cos(), y: th.sin() };
+    let ext = |v: Vec2| poly.iter().map(|&p| (p - c).dot(v)).fold(f64::MIN, f64::max);
+    let (lu, lv) = (ext(u) + ext(-u), ext(u.perp()) + ext(-u.perp()));
+    if lu < 1.2 * lv {
+        return None;
+    }
+    let u = if toward.dot(u) >= 0.0 { u } else { -u };
+    Some((u, ext(u)))
+}
+
 /// One bit per copper (signal) layer index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LayerMask(pub u64);
@@ -615,6 +641,8 @@ pub struct State<'p> {
     /// starts at the footprint and may reach further back; never a neck in the middle of a
     /// full-width run). False: only the bottleneck passes are necked.
     pub neck_from_pad: bool,
+    /// `[search] exit_taut` ([`State::exit_tight`]; false = main's even-point test).
+    pub exit_taut: bool,
     /// `[search] length = "taut"` (shopping list 4.3): the search prices a wire's length as the
     /// shortest path through its sleeve that keeps the clearances ([`State::gap_spans`],
     /// [`super::init`] funnel step; Polubasov 2010, «Начальная трассировка»: «кратчайший путь по
@@ -715,6 +743,7 @@ impl<'p> State<'p> {
             pass_d: Vec::new(),
             floors: std::collections::HashMap::new(),
             neck_from_pad: true,
+            exit_taut: false,
             taut_len: false,
             relay_after_uncross: true,
             took_part: Vec::new(),
@@ -868,6 +897,9 @@ impl<'p> State<'p> {
                 }
                 i = j + 1;
             }
+            // neck-regrow (user 2026-11-26, option a): necks at both ends stay two in the plan,
+            // the middle keeps its full-width room (neighbours laid out as before); the drawing
+            // necks the whole wire (`Draw::plan_neck`, never narrow-wide-narrow).
             for (k, nk) in neck.iter_mut().enumerate() {
                 *nk = *nk || k < na || k + nb >= n;
             }
@@ -919,9 +951,14 @@ impl<'p> State<'p> {
 
     /// Whether the exit of wire `w` from its pad at `end` (0 = `a`, 1 = `b`) is too narrow for its
     /// nominal width (M-C pad exits, pin access): the stretch from the pad centre through its
-    /// first two passes (the pass points) comes closer than `w/2 + clearance` to the copper of an
-    /// obstacle of another net next to the pad or to those passes' edges (CDT neighbours only).
-    /// O(neighbourhood x outline).
+    /// first two passes outside the pad (the pass points) comes closer than `w/2 + clearance` to
+    /// the copper of an obstacle of another net next to the pad or to those passes' edges (CDT
+    /// neighbours only). neck-regrow: a pass whose edge joins two outline vertices of the pad
+    /// itself lies on the wire's own copper and is skipped (qmtech ADV7511.19: the even points of
+    /// the rounded-corner fan's edges sat 0.24 mm from the next pad); and an elongated pad (the
+    /// drawing's [`super::octi`] `pad_exit` test, long side over 1.2 x the short side) is left
+    /// along its axis by the drawing, so its exit is tight only when that leg too (centre to past
+    /// the tip plus `s + w/2`, towards the wire) comes too close. O(neighbourhood x outline).
     pub fn exit_tight(&self, w: WireId, end: usize) -> bool {
         let pr = self.proj;
         let wi = &self.wires[w];
@@ -930,7 +967,27 @@ impl<'p> State<'p> {
         if pad == NO_OBS || n == 0 {
             return false;
         }
-        let ks: Vec<usize> = if end == 0 { (0..n.min(2)).collect() } else { (0..n.min(2)).map(|j| n - 1 - j).collect() };
+        let on_pad = |x: VertId| matches!(pr.vkind[x], VertKind::Outline(o) if o == pad);
+        let inside = |k: usize| pr.edges[self.passes[wi.passes[k]].edge].iter().all(|&x| on_pad(x));
+        let order: Vec<usize> = if end == 0 { (0..n).collect() } else { (0..n).rev().collect() };
+        // Only passes nearer to this end than to the other one are its exit (neck-regrow: on a
+        // short wire the "first two" passes from a free end can be the other end's bottleneck,
+        // which then made both ends tight and the whole wire necked).
+        let other = pr.pos[if end == 0 { wi.b } else { wi.a }];
+        let mine = |k: usize| {
+            let q = self.pass_point(wi.passes[k]);
+            super::octi::fd45_off("nrg_near") || (q - pr.pos[v]).len() <= (q - other).len()
+        };
+        // `[search] exit_taut` false (the default) or debug arm `nrg_exit`: main's test (the
+        // first two passes' even points only).
+        let legacy = !self.exit_taut || super::octi::fd45_off("nrg_exit");
+        // Debug arms `nrg_ownpad` (passes inside the own pad count again), `nrg_taut` (the cheap
+        // pass-point test decides, no taut path), `nrg_axis` (no pad-axis exit check).
+        let ownpad = super::octi::fd45_off("nrg_ownpad");
+        let ks: Vec<usize> = order.into_iter().filter(|&k| legacy || ((ownpad || !inside(k)) && mine(k))).take(2).collect();
+        if ks.is_empty() {
+            return false;
+        }
         let mut pts = vec![pr.pos[v]];
         pts.extend(ks.iter().map(|&k| self.pass_point(wi.passes[k])));
         // Candidate obstacles: those with a vertex next to the pad's outline or to the edges.
@@ -949,22 +1006,181 @@ impl<'p> State<'p> {
             }
         }
         let me = &pr.obstacles[pad];
-        for o in obs {
+        obs.retain(|&o| {
             let ob = &pr.obstacles[o];
-            if ob.net == Some(wi.net) || !(ob.drilled || ob.layers.0 & me.layers.0 != 0) {
-                continue;
-            }
-            let need = 0.5 * wi.w + if ob.bare { ob.clear } else { ob.clear.max(wi.s) } - 1.0;
+            ob.net != Some(wi.net) && (ob.drilled || ob.layers.0 & me.layers.0 != 0)
+        });
+        let need = |o: ObsId| {
+            let ob = &pr.obstacles[o];
+            0.5 * wi.w + if ob.bare { ob.clear } else { ob.clear.max(wi.s) } - 1.0
+        };
+        // What the exit must keep clear of: the other nets' copper (polygon sides at their
+        // clearance) and the board outline near it (its sides: constrained mesh edges between two
+        // outline vertices, at the edge clearance; neck-regrow: a terminal next to the board
+        // edge, as qmtech's crop terminals, has a tight exit too). `(a, b, need, obstacle)`,
+        // NO_OBS for the outline.
+        let mut walls: Vec<(Vec2, Vec2, f64, ObsId)> = Vec::new();
+        for &o in &obs {
+            let ob = &pr.obstacles[o];
             let m = ob.poly.len();
-            for sgm in pts.windows(2) {
-                for i in 0..m {
-                    if seg_seg_dist(sgm[0], sgm[1], ob.poly[i], ob.poly[(i + 1) % m]) < need {
-                        return true;
+            walls.extend((0..m).map(|i| (ob.poly[i], ob.poly[(i + 1) % m], need(o), o)));
+        }
+        if !super::octi::fd45_off("nrg_edge") && !legacy {
+            let mut seen: Vec<EdgeId> = Vec::new();
+            for &u in &verts {
+                for &t in &pr.vert_tris[u] {
+                    for &e in &pr.tri_edges[t] {
+                        let [x, y] = pr.edges[e];
+                        if pr.edge_constraint[e] && matches!(pr.vkind[x], VertKind::Edge) && matches!(pr.vkind[y], VertKind::Edge) && !seen.contains(&e) {
+                            seen.push(e);
+                            walls.push((pr.pos[x], pr.pos[y], 0.5 * wi.w + pr.edge_clear - 1.0, NO_OBS));
+                        }
                     }
                 }
             }
         }
-        false
+        let too_close_by = |stretch: &[Vec2], slack: f64| -> Option<(ObsId, f64)> {
+            for &(a, b, nd, o) in &walls {
+                for sgm in stretch.windows(2) {
+                    let d = seg_seg_dist(sgm[0], sgm[1], a, b);
+                    if d < nd - slack {
+                        return Some((o, d));
+                    }
+                }
+            }
+            None
+        };
+        let too_close = |stretch: &[Vec2]| too_close_by(stretch, 0.0);
+        let Some((o, d)) = too_close(&pts) else { return false };
+        if legacy || super::octi::fd45_off("nrg_taut") {
+            return true;
+        }
+        // The even pass points are no path: the wire's taut path at its nominal width through the
+        // clearance spans of its passes (the drawing's shortest path), up to the last pass judged.
+        // The funnel's legs between two edge ports can cut a corner of the fan they cross closer
+        // than the clearance; the drawing wraps such a corner at it. So the path is relaxed
+        // first: a leg that comes closer than half the width plus the clearance to an obstacle
+        // is bent out to that distance at its nearest point (a few times, as a rubber band
+        // round the clearance discs); the exit is tight only when the bent path still is (it
+        // was pushed into other copper: no room for the nominal width).
+        let mut taut = self.taut_prefix(w, end, *ks.last().unwrap());
+        if !super::octi::fd45_off("nrg_relax") {
+            for _ in 0..6 {
+                let mut out = vec![taut[0]];
+                let mut bent = false;
+                for sgm in taut.windows(2) {
+                    let (p, q) = (sgm[0], sgm[1]);
+                    let mut best: Option<(f64, Vec2, Vec2, f64)> = None;
+                    for &(a, b, nd, _) in &walls {
+                        let (d, x, y) = seg_seg_closest(p, q, a, b);
+                        let r = nd + 1.0;
+                        if d < r - 1.0 && best.is_none_or(|bb| d - r < bb.0 - bb.3) {
+                            best = Some((d, x, y, r));
+                        }
+                    }
+                    if let Some((d, x, y, r)) = best {
+                        if let Some(u) = (x - y).unit().filter(|_| d > 1.0) {
+                            let z = y + u * r;
+                            if (z - p).len() > 1.0 && (z - q).len() > 1.0 {
+                                out.push(z);
+                                bent = true;
+                            }
+                        }
+                    }
+                    out.push(q);
+                }
+                taut = out;
+                if !bent {
+                    break;
+                }
+            }
+        }
+        // (1 um slack: the relaxed band is a polyline round the discs, a few nm inside them)
+        let tc = too_close_by(&taut, 1_000.0);
+        if std::env::var("TOPO_NECKDBG").is_ok() {
+            let p: Vec<String> = taut.iter().map(|q| format!("({:.3},{:.3})", q.x / 1e6, -q.y / 1e6)).collect();
+            eprintln!("EXITTAUT wire {w} end {end} ks {ks:?} turns {:?} taut [{}] close {tc:?}", wi.turns, p.join(", "));
+        }
+        if tc.is_none() {
+            return false;
+        }
+        // The drawing's axis exit of an elongated pad (`octi::pad_exit`).
+        if let Some((u, ext)) = pad_axis(&me.poly, me.center, pts[1] - pts[0]).filter(|_| !super::octi::fd45_off("nrg_axis")) {
+            let c = pr.pos[v];
+            let reach = ext + (c - me.center).dot(-u) + wi.s + 0.5 * wi.w;
+            if too_close(&[c, c + u * reach]).is_none() {
+                return false;
+            }
+        }
+        if std::env::var("TOPO_NECKDBG").is_ok() {
+            match pr.obstacles.get(o) {
+                Some(ob) => eprintln!("EXITTIGHT wire {w} end {end} obstacle {o} net {:?} centre ({:.3},{:.3}) dist {d:.0} need {:.0}", ob.net, ob.center.x / 1e6, -ob.center.y / 1e6, need(o)),
+                None => eprintln!("EXITTIGHT wire {w} end {end} the board outline dist {d:.0} need {:.0}", 0.5 * wi.w + pr.edge_clear),
+            }
+        }
+        true
+    }
+
+    /// neck-regrow: the taut path of wire `w` with its passes at the NOMINAL width (spans of
+    /// [`State::gap_spans`], funnel as [`State::taut_points`]), from its end `end` up to where it
+    /// crosses the edge of its pass `k` (the whole path when it does not). O(passes x edge load²).
+    pub fn taut_prefix(&self, w: WireId, end: usize, k: usize) -> Vec<Vec2> {
+        let pr = self.proj;
+        let wi = &self.wires[w];
+        let n = wi.passes.len();
+        let me = Item { net: wi.net, w: wi.w, s: wi.s };
+        let mut ports: Vec<(Vec2, Vec2)> = Vec::with_capacity(n + wi.turns.len() + 2);
+        ports.push((pr.pos[wi.a], pr.pos[wi.a]));
+        let mut sp = Vec::new();
+        let mut ti = 0;
+        for j in 0..n {
+            while ti < wi.turns.len() && wi.turns[ti].0 == j {
+                let v = pr.pos[wi.turns[ti].1];
+                ports.push((v, v));
+                ti += 1;
+            }
+            let p = wi.passes[j];
+            let e = self.passes[p].edge;
+            let (t1, t2) = (wi.tris[j], wi.tris[j + 1]);
+            let both = pr.allowed(t1, wi.net).map_or(0, |m| m.0) & pr.allowed(t2, wi.net).map_or(0, |m| m.0);
+            self.gap_spans(e, me, both, Some(p), &mut sp);
+            let [vp, vq] = pr.edges[e];
+            let (a, b) = (pr.pos[vp], pr.pos[vq]);
+            let len = (b - a).len().max(1.0);
+            let (lo, hi) = sp[self.order_index(p).min(sp.len() - 1)];
+            let (x, y) = (super::funnel::edge_point(a, b, lo / len), super::funnel::edge_point(a, b, hi / len));
+            let t = pr.tris[t1];
+            let c = (pr.pos[t[0]] + pr.pos[t[1]] + pr.pos[t[2]]) * (1.0 / 3.0);
+            ports.push(if (b - a).cross(c - a) > 0.0 { (y, x) } else { (x, y) });
+        }
+        while ti < wi.turns.len() && wi.turns[ti].0 == n {
+            let v = pr.pos[wi.turns[ti].1];
+            ports.push((v, v));
+            ti += 1;
+        }
+        ports.push((pr.pos[wi.b], pr.pos[wi.b]));
+        let mut path: Vec<Vec2> = super::pack::funnel(&ports).into_iter().map(|c| c.0).collect();
+        if end == 1 {
+            path.reverse();
+        }
+        let [vp, vq] = pr.edges[self.passes[wi.passes[k]].edge];
+        let (a, b) = (pr.pos[vp], pr.pos[vq]);
+        for i in 0..path.len().saturating_sub(1) {
+            let (u, v) = (path[i], path[i + 1]);
+            let (d1, d2) = (v - u, b - a);
+            let den = d1.cross(d2);
+            if den.abs() < 1e-9 {
+                continue;
+            }
+            let t = (a - u).cross(d2) / den;
+            let r = (a - u).cross(d1) / den;
+            if (-1e-9..=1.0 + 1e-9).contains(&t) && (-1e-9..=1.0 + 1e-9).contains(&r) {
+                path.truncate(i + 1);
+                path.push(u + d1 * t.clamp(0.0, 1.0));
+                return path;
+            }
+        }
+        path
     }
 
     /// [`State::refit_wire`] for `w` and every alive wire that shares an edge with it (its
@@ -1056,6 +1272,9 @@ impl<'p> State<'p> {
     /// Write the widths of [`State::cut_neck_widths`] into the pass widths (narrower only).
     pub fn apply_neck_widths(&mut self, m: &BTreeMap<PassId, f64>) {
         for (&p, &wn) in m {
+            if std::env::var("TOPO_NECKDBG").is_ok() {
+                eprintln!("CUTNECK wire {} pass {p} edge {} -> {wn:.0}", self.passes[p].wire, self.passes[p].edge);
+            }
             self.pass_w[p] = self.pass_w[p].min(wn);
         }
     }
@@ -1795,6 +2014,23 @@ impl<'p> State<'p> {
         }
         Ok(())
     }
+}
+
+/// Distance between the segments `a-b` and `c-d` with the nearest points on each (0 and an
+/// endpoint when they cross).
+fn seg_seg_closest(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> (f64, Vec2, Vec2) {
+    let pt = |p: Vec2, u: Vec2, v: Vec2| {
+        let e = v - u;
+        let l2 = e.len2();
+        let t = if l2 > 0.0 { ((p - u).dot(e) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        u + e * t
+    };
+    if interleave_seg(a, b, c, d) {
+        return (0.0, a, a);
+    }
+    let cands = [(a, pt(a, c, d)), (b, pt(b, c, d)), (pt(c, a, b), c), (pt(d, a, b), d)];
+    let (x, y) = cands.into_iter().min_by(|m, n| (m.0 - m.1).len().total_cmp(&(n.0 - n.1).len())).unwrap();
+    ((x - y).len(), x, y)
 }
 
 /// Distance between the segments `a-b` and `c-d`.

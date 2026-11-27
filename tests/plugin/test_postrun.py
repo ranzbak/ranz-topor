@@ -63,6 +63,22 @@ def test_route_findings_from_real_engine_lines():
         assert f.fix == MESSAGES[f.code].fix and ("KiCad →" in f.fix or "." in f.fix)
 
 
+def test_necked_finding_names_whole_wire_supply_necks():
+    """neck-regrow (rule 13: every value of the text): pad-exit necks only, and with whole-wire supply necks (the
+    engine line of factors/necking.rs describe, whole_supply = true)."""
+    pad = "VIN5V (U6.18): necked from 0.500 mm to 0.204 mm over 3.52 mm"
+    whole = ("PWR (P1.1): necked from 0.500 mm to 0.304 mm over 10.29 mm, the whole wire (both ends needed a neck; a "
+             "supply-width net: its current is limited to the neck's)")
+    f = {x.code: x for x in postrun.route_findings({"connections": [], "warnings": [pad]})}["NECKED"]
+    assert f.message == "1 stretch(es) are narrower than their net's track width (to get out of a pad)."
+    f = {x.code: x for x in postrun.route_findings({"connections": [], "warnings": [pad, whole]})}["NECKED"]
+    assert f.message == ("2 stretch(es) are narrower than their net's track width (1 to get out of a pad, 1 along the "
+                         "whole wire of a supply-width net: both ends needed a neck, so its current is limited to the "
+                         "neck's).") and f.items == (pad, whole)
+    f = {x.code: x for x in postrun.route_findings({"connections": [], "warnings": [whole]})}["NECKED"]
+    assert f.message.startswith("1 stretch(es) are narrower than their net's track width (0 to get out of a pad, 1 along")
+
+
 def test_violations_finding_lists_place_type_and_cause():
     """M-B1 never drop: the engine's ``violations`` (engine/tests/topo_mb1.rs shape) become one VIOLATIONS
     warning, one item per violation."""

@@ -40,10 +40,32 @@ impl Factor for Necking {
     }
     fn describe(&self, ev: &Event) -> String {
         match *ev {
-            Event::Necking { from_nm, to_nm, mm, .. } => {
+            Event::Necking { from_nm, to_nm, mm, whole_supply: false, .. } => {
                 format!("necked from {:.3} mm to {:.3} mm over {:.2} mm", from_nm / 1e6, to_nm / 1e6, mm)
             }
+            Event::Necking { from_nm, to_nm, mm, whole_supply: true, .. } => format!(
+                "necked from {:.3} mm to {:.3} mm over {:.2} mm, the whole wire (both ends needed a neck; a supply-width net: its current is limited to the neck's)",
+                from_nm / 1e6,
+                to_nm / 1e6,
+                mm
+            ),
             _ => String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both texts (AGENT_RULES 13): the plugin's post-run parser matches ": necked from ".
+    #[test]
+    fn describe_names_a_whole_wire_supply_neck_apart() {
+        let ev = |whole_supply| Event::Necking { wire: 0, from_nm: 500_000.0, to_nm: 300_000.0, mm: 10.0, whole_supply };
+        assert_eq!(Necking.describe(&ev(false)), "necked from 0.500 mm to 0.300 mm over 10.00 mm");
+        let t = Necking.describe(&ev(true));
+        assert!(t.starts_with("necked from 0.500 mm to 0.300 mm over 10.00 mm, the whole wire"), "{t}");
+        assert!(t.contains("supply-width net"), "{t}");
+        assert_eq!(Necking.amount(&ev(true)), Necking.amount(&ev(false)));
     }
 }
