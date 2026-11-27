@@ -3,6 +3,7 @@
 tracks. If the track is gone after the cleanup, it was not good.").
 
   python -m harness.kicad_accepts <out_dir>        writes <out_dir>/pad_centre.kicad_pcb (+ .kicad_pro)
+  python -m harness.kicad_accepts <out_dir> shorting   writes <out_dir>/shorting.kicad_pcb (see SHORTING)
 
 Run the real dialog on it (Xephyr, its own KiCad home, every box on):
   tools/gui_e2e.sh <out_dir>/pad_centre.kicad_pcb <run_dir> --existing --cleanup --display :6
@@ -61,6 +62,42 @@ def make_pad_centre(out_dir: Path) -> Path:
     return f.save(Path(out_dir) / "pad_centre.kicad_pcb")
 
 
+#: shorting (pad-centre-main, 2026-11-27): what KiCad's Cleanup does with a short topor's never-drop pass writes.
+#: Each case is two nets: a forced wire X (from a pad PX centre to a pad QX centre, two segments) and a legal victim
+#: wire Y (one segment PY -> QY); case -> (X points, Y points, width mm). TOUCH: X's bend lies on Y (an end inside
+#: foreign copper: KiCad's connectivity joins them); CROSS: X crosses Y mid-segment (no end inside foreign copper:
+#: a DRC short that KiCad's connectivity does not join); NEAR: X passes Y 0.05 mm apart (a clearance violation only).
+SHORTING = {
+    "TOUCH": ([(2.0, 3.0), (6.0, 6.0), (10.0, 3.0)], [(2.0, 6.0), (10.0, 6.0)], 0.25),
+    "CROSS": ([(14.0, 3.0), (18.0, 9.0), (22.0, 3.0)], [(14.0, 6.0), (22.0, 6.0)], 0.25),
+    "NEAR": ([(26.0, 3.0), (30.0, 5.7), (34.0, 3.0)], [(26.0, 6.0), (34.0, 6.0)], 0.25),
+}
+
+
+def make_shorting(out_dir: Path) -> Path:
+    """Write the shorting project (see :data:`SHORTING`) into `out_dir`; returns the .kicad_pcb path. Nets X_<case>
+    and Y_<case>; every wire end sits on its pad's centre."""
+    import pcbnew
+
+    from harness.mechfix import Fx, _v
+    nets = tuple(f"{k}_{c}" for c in SHORTING for k in ("X", "Y"))
+    f = Fx(36, 12, nets=nets)
+    for c, (xs, ys, w) in SHORTING.items():
+        for k, pts in (("X", xs), ("Y", ys)):
+            net = f"{k}_{c}"
+            f.pad(f"P{k}_{c}", net, pts[0], (1.0, 1.0))
+            f.pad(f"Q{k}_{c}", net, pts[-1], (1.0, 1.0))
+            for a, b in zip(pts, pts[1:]):
+                t = pcbnew.PCB_TRACK(f.b)
+                t.SetStart(_v(*a))
+                t.SetEnd(_v(*b))
+                t.SetWidth(int(round(w * MM)))
+                t.SetLayer(pcbnew.F_Cu)
+                t.SetNet(f.nets[net])
+                f.b.Add(t)
+    return f.save(Path(out_dir) / "shorting.kicad_pcb")
+
+
 def tracks_by_net(pcb: Path) -> dict:
     """net -> sorted list of (start, end, width) in nm of the tracks of `pcb` (pcbnew; run in an isolated env)."""
     import pcbnew
@@ -81,4 +118,4 @@ def gone_by_net(before: Path, after: Path) -> dict:
 
 
 if __name__ == "__main__":
-    print(make_pad_centre(Path(sys.argv[1])))
+    print(make_shorting(Path(sys.argv[1])) if sys.argv[2:] == ["shorting"] else make_pad_centre(Path(sys.argv[1])))
