@@ -1251,6 +1251,29 @@ impl Drawer<'_> {
             let [c, sh] = self.seg_deficit_parts_near(&nr, a, b);
             cfg.viol_nm * c + cfg.short_nm * sh
         };
+        // bundle-turn RCA (`TOPO_OCTIPROBE=<wire>:x,y;x,y;...`, KiCad mm, copper-neutral): the leg
+        // tests and prices of a given polyline in this call of the DP.
+        if let Ok(v) = std::env::var("TOPO_OCTIPROBE") {
+            for spec in v.split('|') {
+                let Some((ws, pl)) = spec.split_once(':') else { continue };
+                if ws.trim().parse::<usize>().ok() != Some(w) {
+                    continue;
+                }
+                let pts: Vec<Vec2> = pl.split(';').filter_map(|p| p.split_once(',').and_then(|(x, y)| Some(Vec2 { x: x.trim().parse::<f64>().ok()? * MM, y: -y.trim().parse::<f64>().ok()? * MM }))).collect();
+                for s in pts.windows(2) {
+                    let (a, b) = (s[0], s[1]);
+                    let bb = bbox_of(&[a, b]);
+                    let in_region = bb.min.x >= region.min.x && bb.min.y >= region.min.y && bb.max.x <= region.max.x && bb.max.y <= region.max.y;
+                    let walls: Vec<String> = strip.walls.iter().filter(|&&(c, d)| super::draw::seg_proper(a, b, c, d)).map(|(c, d)| format!("({:.3},{:.3})-({:.3},{:.3})", c.x / MM, -c.y / MM, d.x / MM, -d.y / MM)).collect();
+                    eprintln!(
+                        "OCTIPROBE w{w} forced {forced} ({:.3},{:.3})->({:.3},{:.3}) region {in_region} strip_b {} strip_mid {} walls {:?} clear {} viol {:.3} room {:.3} legal {}",
+                        a.x / MM, -a.y / MM, b.x / MM, -b.y / MM,
+                        strip.contains(b), strip.contains((a + b) * 0.5), walls, self.seg_clear_near(&nr, a, b),
+                        viol_x(a, b) / MM, room_x(a, b) / MM, legal_f(a, b)
+                    );
+                }
+            }
+        }
         let mut memo = Memo::default();
         // DP state per node: arrival direction 0..7, or 8 (the start / an any-angle leg).
         const ND: usize = 9;

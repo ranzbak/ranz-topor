@@ -47,6 +47,14 @@ case "${1:-}" in
     done
     python -m harness.bundle_turn_patterns_png $P/runs $P/png > $P/png.log 2>&1; note "pats png rc $?"
     note "all done" ;;
+  probe)  # qmtech off (and a1) again with TOPO_OCTIPROBE on the JS1 bus forms (copper must stay = dab3)
+    PR="774:152.699,120.352;155.556,123.209;161.377,123.209|774:152.699,120.352;154.964,122.617;155.469,122.617;155.779,122.927;156.068,122.927;156.350,123.209;161.377,123.209|774:153.980,122.240;154.949,123.209;156.858,123.209|774:154.587,122.240;155.046,122.698;155.695,122.698;156.044,123.046;156.696,123.046;156.858,123.209|1275:161.403,122.843;163.988,125.428;163.988,125.861;164.327,126.200|1275:161.497,122.843;163.687,125.033;163.687,125.560;164.327,126.200"
+    for a in off a1; do
+      x=""; [ $a = a1 ] && x="--set drawing.forced_shrink=true"
+      mkdir -p $OUT/p-$a
+      TOPO_OCTIPROBE="$PR" TOPO_OCTINODES=774 TOPOR_UNRELEASED_SETTINGS=1 RAYON_NUM_THREADS=4 tools/route_board.sh $QM $OUT/p-$a/qmtech-minimig/s0 --clock cpu --timeout 2400 $C1 $x --no-png \
+        2> >(grep -E "^(OCTIPROBE|OCTINODE|OCTILEG|OCTIWHYF|RUNPROV)" | gzip -c > $OUT/p-$a/stderr.gz) > $OUT/p-$a/route.log 9>&- &
+    done; wait; note "probe rc $?" ;;
   top)  # the hzq units of the dbg job
     T=${HZ_TAG:-bt}
     hzq run --threads 8 --name $T-dbg -- bash $ROOT/tools/bundle_turn_job.sh dbg 9>&- & sleep 3
