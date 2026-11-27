@@ -115,8 +115,7 @@ pricing (search approximation only; the copper uses `neck_items`).
 
 ## As built (r4, lead 2026-11-27): the taut exit test behind `[search] exit_taut`
 
-- `[search] exit_taut` (default **false** in r4; **true** since branch defaults-flip-a1, user-approved 2026-11-27)
-  selects `State::exit_tight`'s test. false = main's test
+- `[search] exit_taut` (default **false**) selects `State::exit_tight`'s test. false = main's test
   (the stretch through the even points of the first two passes). true = the taut test of r2/r3:
   own-pad passes skipped, nearer-end passes only, the relaxed taut path, the board outline as a wall,
   the pad-axis exit.

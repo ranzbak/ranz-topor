@@ -641,8 +641,7 @@ pub struct State<'p> {
     /// starts at the footprint and may reach further back; never a neck in the middle of a
     /// full-width run). False: only the bottleneck passes are necked.
     pub neck_from_pad: bool,
-    /// `[search] exit_taut` ([`State::exit_tight`]; true = the taut test, the default since
-    /// defaults-flip-a1; false = the even-point test before).
+    /// `[search] exit_taut` ([`State::exit_tight`]; false = main's even-point test).
     pub exit_taut: bool,
     /// `[search] length = "taut"` (shopping list 4.3): the search prices a wire's length as the
     /// shortest path through its sleeve that keeps the clearances ([`State::gap_spans`],
@@ -744,7 +743,7 @@ impl<'p> State<'p> {
             pass_d: Vec::new(),
             floors: std::collections::HashMap::new(),
             neck_from_pad: true,
-            exit_taut: true,
+            exit_taut: false,
             taut_len: false,
             relay_after_uncross: true,
             took_part: Vec::new(),
@@ -979,8 +978,8 @@ impl<'p> State<'p> {
             let q = self.pass_point(wi.passes[k]);
             super::octi::fd45_off("nrg_near") || (q - pr.pos[v]).len() <= (q - other).len()
         };
-        // `[search] exit_taut` false (the default before defaults-flip-a1) or debug arm
-        // `nrg_exit`: the even-point test (the first two passes' even points only).
+        // `[search] exit_taut` false (the default) or debug arm `nrg_exit`: main's test (the
+        // first two passes' even points only).
         let legacy = !self.exit_taut || super::octi::fd45_off("nrg_exit");
         // Debug arms `nrg_ownpad` (passes inside the own pad count again), `nrg_taut` (the cheap
         // pass-point test decides, no taut path), `nrg_axis` (no pad-axis exit check).
