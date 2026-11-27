@@ -1124,9 +1124,9 @@ mod tests {
         assert_eq!(stub_out_of_pad(&mut its, F, &in_pad), 0);
         assert_eq!(ends(&its[0]).1, deep);
         // full width, not joined, outside the pad
-        assert_eq!(stub_out_of_pad(&mut vec![tr(F, c, p1), tr(F, p1, next)], F, &in_pad), 0);
-        assert_eq!(stub_out_of_pad(&mut vec![tr(N, c, p1), tr(N, next, (9_000_000, 12_000_000))], F, &in_pad), 0);
-        assert_eq!(stub_out_of_pad(&mut vec![tr(N, (6_000_000, 10_000_000), (6_400_000, 10_000_000)), tr(N, (6_400_000, 10_000_000), next)], F, &in_pad), 0);
+        assert_eq!(stub_out_of_pad(&mut [tr(F, c, p1), tr(F, p1, next)], F, &in_pad), 0);
+        assert_eq!(stub_out_of_pad(&mut [tr(N, c, p1), tr(N, next, (9_000_000, 12_000_000))], F, &in_pad), 0);
+        assert_eq!(stub_out_of_pad(&mut [tr(N, (6_000_000, 10_000_000), (6_400_000, 10_000_000)), tr(N, (6_400_000, 10_000_000), next)], F, &in_pad), 0);
     }
 
     /// The stretch's run end, narrowest width and length.
