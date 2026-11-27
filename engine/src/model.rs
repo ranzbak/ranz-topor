@@ -1690,7 +1690,8 @@ pub struct Options {
     /// neck on a supply-width net gets a graded warning. Never wider again after a neck: the
     /// drawing's one step for every wire (`Drawer::monotone_necks`, with `[search] neck_from_pad`)
     /// reaches the neck on to the cheaper wire end (defaults-flip-a1, user 2026-11-27).
-    /// false (default until a verifier) = main's copper.
+    /// true (default since defaults-flip-a1, user-approved 2026-11-27); false = such places stay
+    /// violations at full width (the copper before the flip).
     pub forced_shrink: bool,
     /// draw-absorb A3 (`[drawing] band_passes`, docs/dev/design/draw-absorb.md): with realise =
     /// "erbs", passes of the iterated band realise per layer before any copper: the band of each
@@ -2120,7 +2121,7 @@ impl Default for Options {
             octi_own_portals: true,
             octi_straighten: true,
             erbs_gap_keep_max_mm: 0.15,
-            forced_shrink: false,
+            forced_shrink: true,
             band_passes: 0,
             erbs_length_weight: 1.0,
             erbs_margin: 0.05,
