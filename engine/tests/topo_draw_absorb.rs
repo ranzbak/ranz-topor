@@ -449,6 +449,82 @@ fn a_mid_band_gap_spot_is_necked_where_it_hits() {
     assert_eq!(on.routed, off.routed);
 }
 
+/// fx_narrow_gap with one wall per `(x mm, gap centre y mm)` (1 mm thick, a 0.5 mm gap, on both
+/// layers): the 0.25 mm track from A1 (3, 10) to B1 (27, 10) has to pass every gap. The pad
+/// order and the layer order inside a wall are the fixture's (the plan necks the run itself, so
+/// nothing is forced, with another order). `b1_back`: B1 on B.Cu at x 27, so the run ends in a via.
+fn multi_gap(min_w: i64, gaps: &[(f64, f64)], b1_back: bool) -> BoardModel {
+    with(include_str!("fixtures/fx-narrow-gap.json"), |j| {
+        j["rules"]["min_track_width"] = serde_json::json!(min_w);
+        let pads = j["pads"].as_array_mut().unwrap();
+        let mut sig: Vec<serde_json::Value> = pads.iter().filter(|p| p["net"] == 1).cloned().collect();
+        if b1_back {
+            sig[1]["layers"] = serde_json::json!([2]);
+            sig[1]["shapes"] = serde_json::json!({"2": {"kind": "rect", "w": 1_000_000, "h": 1_000_000}});
+        }
+        let wall = pads.iter().find(|p| p["ref"] == "WNF").cloned().unwrap();
+        pads.clear();
+        let mut k = 0;
+        for &(x, gy) in gaps {
+            for (y0, y1) in [(0.0, gy - 0.25), (gy + 0.25, 20.0)] {
+                for layer in [2, 0] {
+                    let mut p = wall.clone();
+                    p["ref"] = serde_json::json!(format!("W{k}"));
+                    p["uuid"] = serde_json::json!(format!("{k:08x}-7c3f-41b0-91fb-a89f87e7d2a5"));
+                    p["center"] = serde_json::json!([(x * MM) as i64, ((y0 + y1) / 2.0 * MM) as i64]);
+                    p["layers"] = serde_json::json!([layer]);
+                    p["shapes"] = serde_json::json!({ layer.to_string(): {"kind": "rect", "w": 1_000_000, "h": ((y1 - y0) * MM) as i64} });
+                    pads.push(p);
+                    k += 1;
+                }
+            }
+        }
+        pads.extend(sig);
+    })
+}
+
+/// vfy-draw-absorb r3 survivor `mid_zone_3` (`exact::MID_ZONE` 2 -> 3, which leaves A1 three mid
+/// slots): a forced run with FOUR hit tracks (one per gap of four, alternating y 7 / 13 mm, so
+/// each gap is passed by its own short track; main: 8 violations) gets one neck zone per hit in
+/// the four mid slots. With three slots `hit_zones` merges all four into one centroid circle: the
+/// same widths and no violation, but the neck starts 0.8 um further on (the one full-width stub
+/// before it is 1.85 um long, with the merged zone 1.07 um) and every later vertex moves with it,
+/// so the test pins the stub and the first necked track to 0.3 um. Qmtech has A1 runs with 4-6
+/// spots (r2 ABSORBDBG: 24 of 117).
+#[test]
+fn a_forced_run_with_four_hit_spots_uses_all_four_mid_slots() {
+    let m = multi_gap(100_000, &[(9.0, 7.0), (14.0, 13.0), (19.0, 7.0), (24.0, 13.0)], false);
+    let off = route(&m, &opts_shrink(&opts(), false));
+    assert!(off.violations.len() >= 8, "main: two violations per gap: {}", off.violations.len());
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!((on.routed, on.violations.len(), on.erbs.as_ref().unwrap().forced_shrunk), (1, 0, 1), "{:?}", on.violations);
+    assert!(valleys(&m, &on).is_empty(), "{:?}", chains(&m, &on));
+    let ts = tracks(&on);
+    let w: Vec<i64> = ts.iter().map(|t| t.0).collect();
+    assert_eq!(&w[..5], &[250_000, 250_000, 250_000, 250_000, 100_000], "{w:?}");
+    assert!(w[4..].iter().all(|&x| x == 100_000), "one necked stretch to the far end: {w:?}");
+    assert!((ts[3].1 - 1_850.0).abs() < 300.0, "the full-width stub before the neck: {} nm", ts[3].1);
+    assert!((ts[4].1 - 1_417_418.0).abs() < 300.0, "the first necked track: {} nm", ts[4].1);
+}
+
+/// vfy-draw-absorb r3 survivor `mono_off` (`a1_finish` without `one_neck_stretch`; arm
+/// `TOPO_FD45_OFF=dab_mono`): pins A1's own one-stretch step. One gap at x 15 mm and B1 on the
+/// other layer (the run A1 -> via -> B1): the hit zone's neck is a stretch in mid-run; A1 reaches
+/// it on to the run's end (the via), 18.00 mm at 0.1 mm and the B.Cu run at 0.25 mm. Without the
+/// step the run keeps 5.29 mm at full width before the via (neck, full width, via: widens again
+/// after the neck; the supply-net case on qmtech, ADV_AVDD T -> via, 0.19 mm at 0.28 mm).
+/// DECISION PENDING (user): keep this step, gate it like `monotone_necks` with `neck_from_pad`,
+/// or drop it (docs/dev/design/draw-absorb.md); this test pins today's behaviour.
+#[test]
+fn a1_necks_a_run_to_its_via_in_one_stretch() {
+    let m = multi_gap(100_000, &[(15.0, 10.0)], true);
+    let on = route(&m, &opts_shrink(&opts(), true));
+    assert_eq!((on.violations.len(), on.erbs.as_ref().unwrap().forced_shrunk), (0, 1), "{:?}", on.violations);
+    let ts = tracks(&on);
+    assert_eq!(ts.iter().map(|t| t.0).collect::<Vec<_>>(), [100_000, 250_000], "one necked stretch, then the other layer's run at full width: {ts:?}");
+    assert!((ts[0].1 / MM - 18.0).abs() < 0.01 && (ts[1].1 / MM - 6.0).abs() < 0.01, "{ts:?}");
+}
+
 /// The neck takes the widest width that clears, not the floor: with a floor of 0.05 mm the gap
 /// (0.5 mm between the walls, 0.2 mm clearance each side) is cleared at about 0.1 mm.
 #[test]

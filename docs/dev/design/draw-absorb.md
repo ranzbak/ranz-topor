@@ -339,9 +339,19 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
   verifier's ccx33 off hash too; ladder_diff --json, drc_digest --diff):**
   - det s0 C1: A1 copper = the probe's on qm and esp. qmtech DRC 200 -> 146 (0 valleys, loose ends a subset 27 ->
     25), esp 17 -> 15; wiccon and eprom = main. A1b, A3: copper unchanged by r3 (no A1 zones).
-  - Real settings (wall clock, timeout 600, ccx43 below its hzq target): qmtech 152 -> 135 (0 new clusters, 6 gone;
-    old main 119 -> 93), esp 10 -> 8 (0 new, 2 gone; vias 52 -> 50). 0 valleys.
+  - Real settings (wall clock, timeout 600), like for like against main acdee25b on the ccx33 timing slots (30
+    cycles each): qmtech 116 -> 90 DRC (0 new, 8 gone), esp 10 -> 8 (0 new, 2 gone; vias 52 -> 50). 0 valleys.
+    (The r3 first figure "qmtech 152 -> 135" compared two limit-cut runs on the loaded ccx43: real qmtech sits at the
+    600 s edge, main needs 542-610 s for 30 cycles, and a busy neighbour slot cut the loop at 23-27 cycles; 152 is
+    that cut base, not a code regression. Check "N cycles (picked run)" before comparing real qmtech numbers.)
   - Real KiCad Cleanup (Xephyr, all options), det and real, qm and esp: it deletes no copper that main keeps.
+
+- **Pending user decision: the one-stretch step (`a1_finish`, `one_neck_stretch`).** A1's own step necks a run on to
+  its end (via, T, pad) in one stretch. Where main's `monotone_necks` (via wires only, neck-regrow) would stop short,
+  it necks more: qmtech ADV_AVDD T -> via, 0.19 mm more of a 0.28 mm supply net; DRC equal. Options: keep, gate like
+  `monotone_necks` with `neck_from_pad`, or drop. Today's behaviour is pinned by
+  `a1_necks_a_run_to_its_via_in_one_stretch` (kills mutant mono_off); mid-slot use by
+  `a_forced_run_with_four_hit_spots_uses_all_four_mid_slots` (kills mutant mid_zone_3).
 
 **A1b as built (2026-11-27): `[drawing] reserved_keep_neck`**, default false (since 0.5.0, unreleased); off = main
 copper (hash on 4 boards).
