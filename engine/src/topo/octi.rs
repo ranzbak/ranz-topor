@@ -3310,6 +3310,16 @@ impl Drawer<'_> {
             if cur.len() < 4 {
                 continue;
             }
+            // bundle-turn r3 (cpu): a run [`Drawer::refit_run`] refuses whatever the form (the
+            // wire has violations or necks: its own drawing, which this pass does not change) is
+            // skipped. Every form would be priced and then refused with no side effect, so the
+            // copper is the same (qmtech-bh26: 78 % of the trials, the forced JS2 bundle).
+            if self.refit_counts(wo, r).is_none() {
+                if dbg {
+                    eprintln!("STRAIGHTEN wire {w} run {r}: {} pts, skipped (refit refuses this wire)", cur.len());
+                }
+                continue;
+            }
             let layer = wo.runs[r].0;
             let wp = Wp { wire: w, net, w: ww, s: wi.s, layer, own, neck: None, relax: 0.0, relax_on: None };
             // The drawn octilinear segments of other nets near the run (the DP's `side`).
@@ -3432,6 +3442,7 @@ impl Drawer<'_> {
                     cands.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
                     for (p, _, trial) in cands {
                         let snap = wo.clone();
+                        self.stats.straighten_trials += 1;
                         let ok = self.refit_run(wo, r, trial.clone());
                         if dbg {
                             eprintln!("STRAIGHTEN wire {w} run {r} i {i} j {j}: old {old:.0} form {p:.0} legal {ok}");

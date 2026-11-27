@@ -792,6 +792,9 @@ pub struct DrawStats {
     pub refit_tried: usize,
     pub refit_kept: usize,
     pub refit_legal: usize,
+    /// bundle-turn r3 (cpu): the forms the straightening ([`Drawer::octi_straighten`]) handed to
+    /// [`Drawer::refit_run`]; a run the re-fit refuses whatever the form is skipped, no trial.
+    pub straighten_trials: usize,
     pub forced_funnel: usize,
     pub forced_attempt: usize,
     /// forced-draw: forced runs drawn in their octilinear form (the cheaper by
@@ -4960,6 +4963,23 @@ impl<'a> Drawer<'a> {
         out
     }
 
+    /// The preconditions of [`Drawer::refit_run`] / [`Drawer::refit_legal`], which read only the
+    /// wire's own drawing (never the copper around it): run `r` exists, the wire has no
+    /// violations (a wire drawn with violations, never drop, keeps its copper: its violations
+    /// belong to it) and no necks, and its track items are exactly the plain
+    /// [`Drawer::run_items`] of its runs. Then the track item count per run, else `None`: every
+    /// re-fit of this wire is refused, whatever the polyline (bundle-turn r3: the straightening
+    /// skips such a run, 78 % of its trials on qmtech-bh26 were these). O(wire segments).
+    pub fn refit_counts(&self, wo: &WireOut, r: usize) -> Option<Vec<usize>> {
+        let w = wo.wire;
+        let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
+        let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
+        if r >= wo.runs.len() || !wo.viol.is_empty() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
+            return None;
+        }
+        Some(counts)
+    }
+
     /// Replace run `r` of the drawn wire `wo` by the polyline `pts` (same layer, math frame) when
     /// its tracks pass the checker against everything else drawn and graze no pad of the wire's
     /// own net; else the old tracks stay. Only for wires whose track items are exactly the plain
@@ -4967,12 +4987,7 @@ impl<'a> Drawer<'a> {
     /// `false` for any other. O(run segments x checker query).
     pub fn refit_run(&mut self, wo: &mut WireOut, r: usize, pts: Vec<Vec2>) -> bool {
         let w = wo.wire;
-        let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
-        let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
-        // A wire drawn with violations (never drop) keeps its copper: its violations belong to it.
-        if r >= wo.runs.len() || !wo.viol.is_empty() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
-            return false;
-        }
+        let Some(counts) = self.refit_counts(wo, r) else { return false };
         let off: usize = counts[..r].iter().sum();
         let (lo, hi) = (off, off + counts[r]);
         for &h in &wo.handles[lo..hi] {
@@ -5041,11 +5056,7 @@ impl<'a> Drawer<'a> {
     /// checker query).
     pub fn refit_legal(&self, wo: &WireOut, r: usize, pts: &[Vec2]) -> bool {
         let w = wo.wire;
-        let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
-        let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
-        if r >= wo.runs.len() || !wo.viol.is_empty() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
-            return false;
-        }
+        let Some(counts) = self.refit_counts(wo, r) else { return false };
         let off: usize = counts[..r].iter().sum();
         let mut skip: Vec<usize> = wo.handles[off..off + counts[r]].iter().map(|&h| self.handles[h].0).collect();
         skip.sort_unstable();
@@ -7482,6 +7493,39 @@ mod tests {
         assert!(octilinear(&got), "{got:?}");
     }
 
+
+    /// bundle-turn r3 (cpu, bit-identical): the straightening skips a run [`Drawer::refit_run`]
+    /// refuses whatever the form, here a wire with a neck ([`Drawer::refit_counts`] is `None`):
+    /// no form is tried, nothing changes. The same staircase without the neck is straightened
+    /// (so the skip is what kept the trials at 0). On qmtech-bh26 78 % of the straightening's
+    /// trials were on such wires (the forced JS2 bundle), each priced and then refused.
+    #[test]
+    fn straightening_skips_a_run_the_refit_refuses() {
+        let m = fx_model(&[(1, 3.0, 20.0), (1, 13.0, 16.0)]);
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let o = Options::default();
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..b.proj.obstacles.len()).find(|&i| (b.proj.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(3.0, 20.0), obs(13.0, 16.0));
+        let run = vec![fp(3.0, 20.0), fp(4.0, 20.0), fp(6.0, 18.0), fp(8.0, 18.0), fp(10.0, 16.0), fp(13.0, 16.0)];
+        for necked in [true, false] {
+            let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+            dr.octi = super::super::octi::OctiCfg { on: true, ..dr.octi };
+            let mut wo = fx_drawn(&mut dr, w, run.clone());
+            if necked {
+                wo.necks.push((fp(5.0, 19.0), 0.5 * FMM, 0.1 * FMM));
+            }
+            let before = wo.runs[0].1.clone();
+            let k = dr.octi_straighten(&mut wo, &[], &mut |_, _| true);
+            if necked {
+                assert_eq!((k, dr.stats.straighten_trials), (0, 0), "a run the re-fit refuses is skipped");
+                assert_eq!(wo.runs[0].1, before, "unchanged");
+            } else {
+                assert!(k >= 1 && dr.stats.straighten_trials >= 1, "without the neck it is straightened: {k} {}", dr.stats.straighten_trials);
+            }
+        }
+    }
 
     /// neck-regrow r6: the fixture of the whole-wire neck tests: wire A (5, 15) - B (35, 15) of
     /// net 1 at 0.25 mm and net-2 tracks (0.1 mm) 0.33 mm above and below y = 15 over `xs`:
