@@ -104,10 +104,11 @@ fn oblique_overage_is_a_price_and_over_full_only_when_it_does_not_fit_square() {
 #[test]
 fn refit_and_straighten_lines_report_convergence() {
     assert_eq!(
-        refit_line(3, 2, 1, false),
+        refit_line(3, 2, 1, false, 0),
         "never drop, re-fit after the straightening: 3 wires drawn with violations drawn again against the straightened neighbours; 2 kept (fewer violations, or shorter at equal violations), 1 of them now without violations"
     );
-    assert!(refit_line(3, 2, 1, true).ends_with("stopped at Cancel or the time limit ([run] drawing_grace_s) before the rest (they keep their copper)"));
+    assert!(refit_line(1, 0, 0, false, 4).ends_with("; 4 not drawn again (no violation partner and no wire on their planned edges moved)"));
+    assert!(refit_line(3, 2, 1, true, 0).ends_with("stopped at Cancel or the time limit ([run] drawing_grace_s) before the rest (they keep their copper)"));
     assert!(straighten_line(2, 0.3, 0, 7, 7, false, 0.1).contains("stopped at the bound of 7 passes with changes in the last ([drawing] straighten_passes)"));
     assert!(straighten_line(2, 0.3, 0, 3, 7, true, 0.1).contains("3 passes, the last without a change"));
 }

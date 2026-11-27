@@ -2538,9 +2538,10 @@ pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, c
 /// after the straightening moved their neighbours, `kept` of them with fewer violations or shorter
 /// at equal violations, `legal` of those without any violation left; `stopped`: the pass stopped
 /// at Cancel or the time limit before every such wire had its turn.
-pub fn refit_line(tried: usize, kept: usize, legal: usize, stopped: bool) -> String {
+pub fn refit_line(tried: usize, kept: usize, legal: usize, stopped: bool, skipped: usize) -> String {
     format!(
-        "never drop, re-fit after the straightening: {tried} wires drawn with violations drawn again against the straightened neighbours; {kept} kept (fewer violations, or shorter at equal violations), {legal} of them now without violations{}",
+        "never drop, re-fit after the straightening: {tried} wires drawn with violations drawn again against the straightened neighbours; {kept} kept (fewer violations, or shorter at equal violations), {legal} of them now without violations{}{}",
+        if skipped > 0 { format!("; {skipped} not drawn again (no violation partner and no wire on their planned edges moved)") } else { String::new() },
         if stopped { "; stopped at Cancel or the time limit ([run] drawing_grace_s) before the rest (they keep their copper)" } else { "" }
     )
 }
@@ -9177,6 +9178,11 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         // drawing_grace_s` (soft limit) or at the time limit (hard); every wire stays drawn.
         let refit_stop = || ctl.is_cancelled() || ctl.limit.draw_grace_over(t_draw_c) || (!soft() && ctl.deadline().is_some_and(|d| ctl.limit.now() >= d.max(floor)));
         let mut refit_stopped = false;
+        // The wires the straightening (or a kept re-fit) changed: a forced wire is drawn again
+        // only when one of its violation partners or a wire on one of its planned edges is among
+        // them; else its surroundings are as they were and the forced draw would repeat itself.
+        let mut moved: BTreeSet<WireId> = BTreeSet::new();
+        let mut refit_skipped = 0usize;
         loop {
         while pass_changed && phase < cap {
             pass_changed = false;
@@ -9205,6 +9211,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 let k = dr.octi_straighten(&mut wo, &keep, &mut joined);
                 if k > 0 {
                     pass_changed = true;
+                    moved.insert(w);
                     n_str += k;
                     str_nm += wo.length_nm - len0;
                     let ci = conn_of[wire_conn[w]];
@@ -9223,6 +9230,12 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             if drawn.get(&w).is_none_or(|o| o.viol.is_empty()) {
                 continue;
             }
+            let near_moved = drawn[&w].viol.iter().any(|v| v.src.hit_wire.is_some_and(|h| moved.contains(&h)))
+                || st.wires[w].passes.iter().any(|&p| st.edge_order[st.passes[p].edge].iter().any(|&q| { let x = st.passes[q].wire; x != w && moved.contains(&x) }));
+            if !near_moved {
+                refit_skipped += 1;
+                continue;
+            }
             if refit_stop() {
                 refit_stopped = true;
                 break;
@@ -9236,6 +9249,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 Some(nw) => {
                     kept_any = true;
                     refit_kept += 1;
+                    moved.insert(w);
                     let ci = conn_of[wire_conn[w]];
                     necking.retain(|(c, _)| *c != ci);
                     settle(octi_on, &mut out, &mut necking, ci, w, &nw, b, &st, model.rules.default.width as f64);
@@ -9256,8 +9270,8 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         if n_str > 0 || str_refused > 0 {
             warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, cap, !pass_changed, t_str.elapsed().as_secs_f64()));
         }
-        if refit_tried > 0 || refit_stopped {
-            warnings.push(refit_line(refit_tried, refit_kept, dr.stats.refit_legal, refit_stopped));
+        if refit_tried > 0 || refit_stopped || refit_skipped > 0 {
+            warnings.push(refit_line(refit_tried, refit_kept, dr.stats.refit_legal, refit_stopped, refit_skipped));
         }
     }
     free_snap("straighten", &drawn, &st);
