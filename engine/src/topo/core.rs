@@ -4445,7 +4445,12 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             st.uncross_all(50);
             let lr2 = assign(st);
             let after = score(st, &lr2);
-            let keep = p4_better(&after, &before);
+            // A part of a refused group is kept only when it also adds no predicted violation
+            // (its ranked count, as the archive's pick reads it, does not rise): the split looks
+            // for the re-plans the rest of the group hid, not for more length-for-violation trades
+            // than the whole pass would have made (qmtech, bt2g: split parts that each traded 2
+            // predicted violations for ~130 mm drew 44 more DRC errors).
+            let keep = p4_better(&after, &before) && (depth == 0 || p4_ranked(&after) <= p4_ranked(&before) + 1e-9);
             if std::env::var_os("TOPO_XRDBG").is_some() {
                 let cs: Vec<usize> = moved.iter().filter_map(|&w| topo.wire_conn.get(w).copied()).collect();
                 eprintln!("XRDBG stage {stage} depth {depth} pairs {}..{} resolved {resolved} score {:.3}+{:.3} viol {} -> {:.3}+{:.3} viol {}: {} conns {cs:?}", range.start, range.end, before.0, before.3, before.1, after.0, after.3, after.1, if keep { "kept" } else { "refused" });
