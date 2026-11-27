@@ -421,6 +421,10 @@ pub struct Packer<'a> {
     /// tw4-r2 (`[capacity] via_over_ramp`, nm): the over-full via price ramps from 0 over this
     /// overage ([`super::viacut::price`]); 0 = the step at zero.
     pub via_ramp: f64,
+    /// bundle-turn (`[capacity] oblique_price`, mm per mm): the per-edge model counts an
+    /// edge-layer over-full only when it does not fit square (oblique factor 1); the oblique
+    /// overage beyond that is priced at this weight ([`Packer::oblique_split`]). 0 = off.
+    pub oblique_price: f64,
     /// tw4-r2 (2b) (`[capacity] via_disc_height`): a planned via's disc packs on its wire's entry
     /// and exit edges at its height off each edge line ([`pair_req`], [`disc_margin`]).
     pub via_disc_h: bool,
@@ -509,6 +513,7 @@ impl<'a> Packer<'a> {
             via_cuts: None,
             via_best: false,
             via_ramp: 0.0,
+            oblique_price: 0.0,
             via_disc_h: false,
             site_price: false,
             lead_ends: Vec::new(),
@@ -614,6 +619,7 @@ impl<'a> Packer<'a> {
         p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.via_best = opts.via_best_point;
         p.via_ramp = opts.via_over_ramp_mm.max(0.0) * 1e6;
+        p.oblique_price = opts.oblique_price.max(0.0);
         p.via_disc_h = opts.via_disc_height;
         p.site_price = opts.via_site_price == "graded";
         p.pad_exits = opts.pad_exits && opts.via_cuts;
@@ -1041,6 +1047,26 @@ impl<'a> Packer<'a> {
             worst = worst.max(lmin - rmax[i]);
         }
         worst
+    }
+
+    /// bundle-turn item 4 (`[capacity] oblique_price`): the over-fill `over` of `items` on edge
+    /// `e` (spans `lo`, `hi`, oblique factors from the taut paths) split into `(over, price)`.
+    /// `over` stays when the price is off, when it fits, or when no item is oblique. Else the
+    /// items are packed again crossing square (factor 1, the cut condition of Leiserson & Maley
+    /// 1985: an edge between two features is routable iff its wires fit along it): that over-fill
+    /// is the one returned, and the part only the oblique crossing lacks, `over - max(square, 0)`,
+    /// costs `oblique_price` per mm (nm in, mm out). Continuous in `over`; `scratch`: items.
+    /// O(items).
+    #[allow(clippy::too_many_arguments)]
+    pub fn oblique_split(&self, e: EdgeId, items: &[PackItem], lo: &[f64], hi: &[f64], over: f64, scratch: &mut Vec<PackItem>, req: &mut Vec<f64>, rmax: &mut Vec<f64>) -> (f64, f64) {
+        if self.oblique_price <= 0.0 || over <= 1e-6 || items.iter().all(|i| i.infl <= 1.0) {
+            return (over, 0.0);
+        }
+        scratch.clear();
+        scratch.extend(items.iter().map(|i| PackItem { infl: 1.0, ..*i }));
+        let square = self.worst_into(e, scratch, lo, hi, req, rmax);
+        let square = square.min(over);
+        (square, self.oblique_price * (over - square.max(0.0)) / 1e6)
     }
 
     /// Length of edge `e` as [`Packer::bounds`] takes it (nm, at least 1). O(1).

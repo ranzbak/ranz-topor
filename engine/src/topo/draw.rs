@@ -1750,7 +1750,18 @@ impl<'a> Drawer<'a> {
         let items: Vec<PassId> = ids.iter().map(|x| x.0).collect();
         let only_disc: Vec<bool> = ids.iter().map(|x| x.1).collect();
         let n = items.len();
-        let bnd = self.packer.bounds(e, l, &pitems);
+        let mut bnd = self.packer.bounds(e, l, &pitems);
+        // bundle-turn item 4 (`[capacity] oblique_price`): an edge-layer whose passes do not fit
+        // at their taut crossing angles but fit crossing square is packed square, as the plan
+        // counts it (Leiserson & Maley 1985: the cut condition has no angle term); the
+        // octilinear drawing crosses it squarer. Unchanged where it fits at the taut angles.
+        if !bnd.fits() && self.packer.oblique_price > 0.0 && pitems.iter().any(|i| i.infl > 1.0) {
+            let sq: Vec<PackItem> = pitems.iter().map(|i| PackItem { infl: 1.0, ..*i }).collect();
+            let b2 = self.packer.bounds(e, l, &sq);
+            if b2.fits() {
+                bnd = b2;
+            }
+        }
         let (lo, hi, lmin, rmax) = (&bnd.lo, &bnd.hi, &bnd.lmin, &bnd.rmax);
         let req = |i: usize| bnd.req[i];
         let fits = bnd.fits();

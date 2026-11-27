@@ -563,6 +563,8 @@ struct EvalScratch {
     hi: Vec<f64>,
     req: Vec<f64>,
     rmax: Vec<f64>,
+    /// The items crossing square ([`Packer::oblique_split`]).
+    square: Vec<PackItem>,
 }
 
 thread_local! {
@@ -1905,6 +1907,9 @@ impl<'a> Frame<'a> {
         let over = self.packer.worst_into(e, items, &sc.lo, &sc.hi, &mut sc.req, &mut sc.rmax);
         let sq_w = self.packer.via_squeeze;
         let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
+        // bundle-turn item 4: over-full only when it does not fit square, the oblique rest a price.
+        let (over, obl) = self.packer.oblique_split(e, items, &sc.lo, &sc.hi, over, &mut sc.square, &mut sc.req, &mut sc.rmax);
+        let sq = sq + obl;
         let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
         (over, sq, pitch)
     }
@@ -2287,9 +2292,12 @@ impl<'a> CapModel<'a> {
         if items.is_empty() {
             return (0.0, 0.0);
         }
-        let over = fx.packer.bounds(e, l, &items).worst();
+        let b = fx.packer.bounds(e, l, &items);
+        let over = b.worst();
         let sq_w = fx.packer.via_squeeze;
         let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
+        let (over, obl) = fx.packer.oblique_split(e, &items, &b.lo, &b.hi, over, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+        let sq = sq + obl;
         if over <= 1e-6 {
             return (0.0, sq);
         }
@@ -2312,7 +2320,12 @@ impl<'a> CapModel<'a> {
     /// Whether the passes on edge `e`, layer `l` fit when the wires in `gone` are taken out.
     pub fn fits_without(&self, e: usize, l: usize, gone: &std::collections::BTreeSet<WireId>) -> bool {
         let items = self.fx.items(&self.a, e, l, Some(gone));
-        items.is_empty() || self.fx.packer.bounds(e, l, &items).fits()
+        if items.is_empty() {
+            return true;
+        }
+        let b = self.fx.packer.bounds(e, l, &items);
+        // bundle-turn item 4: fits as the model counts it (square, with the oblique price on).
+        b.fits() || self.fx.packer.oblique_split(e, &items, &b.lo, &b.hi, b.worst(), &mut Vec::new(), &mut Vec::new(), &mut Vec::new()).0 <= 1e-6
     }
 
     /// Total overflow price of the labelling (mm), vias without a site and via squeeze
@@ -2434,7 +2447,9 @@ impl<'a> CapModel<'a> {
                     (!sc.items.is_empty()).then(|| fx.numbers_in(e, l, sc).0)
                 });
                 if let Some(over) = over {
-                    let ob = fx.packer.bounds(e, l, &fx.items(&self.a, e, l, None)).worst();
+                    let its = fx.items(&self.a, e, l, None);
+                    let b = fx.packer.bounds(e, l, &its);
+                    let ob = fx.packer.oblique_split(e, &its, &b.lo, &b.hi, b.worst(), &mut Vec::new(), &mut Vec::new(), &mut Vec::new()).0;
                     if (over - ob).abs() > 1e-6 {
                         bad += 1;
                         if bad <= 5 {

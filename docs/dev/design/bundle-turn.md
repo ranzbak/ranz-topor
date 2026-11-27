@@ -57,6 +57,33 @@ line (fixpoint, or bound reached), and there is a new line for the re-fit.
 
 **Debug arm.** `TOPO_FD45_OFF=refit`.
 
+## 4. Over-full only when it does not fit square (pack.rs `oblique_split`, refine.rs `numbers_in`)
+
+**What.** In `turn_fork_corner`, P4 rip-up (core.rs `p4_victims`) marked the corridor edges as over-full: the two
+horizontal edges and the diagonal edge from T1's corners to the wall. It put congestion history on them, and N3 was
+rerouted round the wall (7.99 mm against 6.72 mm). The loop kept that detour.
+
+The corridor fits N2 and N3 crossing square: the edge is 1.156 mm, the spans run from 0.325 to 0.831 mm, and the pitch
+is 0.45 mm. It was over-full only through the oblique factor `infl_dir`, taken from the taut paths that cut the corridor
+diagonally: 1.31 on the horizontal edges and 1.9 on the diagonal one. With that factor the edges were over by 0.084 and
+0.314 mm.
+
+**Change.** The per-edge model packs an over-full edge-layer a second time with every factor at 1.
+- What that second packing lacks is the over-fill: over-full, rip-up victims, and the predicted violation.
+- The part only the oblique crossing lacks, `over - max(square, 0)`, is a graded price of `oblique_price` mm per mm,
+  in the squeeze channel. It is continuous and has no angle threshold. It stands for the length the wires spend to cross
+  squarer.
+- `fits_without` (P4's rip-until-it-fits) uses the same rule.
+- The drawing's lane packing (draw.rs `pack`) packs such an edge-layer square, but only when it does not fit at the
+  taut angles and does fit square. Without this the lanes on the oblique corridor edge collapsed, and N2 jogged 35 µm
+  into N3's slot. Edges that fit at the taut angles get the same copper as before.
+- The taut directions are unchanged.
+
+The option is `[capacity] oblique_price`: default 1, and 0 restores the old rule.
+
+**Literature.** Leiserson & Maley 1985 (an any-angle layout is routable iff no cut between two features carries more
+than its length; there is no angle term). TopoR 6.3 manual p. 237.
+
 ## Invariants
 
 - Copper is unchanged where none of the three fires:

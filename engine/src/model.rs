@@ -1816,6 +1816,13 @@ pub struct Options {
     /// 0 at zero overage, no step there) and counts as a predicted violation only from `over >=
     /// ramp`. 0 (default) = the step at zero (every over-full cut a full violation).
     pub via_over_ramp_mm: f64,
+    /// bundle-turn (`[capacity] oblique_price`, docs/dev/design/bundle-turn.md item 4): per-edge
+    /// model, the price (mm per mm) of the room an edge-layer lacks only because its wires cross
+    /// it obliquely along their taut paths. Such an edge-layer is over-full only when its wires do
+    /// not fit crossing square (the cut condition, Leiserson & Maley 1985); the oblique overage is
+    /// this graded price instead (the length the wires spend to cross squarer). 0 = the oblique
+    /// overage counts as over-full (before bundle-turn). Default 1.
+    pub oblique_price: f64,
     /// tw4-r2 (2b) (`[capacity] via_disc_height`, docs/dev/design/tw4-r2.md (2b)): with via_cuts,
     /// a planned via's disc packs on the two edges its wire crosses round it at the via point's
     /// height off each edge line, not on the line: against a track crossing at sin θ and leaning
@@ -2157,6 +2164,7 @@ impl Default for Options {
             via_cuts: true,
             via_best_point: false,
             via_over_ramp_mm: 0.0,
+            oblique_price: 1.0,
             via_disc_height: false,
             via_site_price: "off".into(),
             via_pair_room: false,
