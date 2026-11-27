@@ -579,6 +579,20 @@ pub fn pad_end_breaches(model: &BoardModel, items: &[Item]) -> Vec<PadEndBreach>
     out
 }
 
+/// draw-absorb r2: the segment `a -> b` (KiCad frame) of width `width` (nm) on `layer` lies wholly
+/// inside pad `pi` of the model: [`tidy`]'s step 2a, KiCad's `deleteTracksInPads` (both ends in
+/// the pad and the track's polygon at the board's maximum error in it), so the Cleanup deletes it.
+/// The same test as [`tidy`]'s, for the drawing to keep a narrowed pad stub out of it. O(pad).
+pub fn track_in_pad(model: &BoardModel, pi: usize, layer: u32, a: IVec2, b: IVec2, width: f64) -> bool {
+    let pad = &model.pads[pi];
+    if !(pad.layers.is_empty() || pad.layers.contains(&layer)) {
+        return false;
+    }
+    let sk = model.skeleton(pad, layer);
+    let (a, b) = (math(p_of(a)), math(p_of(b)));
+    depth(&sk, a) >= 0.0 && depth(&sk, b) >= 0.0 && crate::geom::kicad::track_inside(a, b, width, model.rules.max_error as f64, |q| depth(&sk, q), PAD_SLACK_NM)
+}
+
 /// Make `items` (KiCad frame, with `conn[i]` the connection of item `i`) stable under KiCad's
 /// Cleanup Tracks & Vias (module doc). O(see module).
 pub fn tidy(model: &BoardModel, items: &mut Vec<Item>, conn: &mut Vec<usize>) -> TidyStats {

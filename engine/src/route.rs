@@ -445,6 +445,13 @@ pub struct ErbsRunReport {
     /// draw-absorb A1 (`[drawing] forced_shrink`): model-gap pairs resolved by realising one band
     /// with its plan's neck against the other (not kept as a violation).
     pub gap_shrunk: usize,
+    /// draw-absorb A1 r2 (`Drawer::a1_finish`): A1 necks joined into one stretch touching a run
+    /// end (never wider again after a neck; per neck taken), the length narrowed for it (mm), and
+    /// the narrowed pad-end stubs moved out of KiCad's in-pad delete (the trace keeps its pad
+    /// centre end).
+    pub a1_one_stretch: usize,
+    pub a1_one_stretch_mm: f64,
+    pub a1_stub_out: usize,
     /// draw-absorb A1b meter: reserved bands the plan had necked that the drawing redrew at their
     /// full width (pad-tip re-anchor `tip`, adopted band's octilinear form `octi`): count, necked
     /// length dropped (mm), every one; and with `[drawing] reserved_keep_neck` the redraws that

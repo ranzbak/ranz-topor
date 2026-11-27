@@ -97,6 +97,14 @@ fn free_snap(stage: &str, drawn: &BTreeMap<WireId, WireOut>, st: &State) {
     }
 }
 
+/// draw-absorb A1 r2: the grade of a neck from width `w` to `to` over `len` (nm) on a supply-width
+/// net: (the share of its width left, the severity = width share lost x length in mm). Graded, no
+/// cutoff: a deeper or longer neck is more severe. O(1).
+pub(crate) fn a1_supply_grade(w: f64, to: f64, len: f64) -> (f64, f64) {
+    let left = if w > 0.0 { (to / w).clamp(0.0, 1.0) } else { 1.0 };
+    (left, (1.0 - left) * len / MM)
+}
+
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
 /// `octi`: the octilinear style is on; every stretch not at 0/45/90 degrees and every acute bend
 /// of the drawn runs is an event (`any_angle`, `acute_bend`, M-45) next to the necked stretches.
@@ -9962,6 +9970,44 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             if ex.is_empty() { "" } else { ": " },
             ex.join("; ")
         ));
+    }
+    // draw-absorb A1 r2 (lead 2026-11-27; POWER-NECK-MONOTONE): every neck of a wire A1 necked
+    // (`[drawing] forced_shrink`: a joint-commit band or a forced run) on a supply-width net (wider
+    // than the board's default width) gets a warning of its own, graded by the width it loses
+    // times its length (its narrowest part sets the current), the most severe first.
+    {
+        let dflt = model.rules.default.width as f64;
+        let net_name = |net: i32| model.nets.iter().find(|n| n.code == net).map_or(String::new(), |n| n.name.clone());
+        let mut lines: Vec<(f64, String)> = Vec::new();
+        for (&w, wo) in &drawn {
+            let wi = &st.wires[w];
+            if !dr.joint.a1_wires.contains(&w) || wi.w <= dflt + 0.5 {
+                continue;
+            }
+            let ci = conn_of[wire_conn[w]];
+            for &(_, to, len) in &wo.necks {
+                if to >= wi.w - 0.5 || len <= 0.0 {
+                    continue;
+                }
+                let (left, sev) = a1_supply_grade(wi.w, to, len);
+                lines.push((
+                    sev,
+                    format!(
+                        "{} ({}): supply-width net necked by draw-absorb A1 ([drawing] forced_shrink): {:.3} mm (board default {:.3} mm) to {:.3} mm over {:.2} mm, {:.0} % of its width left (its narrowest part sets its current); severity {:.2} (width lost x mm)",
+                        net_name(wi.net),
+                        dec.connections[ci].from.label,
+                        wi.w / MM,
+                        dflt / MM,
+                        to / MM,
+                        len / MM,
+                        100.0 * left,
+                        sev
+                    ),
+                ));
+            }
+        }
+        lines.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        warnings.extend(lines.into_iter().map(|l| l.1));
     }
     if dr.stats.octi_asis > 0 {
         // first-draw-45 P1: counted, not hidden (the free-angle count does not see them: they are

@@ -211,13 +211,91 @@ fn tracks(r: &RouteResult) -> Vec<(i64, f64)> {
         .collect()
 }
 
+/// Track chains of the routed copper per net and layer between stops (pad centres, vias, ends,
+/// T / branch nodes), each walked end to end: `(net, layer, widths in path order, lengths)`. The
+/// user rule "never widen again after a neck" (lead 2026-11-27: at most one necked stretch per
+/// run, touching a run end, or the whole run) is checked on these (tools/vfy_neck_regrow.py's
+/// walk, in Rust).
+fn chains(m: &BoardModel, r: &RouteResult) -> Vec<(i32, u32, Vec<i64>, Vec<f64>)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    type P = (i64, i64);
+    let mut segs: Vec<(i32, u32, P, P, i64, f64)> = Vec::new();
+    let mut stops: BTreeSet<P> = m.pads.iter().map(|p| (p.center.x, -p.center.y)).collect();
+    for it in &r.items {
+        match it {
+            topor_engine::model::Item::Track(t) => {
+                let (a, b) = (t.prim.start(), t.prim.end());
+                let (a, b) = ((i64::from(a.x), i64::from(a.y)), (i64::from(b.x), i64::from(b.y)));
+                segs.push((t.net, t.layer, a, b, t.width, (((a.0 - b.0) as f64).powi(2) + ((a.1 - b.1) as f64).powi(2)).sqrt()));
+            }
+            topor_engine::model::Item::Via(v) => {
+                stops.insert((v.at.x, v.at.y));
+            }
+        }
+    }
+    let mut adj: BTreeMap<(i32, u32, P), Vec<usize>> = BTreeMap::new();
+    for (i, s) in segs.iter().enumerate() {
+        adj.entry((s.0, s.1, s.2)).or_default().push(i);
+        adj.entry((s.0, s.1, s.3)).or_default().push(i);
+    }
+    let mut seen = vec![false; segs.len()];
+    let mut out = Vec::new();
+    for (&(net, layer, start), inc) in &adj {
+        if inc.len() == 2 && !stops.contains(&start) {
+            continue;
+        }
+        for &e0 in inc {
+            if seen[e0] {
+                continue;
+            }
+            let (mut node, mut e) = (start, e0);
+            let (mut ws, mut ls) = (Vec::new(), Vec::new());
+            loop {
+                seen[e] = true;
+                let s = segs[e];
+                ws.push(s.4);
+                ls.push(s.5);
+                let nxt = if s.2 == node { s.3 } else { s.2 };
+                let at = &adj[&(net, layer, nxt)];
+                if at.len() != 2 || stops.contains(&nxt) {
+                    break;
+                }
+                let e2 = if at[0] == e { at[1] } else { at[0] };
+                if seen[e2] {
+                    break;
+                }
+                (node, e) = (nxt, e2);
+            }
+            out.push((net, layer, ws, ls));
+        }
+    }
+    out
+}
+
+/// The chains that widen again after a neck: a narrower piece with a wider piece on both sides
+/// (a valley), and those narrower at both ends than in their middle; `(net, layer, widths)`.
+fn valleys(m: &BoardModel, r: &RouteResult) -> Vec<(i32, u32, Vec<i64>)> {
+    chains(m, r)
+        .into_iter()
+        .filter(|(_, _, ws, _)| {
+            let mx = |v: &[i64]| v.iter().copied().max().unwrap_or(0);
+            let valley = (1..ws.len().saturating_sub(1)).any(|i| ws[i] < mx(&ws[..i]) && ws[i] < mx(&ws[i + 1..]));
+            let both = ws.len() > 1 && ws[0] < mx(ws) && ws[ws.len() - 1] < mx(ws);
+            valley || both
+        })
+        .map(|(n, l, ws, _)| (n, l, ws))
+        .collect()
+}
+
 /// A1 pattern `wide_bottleneck_neck` on fx_narrow_gap: the 0.25 mm track's only way is a gap
-/// that fits it only at 0.1 mm over the gap (the net's floor: min track width 0.1 mm). Main
-/// (forced_shrink off) draws it forced at full width, 2 clearance violations of 75 um. On: the
-/// forced run is necked over the gap only, no violation, one neck warning; the rest of the track
-/// (and both pad ends) keeps 0.25 mm.
+/// that fits it only at 0.1 mm (the net's floor: min track width 0.1 mm). Main (forced_shrink
+/// off) draws it forced at full width, 2 clearance violations of 75 um. On (r2, lead 2026-11-27,
+/// user "never widen again after a neck"): the forced run is necked from the gap to the nearer
+/// run end, one stretch (r1 necked the gap only and widened again on both sides: the verifier's
+/// valley), no violation, one neck warning; the other pad end keeps 0.25 mm and both ends stay
+/// at their pad centres.
 #[test]
-fn a_forced_run_shrinks_over_the_gap_instead_of_violating() {
+fn a_forced_run_shrinks_from_the_gap_to_the_nearer_end_instead_of_violating() {
     let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
     let off = route(&m, &opts_shrink(&opts(), false));
     assert_eq!(off.violations.len(), 2, "main: the forced run at full width: {:?}", off.violations);
@@ -230,13 +308,17 @@ fn a_forced_run_shrinks_over_the_gap_instead_of_violating() {
     assert!(ts.iter().all(|t| t.0 >= 100_000 && t.0 <= 250_000), "{ts:?}");
     let thin: f64 = ts.iter().filter(|t| t.0 < 250_000).map(|t| t.1).sum();
     let all: f64 = ts.iter().map(|t| t.1).sum();
-    // The gap's walls are 1 mm long (x 14.5 .. 15.5): the neck covers them and about one pitch more.
-    assert!(thin > 1.0 * MM && thin < 3.0 * MM && thin < 0.2 * all, "necked {thin} of {all}");
-    let ends = |r: &RouteResult| r.items.iter().filter_map(|it| match it {
+    // The gap's walls span x 14.5 .. 15.5, the pads sit at x 3 and 27: from the gap's far side to
+    // the nearer pad is over 11 mm, the other side keeps its width.
+    assert!(thin > 11.0 * MM && thin < 0.75 * all, "necked {} of {} mm", thin / MM, all / MM);
+    assert!(valleys(&m, &on).is_empty(), "one necked stretch, touching an end: {:?}", chains(&m, &on));
+    let at = |x: f64| on.items.iter().filter_map(|it| match it {
         topor_engine::model::Item::Track(t) => Some((t.prim.start(), t.prim.end(), t.width)),
         _ => None,
-    }).filter(|(a, b, _)| [a, b].iter().any(|p| (p.x as f64 - 3.0 * MM).abs() < 1e3 || (p.x as f64 - 27.0 * MM).abs() < 1e3)).map(|x| x.2).collect::<Vec<_>>();
-    assert!(ends(&on).iter().all(|&w| w == 250_000), "pad ends at full width: {:?}", ends(&on));
+    }).filter(|(a, b, _)| [a, b].iter().any(|p| (p.x as f64 - x * MM).abs() < 1e3 && (p.y as f64 - 10.0 * MM).abs() < 1e3)).map(|x| x.2).collect::<Vec<_>>();
+    let (a, b) = (at(3.0), at(27.0));
+    assert!(a.len() == 1 && b.len() == 1, "a track ends at each pad centre: {a:?} {b:?}");
+    assert!((a[0] < 250_000) != (b[0] < 250_000), "necked at one pad end, full width at the other: {a:?} {b:?}");
 }
 
 /// The floor is the nominal width (min track width 0.25 mm): nothing to shrink, the copper is

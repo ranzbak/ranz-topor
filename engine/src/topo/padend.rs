@@ -248,6 +248,10 @@ impl Drawer<'_> {
                 // draw-absorb A1: a band the joint commit necked against a gap partner keeps its
                 // neck (re-anchoring draws it at full width; never wider after the neck).
                 if res.pts.len() < 2 || res.zones.is_some() {
+                    if res.zones.is_some() && std::env::var_os("TOPO_ABSORBDBG").is_some() {
+                        let q = |p: Vec2| ((p.x / 1e3).round() / 1e3, (-p.y / 1e3).round() / 1e3);
+                        eprintln!("ABSORBDBG tip skip wire {w} net {} run {r} ends {:?} {:?}", self.st.wires[w].net, q(res.pts[0]), q(res.pts[res.pts.len() - 1]));
+                    }
                     continue;
                 }
                 let layer = plan.layers[r];
