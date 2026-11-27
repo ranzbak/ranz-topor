@@ -39,3 +39,25 @@ def test_cleanup_removes_only_the_jog_kicad_deletes():
     """KiCad's Cleanup on the pad_centre project, every option on: only the 5.35 um jog goes (its polygon lies in
     the pad); the T joins in the pad, the off-centre ends and the jog 1 um further out stay."""
     assert _removed(FIX) == DIALOG_REMOVED
+
+
+SHORT_FIX = Path(__file__).parent / "fixtures" / "kicad_accepts" / "shorting.kicad_pcb"
+
+#: the real dialog's removals on SHORT_FIX (pad-centre-main 2026-11-27, Xephyr :6, every box on, KiCad 10.0.8; the
+#: replay removed exactly the same): both wires of a touching or crossing pair go, the legal victim Y included; a
+#: wire that only breaks clearance (NEAR) stays.
+SHORT_DIALOG_REMOVED = {"X_TOUCH": 2, "Y_TOUCH": 1, "X_CROSS": 2, "Y_CROSS": 1}
+
+
+def test_the_shorting_fixture_is_the_generators_board(tmp_path):
+    new = kicad_accepts.make_shorting(tmp_path)
+    assert kicad_accepts.tracks_by_net(new) == kicad_accepts.tracks_by_net(SHORT_FIX)
+
+
+def test_cleanup_removes_both_wires_of_a_short_and_keeps_a_clearance_violation():
+    """A short topor writes (never drop) costs the victim net its legal copper too; clearance-only copper stays."""
+    got: dict = {}
+    for i in cleanup_check.cleanup_items(SHORT_FIX):
+        assert i["rule"] == "shorting", i
+        got[i["net"]] = got.get(i["net"], 0) + 1
+    assert got == SHORT_DIALOG_REMOVED
