@@ -356,6 +356,13 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
   `a1_neck_on_a_via_wire_runs_from_the_cheaper_wire_end` (necked from the pad A1 over the gap, 12.71 mm, full
   width after it across the via; r4's step necked the run on to its via, 18.00 mm). `route.erbs.a1_one_stretch*`
   are gone; the "neck profile" line counts the joins (and the moved stubs).
+  - Measured (defaults-flip-a1 at 087bbfd9, det s0 C1, base = main b59e745e; reports/defaults-flip-a1-*.md): with
+    both flips off the copper is main's on qm/esp/wiccon/eprom (A1b removal and this change are copper-neutral off).
+    forced_shrink on alone: qm copper = the r4 verifier's `mono_off` arm (DRC 200 -> 146, unconnected 16 = 16,
+    vias 248 -> 252, 0 valleys); esp = r4's A1 copper (17 -> 15). wiccon, eprom = main. Real (ccx33, 600 s wall)
+    esp 10 -> 8 at 30 cycles (= r4's A1 copper). Real KiCad Cleanup (all boxes): det qm/esp and real esp delete no
+    copper main keeps and no net loses a connection. The stub step (`mono_stub`) fires on none of the 4 boards; the
+    unit test `monotone_necks_moves_a_narrowed_pad_stub_out_of_the_pad` kills its arm.
 
 **A1b DROPPED (user 2026-11-27, branch defaults-flip-a1).** The option `[drawing] reserved_keep_neck`, its code
 (`kept_neck_items`, `fit_neck_with`'s grow-trimmed mode, the octilinear-form branch) and its meter

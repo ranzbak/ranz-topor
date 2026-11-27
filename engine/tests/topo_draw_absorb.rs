@@ -543,7 +543,7 @@ fn a_forced_run_with_four_hit_spots_uses_all_four_mid_slots() {
 fn a1_neck_on_a_via_wire_runs_from_the_cheaper_wire_end() {
     let m = multi_gap(100_000, &[(15.0, 10.0)], true);
     let et = ("exit_taut", serde_json::json!(false));
-    let on = route(&m, &opts_with(&opts_shrink(&opts(), true), &[et.clone()]));
+    let on = route(&m, &opts_with(&opts_shrink(&opts(), true), std::slice::from_ref(&et)));
     assert_eq!((on.violations.len(), on.erbs.as_ref().unwrap().forced_shrunk), (0, 1), "{:?}", on.violations);
     let ts = tracks(&on);
     assert_eq!(ts.iter().map(|t| t.0).collect::<Vec<_>>(), [100_000, 250_000, 250_000], "necked from the pad A1, full width from the gap on: {ts:?}");
