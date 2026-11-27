@@ -4691,6 +4691,21 @@ impl<'a> Drawer<'a> {
                     // draw-absorb A1 (`[drawing] forced_shrink`): shrink before violate.
                     if self.opts.forced_shrink && !vs.is_empty() {
                         if let Some((its, neck, fix, v2)) = self.shrink_forced(w, lid, &pts, &items, &vs) {
+                            // defaults-flip-a1 forensics (`TOPO_ABSORBDBG`, copper-neutral): one line
+                            // per forced shrink: the neck and the violations it removed, each with
+                            // the wire it hit (the A1 neck list of the flip report).
+                            if std::env::var_os("TOPO_ABSORBDBG").is_some() {
+                                let nm = |n: i32| self.model.nets.iter().find(|x| x.code == n).map_or("?".to_string(), |x| x.name.clone());
+                                let hit = |v: &Viol| against_item(&v.against).and_then(|id| self.wire_of_item(id)).map_or(v.against.clone(), |(hw, _)| format!("w{hw} {}", nm(self.st.wires[hw].net)));
+                                let q = |p: Vec2| ((p.x / 1e3).round() / 1e3, (-p.y / 1e3).round() / 1e3);
+                                eprintln!(
+                                    "ABSORBDBG forced shrink wire {w} net {} run {r} L{} w {:.3} neck {:?} before {:?} after {}",
+                                    nm(wi.net), lid, wi.w / 1e6,
+                                    neck.map(|(c, wn, l)| (q(c), wn / 1e6, l / 1e6)),
+                                    vs.iter().map(|v| (v.kind, hit(v), (v.depth_nm / 1e3).round() / 1e3, q(v.at))).collect::<Vec<_>>(),
+                                    v2.len()
+                                );
+                            }
                             items = its;
                             vs = v2;
                             // One neck entry per run (monotone_necks makes the profile).

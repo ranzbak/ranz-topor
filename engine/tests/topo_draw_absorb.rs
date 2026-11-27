@@ -9,8 +9,13 @@ use topor_engine::route::{route, RouteResult};
 
 const MM: f64 = 1e6;
 
+/// defaults-flip-a1: the A0/A1 fixtures are scenarios where the plan does not neck the gap, so the
+/// drawing has to (or forces the run). With `[search] exit_taut` on (the default since the flip)
+/// the plan judges these exits by the taut path and necks most of them itself; the file pins
+/// exit_taut false so the drawing's step stays under test (`a_planned_neck_with_the_taut_exit_needs_no_shrink`
+/// checks the defaults on the same fixture).
 fn opts() -> Options {
-    Options::from_json(r#"{"runs": 1, "wall_clock_s": 60.0, "topo_rounds": 3}"#).expect("options parse")
+    Options::from_json(r#"{"runs": 1, "wall_clock_s": 60.0, "topo_rounds": 3, "exit_taut": false}"#).expect("options parse")
 }
 
 /// The counts add up to the violations, each violation has a writer, a candidate and a fault class.
@@ -322,6 +327,20 @@ fn a_forced_run_shrinks_from_the_gap_to_the_nearer_end_instead_of_violating() {
     assert!((a[0] < 250_000) != (b[0] < 250_000), "necked at one pad end, full width at the other: {a:?} {b:?}");
 }
 
+/// defaults-flip-a1 (`[search] exit_taut` and `[drawing] forced_shrink` on by default): on the
+/// A1 pattern fixture the plan's taut exit test sees the gap and necks the wire itself, so
+/// nothing is forced and A1 has nothing to shrink: no violation, one neck from a pad end, no
+/// valley, both ends at their pad centres.
+#[test]
+fn a_planned_neck_with_the_taut_exit_needs_no_shrink() {
+    let m = with(include_str!("fixtures/fx-narrow-gap.json"), |j| j["rules"]["min_track_width"] = serde_json::json!(100_000));
+    let d = route(&m, &Options::from_json(r#"{"runs": 1, "wall_clock_s": 60.0, "topo_rounds": 3}"#).unwrap());
+    assert_eq!((d.routed, d.violations.len(), d.erbs.as_ref().unwrap().forced_shrunk), (1, 0, 0), "{:?}", d.violations);
+    assert!(valleys(&m, &d).is_empty(), "{:?}", chains(&m, &d));
+    assert!(tracks(&d).iter().any(|t| t.0 < 250_000), "the plan necks the gap: {:?}", tracks(&d));
+    assert_eq!(topor_engine::topo::tidy::off_centre_pad_ends(&m, &d.items).0, 0);
+}
+
 /// The floor is the nominal width (min track width 0.25 mm): nothing to shrink, the copper is
 /// main's whether forced_shrink is on or off.
 #[test]
@@ -516,17 +535,22 @@ fn a_forced_run_with_four_hit_spots_uses_all_four_mid_slots() {
 /// via (5.29 mm F.Cu + 6.00 mm B.Cu at 0.25 mm). r4's step necked run 0 on to its via instead
 /// (18.00 mm at 0.1 mm), 5.29 mm more narrowed copper for the same violations (0). With
 /// `neck_from_pad` off the mid-run neck stays where it is (wanted there, as in main).
+/// Runs with `[search] exit_taut` false (the default before defaults-flip-a1): with the taut exit
+/// test the plan necks the wire from B1 (`nb` 2), the forced run takes another candidate and A1's
+/// trimmed zone covers the whole first run (18.00 mm at 0.1 mm), so no mid-run neck is left for
+/// `monotone_necks` to join (flip report, finding on A1's trim).
 #[test]
 fn a1_neck_on_a_via_wire_runs_from_the_cheaper_wire_end() {
     let m = multi_gap(100_000, &[(15.0, 10.0)], true);
-    let on = route(&m, &opts_shrink(&opts(), true));
+    let et = ("exit_taut", serde_json::json!(false));
+    let on = route(&m, &opts_with(&opts_shrink(&opts(), true), &[et.clone()]));
     assert_eq!((on.violations.len(), on.erbs.as_ref().unwrap().forced_shrunk), (0, 1), "{:?}", on.violations);
     let ts = tracks(&on);
     assert_eq!(ts.iter().map(|t| t.0).collect::<Vec<_>>(), [100_000, 250_000, 250_000], "necked from the pad A1, full width from the gap on: {ts:?}");
     let mm: Vec<f64> = ts.iter().map(|t| t.1 / MM).collect();
     assert!((mm[0] - 12.71).abs() < 0.01 && (mm[1] - 5.29).abs() < 0.01 && (mm[2] - 6.0).abs() < 0.01, "{mm:?}");
     assert!(valleys(&m, &on).is_empty(), "{:?}", chains(&m, &on));
-    let mid = route(&m, &opts_with(&opts_shrink(&opts(), true), &[("neck_from_pad", serde_json::json!(false))]));
+    let mid = route(&m, &opts_with(&opts_shrink(&opts(), true), &[et, ("neck_from_pad", serde_json::json!(false))]));
     let w: Vec<i64> = tracks(&mid).iter().map(|t| t.0).collect();
     assert!(w.len() >= 3 && w[0] == 250_000 && w.contains(&100_000) && w[w.len() - 1] == 250_000, "neck_from_pad off: the neck stays in mid-run: {w:?}");
 }
@@ -553,7 +577,15 @@ fn opts_with(base: &Options, kv: &[(&str, serde_json::Value)]) -> Options {
 }
 
 fn one_cycle(style: &str) -> Options {
-    opts_with(&Options::default(), &[("runs", serde_json::json!(1)), ("topo_rounds", serde_json::json!(1)), ("draw_style", serde_json::json!(style))])
+    opts_with(&Options::default(), &[("runs", serde_json::json!(1)), ("topo_rounds", serde_json::json!(1)), ("draw_style", serde_json::json!(style)), ("exit_taut", serde_json::json!(false))])
+}
+
+/// The A3 tests' options: A3 is measured against the drawing without A1 (`forced_shrink` false,
+/// the default when they were written; defaults-flip-a1 turned it on). With A1 on, a model-gap
+/// pair is necked by the joint commit before A3's passes see it (dvn_crop_q2: the swap case
+/// then has nothing left to swap).
+fn a3_cycle(style: &str) -> Options {
+    opts_shrink(&one_cycle(style), false)
 }
 
 fn fixture(dir: &str, p: &str) -> BoardModel {
@@ -568,7 +600,7 @@ fn fixture(dir: &str, p: &str) -> BoardModel {
 #[test]
 fn a_band_pass_pushes_a_model_gap_apart() {
     let m = fixture("erbs", "qfn_fan");
-    let o = one_cycle("smooth");
+    let o = a3_cycle("smooth");
     let off = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
     let on = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(1))]));
     let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
@@ -586,7 +618,7 @@ fn a_band_pass_pushes_a_model_gap_apart() {
 #[test]
 fn a_band_pass_never_changes_the_class() {
     let m = fixture("erbs", "serpentine_bundle");
-    let o = one_cycle("smooth");
+    let o = a3_cycle("smooth");
     let off = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
     let on = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(3))]));
     let (eo, en) = (off.erbs.as_ref().unwrap(), on.erbs.as_ref().unwrap());
@@ -599,7 +631,7 @@ fn a_band_pass_never_changes_the_class() {
 #[test]
 fn no_band_pass_is_main() {
     let m = fixture("erbs", "river_wrap");
-    let o = one_cycle("smooth");
+    let o = a3_cycle("smooth");
     let a = route(&m, &o);
     let b = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
     assert_eq!(a.items, b.items);
@@ -724,7 +756,7 @@ fn an_a1_neck_on_a_supply_width_net_is_warned_graded() {
 #[test]
 fn a_band_pass_lets_the_partner_yield_when_the_first_yielder_is_put_back() {
     let m = fixture("dvn", "dvn_crop_q2");
-    let o = one_cycle("smooth");
+    let o = a3_cycle("smooth");
     let off = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(0))]));
     let on = route(&m, &opts_with(&o, &[("band_passes", serde_json::json!(3))]));
     let en = on.erbs.as_ref().unwrap();
@@ -767,4 +799,5 @@ fn a_necked_band_that_breaks_a_rule_keeps_its_octilinear_form() {
     assert!(on.violations.len() <= off.violations.len());
     assert_eq!(on.routed, off.routed);
 }
+
 
