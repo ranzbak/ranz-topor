@@ -79,31 +79,34 @@ def turn_fork_corner() -> Pattern:
     c = {1: x1 - y1, 2: x2 - y2, 3: x3 - y3}  # the diagonals x - y = c
     K = 5.0  # sources on the line x + y = K (perpendicular to the diagonals: P apart)
     src = {i: ((K + c[i]) / 2, (K - c[i]) / 2) for i in c}
-    yb = yt + 2.6  # N2, N3 targets below the corridor
-    wall = (x3 - NEED - 0.4, x3 - NEED, y3 + 0.3, yt + 1.925)  # left wall pad: x0, x1, y0, y1
-    fps = [Fp("T", [Pad("1", "N1", (xr, yt), (0.8, 0.65)), Pad("2", None, (xr, yt + 0.8), (0.8, 0.65)),
-                    Pad("3", None, (xr, yt + 1.6), (0.8, 0.65))], "terminal"),
+    slack = 0.05  # corridor slack over the exact fit (a capacity model rounding; no third wire fits: it needs 0.452)
+    wall = (x3 - NEED - slack - 0.4, x3 - NEED - slack, y3 + 0.3, yt + 1.925)  # left wall pad: x0, x1, y0, y1
+    # N2, N3 end on the column's next pads (a staircase, as RN2.3 / RN2.2): vertical, then the longest 45 deg jog that clears
+    # the pad corner above at NEED (the octilinear shortest path), then horizontal into the pad centre.
+    d2 = ((xr - 0.4) - (yt + 0.325)) - (x2 - (yt + 0.8)) - NEED * SQ2
+    d3 = ((xr - 0.4) - (yt + 0.8 + 0.325)) - (x3 - (yt + 1.6)) - NEED * SQ2
+    fps = [Fp("T", [Pad("1", "N1", (xr, yt), (0.8, 0.65)), Pad("2", "N2", (xr, yt + 0.8), (0.8, 0.65)),
+                    Pad("3", "N3", (xr, yt + 1.6), (0.8, 0.65))], "terminal"),
            Fp("WL", [_rect("WL", "1", *wall)], "wall"),
-           Fp("S", [Pad(str(i), f"N{i}", _pt(src[i]), (W_SIG, W_SIG), shape="circle") for i in (1, 2, 3)], "terminal"),
-           Fp("B", [Pad("2", "N2", _pt((x2, yb)), (W_SIG, W_SIG), shape="circle"),
-                    Pad("3", "N3", _pt((x3, yb)), (W_SIG, W_SIG), shape="circle")], "terminal")]
+           Fp("S", [Pad(str(i), f"N{i}", _pt(src[i]), (W_SIG, W_SIG), shape="circle") for i in (1, 2, 3)], "terminal")]
     tracks = [Track("N1", "F.Cu", W_SIG, [_pt(src[1]), _pt((x1, y1)), _pt((x1, yt - (xr - x1))), (xr, yt)]),
-              Track("N2", "F.Cu", W_SIG, [_pt(src[2]), _pt((x2, y2)), _pt((x2, yb))]),
-              Track("N3", "F.Cu", W_SIG, [_pt(src[3]), _pt((x3, y3)), _pt((x3, yb))])]
+              Track("N2", "F.Cu", W_SIG, [_pt(src[2]), _pt((x2, y2)), _pt((x2, yt + 0.8 - d2)), _pt((x2 + d2, yt + 0.8)), (xr, yt + 0.8)]),
+              Track("N3", "F.Cu", W_SIG, [_pt(src[3]), _pt((x3, y3)), _pt((x3, yt + 1.6 - d3)), _pt((x3 + d3, yt + 1.6)), (xr, yt + 1.6)])]
     return _base(
         "turn_fork_corner", "A bundle that fits straight fits through its 45 deg turn: nested corners, the outer wire keeps its slot",
         f"Two layers, B.Cu closed, Default 0.25 / 0.2 (pitch {_r(P)} mm). N1, N2, N3 leave three round pads P apart on a "
         f"45 deg line (upper left) and run down-right. A pad column (0.8 x 0.65 at 0.8 pitch, like RN2) stands at x {xr}: "
-        f"its top pad T1 is N1's target, the two below are unconnected. Left of it an unconnected wall pad leaves a corridor "
-        f"that fits N2 and N3 at exactly clearance (x {_r(x2)} and {_r(x3)}); N2 and N3 end below the corridor.",
+        f"its pads T1, T2, T3 are the targets of N1, N2, N3 (a staircase, as RN2). Left of it an unconnected wall pad leaves a "
+        f"corridor that fits N2 and N3 at clearance (x {_r(x2)} and {_r(x3)}) with 0.05 mm to spare.",
         f"All three one 45 deg turn, nested: corners at ({_r(x1)}, {_r(y1)}), ({_r(x2)}, {_r(y2)}), ({_r(x3)}, {_r(y3)}) (each "
         f"outer corner {_r(P * (SQ2 - 1))} mm higher), verticals at pitch. N1 runs down in its outer slot x {_r(x1)} and jogs "
-        "45 deg into T1's centre. Bending N1 earlier (same length) puts it into N2's slot past T1's corner, and N2 no longer "
+        "45 deg into T1's centre; N2 and N3 run down their slots and turn into T2 / T3 with the longest 45 deg jog that clears "
+        "the pad corner above. Bending N1 earlier (same length) puts it into N2's slot past T1's corner, and N2 no longer "
         "fits: a hair violation or a neck there is the drawing's fault, not the plan's.",
         "Solvable by construction: every wire takes an octilinear shortest path (dy > dx: one diagonal, one vertical); the "
         "corridor fixes N2 and N3 to their slots; N1's form is one of several equal-length forms, the only one that leaves "
         "N2 its slot (user rule 2026-11-27: if the traces can exist vertically they can all make a 45 deg turn).",
-        (W, H), ["N1", "N2", "N3"], fps, tracks, [("N1", "S.1", "T.1"), ("N2", "S.2", "B.2"), ("N3", "S.3", "B.3")], [],
+        (W, H), ["N1", "N2", "N3"], fps, tracks, [("N1", "S.1", "T.1"), ("N2", "S.2", "T.2"), ("N3", "S.3", "T.3")], [],
         {"pitch": _r(P), "check_window": _box(x3 - 1.0, y1 - 1.0, xr + 0.5, yt + 2.0), "allowed_violations": []})
 
 
