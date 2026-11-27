@@ -1145,3 +1145,13 @@ def test_progress_paused_times_stand_still(app):
     ui.progress(_running(optimize_s=12.0, paused=True, paused_s=60.0, wall_s=80.0))
     assert dlg.elapsed_value.GetLabel() == before == "0:12 / 10:00 · CPU 0:00"
     ui._close_progress()
+
+
+def test_score_delta_has_a_text_for_every_decider():
+    """Every criterion `Objective::decider` can name has its own wording (rule 13); a sub-mm necking delta
+    never prints as "-0" (pick-necks)."""
+    for decider in ("errors", "shorts", "open", "vias", "length", "shrinkages", "score", "area", "necking"):
+        text = ui_wx.score_delta(decider, 2.0)
+        assert text and not text.startswith(decider + " "), (decider, text)
+    assert ui_wx.score_delta("necking", -0.4) == "necking -0.4 mm-eq"
+    assert ui_wx.score_delta("", 1.0) == ""

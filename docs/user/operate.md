@@ -307,8 +307,11 @@ included); and the **score** of the **Last round** and of the **Best so far**.
 
 The score rows show run, round, **Errors** (connections open or drawn with rule violations), **Open** (connections
 without copper), **Vias** and **Length** — the order in which topor judges results (`[optimize] pick`, default
-`errors_vias_length`: fewest errors, then fewest connections with a short, then fewest open, fewest vias, the shortest
-length, then fewest shrinkages; `[optimize] pick_shorts`). A short (copper over another net's copper) is one of the
+`best`: fewest errors, then fewest connections with a short, then the least length + 25 mm per via + necking, then fewest
+shrinkages; `[optimize] pick_shorts`). Necking is how much of the drawn copper is narrower than its net class width:
+`[optimize] neck_mm_per_mm2` per mm2 of (class width - drawn width) x length, plus `neck_via_mm` per via smaller than the
+class via (both defaults are guesses; 0 switches the term off). The Round line and the dialog name it as `necking` when it
+turns a comparison. A short (copper over another net's copper) is one of the
 errors and, at the same error count, worse than an open connection: KiCad's DRC fails the board on it and Cleanup
 removes the track. `[optimize] short_weight` (k, default 1) grades this: the ranked count is errors + (k - 1) x
 shorts, the shorts a tie-break after it. The round lines in log.txt name the connections with a short. The same order decides when the

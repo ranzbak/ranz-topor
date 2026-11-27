@@ -64,16 +64,17 @@ pub struct Criteria {
     pub length_mm: f64,
     /// Necked stretches (TopoR's "shrinkages").
     pub shrinkages: usize,
-    /// pick-necks (user 2026-11-27): graded necked length of the drawn copper, mm: each necked
-    /// piece counts `length x (1 - w_neck / w_full)` of its net's full width. 0 for a plan.
-    pub neck_mm: f64,
+    /// pick-necks (user 2026-11-27): necked copper of the drawn tracks, mm2: sum of `(w_full -
+    /// w_drawn) x length`, every segment at its own width (a taper steps down, not at its narrowest
+    /// width). 0 for a plan.
+    pub neck_mm2: f64,
     /// pick-necks: vias smaller than the net class via (neck vias, e.g. down to the Board Setup
     /// minimum) of the drawn copper. 0 for a plan.
     pub neck_vias: usize,
-    /// pick-necks: the necking criterion of `pick = best`: `neck_mm + [optimize] neck_via_mm x
-    /// neck_vias` (mm equivalent). Ranked after the shorts, before length + vias (TopoR 6.3
-    /// manual pp. 72-73 sort the table by violations, then length, with width reductions
-    /// (shrinkages) a criterion of their own). 0 for a plan.
+    /// pick-necks: the necking term of `pick = best`, mm equivalent: `[optimize] neck_mm_per_mm2 x
+    /// neck_mm2 + neck_via_mm x neck_vias`. Added to length + `mm_per_via` x vias in the value the
+    /// pick ranks after errors and shorts (user 2026-11-27: "necking width reduced x length x
+    /// constant"); shrinkages stay the last tie-break. 0 for a plan.
     pub necking: f64,
     /// Warning-level factor findings (a column, not a Pareto criterion).
     pub warnings: usize,
@@ -244,7 +245,8 @@ impl Objective {
     /// The objective's own value, without the violation price (the scale of a relative gain).
     pub fn base(&self, c: &Criteria) -> f64 {
         match *self {
-            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } | Objective::Best { mm_per_via, .. } => c.length_mm + mm_per_via * c.vias as f64,
+            Objective::Best { mm_per_via, .. } => c.length_mm + mm_per_via * c.vias as f64 + c.necking,
+            Objective::LengthVias { mm_per_via } | Objective::ErrorsViasLength { mm_per_via } => c.length_mm + mm_per_via * c.vias as f64,
             Objective::Area => c.area_mm2,
         }
     }
@@ -277,10 +279,6 @@ impl Objective {
                 return a.length_mm < b.length_mm;
             }
             return a.shrinkages < b.shrinkages;
-        }
-        // pick-necks: `Best` ranks the necking after the shorts, before length + vias.
-        if matches!(self, Objective::Best { .. }) && (a.necking - b.necking).abs() > 1e-9 {
-            return a.necking < b.necking;
         }
         let (va, vb) = (self.ranked_value(a), self.ranked_value(b));
         va < vb - 1e-9 || (va - vb).abs() <= 1e-9 && a.shrinkages < b.shrinkages
@@ -319,11 +317,16 @@ impl Objective {
                 return Some(("length", a.length_mm - b.length_mm));
             }
         } else {
-            if matches!(self, Objective::Best { .. }) && (a.necking - b.necking).abs() > 1e-9 {
-                return Some(("necking", a.necking - b.necking));
-            }
             let dv = self.ranked_value(a) - self.ranked_value(b);
             if dv.abs() > 1e-9 {
+                // pick-necks: `Best` adds the necking to length + vias; the necking is named when
+                // it turns the comparison (without it the other one would win or tie).
+                if matches!(self, Objective::Best { .. }) {
+                    let rest = dv - (a.necking - b.necking);
+                    if rest.abs() <= 1e-9 || (rest < 0.0) != (dv < 0.0) {
+                        return Some(("necking", dv));
+                    }
+                }
                 return Some((if matches!(self, Objective::Area) { "area" } else { "score" }, dv));
             }
         }
@@ -353,8 +356,8 @@ pub struct VariantRow {
     pub vias: usize,
     pub length_mm: f64,
     pub shrinkages: usize,
-    /// pick-necks: graded necked length (mm), necked vias, and their sum ([`Criteria::necking`]).
-    pub neck_mm: f64,
+    /// pick-necks: necked copper (mm2), necked vias, and the necking term ([`Criteria::necking`], mm-eq).
+    pub neck_mm2: f64,
     pub neck_vias: usize,
     pub necking: f64,
     pub warnings: usize,
@@ -499,7 +502,7 @@ impl<T> Archive<T> {
                 vias: c.vias,
                 length_mm: (c.length_mm * 1000.0).round() / 1000.0,
                 shrinkages: c.shrinkages,
-                neck_mm: (c.neck_mm * 1000.0).round() / 1000.0,
+                neck_mm2: (c.neck_mm2 * 1000.0).round() / 1000.0,
                 neck_vias: c.neck_vias,
                 necking: (c.necking * 1000.0).round() / 1000.0,
                 warnings: c.warnings,
@@ -520,9 +523,9 @@ pub fn table_text(rows: &[VariantRow], obj: &Objective) -> String {
         Objective::LengthVias { mm_per_via } => format!("length_vias, pick errors_weighted, {mm_per_via} mm/via"),
         Objective::ErrorsViasLength { .. } => "length_vias, pick errors_vias_length (errors, shorts, open, vias, length)".to_string(),
         Objective::Area => "area".to_string(),
-        Objective::Best { mm_per_via, penalty } => format!("length_vias, pick best (errors, shorts, necking, length + {mm_per_via} mm/via{})", if *penalty { " + violation price" } else { "" }),
+        Objective::Best { mm_per_via, penalty } => format!("length_vias, pick best (errors, shorts, then length + {mm_per_via} mm/via + necking{})", if *penalty { " + violation price" } else { "" }),
     };
-    let mut s = format!("variants ({} kept, objective {objective}; errors (violations, shorts) / vias / length mm / shrinkages / necking mm-eq (necked mm + neck vias) / warnings / area mm2 / mm per via):", rows.len());
+    let mut s = format!("variants ({} kept, objective {objective}; errors (violations, shorts) / vias / length mm / shrinkages / necking mm-eq (necked mm2 + neck vias) / warnings / area mm2 / mm per via):", rows.len());
     for r in rows {
         s.push_str(&format!(
             " [{}{}] {} ({}, {}) / {} / {:.1} / {} / {:.1} ({:.1} + {}) / {} / {:.1} / {}{};",
@@ -535,7 +538,7 @@ pub fn table_text(rows: &[VariantRow], obj: &Objective) -> String {
             r.length_mm,
             r.shrinkages,
             r.necking,
-            r.neck_mm,
+            r.neck_mm2,
             r.neck_vias,
             r.warnings,
             r.area_mm2,
@@ -632,29 +635,48 @@ mod tests {
         assert_eq!(labels, vec!["v0", "v1", "v3"]);
     }
 
-    /// pick-necks: `pick = best` ranks the necking after errors and shorts and before length + vias.
+    /// pick-necks (user 2026-11-27): `pick = best` ranks errors, shorts, then length + mm_per_via x vias
+    /// + necking (one value), then shrinkages.
     #[test]
-    fn best_pick_necking_beats_length() {
+    fn best_pick_necking_is_part_of_the_value() {
         let o = Objective::from_options("length_vias", 25.0, "best");
         let mk = |len: f64, necking: f64| Criteria { length_mm: len, necking, ..Criteria::default() };
-        let (short_necked, long_plain) = (mk(100.0, 12.0), mk(180.0, 3.0));
-        assert!(o.better(&long_plain, &short_necked), "less necking wins although 80 mm longer");
-        assert!(!o.better(&short_necked, &long_plain));
-        assert_eq!(o.decider(&long_plain, &short_necked).map(|d| d.0), Some("necking"));
-        // equal necking: length + mm_per_via x vias decides
-        let (a, b) = (mk(100.0, 5.0), Criteria { vias: 1, ..mk(90.0, 5.0) });
-        assert!(o.better(&a, &b), "100 < 90 + 25 mm/via: the via price counts at equal necking");
-        let c2 = mk(90.0, 5.0);
-        assert!(o.better(&c2, &a), "equal necking falls back to length");
-        assert_eq!(o.decider(&c2, &a).map(|d| d.0), Some("score"));
+        // 100 + 12 = 112 > 90 + 3 = 93 ...
+        let (short_necked, long_plain) = (mk(100.0, 12.0), mk(90.0 + 0.0, 3.0));
+        assert!(o.better(&long_plain, &short_necked));
+        // ... but necking is a price, not a strict key: 180 + 3 loses against 100 + 12
+        let way_longer = mk(180.0, 3.0);
+        assert!(o.better(&short_necked, &way_longer), "112 < 183: necking is a price, not a strict key");
+        assert!(!o.better(&way_longer, &short_necked));
+        assert_eq!(o.decider(&long_plain, &short_necked).map(|d| d.0), Some("score"), "length alone gives the same order: not the necking's doing");
+        // length decides when the necking does not turn the comparison
+        let (a, b) = (mk(80.0, 3.0), mk(100.0, 5.0));
+        assert_eq!(o.decider(&a, &b).map(|d| d.0), Some("score"));
+        let c2 = Criteria { vias: 1, ..mk(60.0, 3.0) };
+        assert!(o.better(&a, &c2), "80 < 60 + 25 mm/via at equal necking");
+        // the necking turns it against the shorter one
+        let (s1, s2) = (mk(80.0, 30.0), mk(100.0, 3.0));
+        assert!(o.better(&s2, &s1));
+        assert_eq!(o.decider(&s2, &s1).map(|d| d.0), Some("necking"));
         // errors and shorts stay first
         let err = Criteria { errors: 1, ..mk(10.0, 0.0) };
         assert!(o.better(&short_necked, &err), "fewer errors beat less necking");
         // the other picks do not look at it
         let w = Objective::from_options("length_vias", 25.0, "errors_weighted");
-        assert!(w.better(&short_necked, &long_plain));
+        assert!(w.better(&short_necked, &way_longer));
         let e = Objective::from_options("length_vias", 25.0, "errors_vias_length");
-        assert!(e.better(&short_necked, &long_plain));
+        assert!(e.better(&short_necked, &way_longer));
+    }
+
+    /// pick-necks r2: a variant that necks more never covers one that necks less (the archive keeps the
+    /// less necked drawn row), and an equal one is not dominated.
+    #[test]
+    fn necking_is_a_pareto_criterion() {
+        let mk = |n: f64| Criteria { necking: n, ..Criteria::default() };
+        assert!(mk(1.0).covers(&mk(2.0)) && !mk(2.0).covers(&mk(1.0)));
+        assert!(mk(1.0).dominates(&mk(2.0)) && !mk(2.0).dominates(&mk(1.0)));
+        assert!(mk(1.0).covers(&mk(1.0)) && !mk(1.0).dominates(&mk(1.0)));
+        assert!(mk(1.0 + 1e-12).covers(&mk(1.0)), "within 1e-9");
     }
 
     #[test]

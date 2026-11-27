@@ -231,13 +231,13 @@ def bests_summary_line(bests) -> str:
 def bests_table_md(bests) -> list:
     """TW3: the report.md table of the four bests: roles in the table (predicted) and among the drawn rows,
     predicted and drawn criteria, applied. O(rows)."""
-    rows = ["| roles (table) | roles (drawn) | row | run | predicted | drawn | shorts | open | necking | necked mm | neck vias | applied |",
+    rows = ["| roles (table) | roles (drawn) | row | run | predicted | drawn | shorts | open | necking | necked mm² | neck vias | applied |",
             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for b in bests:
         d = b.get("drawn") or {}
         rows.append(f"| {', '.join(b.get('roles') or [])} | {', '.join(b.get('drawn_roles') or [])} | {b.get('row')} | "
                     f"{_na(b.get('run'))} | {_crit_text(b.get('predicted'))} | {_crit_text(d)} | {_na(d.get('shorts'))} | "
-                    f"{_na(d.get('open'))} | {_na(d.get('necking'), '{:.1f}')} | {_na(d.get('neck_mm'), '{:.1f}')} | "
+                    f"{_na(d.get('open'))} | {_na(d.get('necking'), '{:.1f}')} | {_na(d.get('neck_mm2'), '{:.2f}')} | "
                     f"{_na(d.get('neck_vias'))} | {'yes' if b.get('applied') else ''} |")
     return rows
 

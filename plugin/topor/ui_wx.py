@@ -262,6 +262,7 @@ WORDING: dict[str, dict[str, str]] = {
         "delta_length": "length {d} m",
         "delta_shrinkages": "shrinkages {d}",
         "delta_score": "weighted score {d} mm",
+        "delta_necking": "necking {d} mm-eq",
         "delta_area": "area {d} mm²",
     },
     "preview": {
@@ -529,7 +530,7 @@ def score_delta(decider: str, delta: float) -> str:
         return ""
     if decider == "length":
         return W["delta_length"].format(d=f"{delta / 1000:+.3f}")
-    if decider in ("score", "area"):
+    if decider in ("score", "area", "necking"):
         return W[f"delta_{decider}"].format(d=f"{delta:+.1f}")
     key = f"delta_{decider}"
     return W[key].format(d=f"{delta:+.0f}") if key in W else f"{decider} {delta:+g}"

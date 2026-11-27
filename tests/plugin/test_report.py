@@ -235,7 +235,7 @@ _ROW = {"roles": ["best", "errors", "shortest", "vias"], "drawn_roles": ["best",
         "row": "cycle 9 (gen 6)", "run": 2, "applied": True,
         "predicted": {"errors": 3, "vias": 31, "length_mm": 929.34},
         "drawn": {"errors": 24, "vias": 45, "length_mm": 998.71, "shorts": 6, "open": 0,
-                   "necking": 52.5, "neck_mm": 32.5, "neck_vias": 2}}
+                   "necking": 52.5, "neck_mm2": 3.25, "neck_vias": 2}}
 
 
 def test_bests_summary_line_without_bests_is_empty():
