@@ -61,7 +61,7 @@ impl Drawer<'_> {
             return Anchor::Centre;
         }
         let c = pr.pos[v];
-        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
         let reach = poly.iter().map(|&p| (p - c).len()).fold(0.0, f64::max);
         let ents: Vec<usize> = self.local_ents(&wp, bbox_of(poly).grow(self.qgrow + wi.w)).into_iter().filter(|&i| i < self.n_static).collect();
         let ok = |p: Vec2| self.seg_clear(&ents, &wp, p, p);

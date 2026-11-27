@@ -278,6 +278,43 @@ pub(super) struct Wp {
     /// Never drop (M-B1): the clearance to foreign objects is kept only up to this much less (nm;
     /// 0 = the rule): the least violating geometry where no legal one exists.
     pub relax: f64,
+    /// bundle-turn (2): the objects `relax` applies to (`None` = every foreign object): the
+    /// bottleneck's, so the run keeps the full clearance everywhere else (TopoR 6.3 manual p. 237:
+    /// the minimal clearance only in the narrowest spots).
+    pub relax_on: Option<RelaxSet>,
+}
+
+/// bundle-turn (2): most objects one forced run relaxes its clearance to ([`Drawer::exact_fix_local`]).
+pub(super) const RELAX_SET: usize = 8;
+
+/// A small set of object (entity) ids, [`Wp::relax_on`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct RelaxSet {
+    ids: [usize; RELAX_SET],
+    n: usize,
+}
+
+impl RelaxSet {
+    pub(super) fn contains(&self, id: usize) -> bool {
+        self.ids[..self.n].contains(&id)
+    }
+
+    /// Adds `id`; false when the set is full (and `id` not in it).
+    pub(super) fn insert(&mut self, id: usize) -> bool {
+        if self.contains(id) {
+            return true;
+        }
+        if self.n == RELAX_SET {
+            return false;
+        }
+        self.ids[self.n] = id;
+        self.n += 1;
+        true
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.n
+    }
 }
 
 /// Necking of a run: `(centre, radius nm)` zones inside which the wire is `min_w` wide: the
@@ -444,7 +481,8 @@ impl Drawer<'_> {
             // "actual 0.0023 mm").
             return e.grow + 0.5 * w + self.eps + self.model.rules.max_error as f64;
         }
-        (e.grow + if e.fixed { e.clear } else { e.clear.max(wp.s) } + 0.5 * w + self.eps - wp.relax).max(e.grow)
+        let relax = if wp.relax_on.is_none_or(|r| r.contains(id)) { wp.relax } else { 0.0 };
+        (e.grow + if e.fixed { e.clear } else { e.clear.max(wp.s) } + 0.5 * w + self.eps - relax).max(e.grow)
     }
 
     /// The segment `a-b` keeps the clearance to every object of `ents`.
@@ -830,9 +868,49 @@ impl Drawer<'_> {
     /// [`Drawer::exact_fix`] keeping the clearances to foreign objects only up to `relax` nm less
     /// (never drop, M-B1: the least violating geometry where no legal one exists).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn exact_fix_relaxed(&self, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, neck: Option<Neck>, relax: f64) -> Option<Vec<Vec2>> {
+    pub(super) fn exact_fix_relaxed(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: Vec<Vec2>, neck: Option<Neck>, relax: f64) -> Option<Vec<Vec2>> {
         let wi = &self.st.wires[w];
-        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax };
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax, relax_on: None };
+        self.exact_fix_wp(w, k0, k1, layer, pts, &wp).ok()
+    }
+
+    /// bundle-turn (2): [`Drawer::exact_fix_relaxed`] with the clearance relaxed (by `relax`) only
+    /// to the objects of the bottleneck: it starts with none relaxed; each stretch it cannot repair
+    /// adds the objects that stretch's segment comes too close to, and it repairs again from `pts`,
+    /// until a path exists or more than [`RELAX_SET`] objects would be needed (`None`; the caller
+    /// keeps the run-wide relaxation then). The run keeps the full clearance to every other object
+    /// (TopoR 6.3 manual p. 237: the nominal clearance wherever wires can be set apart, the minimal
+    /// one only in the narrowest spots; p. 239: wires stay further apart where there is room).
+    /// Returns the path and the number of objects relaxed. O(set x [`Drawer::exact_fix_relaxed`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn exact_fix_local(&self, w: WireId, k0: usize, k1: usize, layer: usize, pts: Vec<Vec2>, neck: Option<Neck>, relax: f64) -> Option<(Vec<Vec2>, usize)> {
+        let wi = &self.st.wires[w];
+        let mut set = RelaxSet::default();
+        loop {
+            let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax, relax_on: Some(set) };
+            match self.exact_fix_wp(w, k0, k1, layer, pts.clone(), &wp) {
+                Ok(p) => return Some((p, set.len())),
+                Err(hits) => {
+                    let n0 = set.len();
+                    for id in hits {
+                        if !set.insert(id) {
+                            return None;
+                        }
+                    }
+                    if set.len() == n0 {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The repair of [`Drawer::exact_fix_relaxed`] with the wire parameters `wp`. `Err` = a stretch
+    /// it cannot repair, with the objects the failing segment comes too close to under `wp` (empty
+    /// when none, e.g. the repeat cap). O(repairs x local path).
+    fn exact_fix_wp(&self, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, wp: &Wp) -> Result<Vec<Vec2>, Vec<usize>> {
+        let wi = &self.st.wires[w];
+        let wp = *wp;
         let mut strip = self.strip(w, k0, k1);
         // The chords of other nets' vias in the sleeve are walls too (see `via_walls`); a stretch
         // that crosses one is repaired like a clearance violation.
@@ -857,7 +935,7 @@ impl Drawer<'_> {
                     break;
                 }
             }
-            let Some(i) = bad else { return Some(self.drop_backtracks(&strip, &wp, pts)) };
+            let Some(i) = bad else { return Ok(self.drop_backtracks(&strip, &wp, pts)) };
             // A via wall crossed: the run reached the wrong side of the via before this
             // segment, so the search starts one vertex earlier.
             let (mut l, mut r) = (if via_wall(pts[i], pts[i + 1]) { i.saturating_sub(1) } else { i }, i + 1);
@@ -894,7 +972,8 @@ impl Drawer<'_> {
                         hit
                     );
                 }
-                return None;
+                let ents = self.local_ents(&wp, bbox_of(&[pts[i], pts[i + 1]]).grow(self.qgrow));
+                return Err(ents.into_iter().filter(|&id| !self.seg_clear(&[id], &wp, pts[i], pts[i + 1])).collect());
             };
             let mut np: Vec<Vec2> = pts[..l].to_vec();
             np.extend(sub);
@@ -902,7 +981,7 @@ impl Drawer<'_> {
             np.dedup_by(|a, b| (*a - *b).len2() < 1.0);
             pts = np;
         }
-        None
+        Err(Vec::new())
     }
 }
 
@@ -934,7 +1013,7 @@ impl Drawer<'_> {
     /// caller still runs the checker on the via. O(ents near x samples + sleeve triangles).
     pub(super) fn via_extra(&self, w: WireId, ka: usize, kb: usize, d: f64, s: f64) -> Vec<(usize, Vec2)> {
         let wi = &self.st.wires[w];
-        let wp = Wp { wire: w, net: wi.net, w: d, s, layer: usize::MAX, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+        let wp = Wp { wire: w, net: wi.net, w: d, s, layer: usize::MAX, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
         let strip = self.strip(w, ka, kb.max(ka));
         let mut bb = strip.boxes[0];
         for b in &strip.boxes {
@@ -1120,7 +1199,7 @@ mod tests {
             Neck { min_w: 100_000.0, ends }
         });
         let relax = [0.0, 0.0, 20_000.0, 1e9][g.int(0, 3) as usize];
-        Wp { wire: 0, net: g.int(1, 3) as i32, w: 100_000.0 + 400_000.0 * g.f(), s: 100_000.0 + 200_000.0 * g.f(), layer: g.int(0, 1) as usize, own: [wi.pa, wi.pb], neck, relax }
+        Wp { wire: 0, net: g.int(1, 3) as i32, w: 100_000.0 + 400_000.0 * g.f(), s: 100_000.0 + 200_000.0 * g.f(), layer: g.int(0, 1) as usize, own: [wi.pa, wi.pb], neck, relax, relax_on: None }
     }
 
     /// nd-perf F2: the verdict without the price (`via_in_class`) is `via_reach`'s; the call sites'
@@ -1466,7 +1545,7 @@ mod tests {
 
     fn exact_fix_ref(dr: &Drawer, w: WireId, k0: usize, k1: usize, layer: usize, mut pts: Vec<Vec2>, relax: f64) -> Option<Vec<Vec2>> {
         let wi = &dr.st.wires[w];
-        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck: None, relax };
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck: None, relax, relax_on: None };
         let mut strip = dr.strip(w, k0, k1);
         let n_walls = strip.walls.len();
         strip.walls.extend(dr.via_walls(w, k0, k1, layer));
@@ -1828,7 +1907,7 @@ mod tests {
                 }
                 let layer = g.int(0, 1) as usize;
                 let wi = &dr.st.wires[0];
-                let wp = Wp { wire: 0, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                let wp = Wp { wire: 0, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
                 let region = bbox_of(&pts).grow(2.0 * MM + 4.0 * (wi.w + wi.s));
                 let form = |dr: &Drawer| dr.octilinear(0, 0, k1, layer, &pts, None, [None, None], Some(dr.octi.viol_nm)).map_or(pts.clone(), |o| o.pts);
                 let f1 = form(dr);
@@ -1892,7 +1971,7 @@ mod tests {
             let u = (b - a).unit().expect("A != B");
             let left = Vec2 { x: -u.y, y: u.x };
             let wi = dr.st.wires[0].clone();
-            let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+            let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
             let tw = 150_000.0;
             dr.commit(&track_item(2, 0, tw, a + left * 20.0 * MM, b + left * 20.0 * MM, None));
             let need = dr.need_of(dr.ents.len() - 1, &wp, wi.w);
@@ -1978,7 +2057,7 @@ mod tests {
         for range in [f64::INFINITY, 0.5 * MM] {
             two_pads((2.0, 12.0), (12.0, 9.0), &mut |dr| {
                 let wi = dr.st.wires[0].clone();
-                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
                 // the need of a net-2 track of width tw: its half width + the clearance + the run's half width
                 let h = dr.commit(&track_item(2, 0, tw, v(3.0, 30.0), v(8.0, 30.0), None));
                 let id = dr.handles[h].1;
@@ -2033,7 +2112,7 @@ mod tests {
                 let pts = vec![a, m, b];
                 let dr: &Drawer = dr;
                 let wi = &dr.st.wires[0];
-                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
                 let nr = dr.near(dr.local_ents(&wp, bbox_of(&pts).grow(4.0 * MM)), &wp);
                 assert!(!dr.seg_clear_near(&nr, a, m) && dr.seg_deficit_near(&nr, a, m) > 0.0, "case {case}: A-M must be below the rule");
                 let o = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None);
@@ -2065,7 +2144,7 @@ mod tests {
             let pts = vec![a, m, b];
             let dr: &Drawer = dr;
             let wi = &dr.st.wires[0];
-            let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+            let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
             let nr = dr.near(dr.local_ents(&wp, bbox_of(&pts).grow(4.0 * MM)), &wp);
             let o = dr.octilinear(0, 0, k1, 0, &pts, None, [None, None], None).expect("case 3: a form");
             let below = o.pts.windows(2).any(|x| dr.seg_deficit_near(&nr, x[0], x[1]) > 0.0);
@@ -2457,7 +2536,7 @@ mod tests {
                 let u = (b - a).unit().expect("A != B");
                 let left = Vec2 { x: -u.y, y: u.x };
                 let wi = dr.st.wires[0].clone();
-                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0 };
+                let wp = Wp { wire: 0, net: 1, w: wi.w, s: wi.s, layer: 0, own: [wi.pa, wi.pb], neck: None, relax: 0.0, relax_on: None };
                 let tw = 150_000.0;
                 let r0 = 0.5 * tw + 0.5 * wi.w;
                 // the room to a track's copper and its clearance band, measured on the first one

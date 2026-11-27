@@ -1675,6 +1675,12 @@ pub struct Options {
     /// (length, bends, jog penalty) and legal (StraightenLayer, Staepelaere 1992 ch. 5, p. 15);
     /// an end leg on its pad keeps its pad anchor (r10); false = the staircases of the first draw stay. Default true.
     pub octi_straighten: bool,
+    /// bundle-turn (`[drawing] straighten_passes`): most passes of the straightening over the draw
+    /// order (a work bound; a pass that changes nothing ends it earlier, at its fixpoint; the
+    /// warning line says which). After a wire drawn with violations was drawn again into the room
+    /// the straightening freed (`Drawer::refit_forced`), the straightening runs again, with the
+    /// same bound. Default 4 (qmtech reached the bound still changing: the line says so).
+    pub straighten_passes: usize,
     /// TW2 (`[drawing] erbs_gap_keep_max_mm`): with realise = "erbs", two bands the joint check
     /// finds too close by a model gap of the ERBS (`RunBand::gap`, no over-full cut predicts it)
     /// are both kept when the overlap is at most this: the gap stays as a clearance violation of
@@ -2126,6 +2132,7 @@ impl Default for Options {
             octi_order: "sweep".into(),
             octi_own_portals: true,
             octi_straighten: true,
+            straighten_passes: 4,
             erbs_gap_keep_max_mm: 0.15,
             forced_shrink: false,
             reserved_keep_neck: false,

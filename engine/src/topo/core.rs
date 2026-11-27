@@ -2518,23 +2518,26 @@ pub fn split_line(fuse: usize, polish: usize, split: &[String]) -> Option<String
     Some(l)
 }
 
-/// first-draw-45 P4: most passes of the straightening over the draw order (a work bound; a pass
-/// that changes nothing ends it earlier, at a fixpoint). r7: the qmtech USB corner reaches its
-/// fixpoint in the 3rd pass (`straightening_reaches_its_fixpoint`); the boards take 3 (esp,
-/// wiccon) to 4 (qmtech, at the bound) passes.
-const STRAIGHTEN_PASSES: usize = 4;
-
 /// first-draw-45 P4: the straightening pass's report line: `n` stretches of two or more bends
 /// redrawn as one straight, elbow or Z form, the length that changed (mm, + added), the steps the
 /// split guard refused, the passes and whether the last one changed nothing (`fixpoint`; else the
-/// loop stopped at [`STRAIGHTEN_PASSES`]), the time (s).
-pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, fixpoint: bool, secs: f64) -> String {
+/// loop stopped at its bound `cap`, `[drawing] straighten_passes`, first-draw-45 r7: qmtech reached
+/// the bound of 4 still changing), the time (s). With a re-fit round (bundle-turn (3)) `passes`
+/// counts both phases, each bounded by `cap`.
+pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, cap: usize, fixpoint: bool, secs: f64) -> String {
     format!(
         "octilinear straightening after drawing (draw order, {passes} passes, {}): {n} stretches of two or more bends redrawn as one straight, elbow or Z form, {:.1} mm {} in length; {refused} refused by the split guard ({secs:.1} s)",
-        if fixpoint { "the last without a change".to_string() } else { format!("stopped at the bound of {STRAIGHTEN_PASSES} passes with changes in the last") },
+        if fixpoint { "the last without a change".to_string() } else { format!("stopped at the bound of {cap} passes with changes in the last ([drawing] straighten_passes)") },
         added_mm.abs(),
         if added_mm > 0.0 { "added" } else { "saved" }
     )
+}
+
+/// bundle-turn (3): the re-fit line: `tried` wires drawn with violations (never drop) drawn again
+/// after the straightening moved their neighbours, `kept` of them with fewer violations or shorter
+/// at equal violations, `legal` of those without any violation left.
+pub fn refit_line(tried: usize, kept: usize, legal: usize) -> String {
+    format!("never drop, re-fit after the straightening: {tried} wires drawn with violations drawn again against the straightened neighbours; {kept} kept (fewer violations, or shorter at equal violations), {legal} of them now without violations")
 }
 
 /// The octilinear polish's report line: `n` segments redrawn as an elbow or Z, which changed the
@@ -9152,13 +9155,24 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         let mut str_pieces: BTreeMap<i32, super::netconn::Conn> = BTreeMap::new();
         let order: Vec<WireId> = live.iter().copied().filter(|w| drawn.contains_key(w)).collect();
         // Passes over the order until one changes nothing (each step lowers the wire's price, so
-        // it ends; at most STRAIGHTEN_PASSES, a work bound): a wire straightened before its
-        // neighbours gets another turn once they have moved.
+        // it ends; at most `[drawing] straighten_passes`, a work bound): a wire straightened before
+        // its neighbours gets another turn once they have moved.
+        let cap = opts.straighten_passes.max(1);
         let mut pass_changed = true;
-        let mut passes = 0usize;
-        while pass_changed && passes < STRAIGHTEN_PASSES {
+        let (mut passes, mut phase) = (0usize, 0usize);
+        // bundle-turn (3): the wires drawn with violations (never drop) were forced against their
+        // neighbours' first drafts; once the straightening has moved those, each is drawn again
+        // against the copper as it is ([`draw::Drawer::refit_forced`], kept when it has fewer
+        // violations), then the straightening runs again (one re-fit round; debug arm
+        // `TOPO_FD45_OFF=refit`). TopoR 6.3 manual p. 237: the minimal clearance only in the
+        // narrowest spots, so a run squeezed where room has become free is fitted again.
+        let mut refit_round_done = !opts.allow_violations || super::octi::fd45_off("refit");
+        let (mut refit_tried, mut refit_kept) = (0usize, 0usize);
+        loop {
+        while pass_changed && phase < cap {
             pass_changed = false;
             passes += 1;
+            phase += 1;
             for &w in &order {
                 let mut wo = drawn.remove(&w).expect("drawn wire");
                 let (len0, net) = (wo.length_nm, st.wires[w].net);
@@ -9191,8 +9205,46 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 drawn.insert(w, wo);
             }
         }
+        if refit_round_done {
+            break;
+        }
+        refit_round_done = true;
+        let mut kept_any = false;
+        for &w in &order {
+            if drawn.get(&w).is_none_or(|o| o.viol.is_empty()) {
+                continue;
+            }
+            let old = drawn.remove(&w).expect("drawn wire");
+            if let Some((key, q)) = joint_of(w, &drawn, &plans) {
+                dr.end_at.insert(key, q);
+            }
+            refit_tried += 1;
+            match dr.refit_forced(&plans[&w], &placed[&w], &old) {
+                Some(nw) => {
+                    kept_any = true;
+                    refit_kept += 1;
+                    let ci = conn_of[wire_conn[w]];
+                    necking.retain(|(c, _)| *c != ci);
+                    settle(octi_on, &mut out, &mut necking, ci, w, &nw, b, &st, model.rules.default.width as f64);
+                    str_pieces.remove(&st.wires[w].net);
+                    drawn.insert(w, nw);
+                }
+                None => {
+                    drawn.insert(w, old);
+                }
+            }
+        }
+        if !kept_any {
+            break;
+        }
+        pass_changed = true;
+        phase = 0;
+        }
         if n_str > 0 || str_refused > 0 {
-            warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, !pass_changed, t_str.elapsed().as_secs_f64()));
+            warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, cap, !pass_changed, t_str.elapsed().as_secs_f64()));
+        }
+        if refit_tried > 0 {
+            warnings.push(refit_line(refit_tried, refit_kept, dr.stats.refit_legal));
         }
     }
     free_snap("straighten", &drawn, &st);
@@ -10345,13 +10397,14 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             ));
         }
         warnings.push(format!(
-            "never drop ([optimize] allow_violations): {} connections written with {} rule violations ({}); {} wires drawn by force ({} runs: {} on the exact path with the clearance relaxed, {} on a funnel, {} on a normal attempt), {} wires with a via placed by force, {} crossings that cannot be layered kept",
+            "never drop ([optimize] allow_violations): {} connections written with {} rule violations ({}); {} wires drawn by force ({} runs: {} on the exact path with the clearance relaxed ({} of them only at the bottleneck's objects), {} on a funnel, {} on a normal attempt), {} wires with a via placed by force, {} crossings that cannot be layered kept",
             conns.len(),
             viol_list.len(),
             if by.is_empty() { "none".to_string() } else { by.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") },
             n_forced,
             forced_stats.forced_relaxed + forced_stats.forced_funnel + forced_stats.forced_attempt,
             forced_stats.forced_relaxed,
+            forced_stats.forced_relax_local,
             forced_stats.forced_funnel,
             forced_stats.forced_attempt,
             n_via_forced,

@@ -756,7 +756,7 @@ impl Drawer<'_> {
     /// short]` per leg of `pts` (the near set the DP builds for this run). Read only.
     pub(super) fn forced_leg_deficits(&self, w: WireId, layer: usize, pts: &[Vec2], neck: Option<Neck>) -> Vec<[f64; 2]> {
         let wi = &self.st.wires[w];
-        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax: 0.0 };
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax: 0.0, relax_on: None };
         let region: Aabb = bbox_of(pts).grow(2.0 * MM + 4.0 * (wi.w + wi.s));
         let nr = self.near(self.local_ents(&wp, region.grow(self.qgrow)), &wp);
         pts.windows(2).map(|x| self.seg_deficit_parts_near(&nr, x[0], x[1])).collect()
@@ -783,7 +783,7 @@ impl Drawer<'_> {
             return None;
         }
         let wi = &self.st.wires[w];
-        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax: 0.0 };
+        let wp = Wp { wire: w, net: wi.net, w: wi.w, s: wi.s, layer, own: [wi.pa, wi.pb], neck, relax: 0.0, relax_on: None };
         let (mut strip, own_gates, bands) = self.open_strip(w, k0, k1, layer, &taut);
         #[cfg(test)]
         let own_gates = if OCTI_NO_OWN_GATES.with(|f| f.get()) { Vec::new() } else { own_gates };
@@ -820,6 +820,8 @@ impl Drawer<'_> {
             let (st, pr) = (self.st, &self.b.proj);
             let mut guard: Vec<(usize, [Option<Vec2>; 2])> = Vec::new();
             let dbg = std::env::var("TOPO_LANEDBG").is_ok();
+            // bundle-turn (1): the fork zones (debug arm `TOPO_FD45_OFF=fork`).
+            let fork_room = !fd45_off("fork");
             for k in k0..k1 {
                 let pid = wi.passes[k];
                 let [p, q] = pr.edges[st.passes[pid].edge];
@@ -879,6 +881,36 @@ impl Drawer<'_> {
                         self.neighbour_bound(pid, true).map(|x| x / 1e6),
                         self.lane_dbg(pid)
                     );
+                }
+                // bundle-turn (1): where an undrawn lane neighbour turns off (into a triangle the
+                // wire leaves through another edge, or to its end there), its planned path through
+                // that triangle, offset by the lane spacing towards the wire, bounds its room too
+                // ([`Drawer::neighbour_fork`]): from the bound on this edge to the offset of its
+                // planned point beyond (forward), or from there to the bound (backward).
+                if fork_room {
+                    for (after, g) in [(false, g_lo), (true, g_hi)] {
+                        let Some(a) = g else { continue };
+                        let sign = if p_left != after { 1.0 } else { -1.0 };
+                        for fwd in [true, false] {
+                            let Some((ce, cq)) = self.neighbour_fork(w, k, after, fwd) else { continue };
+                            let (toward, d) = (a - ce, cq - ce);
+                            let gap = toward.len();
+                            let Some(mut nrm) = d.perp().unit() else { continue };
+                            if gap < 1.0 {
+                                continue;
+                            }
+                            if nrm.dot(toward) < 0.0 {
+                                nrm = -nrm;
+                            }
+                            let b = cq + nrm * gap;
+                            if (b - a).len2() >= 1.0 {
+                                zones.push(if fwd { (a, b, sign) } else { (b, a, sign) });
+                                if dbg {
+                                    eprintln!("LANEFORK wire {w} k {k} after {after} fwd {fwd} zone ({:.3},{:.3})-({:.3},{:.3}) sign {sign}", a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6);
+                                }
+                            }
+                        }
+                    }
                 }
                 guard.push((k, if p_left { [g_lo, g_hi] } else { [g_hi, g_lo] }));
             }
@@ -3251,7 +3283,7 @@ impl Drawer<'_> {
                 continue;
             }
             let layer = wo.runs[r].0;
-            let wp = Wp { wire: w, net, w: ww, s: wi.s, layer, own, neck: None, relax: 0.0 };
+            let wp = Wp { wire: w, net, w: ww, s: wi.s, layer, own, neck: None, relax: 0.0, relax_on: None };
             // The drawn octilinear segments of other nets near the run (the DP's `side`).
             let region: Aabb = bbox_of(&cur).grow(2.0 * MM + 4.0 * pitch);
             let side: Vec<(Vec2, Vec2, usize, f64)> = self
