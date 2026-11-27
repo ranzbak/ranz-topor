@@ -300,6 +300,11 @@ false (since 0.5.0, unreleased), off = main copper (hash on 4 boards).
   - wiccon and eprom A1 = main hash.
   - Valleys are counted by `tools/vfy_neck_regrow.py`. qmtech and esp keep main's `both_ends` 2 / 1, which are runs
     necked at both pad ends by the plan.
+  - Real settings (wall clock, timeout 600, ccx33 slots, 3651a086) vs main dvn7tq/dvn7tr (a94cde2b):
+    - qmtech: DRC 119 -> 93 (r1 93), 0 new clusters and 8 gone (23 items, among them JS2_3/JS2_2/JS2_9 with n=10).
+      Unconnected 17 = 17, vias 243 -> 248, detour 17 = 17. Valleys: main 0, r1 10, r2 0. Loose ends 32 -> 31.
+    - esp: DRC 10 -> 8, 0 new clusters and 2 gone. Unconnected 10 = 10, vias 52 -> 50, detour 11 = 11. Valleys: r1 3,
+      r2 0. Loose ends 9 -> 10: IO0 is unnecked full-width copper, and +5V is off by 0.013 mm.
   - Real KiCad Cleanup (Xephyr, all options), off vs r2: Cleanup removes no copper that off keeps (strict check
     empty). Unconnected after: qmtech 24 -> 22, esp 10 -> 10.
 - **Touch points with branch neck-regrow:**
