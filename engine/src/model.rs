@@ -1477,6 +1477,14 @@ pub struct Options {
     /// below 1 count as 1. A k above 1 is not chosen yet: it needs a run that checks the
     /// alternative variants in KiCad.
     pub short_weight: f64,
+    /// Topological core (`topor.toml [optimize] neck_via_mm`, pick-necks, user 2026-11-27): price
+    /// of one necked via (smaller than its net class via) in mm of length + vias, added to the
+    /// necking term of the `pick = best` value (a guess, 10).
+    pub neck_via_mm: f64,
+    /// Topological core (`topor.toml [optimize] neck_mm_per_mm2`, pick-necks, user 2026-11-27: "necking
+    /// width reduced * length * constant"): K, the price in mm of length + vias per mm2 of
+    /// necked copper (`(class width - drawn width) x length`, every drawn segment at its own width).
+    pub neck_mm_per_mm2: f64,
     /// Topological core (S3, `topor.toml [optimize] variants`): most result variants the archive
     /// keeps besides the champions (fewest errors, shortest, fewest vias, fewest shrinkages,
     /// fewest warnings).
@@ -2084,6 +2092,8 @@ impl Default for Options {
             pick: "best".into(),
             pick_shorts: true,
             short_weight: 1.0,
+            neck_via_mm: 10.0,
+            neck_mm_per_mm2: 10.0,
             variants: 8,
             moves: false,
             max_moves: 400,

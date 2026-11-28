@@ -118,6 +118,68 @@ pub(crate) fn a1_supply_grade(w: f64, to: f64, len: f64) -> (f64, f64) {
     (left, (1.0 - left) * len / MM)
 }
 
+/// The round line's text for a decider `(name, delta)` of [`archive::Objective::decider`].
+fn round_delta((name, d): (&str, f64)) -> String {
+    match name {
+        "length" => format!("length {:+.3} m", d / 1000.0),
+        "score" => format!("weighted score {d:+.1} mm"),
+        "necking" => format!("necking {d:+.1} mm-eq"),
+        "area" => format!("area {d:+.1} mm²"),
+        _ => format!("{name} {d:+.0}"),
+    }
+}
+
+/// pick-necks (user 2026-11-27): the necking of drawn copper, measured on the items as written.
+/// Returns `(mm2, vias)`: `mm2` = sum over the tracks of `(w_full - w_drawn) x length` in mm2 (each
+/// segment or arc at its own width, so a taper counts every step at its own width; a track at or
+/// above its full width counts 0), `vias` = the vias smaller than the full via of their net.
+/// `full_w(ci, net)` / `full_via(ci, net)` give the full width / via diameter (nm) of the item's
+/// connection and net (a diff pair's rule width and pair via for its two nets). O(items).
+pub(crate) fn drawn_necking(items: &[Item], item_conn: &[usize], full_w: &dyn Fn(usize, i32) -> i64, full_via: &dyn Fn(usize, i32) -> i64) -> (f64, usize) {
+    let (mut mm2, mut vias) = (0.0, 0usize);
+    for (it, &ci) in items.iter().zip(item_conn) {
+        match it {
+            Item::Track(t) => {
+                let red = full_w(ci, t.net) - t.width;
+                if red > 0 {
+                    mm2 += red as f64 / MM * track_len_nm(&t.prim) / MM;
+                }
+            }
+            Item::Via(v) => {
+                if v.d < full_via(ci, v.net) {
+                    vias += 1;
+                }
+            }
+        }
+    }
+    (mm2, vias)
+}
+
+/// The necking term of the pick value, mm equivalent: `[optimize] neck_mm_per_mm2` x `mm2` +
+/// `neck_via_mm` x `vias` (negative options count 0). O(1).
+pub(crate) fn necking_mm_eq(mm2: f64, vias: usize, opts: &Options) -> f64 {
+    opts.neck_mm_per_mm2.max(0.0) * mm2 + opts.neck_via_mm.max(0.0) * vias as f64
+}
+
+/// Length (nm) of a drawn track primitive: the chord of a segment, the arc length of an arc
+/// (through its three points; the chord when they are collinear). O(1).
+pub(crate) fn track_len_nm(p: &crate::geom::quant::TrackPrim) -> f64 {
+    use crate::geom::quant::TrackPrim;
+    match *p {
+        TrackPrim::Seg { a, b } => ((b.x - a.x) as f64).hypot((b.y - a.y) as f64),
+        TrackPrim::Arc { start, mid, end } => {
+            let chord = ((end.x - start.x) as f64).hypot((end.y - start.y) as f64);
+            let Some(c) = crate::geom::quant::calc_arc_center(start, mid, end) else { return chord };
+            let ang = |q: crate::geom::quant::IVec2| ((q.y - c.y) as f64).atan2((q.x - c.x) as f64);
+            let r = ((start.x - c.x) as f64).hypot((start.y - c.y) as f64);
+            let tau = std::f64::consts::TAU;
+            let (dm, de) = ((ang(mid) - ang(start)).rem_euclid(tau), (ang(end) - ang(start)).rem_euclid(tau));
+            let sweep = if dm < de { de } else { tau - de };
+            r * sweep
+        }
+    }
+}
+
 /// Record the drawn wire `wo` as the outcome of connection `ci`.
 /// neck-regrow: a neck to `to` (nm) over `neck_len` of a wire of nominal width `w` and drawn
 /// length `wire_len` is a whole-wire neck of a supply net when it spans the wire (within 1 um) and
@@ -524,7 +586,7 @@ fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::
     let ri = Role::ALL.iter().position(|&r| r == role).expect("role");
     let applied = db[ri];
     let drawn_roles = |j: usize| -> Vec<&'static str> { Role::ALL.iter().zip(db).filter(|(_, b)| *b == Some(j)).map(|(r, _)| r.name()).collect() };
-    let crit_json = |c: &Criteria| serde_json::json!({"errors": c.errors, "shorts": c.shorts, "open": c.open, "violations": c.violations, "vias": c.vias, "length_mm": (c.length_mm * 1e3).round() / 1e3, "shrinkages": c.shrinkages, "penalty": (c.penalty * 1e3).round() / 1e3});
+    let crit_json = |c: &Criteria| serde_json::json!({"errors": c.errors, "shorts": c.shorts, "open": c.open, "violations": c.violations, "vias": c.vias, "length_mm": (c.length_mm * 1e3).round() / 1e3, "shrinkages": c.shrinkages, "neck_mm2": (c.neck_mm2 * 1e3).round() / 1e3 + 0.0, "neck_vias": c.neck_vias, "necking": (c.necking * 1e3).round() / 1e3, "penalty": (c.penalty * 1e3).round() / 1e3});
     let json: Vec<serde_json::Value> = rows
         .iter()
         .enumerate()
@@ -538,7 +600,7 @@ fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::
         rows.iter()
             .enumerate()
             .map(|(j, (i, a, c, _))| format!(
-                "[{}{}] {} (run {}): predicted {} errors / {} vias / {:.1} mm, drawn {} errors ({} shorts, {} open) / {} vias / {:.1} mm{}",
+                "[{}{}] {} (run {}): predicted {} errors / {} vias / {:.1} mm, drawn {} errors ({} shorts, {} open) / {} vias / {:.1} mm / necking {:.1} ({:.1} mm necked, {} neck vias){}",
                 if applied == Some(j) { "APPLIED " } else { "" },
                 a.roles.iter().map(|r| r.name()).collect::<Vec<_>>().join(", "),
                 a.label,
@@ -551,6 +613,9 @@ fn four_bests(outs: &[RunOut], obj: &Objective, pick: &str) -> (Vec<serde_json::
                 c.open,
                 c.vias,
                 c.length_mm,
+                c.necking,
+                c.neck_mm2,
+                c.neck_vias,
                 { let d = drawn_roles(j); if d.is_empty() { String::new() } else { format!(", drawn best: {}", d.join(", ")) } }
             ))
             .collect::<Vec<_>>()
@@ -1573,19 +1638,13 @@ impl<'a> Coord<'a> {
                     "worse"
                 };
                 let c = &j.crit;
-                let delta = |(name, d): (&str, f64)| match name {
-                    "length" => format!("length {:+.3} m", d / 1000.0),
-                    "score" => format!("weighted score {d:+.1} mm"),
-                    "area" => format!("area {d:+.1} mm²"),
-                    _ => format!("{name} {d:+.0}"),
-                };
                 let against = match (reference, dec) {
                     (None, _) => "new best (the first result)".to_string(),
                     (Some((i, b)), None) if is_best => format!("the best now: the same score as {}, and ties go to the lower run", at(i, b.cycle)),
                     (Some((i, b)), None) => format!("same score as the best ({}): the earlier one stays", at(i, b.cycle)),
-                    (Some((i, b)), Some(d)) if is_best => format!("new best: {} against {}", delta(d), at(i, b.cycle)),
-                    (Some((i, b)), Some(d)) if vs == "better" => format!("better than the best ({}): {}, but the variant table did not keep it", at(i, b.cycle), delta(d)),
-                    (Some((i, b)), Some(d)) => format!("worse than the best ({}): {}", at(i, b.cycle), delta(d)),
+                    (Some((i, b)), Some(d)) if is_best => format!("new best: {} against {}", round_delta(d), at(i, b.cycle)),
+                    (Some((i, b)), Some(d)) if vs == "better" => format!("better than the best ({}): {}, but the variant table did not keep it", at(i, b.cycle), round_delta(d)),
+                    (Some((i, b)), Some(d)) => format!("worse than the best ({}): {}", at(i, b.cycle), round_delta(d)),
                 };
                 let line = format!(
                     "{}: errors {}, open {}, vias {}, length {:.3} m, shrinkages {}; rule violations {}{}, routed {} of {}{}: {against}",
@@ -10139,7 +10198,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             .sum()
     };
     let n_copper = b.signal_layers.len().max(1);
-    let crit_main = criteria(model, dec, &asm, &out, warn_n(&necking), n_copper, &reg, opts);
+    let crit_main = criteria(model, model_real, dec, &asm, &out, warn_n(&necking), n_copper, &reg, opts);
     if std::env::var("TOPO_FUSEDBG").is_ok() {
         // Debug: the connections each variant counts as an error (open or violating), to compare.
         let errs = |o: &[Outcome]| -> Vec<usize> { o.iter().enumerate().filter(|(_, x)| !x.routed || !x.viol.is_empty()).map(|(i, _)| i).collect() };
@@ -10150,7 +10209,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
     }
     let pre_parts = pre_snap.as_ref().map(|(o, nk)| {
         let a = assemble(model, dec, o, &term_over, first_layer, &reg);
-        let c = criteria(model, dec, &a, o, warn_n(nk), n_copper, &reg, opts);
+        let c = criteria(model, model_real, dec, &a, o, warn_n(nk), n_copper, &reg, opts);
         (c, a)
     });
     let Assembled { items, item_conn, reports, nets, length_by_layer, tot_len, tot_vias, violations: viol_list, diff_pairs: dp_list } = asm;
@@ -10933,12 +10992,13 @@ fn viol_events(model: &BoardModel, dec: &crate::decompose::Decomposition, out: &
     evs
 }
 
-/// The archive criteria of the assembled result `a` of outcomes `out` (`warnings` = warning-level
+/// The archive criteria of the assembled result `a` of outcomes `out` (`model` = the planning
+/// model, `model_real` = the board's own rules, which the necking is measured against; `warnings` = warning-level
 /// factor findings; `opts`: `[optimize] pick_shorts` counts the connections with a short, ranked
 /// at `short_weight`).
 /// O(items).
 #[allow(clippy::too_many_arguments)]
-fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assembled, out: &[Outcome], warnings: usize, n_layers: usize, reg: &Registry, opts: &Options) -> Criteria {
+fn criteria(model: &BoardModel, model_real: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assembled, out: &[Outcome], warnings: usize, n_layers: usize, reg: &Registry, opts: &Options) -> Criteria {
     let shorts_on = opts.pick_shorts;
     let routed = a.reports.iter().filter(|r| r.status == "routed").count();
     let mut area = 0.0;
@@ -10966,6 +11026,11 @@ fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assem
     let shorts = if shorts_on { out.iter().filter(|o| o.routed && o.viol.iter().any(|v| v.kind == "short")).count() } else { 0 };
     let penalty = viol_events(model, dec, out).iter().map(|(ci, ev)| reg.price(ev, &WireCtx { net: dec.connections[*ci].net, tier: dec.connections[*ci].tier })).sum::<f64>()
         + dec.connections.iter().flat_map(|c| out[c.id].dp_events.iter().map(move |ev| (c, ev))).map(|(c, ev)| reg.price(ev, &WireCtx { net: c.net, tier: c.tier })).sum::<f64>();
+    // pick-necks: necking measured on the drawn copper (`a.items`), against the REAL rules
+    // (`model_real`: a diff pair's rule width and pair via, never the alias planning disc).
+    let vias_by_net: BTreeMap<i32, i64> = a.items.iter().filter_map(|it| if let Item::Via(v) = it { Some(v.net) } else { None }).collect::<BTreeSet<_>>().into_iter().map(|n| (n, crate::vias::via_sizes(&model_real.rules, n, opts).first().map_or(0, |s| s.d))).collect();
+    let full_w = |ci: usize, net: i32| model_real.rules.diff_pairs.iter().find(|p| (p.p == net || p.n == net) && p.width > 0).map_or(dec.connections[ci].width, |p| p.width);
+    let (neck_mm2, neck_vias) = drawn_necking(&a.items, &a.item_conn, &full_w, &|_, net| vias_by_net.get(&net).copied().unwrap_or(0));
     Criteria {
         errors: open + violating,
         shorts,
@@ -10976,6 +11041,9 @@ fn criteria(model: &BoardModel, dec: &crate::decompose::Decomposition, a: &Assem
         vias: a.tot_vias,
         length_mm: a.tot_len as f64 / MM,
         shrinkages: out.iter().filter(|o| o.routed).map(|o| o.neck_n).sum(),
+        neck_mm2,
+        neck_vias,
+        necking: necking_mm_eq(neck_mm2, neck_vias, opts),
         warnings,
         area_mm2: area / (MM * MM),
     }
@@ -11068,6 +11136,13 @@ fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, pour_on: bool,
 
 #[cfg(test)]
 mod tests {
+    /// pick-necks r3: the necking decider is named in the round line (not "necking +9").
+    #[test]
+    fn round_delta_names_the_necking_in_mm_eq() {
+        assert_eq!(super::round_delta(("necking", 9.0)), "necking +9.0 mm-eq");
+        assert_eq!(super::round_delta(("vias", -2.0)), "vias -2");
+    }
+
     /// neck-regrow (lead 2026-11-26): only a neck over the whole wire of a wire wider than the
     /// default is a supply whole-wire neck.
     #[test]
@@ -11744,6 +11819,57 @@ mod tests {
         assert!(f_on > f_off + 50 && n_on - n_off == f_on - f_off, "grid on {f_on}/{n_on}, off {f_off}/{n_off}");
         assert_eq!(build_opts(&Options::default()).steiner_mm, 0.0);
         assert_eq!(build_opts(&Options { steiner: true, ..Options::default() }).steiner_mm, BuildOpts::default().steiner_mm);
+    }
+
+    /// pick-necks r2: necking measured on the drawn items, per segment width (a taper counts every step
+    /// at its own width), arcs by arc length, vias against the full via of their own net.
+    #[test]
+    fn drawn_necking_per_segment_width() {
+        use crate::geom::quant::{IVec2, TrackPrim};
+        use crate::model::{Pt, TrackItem, ViaItem};
+        const M: i32 = 1_000_000;
+        let seg = |net: i32, w: i64, a: (i32, i32), b: (i32, i32)| Item::Track(TrackItem { net, layer: 0, width: w, prim: TrackPrim::Seg { a: IVec2 { x: a.0, y: a.1 }, b: IVec2 { x: b.0, y: b.1 } }, group: None, wire: None });
+        let via = |net: i32, d: i64| Item::Via(ViaItem { kind: "via".into(), net, at: Pt { x: 0, y: 0 }, d, drill: 0, layers: vec![], group: None, wire: None });
+        let full_w = |_: usize, net: i32| if net == 7 { 400_000 } else { 600_000 };
+        let full_via = |_: usize, net: i32| if net == 7 { 500_000 } else { 800_000 };
+        // taper 0.6 / 0.4 / 0.2 mm over 1 mm each: 0 + 0.2 + 0.4 mm2 (the narrowest width over all three would be 1.2)
+        let taper = vec![seg(1, 600_000, (0, 0), (M, 0)), seg(1, 400_000, (M, 0), (2 * M, 0)), seg(1, 200_000, (2 * M, 0), (3 * M, 0))];
+        let (mm2, vias) = drawn_necking(&taper, &[0, 0, 0], &full_w, &full_via);
+        assert!((mm2 - 0.6).abs() < 1e-9 && vias == 0, "taper {mm2}");
+        // a diagonal 3-4-5 mm segment at 0.1 mm below full: 0.5 mm2; wider than full counts 0 (not negative)
+        let items = vec![seg(1, 500_000, (0, 0), (3 * M, 4 * M)), seg(1, 900_000, (0, 0), (10 * M, 0))];
+        let (mm2, _) = drawn_necking(&items, &[0, 0], &full_w, &full_via);
+        assert!((mm2 - 0.5).abs() < 1e-9, "diagonal {mm2}");
+        // the full width is per net (pair nets 7: 0.4 mm): 0.3 mm over 2 mm = 0.2 mm2
+        let (mm2, _) = drawn_necking(&[seg(7, 300_000, (0, 0), (2 * M, 0))], &[0], &full_w, &full_via);
+        assert!((mm2 - 0.2).abs() < 1e-9, "per-net full width {mm2}");
+        // a quarter circle of radius 2 mm (arc length pi mm) at 0.1 mm below full, drawn either way round
+        let arc = |s: (i32, i32), m: (i32, i32), e: (i32, i32)| Item::Track(TrackItem { net: 1, layer: 0, width: 500_000, prim: TrackPrim::Arc { start: IVec2 { x: s.0, y: s.1 }, mid: IVec2 { x: m.0, y: m.1 }, end: IVec2 { x: e.0, y: e.1 } }, group: None, wire: None });
+        let h = (2.0 * M as f64 * std::f64::consts::FRAC_1_SQRT_2) as i32;
+        for it in [arc((2 * M, 0), (h, h), (0, 2 * M)), arc((0, 2 * M), (h, h), (2 * M, 0))] {
+            let (mm2, _) = drawn_necking(&[it], &[0], &full_w, &full_via);
+            assert!((mm2 - 0.1 * std::f64::consts::PI).abs() < 2e-3, "arc {mm2}");
+        }
+        // vias: below the net's full via count, at it (and above) do not; per net
+        let vs = vec![via(1, 800_000), via(1, 799_999), via(1, 900_000), via(7, 500_000), via(7, 400_000)];
+        let (_, vias) = drawn_necking(&vs, &[0; 5], &full_w, &full_via);
+        assert_eq!(vias, 2, "799_999 on net 1 and 400_000 on net 7 are necked");
+        // nothing drawn, nothing necked
+        assert_eq!(drawn_necking(&[], &[], &full_w, &full_via), (0.0, 0));
+    }
+
+    /// pick-necks r2: the necking term = K x mm2 + neck_via_mm x vias, a negative option counts 0.
+    #[test]
+    fn necking_term_prices() {
+        let o = Options { neck_mm_per_mm2: 10.0, neck_via_mm: 7.0, ..Options::default() };
+        assert!((necking_mm_eq(0.5, 3, &o) - 26.0).abs() < 1e-9);
+        assert_eq!(necking_mm_eq(0.0, 0, &o), 0.0);
+        let z = Options { neck_mm_per_mm2: 0.0, neck_via_mm: 0.0, ..Options::default() };
+        assert_eq!(necking_mm_eq(5.0, 5, &z), 0.0);
+        let n = Options { neck_mm_per_mm2: -1.0, neck_via_mm: -1.0, ..Options::default() };
+        assert_eq!(necking_mm_eq(5.0, 5, &n), 0.0);
+        assert_eq!(Options::default().neck_mm_per_mm2, 10.0);
+        assert_eq!(Options::default().neck_via_mm, 10.0);
     }
 
     #[test]

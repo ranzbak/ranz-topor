@@ -223,20 +223,22 @@ def bests_summary_line(bests) -> str:
     parts = []
     for b in bests:
         roles = ", ".join(b.get("roles") or []) or "-"
-        parts.append(("*" if b.get("applied") else "") + f"{roles}: {_crit_text(b.get('drawn'))}")
+        parts.append(("*" if b.get("applied") else "") + f"{roles}: {_crit_text(b.get('drawn'))}"
+                     + (f" / necking {b['drawn']['necking']:.1f}" if (b.get("drawn") or {}).get("necking") is not None else ""))
     return "Four bests drawn (* = applied, [optimize] pick): " + " · ".join(parts)
 
 
 def bests_table_md(bests) -> list:
     """TW3: the report.md table of the four bests: roles in the table (predicted) and among the drawn rows,
     predicted and drawn criteria, applied. O(rows)."""
-    rows = ["| roles (table) | roles (drawn) | row | run | predicted | drawn | shorts | open | applied |",
-            "|---|---|---|---|---|---|---|---|---|"]
+    rows = ["| roles (table) | roles (drawn) | row | run | predicted | drawn | shorts | open | necking | necked mm² | neck vias | applied |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for b in bests:
         d = b.get("drawn") or {}
         rows.append(f"| {', '.join(b.get('roles') or [])} | {', '.join(b.get('drawn_roles') or [])} | {b.get('row')} | "
                     f"{_na(b.get('run'))} | {_crit_text(b.get('predicted'))} | {_crit_text(d)} | {_na(d.get('shorts'))} | "
-                    f"{_na(d.get('open'))} | {'yes' if b.get('applied') else ''} |")
+                    f"{_na(d.get('open'))} | {_na(d.get('necking'), '{:.1f}')} | {_na(d.get('neck_mm2'), '{:.2f}')} | "
+                    f"{_na(d.get('neck_vias'))} | {'yes' if b.get('applied') else ''} |")
     return rows
 
 
@@ -365,12 +367,12 @@ class RunReport:
     def _variants(self) -> list:
         """The topological core's Pareto archive ([optimize] objective): one row per kept variant, the pick
         marked; the routed result is the picked variant. O(variants)."""
-        rows = ["| variant | errors | vias | length mm | shrinkages | warnings | area mm² | mm/via | best on | picked |",
-                "|---|---|---|---|---|---|---|---|---|---|"]
+        rows = ["| variant | errors | vias | length mm | shrinkages | necking | warnings | area mm² | mm/via | best on | picked |",
+                "|---|---|---|---|---|---|---|---|---|---|---|"]
         for v in self.facts["variants"]:
             mpv = v.get("mm_per_via")
             rows.append(f"| {v.get('label')} | {v.get('errors')} | {v.get('vias')} | {v.get('length_mm')} | "
-                        f"{v.get('shrinkages')} | {v.get('warnings')} | {v.get('area_mm2')} | "
+                        f"{v.get('shrinkages')} | {_na(v.get('necking'), '{:.1f}')} | {v.get('warnings')} | {v.get('area_mm2')} | "
                         f"{'-' if mpv is None else mpv} | {', '.join(v.get('champion') or [])} | "
                         f"{'yes' if v.get('picked') else ''} |")
         moves = self.facts.get("moves") or {}
