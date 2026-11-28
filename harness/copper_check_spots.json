@@ -1,0 +1,19 @@
+{"board": "qmtech-minimig user run 2026-11-27 (scratch/agent-wt/reports/pad-entry-spots/user-qm-routed.kicad_pcb)",
+ "source": "reports/u5-spots, reports/hdmi-spots, reports/pad-entry-spots (user-circled 2026-11-27)",
+ "spots": [
+  {"id": "U1", "what": "via in pad U5.16 (JS_INTB_5V)", "x": 143.7895, "y": 109.725, "r": 1.5, "net": "JS_INTB_5V", "kinds": ["via_in_pad"]},
+  {"id": "U2", "what": "JS_SCK necked 0.109 over 11.5 mm, room exists", "x": 146.9, "y": 109.02, "r": 8.0, "net": "JS_SCK", "kinds": ["neck_room_fits", "neck_room_partial", "neck_forced"]},
+  {"id": "U3a", "what": "VIN5V chained through 0.4 mm pin U5.15", "x": 143.79, "y": 110.375, "r": 1.0, "net": "VIN5V", "kinds": ["power_chain_narrow_pin"]},
+  {"id": "U3b", "what": "0.134 neck / off-axis entry into U5.15 where pad width fits", "x": 142.6, "y": 111.0, "r": 2.5, "net": "VIN5V", "kinds": ["neck_room_fits", "neck_room_partial", "neck_forced", "off_axis_entry"]},
+  {"id": "U4", "what": "via vs JS_CS_5V clearance DRC 0.0945", "x": 145.127, "y": 112.3, "r": 1.5, "kinds": ["clearance"]},
+  {"id": "U5", "what": "VIN5V thick trace at minimum clearance past R17.1 / U5.8", "x": 135.5, "y": 114.5, "r": 3.0, "net": "VIN5V", "kinds": ["min_clearance_run"]},
+  {"id": "H1", "what": "ADV_DDCSCL_C 0.1 neck, 7 bends, off-axis entry USB1.15", "x": 137.09, "y": 53.2, "r": 3.0, "net": "ADV_DDCSCL_C", "kinds": ["neck_room_fits", "neck_room_partial", "bend_excess", "off_axis_entry"]},
+  {"id": "H2", "what": "ADV_TX2- hook under GND pin: DRC 0.067 + 1.49x", "x": 130.33, "y": 56.55, "r": 3.0, "net": "ADV_TX2", "kinds": ["clearance", "detour"]},
+  {"id": "H3", "what": "ADV_TXC- spike past pad, short over GND U3.14, 1.93x", "x": 135.3, "y": 64.5, "r": 3.5, "net": "ADV_TXC", "kinds": ["shorting_items", "acute_angle", "detour", "free_angle", "clearance"]},
+  {"id": "H4a", "what": "ADV_DDCSDA 0.089 neck over 15 mm + short vs BGVDD via", "x": 138.86, "y": 71.2, "r": 3.0, "net": "ADV_DDCSDA", "kinds": ["shorting_items", "clearance", "neck_room_fits", "neck_room_partial", "neck_forced"]},
+  {"id": "H4b", "what": "HDMI5V loop 2.17x round R12", "x": 140.0, "y": 66.0, "r": 14.0, "net": "HDMI5V", "kinds": ["detour"]},
+  {"id": "PA", "what": "U3.6 double entry (TX2-)", "x": 131.2, "y": 64.9625, "r": 1.0, "net": "ADV_TX2", "kinds": ["double_entry", "end_off_centre"]},
+  {"id": "PB", "what": "U3.10 lane 0.132 off axis, jog in pad (TX0+)", "x": 133.2, "y": 64.9625, "r": 1.0, "net": "ADV_TX0", "kinds": ["off_axis_entry", "end_off_centre", "double_entry"]},
+  {"id": "PC", "what": "U3.35 double entry (TX2+)", "x": 130.2, "y": 59.24, "r": 1.0, "net": "ADV_TX2", "kinds": ["double_entry", "end_off_centre"]},
+  {"id": "PD", "what": "U3.37 entered from body side (ESD_BYP)", "x": 129.2, "y": 59.24, "r": 1.0, "net": "ESD_BYP", "kinds": ["wrong_side_entry", "off_axis_entry"]}
+ ]}
