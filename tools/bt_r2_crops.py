@@ -11,9 +11,8 @@ import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from harness.dvn_crop_png import draw  # noqa: E402  (harness before pcbnew: test_kicad_env)
 import pcbnew  # noqa: E402
-
-from harness.dvn_crop_png import draw  # noqa: E402
 
 MM = 1e6
 
