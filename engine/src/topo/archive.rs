@@ -658,6 +658,10 @@ mod tests {
         let (s1, s2) = (mk(80.0, 30.0), mk(100.0, 3.0));
         assert!(o.better(&s2, &s1));
         assert_eq!(o.decider(&s2, &s1).map(|d| d.0), Some("necking"));
+        // an exact tie in length + vias: the necking alone decides, whichever way the difference points
+        let (t1, t2) = (mk(100.0, 12.0), mk(100.0, 3.0));
+        assert_eq!(o.decider(&t1, &t2), Some(("necking", 9.0)));
+        assert_eq!(o.decider(&t2, &t1), Some(("necking", -9.0)));
         // errors and shorts stay first
         let err = Criteria { errors: 1, ..mk(10.0, 0.0) };
         assert!(o.better(&short_necked, &err), "fewer errors beat less necking");

@@ -118,6 +118,17 @@ pub(crate) fn a1_supply_grade(w: f64, to: f64, len: f64) -> (f64, f64) {
     (left, (1.0 - left) * len / MM)
 }
 
+/// The round line's text for a decider `(name, delta)` of [`archive::Objective::decider`].
+fn round_delta((name, d): (&str, f64)) -> String {
+    match name {
+        "length" => format!("length {:+.3} m", d / 1000.0),
+        "score" => format!("weighted score {d:+.1} mm"),
+        "necking" => format!("necking {d:+.1} mm-eq"),
+        "area" => format!("area {d:+.1} mm²"),
+        _ => format!("{name} {d:+.0}"),
+    }
+}
+
 /// pick-necks (user 2026-11-27): the necking of drawn copper, measured on the items as written.
 /// Returns `(mm2, vias)`: `mm2` = sum over the tracks of `(w_full - w_drawn) x length` in mm2 (each
 /// segment or arc at its own width, so a taper counts every step at its own width; a track at or
@@ -1627,20 +1638,13 @@ impl<'a> Coord<'a> {
                     "worse"
                 };
                 let c = &j.crit;
-                let delta = |(name, d): (&str, f64)| match name {
-                    "length" => format!("length {:+.3} m", d / 1000.0),
-                    "score" => format!("weighted score {d:+.1} mm"),
-                    "necking" => format!("necking {d:+.1} mm-eq"),
-                    "area" => format!("area {d:+.1} mm²"),
-                    _ => format!("{name} {d:+.0}"),
-                };
                 let against = match (reference, dec) {
                     (None, _) => "new best (the first result)".to_string(),
                     (Some((i, b)), None) if is_best => format!("the best now: the same score as {}, and ties go to the lower run", at(i, b.cycle)),
                     (Some((i, b)), None) => format!("same score as the best ({}): the earlier one stays", at(i, b.cycle)),
-                    (Some((i, b)), Some(d)) if is_best => format!("new best: {} against {}", delta(d), at(i, b.cycle)),
-                    (Some((i, b)), Some(d)) if vs == "better" => format!("better than the best ({}): {}, but the variant table did not keep it", at(i, b.cycle), delta(d)),
-                    (Some((i, b)), Some(d)) => format!("worse than the best ({}): {}", at(i, b.cycle), delta(d)),
+                    (Some((i, b)), Some(d)) if is_best => format!("new best: {} against {}", round_delta(d), at(i, b.cycle)),
+                    (Some((i, b)), Some(d)) if vs == "better" => format!("better than the best ({}): {}, but the variant table did not keep it", at(i, b.cycle), round_delta(d)),
+                    (Some((i, b)), Some(d)) => format!("worse than the best ({}): {}", at(i, b.cycle), round_delta(d)),
                 };
                 let line = format!(
                     "{}: errors {}, open {}, vias {}, length {:.3} m, shrinkages {}; rule violations {}{}, routed {} of {}{}: {against}",
@@ -11132,6 +11136,13 @@ fn pattern_moves_line(kinds: &[String], share: f64, stuck_w: f64, pour_on: bool,
 
 #[cfg(test)]
 mod tests {
+    /// pick-necks r3: the necking decider is named in the round line (not "necking +9").
+    #[test]
+    fn round_delta_names_the_necking_in_mm_eq() {
+        assert_eq!(super::round_delta(("necking", 9.0)), "necking +9.0 mm-eq");
+        assert_eq!(super::round_delta(("vias", -2.0)), "vias -2");
+    }
+
     /// neck-regrow (lead 2026-11-26): only a neck over the whole wire of a wire wider than the
     /// default is a supply whole-wire neck.
     #[test]
