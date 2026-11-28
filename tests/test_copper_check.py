@@ -268,3 +268,26 @@ def test_wrong_side_entry_from_the_body_side(tmp_path):
     angled = cc.check_pad_entries(cc.Ctx(cc.load_board(*board(tmp_path, [ic, seg(1.5, -1, 0.5, 0, 0.2, "A3")]))))
     r = [r for r in angled if r["type"] == "wrong_side_entry"]
     assert r and r[0]["severity"] == "warning" and r[0]["minutes"] == 4.0
+
+
+def test_acute_threshold_both_sides(tmp_path):
+    def turn(deg):   # one bend of `deg` at (5,0): leg out, then back towards a second pad
+        x, y = 5 + 5 * math.cos(math.radians(deg)), 5 * math.sin(math.radians(deg))
+        pads = [fp("U1", 0, 0, [("1", 0, 0, 0, 1, 1, "A")]), fp("U2", x, y, [("1", 0, 0, 0, 1, 1, "A")])]
+        return cc.check_shape(cc.Ctx(cc.load_board(*board(tmp_path, pads + [seg(0, 0, 5, 0, 0.2, "A"), seg(5, 0, x, y, 0.2, "A")]))))
+    assert "acute_angle" in kinds(turn(105))        # interior 75 deg: a spike
+    assert "acute_angle" not in kinds(turn(75))     # interior 105 deg: fine (ACUTE_DEG +30 would fire)
+
+
+def test_tolerated_offset_entry_does_not_fire(tmp_path):
+    pad = fp("U1", 0, 0, [("1", 0, 0, 90, 1.4, 0.3, "A")])
+    rows = cc.check_pad_entries(cc.Ctx(cc.load_board(*board(tmp_path, [pad, seg(0, 0, 0.09, 0.4, 0.2, "A"), seg(0.09, 0.4, 0.09, 3, 0.2, "A")]))))
+    assert "off_axis_entry" not in kinds(rows)   # 0.09 < 0.4 x 0.3 = 0.12: lane beside the axis, still tolerated
+
+
+def test_no_pro_fails_loudly(tmp_path):
+    pcb, pro = board(tmp_path, [seg(0, 0, 5, 0, 0.2, "A")])
+    pro.unlink()
+    with pytest.raises(SystemExit):
+        cc.run(pcb, tmp_path / "o", no_drc=True)
+    assert any("no .kicad_pro" in n for n in cc.run(pcb, tmp_path / "o", no_drc=True, no_pro=True)["notes"])

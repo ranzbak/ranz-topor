@@ -62,7 +62,6 @@ CENTRE_TOL = 0.01      # mm
 DOUBLE_TOL = 0.05      # mm between two trace ends inside one pad
 POWER_PIN_FRAC = 0.7   # a pad narrower than this fraction of the net width cannot carry the chain
 OFFSET_FRAC = 0.4      # the entering track's line may miss the pad centre by this fraction of the pad short side (hand-calibrated 2026-11-28)
-AXIS_DEG = 12.0        # pad entry heading tolerance to the pad long axis
 FINE_PAD = 0.6         # entry checks only for pads at most this wide (fine pitch: the trace is as wide as the pad)
 ASPECT_MIN = 1.3       # pads below this aspect have no axis
 SIDE_DOT = 0.5         # entry direction . outward direction above this = wrong side
@@ -347,14 +346,14 @@ def pair_partner(net: str) -> str | None:
 
 
 def expected_width(b: Board, net: str) -> float:
-    """Width the net is meant to be drawn at: the class diff_pair_width for a member of a diff pair (both halves exist
+    """Width the net is meant to be drawn at: min(track, diff_pair_width) for a member of a diff pair (both halves exist
     and the class has its own pair width), else the class track width."""
     w = class_val(b, net, "track_width")
     c = b.classes.get(net_class(b, net)) or {}
     dw = c.get("diff_pair_width")
     q = pair_partner(net)
     if dw and q and q in b.net_set:
-        return float(dw)
+        return min(w, float(dw)) if w else float(dw)
     return w
 
 
@@ -1028,13 +1027,16 @@ def own_checks(b: Board, ratio=RATIO):
 # ---------------------------------------------------------------- generated review rules + kicad-cli
 def review_rules(b: Board, cx: Ctx, ratio=RATIO) -> str:
     out = ["(version 1)", "# generated review rules: warning only, review only, never in the user's project"]
+    pair = {n for n in b.nets if expected_width(b, n) != class_val(b, n, "track_width")}   # pair members at min(track, pair)
+    for n in sorted(pair):
+        out.append(f'(rule "rv_neck_pair_{len(out)}" (constraint track_width (min {expected_width(b, n):g}mm)) '
+                   f'(condition "A.NetName == \'{n}\'") (severity warning))')
+    excl = "".join(f" && A.NetName != '{n}'" for n in sorted(pair))
     for cname, c in b.classes.items():
         w = c.get("track_width")
-        if w and c.get("diff_pair_width"):
-            w = min(w, c["diff_pair_width"])   # pair members are meant to be drawn at the pair width
-        if w and any(net_class(b, n) == cname for n in b.nets):
+        if w and any(net_class(b, n) == cname and n not in pair for n in b.nets):
             out.append(f'(rule "rv_neck_{cname.replace(" ", "_")}" (constraint track_width (min {w:g}mm)) '
-                       f'(condition "A.NetClass == \'{cname}\'") (severity warning))')
+                       f'(condition "A.NetClass == \'{cname}\'{excl}") (severity warning))')
     out.append('(rule "rv_short_seg" (constraint track_segment_length (min 0.1mm)) (severity warning))')
     out.append('(rule "rv_via_in_pad" (constraint physical_clearance (min 0.001mm)) '
                '(condition "A.Type == \'Via\' && B.Type == \'Pad\' && A.NetName == B.NetName") (severity warning))')
@@ -1170,16 +1172,22 @@ def recall(rows, spots) -> dict:
 
 # ---------------------------------------------------------------- driver
 def run(pcb: Path, out: Path, pro: Path | None = None, result: Path | None = None, drc_json: Path | None = None,
-        no_drc: bool = False, ratio: float = RATIO, spots: Path | None = None, threads_note: str = "") -> dict:
+        no_drc: bool = False, ratio: float = RATIO, spots: Path | None = None, threads_note: str = "",
+        no_pro: bool = False) -> dict:
     pcb = Path(pcb)
     if pro is None:
         for cand in (pcb.with_suffix(".kicad_pro"), *sorted(pcb.parent.glob("*.kicad_pro"))[:1]):
             if cand.is_file():
                 pro = cand
                 break
+    notes = []
+    if pro is None:
+        if not no_pro:
+            raise SystemExit(f"copper-check: no .kicad_pro next to {pcb}; pass --pro X.kicad_pro, or --no-pro to use a 0.2 mm Default class")
+        notes.append("no .kicad_pro: judged against a 0.2 mm Default class (class widths, clearances and pair widths unknown)")
+        print("copper-check: " + notes[-1], file=sys.stderr)
     b = load_board(pcb, pro)
     rows, cx = own_checks(b, ratio)
-    notes = []
     drc = None
     if drc_json:
         drc = json.loads(Path(drc_json).read_text())
@@ -1243,6 +1251,7 @@ def main(argv=None):
     ap.add_argument("pcb")
     ap.add_argument("--out", required=True)
     ap.add_argument("--pro")
+    ap.add_argument("--no-pro", action="store_true", help="run without a .kicad_pro (0.2 mm Default class)")
     ap.add_argument("--result")
     ap.add_argument("--drc")
     ap.add_argument("--no-drc", action="store_true")
@@ -1250,7 +1259,7 @@ def main(argv=None):
     ap.add_argument("--spots")
     a = ap.parse_args(argv)
     doc = run(Path(a.pcb), Path(a.out), Path(a.pro) if a.pro else None, Path(a.result) if a.result else None,
-              Path(a.drc) if a.drc else None, a.no_drc, a.ratio, Path(a.spots) if a.spots else None)
+              Path(a.drc) if a.drc else None, a.no_drc, a.ratio, Path(a.spots) if a.spots else None, no_pro=a.no_pro)
     print(f"copper-check: {doc['rows_total']} rows, ~{doc['total_cleanup_min']} min cleanup -> {a.out}/copper-check.md")
     if doc.get("recall"):
         print(f"recall {doc['recall']['recall']:.0%}")

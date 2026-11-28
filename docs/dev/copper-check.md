@@ -45,5 +45,8 @@ All thresholds are constants at the top of `copper_check.py`. Dropped: KiCad's `
 ## Calibration (2026-11-28)
 
 Rates per 100 connections on the hand layout (qmtech-bh26, esp-rust-board) vs the user's topor run: see reports/copper-check-20261128-*.md.
-Checks the hand layout also trips often (end_off_centre, acute_angle, free_angle, detour, bend_excess) do not discriminate; read them as
-board-wide numbers, not as defects. Recall: `harness/copper_check_spots.json` holds the 15 user-circled qmtech spots; `--spots` reports recall.
+Only `bend_excess` is "info, not discriminating" (hand and topor rates alike). `end_off_centre`, `acute_angle`, `free_angle` and `detour` are
+user rules for topor output (traces end at the pad centre, no acute angles, free-angle is a counted fallback, no detours): they stay in the ranked
+total whatever the hand layout's rate. Recall: `harness/copper_check_spots.json` holds the 15 user-circled qmtech spots; `--spots` reports recall.
+The recall test needs the local scratch report and the projects folder, so it is skipped in CI.
+Without a `.kicad_pro` the tool stops with an error; `--no-pro` runs on a 0.2 mm Default class and records a note (stderr + notes).
