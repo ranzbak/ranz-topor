@@ -2578,22 +2578,30 @@ pub fn split_line(fuse: usize, polish: usize, split: &[String]) -> Option<String
     Some(l)
 }
 
-/// first-draw-45 P4: most passes of the straightening over the draw order (a work bound; a pass
-/// that changes nothing ends it earlier, at a fixpoint). r7: the qmtech USB corner reaches its
-/// fixpoint in the 3rd pass (`straightening_reaches_its_fixpoint`); the boards take 3 (esp,
-/// wiccon) to 4 (qmtech, at the bound) passes.
-const STRAIGHTEN_PASSES: usize = 4;
-
 /// first-draw-45 P4: the straightening pass's report line: `n` stretches of two or more bends
 /// redrawn as one straight, elbow or Z form, the length that changed (mm, + added), the steps the
 /// split guard refused, the passes and whether the last one changed nothing (`fixpoint`; else the
-/// loop stopped at [`STRAIGHTEN_PASSES`]), the time (s).
-pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, fixpoint: bool, secs: f64) -> String {
+/// loop stopped at its bound `cap`, `[drawing] straighten_passes`, first-draw-45 r7: qmtech reached
+/// the bound of 4 still changing), the time (s). With a re-fit round (bundle-turn (3)) `passes`
+/// counts both phases, each bounded by `cap`.
+pub fn straighten_line(n: usize, added_mm: f64, refused: usize, passes: usize, cap: usize, fixpoint: bool, secs: f64) -> String {
     format!(
         "octilinear straightening after drawing (draw order, {passes} passes, {}): {n} stretches of two or more bends redrawn as one straight, elbow or Z form, {:.1} mm {} in length; {refused} refused by the split guard ({secs:.1} s)",
-        if fixpoint { "the last without a change".to_string() } else { format!("stopped at the bound of {STRAIGHTEN_PASSES} passes with changes in the last") },
+        if fixpoint { "the last without a change".to_string() } else { format!("stopped at the bound of {cap} passes with changes in the last ([drawing] straighten_passes)") },
         added_mm.abs(),
         if added_mm > 0.0 { "added" } else { "saved" }
+    )
+}
+
+/// bundle-turn (3): the re-fit line: `tried` wires drawn with violations (never drop) drawn again
+/// after the straightening moved their neighbours, `kept` of them with fewer violations or shorter
+/// at equal violations, `legal` of those without any violation left; `stopped`: the pass stopped
+/// at Cancel or the time limit before every such wire had its turn.
+pub fn refit_line(tried: usize, kept: usize, legal: usize, stopped: bool, skipped: usize) -> String {
+    format!(
+        "never drop, re-fit after the straightening: {tried} wires drawn with violations drawn again against the straightened neighbours; {kept} kept (fewer violations, or shorter at equal violations), {legal} of them now without violations{}{}",
+        if skipped > 0 { format!("; {skipped} not drawn again (no violation partner and no wire on their planned edges moved)") } else { String::new() },
+        if stopped { "; stopped at Cancel or the time limit ([run] drawing_grace_s) before the rest (they keep their copper)" } else { "" }
     )
 }
 
@@ -4432,64 +4440,97 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         if pairs.is_empty() {
             return;
         }
-        let pj = super::prof::g(super::prof::K::XrJudge);
-        let before = score(st, lr);
-        let saved = (st.clone(), wire_conn.clone(), reroutes.clone(), lr.clone(), *ripped_total);
-        drop(pj);
-        let pr = super::prof::g(super::prof::K::XrReplan);
-        let mut topo = Topo {
-            reg: if opts.fluctuation > 0.0 { reg.fluctuated(seed_of(opts.seed, round, 2000 + stage), opts.fluctuation) } else { reg.clone() },
-            conns: conns.clone(),
-            tiers: (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect(),
-            wire_conn: wire_conn.clone(),
-            reroutes: reroutes.clone(),
-            ws0,
-            cap,
-            evals: 0,
-            max_evals: opts.max_moves.max(1),
-            ripped: *ripped_total,
-            max_ripped: opts.max_ripped,
-            tight: Vec::new(),
-            over_mm: priced.then_some(overflow_mm),
-            tally: Tally::default(),
-        };
-        let mut resolved = 0usize;
+        // bundle-turn r2: the pass is judged as a group (its pairs re-planned together, then one
+        // layering and one score). A group the score refuses is split in two and each half is
+        // tried again from the state before it, the first half kept (or not) before the second
+        // is tried, down to `[optimize] crossing_split` levels. Before, one refused pass dropped
+        // every resolution in it: on qmtech with the oblique price on, the second pass (JS_CS /
+        // JS_MOSI clinched at U5, ADV_D6 round the ADV7511) was refused as a whole and those
+        // wires kept their detours (+11 mm, +15 mm) though their own re-plan was cheaper.
+        let mut groups: Vec<(std::ops::Range<usize>, usize)> = vec![(0..pairs.len(), 0)];
         let mut gone: BTreeSet<WireId> = BTreeSet::new();
-        for p in &pairs {
+        while let Some((range, depth)) = groups.pop() {
             if expired() {
                 break;
             }
-            if gone.contains(&p.first) || gone.contains(&p.second) || !st.wires[p.first].alive || !st.wires[p.second].alive {
+            let pj = super::prof::g(super::prof::K::XrJudge);
+            let before = score(st, lr);
+            let saved = (st.clone(), wire_conn.clone(), reroutes.clone(), lr.clone(), *ripped_total);
+            drop(pj);
+            let pr = super::prof::g(super::prof::K::XrReplan);
+            let mut topo = Topo {
+                reg: if opts.fluctuation > 0.0 { reg.fluctuated(seed_of(opts.seed, round, 2000 + stage), opts.fluctuation) } else { reg.clone() },
+                conns: conns.clone(),
+                tiers: (0..conns.len()).map(|ci| tier_of(conn_of[ci])).collect(),
+                wire_conn: wire_conn.clone(),
+                reroutes: reroutes.clone(),
+                ws0,
+                cap,
+                evals: 0,
+                max_evals: opts.max_moves.max(1),
+                ripped: *ripped_total,
+                max_ripped: opts.max_ripped,
+                tight: Vec::new(),
+                over_mm: priced.then_some(overflow_mm),
+                tally: Tally::default(),
+            };
+            let mut resolved = 0usize;
+            let mut moved: BTreeSet<WireId> = BTreeSet::new();
+            for p in &pairs[range.clone()] {
+                if expired() {
+                    break;
+                }
+                if gone.contains(&p.first) || gone.contains(&p.second) || moved.contains(&p.first) || moved.contains(&p.second) || !st.wires[p.first].alive || !st.wires[p.second].alive {
+                    continue;
+                }
+                if depth == 0 {
+                    xadd(1, 1);
+                }
+                // Route the rule's first wire first, the interfering one after it (try_joint routes
+                // its second argument first).
+                if topo.try_joint(st, p.second, p.first).is_some() {
+                    moved.extend([p.first, p.second]);
+                    resolved += 1;
+                } else if topo.try_reroute(st, p.second).is_some() {
+                    moved.insert(p.second);
+                    resolved += 1;
+                }
+            }
+            drop(pr);
+            if resolved == 0 {
                 continue;
             }
-            xadd(1, 1);
-            // Route the rule's first wire first, the interfering one after it (try_joint routes
-            // its second argument first).
-            if topo.try_joint(st, p.second, p.first).is_some() {
-                gone.extend([p.first, p.second]);
-                resolved += 1;
-            } else if topo.try_reroute(st, p.second).is_some() {
-                gone.insert(p.second);
-                resolved += 1;
+            let _pj = super::prof::g(super::prof::K::XrJudge);
+            st.uncross_all(50);
+            let lr2 = assign(st);
+            let after = score(st, &lr2);
+            // A part of a refused group is kept only when it also adds no predicted violation
+            // (its ranked count, as the archive's pick reads it, does not rise): the split looks
+            // for the re-plans the rest of the group hid, not for more length-for-violation trades
+            // than the whole pass would have made (qmtech, bt2g: split parts that each traded 2
+            // predicted violations for ~130 mm drew 44 more DRC errors).
+            let keep = p4_better(&after, &before) && (depth == 0 || p4_ranked(&after) <= p4_ranked(&before) + 1e-9);
+            if std::env::var_os("TOPO_XRDBG").is_some() {
+                let cs: Vec<usize> = moved.iter().filter_map(|&w| topo.wire_conn.get(w).copied()).collect();
+                eprintln!("XRDBG stage {stage} depth {depth} pairs {}..{} resolved {resolved} score {:.3}+{:.3} viol {} -> {:.3}+{:.3} viol {}: {} conns {cs:?}", range.start, range.end, before.0, before.3, before.1, after.0, after.3, after.1, if keep { "kept" } else { "refused" });
             }
-        }
-        drop(pr);
-        if resolved == 0 {
-            return;
-        }
-        let _pj = super::prof::g(super::prof::K::XrJudge);
-        st.uncross_all(50);
-        let lr2 = assign(st);
-        let after = score(st, &lr2);
-        if p4_better(&after, &before) {
-            *wire_conn = topo.wire_conn;
-            *reroutes = topo.reroutes;
-            *ripped_total = topo.ripped;
-            *lr = lr2;
-            xadd(2, resolved);
-            xadd(3, 1);
-        } else {
-            (*st, *wire_conn, *reroutes, *lr, *ripped_total) = saved;
+            if keep {
+                *wire_conn = topo.wire_conn;
+                *reroutes = topo.reroutes;
+                *ripped_total = topo.ripped;
+                *lr = lr2;
+                gone.extend(moved);
+                xadd(2, resolved);
+                xadd(3, 1);
+            } else {
+                (*st, *wire_conn, *reroutes, *lr, *ripped_total) = saved;
+                if depth < opts.crossing_split && range.len() >= 2 {
+                    let mid = range.start + range.len() / 2;
+                    // Last in, first out: the first half is tried first.
+                    groups.push((mid..range.end, depth + 1));
+                    groups.push((range.start..mid, depth + 1));
+                }
+            }
         }
     };
     crossing_pass(&mut st, &mut wire_conn, &mut reroutes, &mut lr, &mut ripped_total, 0);
@@ -5948,7 +5989,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 }
                 if self.dbg {
                     let t = self.dbg_crit();
-                    eprintln!("LOOPDBG[{}] cycle {} loop P4: {} wires ripped, {}: {t}", self.dbg_tag, c.cycle, vw.len(), if lost { "undone (a wire found no path)" } else if worse { "undone (worse)" } else { "taken" });
+                    eprintln!("LOOPDBG[{}] cycle {} loop P4: {} wires ripped (conns {cis:?}), {}: {t}", self.dbg_tag, c.cycle, vw.len(), if lost { "undone (a wire found no path)" } else if worse { "undone (worse)" } else { "taken" });
                 }
                 true
             }
@@ -9212,13 +9253,34 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
         let mut str_pieces: BTreeMap<i32, super::netconn::Conn> = BTreeMap::new();
         let order: Vec<WireId> = live.iter().copied().filter(|w| drawn.contains_key(w)).collect();
         // Passes over the order until one changes nothing (each step lowers the wire's price, so
-        // it ends; at most STRAIGHTEN_PASSES, a work bound): a wire straightened before its
-        // neighbours gets another turn once they have moved.
+        // it ends; at most `[drawing] straighten_passes`, a work bound): a wire straightened before
+        // its neighbours gets another turn once they have moved.
+        let cap = opts.straighten_passes.max(1);
         let mut pass_changed = true;
-        let mut passes = 0usize;
-        while pass_changed && passes < STRAIGHTEN_PASSES {
+        let (mut passes, mut phase) = (0usize, 0usize);
+        // bundle-turn (3), `[drawing] refit_forced` (off by default): the wires drawn with
+        // violations (never drop) were forced against their
+        // neighbours' first drafts; once the straightening has moved those, each is drawn again
+        // against the copper as it is ([`draw::Drawer::refit_forced`], kept when it has fewer
+        // violations), then the straightening runs again (one re-fit round; debug arm
+        // `TOPO_FD45_OFF=refit`). TopoR 6.3 manual p. 237: the minimal clearance only in the
+        // narrowest spots, so a run squeezed where room has become free is fitted again.
+        let mut refit_round_done = !opts.refit_forced || !opts.allow_violations || super::octi::fd45_off("refit");
+        let (mut refit_tried, mut refit_kept) = (0usize, 0usize);
+        // The re-fit is an optional pass of the drawing: it stops at Cancel, at `[run]
+        // drawing_grace_s` (soft limit) or at the time limit (hard); every wire stays drawn.
+        let refit_stop = || ctl.is_cancelled() || ctl.limit.draw_grace_over(t_draw_c) || (!soft() && ctl.deadline().is_some_and(|d| ctl.limit.now() >= d.max(floor)));
+        let mut refit_stopped = false;
+        // The wires the straightening (or a kept re-fit) changed: a forced wire is drawn again
+        // only when one of its violation partners or a wire on one of its planned edges is among
+        // them; else its surroundings are as they were and the forced draw would repeat itself.
+        let mut moved: BTreeSet<WireId> = BTreeSet::new();
+        let mut refit_skipped = 0usize;
+        loop {
+        while pass_changed && phase < cap {
             pass_changed = false;
             passes += 1;
+            phase += 1;
             for &w in &order {
                 let mut wo = drawn.remove(&w).expect("drawn wire");
                 let (len0, net) = (wo.length_nm, st.wires[w].net);
@@ -9242,6 +9304,7 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 let k = dr.octi_straighten(&mut wo, &keep, &mut joined);
                 if k > 0 {
                     pass_changed = true;
+                    moved.insert(w);
                     n_str += k;
                     str_nm += wo.length_nm - len0;
                     let ci = conn_of[wire_conn[w]];
@@ -9251,8 +9314,57 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
                 drawn.insert(w, wo);
             }
         }
+        if refit_round_done {
+            break;
+        }
+        refit_round_done = true;
+        let mut kept_any = false;
+        for &w in &order {
+            if drawn.get(&w).is_none_or(|o| o.viol.is_empty()) {
+                continue;
+            }
+            let near_moved = drawn[&w].viol.iter().any(|v| v.src.hit_wire.is_some_and(|h| moved.contains(&h)))
+                || st.wires[w].passes.iter().any(|&p| st.edge_order[st.passes[p].edge].iter().any(|&q| { let x = st.passes[q].wire; x != w && moved.contains(&x) }));
+            if !near_moved {
+                refit_skipped += 1;
+                continue;
+            }
+            if refit_stop() {
+                refit_stopped = true;
+                break;
+            }
+            let old = drawn.remove(&w).expect("drawn wire");
+            if let Some((key, q)) = joint_of(w, &drawn, &plans) {
+                dr.end_at.insert(key, q);
+            }
+            refit_tried += 1;
+            match dr.refit_forced(&plans[&w], &placed[&w], &old) {
+                Some(nw) => {
+                    kept_any = true;
+                    refit_kept += 1;
+                    moved.insert(w);
+                    let ci = conn_of[wire_conn[w]];
+                    necking.retain(|(c, _)| *c != ci);
+                    settle(octi_on, &mut out, &mut necking, ci, w, &nw, b, &st, model.rules.default.width as f64);
+                    str_pieces.remove(&st.wires[w].net);
+                    drawn.insert(w, nw);
+                }
+                None => {
+                    drawn.insert(w, old);
+                }
+            }
+        }
+        if !kept_any {
+            break;
+        }
+        pass_changed = true;
+        phase = 0;
+        }
         if n_str > 0 || str_refused > 0 {
-            warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, !pass_changed, t_str.elapsed().as_secs_f64()));
+            warnings.push(straighten_line(n_str, str_nm / MM, str_refused, passes, cap, !pass_changed, t_str.elapsed().as_secs_f64()));
+        }
+        if refit_tried > 0 || refit_stopped || refit_skipped > 0 {
+            warnings.push(refit_line(refit_tried, refit_kept, dr.stats.refit_legal, refit_stopped, refit_skipped));
         }
     }
     free_snap("straighten", &drawn, &st);
@@ -10405,13 +10517,14 @@ fn route_round_in(model: &BoardModel, opts: &Options, ctl: &RunControl, hints: &
             ));
         }
         warnings.push(format!(
-            "never drop ([optimize] allow_violations): {} connections written with {} rule violations ({}); {} wires drawn by force ({} runs: {} on the exact path with the clearance relaxed, {} on a funnel, {} on a normal attempt), {} wires with a via placed by force, {} crossings that cannot be layered kept",
+            "never drop ([optimize] allow_violations): {} connections written with {} rule violations ({}); {} wires drawn by force ({} runs: {} on the exact path with the clearance relaxed ({} of them only at the bottleneck's objects), {} on a funnel, {} on a normal attempt), {} wires with a via placed by force, {} crossings that cannot be layered kept",
             conns.len(),
             viol_list.len(),
             if by.is_empty() { "none".to_string() } else { by.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") },
             n_forced,
             forced_stats.forced_relaxed + forced_stats.forced_funnel + forced_stats.forced_attempt,
             forced_stats.forced_relaxed,
+            forced_stats.forced_relax_local,
             forced_stats.forced_funnel,
             forced_stats.forced_attempt,
             n_via_forced,

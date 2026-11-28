@@ -274,6 +274,13 @@ pub struct Taut {
     pub at: Vec<Vec2>,
     /// Crossing direction of every pass (not normalised; zero when undefined).
     pub dir: Vec<Vec2>,
+    /// bundle-turn (`[capacity] oblique_price`): per pass, the smallest oblique factor the wire
+    /// can reach at this edge inside its sleeve, over the lines from its previous portal to its
+    /// next ([`Packer::reach_factor`]). A wire in an oblique sleeve keeps the factor of `dir`
+    /// (Maley 1987 p. 32: it crosses every cut along its way). A narrow channel that the
+    /// zero-width taut path cuts across diagonally allows a square crossing. `<=` the factor of
+    /// `dir`. Graded, no threshold.
+    pub sq: Vec<f64>,
 }
 
 /// site-price-cost test hook: with [`point_free_memo::OFF`] set, [`Packer::point_free_cached`]
@@ -421,6 +428,11 @@ pub struct Packer<'a> {
     /// tw4-r2 (`[capacity] via_over_ramp`, nm): the over-full via price ramps from 0 over this
     /// overage ([`super::viacut::price`]); 0 = the step at zero.
     pub via_ramp: f64,
+    /// bundle-turn (`[capacity] oblique_price`, mm per mm): the per-edge model counts an
+    /// edge-layer over-full only when it does not fit at the factors its passes reach inside
+    /// their sleeves ([`Taut::sq`]); the oblique overage beyond that is priced at this weight
+    /// ([`Packer::oblique_split`]). 0 = off.
+    pub oblique_price: f64,
     /// tw4-r2 (2b) (`[capacity] via_disc_height`): a planned via's disc packs on its wire's entry
     /// and exit edges at its height off each edge line ([`pair_req`], [`disc_margin`]).
     pub via_disc_h: bool,
@@ -509,6 +521,7 @@ impl<'a> Packer<'a> {
             via_cuts: None,
             via_best: false,
             via_ramp: 0.0,
+            oblique_price: 0.0,
             via_disc_h: false,
             site_price: false,
             lead_ends: Vec::new(),
@@ -614,6 +627,7 @@ impl<'a> Packer<'a> {
         p.via_cuts = opts.via_cuts.then(|| super::sheet::Norm::for_style(&opts.draw_style));
         p.via_best = opts.via_best_point;
         p.via_ramp = opts.via_over_ramp_mm.max(0.0) * 1e6;
+        p.oblique_price = opts.oblique_price.max(0.0);
         p.via_disc_h = opts.via_disc_height;
         p.site_price = opts.via_site_price == "graded";
         p.pad_exits = opts.pad_exits && opts.via_cuts;
@@ -914,6 +928,14 @@ impl<'a> Packer<'a> {
                 }
             }
         }
+        // bundle-turn: the factor reachable inside the sleeve (portal to portal), from the real directions
+        // (before the octilinear rewrite below, which keeps only the angle to the own edge).
+        let mut sq = Vec::with_capacity(n);
+        for (k, &i) in pass_port.iter().enumerate() {
+            let [p, q] = pr.edges[st.passes[wi.passes[k]].edge];
+            let ed = pr.pos[q] - pr.pos[p];
+            sq.push(if wrapped[k] { f64::INFINITY } else { self.reach_factor(ed, dir[k], ports[i - 1], ports[i + 1]) });
+        }
         if self.octi {
             // M-45: the octilinear drawing's room (`demand::octi_stretch`), as the direction whose
             // oblique factor it is (`infl_dir` reads `1 / sin` of the crossing angle).
@@ -927,7 +949,66 @@ impl<'a> Packer<'a> {
                 *d = (eu * cos + eu.perp() * sin) * 1e6;
             }
         }
-        Taut { at, dir }
+        for (k, x) in sq.iter_mut().enumerate() {
+            let e = st.passes[wi.passes[k]].edge;
+            *x = x.min(infl_dir(pr, e, dir[k]));
+        }
+        Taut { at, dir, sq }
+    }
+
+    /// The oblique factor of crossing a cut of direction `ed` in direction `d` as the packer
+    /// counts it (octilinear: [`super::demand::octi_stretch`], else `1 / sin`, 1 .. 2.5). O(1).
+    fn factor(&self, ed: Vec2, d: Vec2) -> f64 {
+        let (Some(e), Some(u)) = (ed.unit(), d.unit()) else { return 1.0 };
+        if self.octi {
+            super::demand::octi_stretch(ed, d, false).max(1.0)
+        } else {
+            1.0 / u.cross(e).abs().clamp(0.4, 1.0)
+        }
+    }
+
+    /// bundle-turn ([`Taut::sq`]): the smallest [`Packer::factor`] over the crossing directions
+    /// a wire can take at a cut of direction `ed` inside its sleeve: the directions of the lines
+    /// from a point of the previous portal `pp` to a point of the next one `pn` (each a free span
+    /// of the wire on its edge, or a point at a terminal or a turn vertex; the extreme directions
+    /// are among the four end-to-end lines). `dk`, the taut direction here, lies in that cone.
+    /// Sampled every 1/8 of the cone on each side of `dk`, plus the cut's normal when it lies in
+    /// the cone. A sleeve that runs obliquely (portals offset along the cut) keeps the factor of
+    /// `dk`; one that allows a square crossing (a narrow channel whose zero-width taut path cuts
+    /// across diagonally) reaches 1. Graded, no threshold. O(1).
+    fn reach_factor(&self, ed: Vec2, dk: Vec2, pp: (Vec2, Vec2), pn: (Vec2, Vec2)) -> f64 {
+        let ang = |v: Vec2| v.y.atan2(v.x);
+        let wrap = |a: f64| (a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+        let Some(uk) = dk.unit() else { return 1.0 };
+        let mut best = self.factor(ed, dk);
+        let Some(eu) = ed.unit() else { return best };
+        let a0 = ang(uk);
+        let (mut lo, mut hi) = (0.0f64, 0.0f64);
+        for a in [pp.0, pp.1] {
+            for b in [pn.0, pn.1] {
+                let d = b - a;
+                // A line backwards (or nearly along the cut) is no crossing direction.
+                if d.len() < 1.0 || d.dot(uk) <= 0.0 {
+                    continue;
+                }
+                let t = wrap(ang(d) - a0);
+                lo = lo.min(t);
+                hi = hi.max(t);
+            }
+        }
+        for i in 1..=8 {
+            for t in [lo * i as f64 / 8.0, hi * i as f64 / 8.0] {
+                let a = a0 + t;
+                best = best.min(self.factor(ed, Vec2 { x: a.cos(), y: a.sin() } * 1e6));
+            }
+        }
+        // The normal on the side the wire crosses to.
+        let nrm = if eu.perp().dot(uk) >= 0.0 { eu.perp() } else { eu.perp() * -1.0 };
+        let t = wrap(ang(nrm) - a0);
+        if t >= lo && t <= hi {
+            best = best.min(self.factor(ed, nrm * 1e6));
+        }
+        best
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1043,6 +1124,28 @@ impl<'a> Packer<'a> {
         worst
     }
 
+    /// bundle-turn item 4 (`[capacity] oblique_price`): the over-fill `over` of `items` on edge
+    /// `e` (spans `lo`, `hi`, oblique factors from the taut paths) split into `(over, price)`.
+    /// `over` stays when the price is off, when it fits, or when no item can cross squarer. Else
+    /// the items are packed again at `isq` (per item the factor it reaches inside its sleeve,
+    /// [`Taut::sq`]; 1 for a disc; the cut condition of Leiserson & Maley 1985
+    /// counts no angle, Maley 1987 p. 32: a straight wire crosses every cut on its way, so its
+    /// factor stays): that over-fill
+    /// is the one returned, and the part only the oblique crossing lacks, `over - max(square, 0)`,
+    /// costs `oblique_price` per mm (nm in, mm out). Continuous in `over`; `scratch`: items.
+    /// O(items).
+    #[allow(clippy::too_many_arguments)]
+    pub fn oblique_split(&self, e: EdgeId, items: &[PackItem], isq: &[f64], lo: &[f64], hi: &[f64], over: f64, scratch: &mut Vec<PackItem>, req: &mut Vec<f64>, rmax: &mut Vec<f64>) -> (f64, f64) {
+        if self.oblique_price <= 0.0 || over <= 1e-6 || items.iter().zip(isq).all(|(i, &q)| q >= i.infl) {
+            return (over, 0.0);
+        }
+        scratch.clear();
+        scratch.extend(items.iter().zip(isq).map(|(i, &q)| PackItem { infl: q.clamp(1.0, i.infl.max(1.0)), ..*i }));
+        let square = self.worst_into(e, scratch, lo, hi, req, rmax);
+        let square = square.min(over);
+        (square, self.oblique_price * (over - square.max(0.0)) / 1e6)
+    }
+
     /// Length of edge `e` as [`Packer::bounds`] takes it (nm, at least 1). O(1).
     pub fn edge_len(&self, e: EdgeId) -> f64 {
         let [p, q] = self.pr.edges[e];
@@ -1056,4 +1159,62 @@ fn _packer_is_sync() {
     fn sync<T: Sync>() {}
     sync::<Packer<'static>>();
     sync::<State<'static>>();
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    const MM: f64 = 1e6;
+
+    /// A 10 x 10 mm two-layer board with two pads: a projection for [`Packer::new`].
+    fn tiny() -> crate::model::BoardModel {
+        let p = |v: f64| (v * MM) as i64;
+        let c = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let segs: Vec<String> = (0..4)
+            .map(|i| {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                format!(r#"{{"kind":"seg","a":[{},{}],"b":[{},{}]}}"#, p(a.0), p(a.1), p(b.0), p(b.1))
+            })
+            .collect();
+        let pad = |i: usize, x: f64| {
+            format!(
+                r#"{{"uuid":"p{i}","ref":"U{i}","number":"1","net":1,"attr":"smd","center":[{},{}],"rotation_deg":0.0,"layers":[0],"shapes":{{"0":{{"kind":"rect","w":{d},"h":{d}}}}}}}"#,
+                p(x),
+                p(5.0),
+                d = p(1.0)
+            )
+        };
+        let s = format!(
+            r#"{{"units":"nm","board":"t","layers":[{{"id":0,"name":"F.Cu","kind":"signal"}},{{"id":2,"name":"B.Cu","kind":"signal"}}],"nets":[{{"code":1,"name":"A"}}],"pads":[{},{}],"outline":[{}],"rules":{{"per_net":{{}}}}}}"#,
+            pad(0, 2.0),
+            pad(1, 8.0),
+            segs.join(",")
+        );
+        crate::model::BoardModel::from_json(&s).unwrap()
+    }
+
+    /// bundle-turn r2 (verifier mutants reach_one, reach_no_normal): [`Packer::reach_factor`] keeps
+    /// the taut factor in an oblique sleeve (a straight 45 degree bundle crosses every cut on its
+    /// way at 45 degrees, Maley 1987 p. 32: the first version gave 1 everywhere and broke a
+    /// straight oblique bus on qmtech, JS2_2 0 -> 36 violations), and reaches exactly 1 where the
+    /// sleeve's cone holds the cut's normal between two of its samples.
+    #[test]
+    fn reach_factor_keeps_the_oblique_sleeve_and_finds_the_normal() {
+        let m = tiny();
+        let b = crate::topo::board::build(&m, &crate::topo::board::BuildOpts::default()).unwrap();
+        let pk = Packer::new(&b.proj, Vec::new(), 0.0, 0.0);
+        let v = |x: f64, y: f64| Vec2 { x: x * MM, y: y * MM };
+        let ed = v(1.0, 0.0);
+        let dk = v(1.0, 1.0);
+        let taut = pk.factor(ed, dk);
+        assert!((taut - std::f64::consts::SQRT_2).abs() < 1e-9, "test setup: 45 degrees, 1 / sin = {taut}");
+        // A straight oblique sleeve: both portals narrow, 10 mm apart along the 45 degree line.
+        let oblique = pk.reach_factor(ed, dk, (v(-5.0, -5.0), v(-4.9, -5.0)), (v(5.0, 5.0), v(5.1, 5.0)));
+        assert!(oblique > 1.35, "an oblique sleeve keeps its factor: {oblique}");
+        // A short sleeve whose cone runs from 45 degrees past the normal (to ~98.5 degrees): the
+        // normal (45 degrees off the taut direction) lies between two of the 1/8 samples.
+        let square = pk.reach_factor(ed, dk, (v(-1.0, -1.0), v(-1.0, -1.0)), (v(-1.3, 1.0), v(1.0, 1.0)));
+        assert!((square - 1.0).abs() < 1e-12, "the cut's normal inside the cone: factor 1, got {square}");
+    }
 }

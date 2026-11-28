@@ -784,6 +784,17 @@ pub struct DrawStats {
     /// Never drop (M-B1): runs drawn by force, by the candidate that won: the exact path with the
     /// clearance relaxed, a funnel before the repair, one of the normal attempts.
     pub forced_relaxed: usize,
+    /// bundle-turn (2): of `forced_relaxed`, the runs relaxed only at the bottleneck's objects
+    /// ([`Drawer::exact_fix_local`]).
+    pub forced_relax_local: usize,
+    /// bundle-turn (3): wires with violations drawn again after the straightening
+    /// ([`Drawer::refit_forced`]), the new drawings kept, and of those the legal ones.
+    pub refit_tried: usize,
+    pub refit_kept: usize,
+    pub refit_legal: usize,
+    /// bundle-turn r3 (cpu): the forms the straightening ([`Drawer::octi_straighten`]) handed to
+    /// [`Drawer::refit_run`]; a run the re-fit refuses whatever the form is skipped, no trial.
+    pub straighten_trials: usize,
     pub forced_funnel: usize,
     pub forced_attempt: usize,
     /// forced-draw: forced runs drawn in their octilinear form (the cheaper by
@@ -1742,7 +1753,28 @@ impl<'a> Drawer<'a> {
         let items: Vec<PassId> = ids.iter().map(|x| x.0).collect();
         let only_disc: Vec<bool> = ids.iter().map(|x| x.1).collect();
         let n = items.len();
-        let bnd = self.packer.bounds(e, l, &pitems);
+        let mut bnd = self.packer.bounds(e, l, &pitems);
+        // bundle-turn item 4 (`[capacity] oblique_price`): an edge-layer whose passes do not fit
+        // at their taut crossing angles but fit at the factors they reach inside their sleeves
+        // (portal to portal, [`super::pack::Taut::sq`]) is packed at those, as the plan counts
+        // it; a pass in a straight oblique sleeve keeps its full factor (Maley 1987 p. 32), so a
+        // straight oblique bundle is never packed tighter than it is drawn. Unchanged where it
+        // fits at the taut angles.
+        if !bnd.fits() && self.packer.oblique_price > 0.0 && pitems.iter().any(|i| i.infl > 1.0) {
+            let sq: Vec<PackItem> = ids
+                .iter()
+                .zip(&pitems)
+                .map(|(&(pid, disc_only), i)| {
+                    let (w, k) = (self.st.passes[pid].wire, self.pass_k[pid]);
+                    let q = if disc_only { 1.0 } else { self.packer.taut(self.st, w).sq.get(k).copied().unwrap_or(i.infl) };
+                    PackItem { infl: q.clamp(1.0, i.infl.max(1.0)), ..*i }
+                })
+                .collect();
+            let b2 = self.packer.bounds(e, l, &sq);
+            if b2.fits() {
+                bnd = b2;
+            }
+        }
         let (lo, hi, lmin, rmax) = (&bnd.lo, &bnd.hi, &bnd.lmin, &bnd.rmax);
         let req = |i: usize| bnd.req[i];
         let fits = bnd.fits();
@@ -1904,6 +1936,84 @@ impl<'a> Drawer<'a> {
             v.iter().filter(|b| b.layer == l).filter_map(|b| crossing(&b.path, pp, pr, taut_x)).min_by(|a, b| (a - taut_x).abs().total_cmp(&(b - taut_x).abs()))
         });
         Some(erbs_x.unwrap_or(taut_x))
+    }
+
+    /// The planned point of pass index `k` of wire `wq` on its edge, on layer `l`: where its ERBS
+    /// on `l` crosses the edge (nearest its taut crossing), else the taut crossing (the same rule as
+    /// [`Drawer::neighbour_x`]). O(ERBS points) plus the cached taut.
+    fn planned_pass_point(&self, wq: WireId, k: usize, l: usize) -> Option<Vec2> {
+        let q = *self.st.wires[wq].passes.get(k)?;
+        let at = *self.packer.taut(self.st, wq).at.get(k)?;
+        let [p, r] = self.b.proj.edges[self.st.passes[q].edge];
+        let (pp, pr) = (self.b.proj.pos[p], self.b.proj.pos[r]);
+        let len = (pr - pp).len();
+        if len < 1.0 {
+            return None;
+        }
+        let u = (pr - pp) * (1.0 / len);
+        let taut_x = (at - pp).dot(u);
+        let erbs_x = (self.opts.realise == "erbs").then(|| self.erbs.get(&wq)).flatten().and_then(|v| {
+            v.iter().filter(|b| b.layer == l).filter_map(|b| crossing(&b.path, pp, pr, taut_x)).min_by(|a, b| (a - taut_x).abs().total_cmp(&(b - taut_x).abs()))
+        });
+        Some(pp + u * erbs_x.unwrap_or(taut_x))
+    }
+
+    /// bundle-turn (1), reserve-planned-room at a fork: the undrawn lane neighbour of pass `k` of
+    /// `w` (before it in the lane: `after` false) that leaves the wire's way in the triangle after
+    /// the pass (`fwd`) or before it: its planned crossing of this pass's edge and its planned
+    /// point beyond it in that triangle (its crossing of its own next edge there, or its end when
+    /// it ends inside). `None` when there is no such neighbour, it is drawn, or it goes on through
+    /// the wire's next edge too (the zone between the two bounds covers that), or it changes layer
+    /// there (its via keeps its own room). O(lane) plus the cached taut.
+    ///
+    /// The planned room of a neighbour is kept per crossed edge ([`Drawer::neighbour_bound`]); where
+    /// it turns off past a pad corner (the outer wire of a bundle ends on the pad, the inner one
+    /// wraps its corner) the two share no next edge, and without this its room in the fork triangle
+    /// cost nothing: the first drawn wire took an equal-length early bend into the neighbour's slot
+    /// (qmtech JS1_5 / JS1_9 at RN2, pattern turn_fork_corner; Bast, Brosi & Storandt 2020 section
+    /// 4.3, p. 7: room is kept for the lines drawn later).
+    pub(super) fn neighbour_fork(&self, w: WireId, k: usize, after: bool, fwd: bool) -> Option<(Vec2, Vec2)> {
+        let st = self.st;
+        let wi = &st.wires[w];
+        let pid = *wi.passes.get(k)?;
+        let (e, l, i, _, _) = self.slot[pid]?;
+        let ln = self.lanes.get(&(e, l))?;
+        let j = if after { i + 1 } else { i.checked_sub(1)? };
+        let q = *ln.pids.get(j)?;
+        let wq = st.passes[q].wire;
+        if wq == w || self.live_x(q).is_some() {
+            return None;
+        }
+        let t = if fwd { *wi.tris.get(k + 1)? } else { wi.tris[k] };
+        let nw = wi.passes.len();
+        let w_next = if fwd { (k + 1 < nw).then(|| st.passes[wi.passes[k + 1]].edge) } else { k.checked_sub(1).map(|m| st.passes[wi.passes[m]].edge) };
+        let qi = &st.wires[wq];
+        let kq = self.pass_k[q];
+        let nq = qi.passes.len();
+        // The neighbour's pass beside `q` inside `t` (its own direction may be the other way).
+        let beyond: Option<usize> = if qi.tris.get(kq + 1) == Some(&t) {
+            (kq + 1 < nq).then_some(kq + 1)
+        } else if qi.tris[kq] == t {
+            kq.checked_sub(1)
+        } else {
+            return None;
+        };
+        let ce = self.planned_pass_point(wq, kq, l)?;
+        let cq = match beyond {
+            Some(m) => {
+                let q2 = qi.passes[m];
+                if Some(st.passes[q2].edge) == w_next || self.pass_layer[q2] != l as i32 {
+                    return None;
+                }
+                self.planned_pass_point(wq, m, l)?
+            }
+            None => {
+                // It ends inside `t`: at its run end (pad anchor or terminal vertex).
+                let end = if qi.tris.get(kq + 1) == Some(&t) { 1 } else { 0 };
+                self.run_end(wq, end)
+            }
+        };
+        ((cq - ce).len2() >= 1.0).then_some((ce, cq))
     }
 
     /// Remember where the accepted run `pts` (passes `k0..k1` of `w`, first track handle `h`)
@@ -4500,9 +4610,19 @@ impl<'a> Drawer<'a> {
                 // with the shallowest violation the sleeve allows.
                 let full = self.model.rules.net_rule(wi.net).clearance as f64 + 0.5 * wi.w + self.eps;
                 let base0 = self.base_polyline(w, k0, k1, s, e, 0);
-                let mut try_relax = |f: f64, cands: &mut Vec<_>| -> bool {
+                // bundle-turn (2): the clearance is relaxed only to the bottleneck's objects
+                // ([`Drawer::exact_fix_local`]; TopoR 6.3 manual p. 237: the minimal clearance only in
+                // the narrowest spots); the run-wide relaxation (all objects) only when no local
+                // one gives a path at any amount. Debug arm `TOPO_FD45_OFF=relaxloc`: run-wide only.
+                let mut local = !super::octi::fd45_off("relaxloc");
+                let mut set = super::exact::RelaxSet::default();
+                let mut try_relax = |f: f64, local: bool, cands: &mut Vec<_>| -> bool {
                     let t_ex = std::time::Instant::now();
-                    let got = self.exact_fix_relaxed(w, k0, k1, layer, base0.clone(), pneck, f * full);
+                    let got = if local {
+                        self.exact_fix_local(w, k0, k1, layer, base0.clone(), pneck, f * full, &mut set).map(|(p, _)| p)
+                    } else {
+                        self.exact_fix_relaxed(w, k0, k1, layer, base0.clone(), pneck, f * full)
+                    };
                     self.stats.exact_s += t_ex.elapsed().as_secs_f64();
                     let Some(pts) = got else { return false };
                     let items = match &pneck {
@@ -4511,26 +4631,32 @@ impl<'a> Drawer<'a> {
                     };
                     let rep = self.checker.check_against(&self.idx, &items, &[]);
                     let (price, vs, lazy) = self.lazy_cand(w, &items, &rep);
-                    cands.push((price, pts, items, vs, None, "relaxed", lazy));
+                    cands.push((price, pts, items, vs, None, if local { "relaxed-local" } else { "relaxed" }, lazy));
                     true
                 };
-                let (mut lo, mut hi) = (0.0, f64::NAN);
-                for f in [0.125, 0.25, 0.5, 1.0] {
-                    if try_relax(f, &mut cands) {
-                        hi = f;
-                        break;
+                loop {
+                    let (mut lo, mut hi) = (0.0, f64::NAN);
+                    for f in [0.125, 0.25, 0.5, 1.0] {
+                        if try_relax(f, local, &mut cands) {
+                            hi = f;
+                            break;
+                        }
+                        lo = f;
                     }
-                    lo = f;
-                }
-                if hi.is_finite() {
-                    for _ in 0..2 {
-                        let mid = 0.5 * (lo + hi);
-                        if try_relax(mid, &mut cands) {
-                            hi = mid;
-                        } else {
-                            lo = mid;
+                    if hi.is_finite() {
+                        for _ in 0..2 {
+                            let mid = 0.5 * (lo + hi);
+                            if try_relax(mid, local, &mut cands) {
+                                hi = mid;
+                            } else {
+                                lo = mid;
+                            }
                         }
                     }
+                    if hi.is_finite() || !local {
+                        break;
+                    }
+                    local = false;
                 }
                 for a in 0..3 {
                     let pts = self.base_polyline(w, k0, k1, s, e, a);
@@ -4639,6 +4765,10 @@ impl<'a> Drawer<'a> {
                     }
                     match src {
                         "relaxed" => self.stats.forced_relaxed += 1,
+                        "relaxed-local" => {
+                            self.stats.forced_relaxed += 1;
+                            self.stats.forced_relax_local += 1;
+                        }
                         "funnel" => self.stats.forced_funnel += 1,
                         _ => self.stats.forced_attempt += 1,
                     }
@@ -4833,6 +4963,23 @@ impl<'a> Drawer<'a> {
         out
     }
 
+    /// The preconditions of [`Drawer::refit_run`] / [`Drawer::refit_legal`], which read only the
+    /// wire's own drawing (never the copper around it): run `r` exists, the wire has no
+    /// violations (a wire drawn with violations, never drop, keeps its copper: its violations
+    /// belong to it) and no necks, and its track items are exactly the plain
+    /// [`Drawer::run_items`] of its runs. Then the track item count per run, else `None`: every
+    /// re-fit of this wire is refused, whatever the polyline (bundle-turn r3: the straightening
+    /// skips such a run, 78 % of its trials on qmtech-bh26 were these). O(wire segments).
+    pub fn refit_counts(&self, wo: &WireOut, r: usize) -> Option<Vec<usize>> {
+        let w = wo.wire;
+        let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
+        let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
+        if r >= wo.runs.len() || !wo.viol.is_empty() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
+            return None;
+        }
+        Some(counts)
+    }
+
     /// Replace run `r` of the drawn wire `wo` by the polyline `pts` (same layer, math frame) when
     /// its tracks pass the checker against everything else drawn and graze no pad of the wire's
     /// own net; else the old tracks stay. Only for wires whose track items are exactly the plain
@@ -4840,12 +4987,7 @@ impl<'a> Drawer<'a> {
     /// `false` for any other. O(run segments x checker query).
     pub fn refit_run(&mut self, wo: &mut WireOut, r: usize, pts: Vec<Vec2>) -> bool {
         let w = wo.wire;
-        let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
-        let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
-        // A wire drawn with violations (never drop) keeps its copper: its violations belong to it.
-        if r >= wo.runs.len() || !wo.viol.is_empty() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
-            return false;
-        }
+        let Some(counts) = self.refit_counts(wo, r) else { return false };
         let off: usize = counts[..r].iter().sum();
         let (lo, hi) = (off, off + counts[r]);
         for &h in &wo.handles[lo..hi] {
@@ -4865,17 +5007,56 @@ impl<'a> Drawer<'a> {
         ok
     }
 
+    /// bundle-turn (3): draw the wire `old` (drawn with violations, never drop) again by force
+    /// against the copper as it is now (the straightening after the drawing moves its neighbours
+    /// and can free the room it lacked when it was forced), with its `plan` and placed `vias` (they
+    /// stay). The new copper is drawn beside the old (the same net: no obstacle to it) and kept
+    /// when its violation key ([`viol_key`]: shorts first, then the violation amount) is lower, or
+    /// equal and the wire more than 1 um shorter; then the old tracks go and `Some(new)` is
+    /// returned. Else the new tracks go and everything (crossings, counters) is as before: `None`.
+    /// The counters of the drawing stay those of the first drawing; [`DrawStats::refit_tried`] /
+    /// `refit_kept` / `refit_legal` count the re-fits. O(one forced drawing).
+    pub fn refit_forced(&mut self, plan: &Plan, vias: &[(usize, Vec2, ViaSize)], old: &WireOut) -> Option<WireOut> {
+        let w = old.wire;
+        let saved_x: Vec<Option<(f64, usize)>> = self.st.wires[w].passes.iter().map(|&p| self.drawn_x[p]).collect();
+        let stats0 = self.stats;
+        let force0 = std::mem::replace(&mut self.force, true);
+        let mut ids: Vec<usize> = Vec::new();
+        let new = self.draw_wire(w, plan, vias, &mut ids);
+        self.force = force0;
+        let (ko, kn) = (viol_key(&old.viol), viol_key(&new.viol));
+        let better = new.ok && (!key_le(ko, kn) || (key_le(kn, ko) && new.length_nm < old.length_nm - 1_000.0));
+        if std::env::var_os("TOPO_FORCEDBG").is_some() {
+            eprintln!("REFIT wire {w}: ok {} old key {ko:?} len {:.3} new key {kn:?} len {:.3}: {}", new.ok, old.length_nm / 1e6, new.length_nm / 1e6, if better { "kept" } else { "old stays" });
+        }
+        self.stats = stats0;
+        self.stats.refit_tried += 1;
+        if !better {
+            for &h in ids.iter().chain(&new.handles) {
+                self.uncommit(h);
+            }
+            for (&p, x) in self.st.wires[w].passes.iter().zip(saved_x) {
+                self.drawn_x[p] = x;
+            }
+            return None;
+        }
+        for &h in &old.handles {
+            self.uncommit(h);
+        }
+        self.stats.refit_kept += 1;
+        if new.viol.is_empty() {
+            self.stats.refit_legal += 1;
+        }
+        Some(new)
+    }
+
     /// Whether [`Drawer::refit_run`]`(wo, r, pts)` would be accepted, changing nothing (fuse-octi r4,
     /// M1: the fuse ranks its ends by their best LEGAL gain): the same preconditions and the same
     /// checker query, with the run's own tracks skipped instead of taken out. O(run segments x
     /// checker query).
     pub fn refit_legal(&self, wo: &WireOut, r: usize, pts: &[Vec2]) -> bool {
         let w = wo.wire;
-        let counts: Vec<usize> = wo.runs.iter().map(|(l, p)| self.run_items(w, *l, p).len()).collect();
-        let n_tracks = wo.items.iter().filter(|i| matches!(i, Item::Track(_))).count();
-        if r >= wo.runs.len() || !wo.viol.is_empty() || counts.iter().sum::<usize>() != n_tracks || n_tracks != wo.handles.len() || !wo.necks.is_empty() || !wo.items[..n_tracks].iter().all(|i| matches!(i, Item::Track(_))) {
-            return false;
-        }
+        let Some(counts) = self.refit_counts(wo, r) else { return false };
         let off: usize = counts[..r].iter().sum();
         let mut skip: Vec<usize> = wo.handles[off..off + counts[r]].iter().map(|&h| self.handles[h].0).collect();
         skip.sort_unstable();
@@ -7312,6 +7493,39 @@ mod tests {
         assert!(octilinear(&got), "{got:?}");
     }
 
+
+    /// bundle-turn r3 (cpu, bit-identical): the straightening skips a run [`Drawer::refit_run`]
+    /// refuses whatever the form, here a wire with a neck ([`Drawer::refit_counts`] is `None`):
+    /// no form is tried, nothing changes. The same staircase without the neck is straightened
+    /// (so the skip is what kept the trials at 0). On qmtech-bh26 78 % of the straightening's
+    /// trials were on such wires (the forced JS2 bundle), each priced and then refused.
+    #[test]
+    fn straightening_skips_a_run_the_refit_refuses() {
+        let m = fx_model(&[(1, 3.0, 20.0), (1, 13.0, 16.0)]);
+        let b = super::super::board::build(&m, &super::super::board::BuildOpts::default()).unwrap();
+        let o = Options::default();
+        let ck = Checker::new(&m, &o);
+        let mut st = State::new(&b.proj);
+        let obs = |x: f64, y: f64| (0..b.proj.obstacles.len()).find(|&i| (b.proj.obstacles[i].center - fp(x, y)).len() < 1e3).unwrap();
+        let w = fx_wire(&mut st, &b, obs(3.0, 20.0), obs(13.0, 16.0));
+        let run = vec![fp(3.0, 20.0), fp(4.0, 20.0), fp(6.0, 18.0), fp(8.0, 18.0), fp(10.0, 16.0), fp(13.0, 16.0)];
+        for necked in [true, false] {
+            let mut dr = Drawer::new(&m, &o, &b, &st, &ck);
+            dr.octi = super::super::octi::OctiCfg { on: true, ..dr.octi };
+            let mut wo = fx_drawn(&mut dr, w, run.clone());
+            if necked {
+                wo.necks.push((fp(5.0, 19.0), 0.5 * FMM, 0.1 * FMM));
+            }
+            let before = wo.runs[0].1.clone();
+            let k = dr.octi_straighten(&mut wo, &[], &mut |_, _| true);
+            if necked {
+                assert_eq!((k, dr.stats.straighten_trials), (0, 0), "a run the re-fit refuses is skipped");
+                assert_eq!(wo.runs[0].1, before, "unchanged");
+            } else {
+                assert!(k >= 1 && dr.stats.straighten_trials >= 1, "without the neck it is straightened: {k} {}", dr.stats.straighten_trials);
+            }
+        }
+    }
 
     /// neck-regrow r6: the fixture of the whole-wire neck tests: wire A (5, 15) - B (35, 15) of
     /// net 1 at 0.25 mm and net-2 tracks (0.1 mm) 0.33 mm above and below y = 15 over `xs`:

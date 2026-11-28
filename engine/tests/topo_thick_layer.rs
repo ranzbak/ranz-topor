@@ -189,6 +189,19 @@ fn route(m: &BoardModel, extra: &[(&str, serde_json::Value)]) -> RouteResult {
     })
 }
 
+/// bundle-turn r2: main's capacity model (`[capacity] oblique_price` 0, the default again since
+/// item 4 became opt-in, user 2026-11-28). With the oblique price on the P3 layering of this
+/// fixture finds its documented optimum at ω off (P 1 via, F3 / F4 jog over B1), so there is no
+/// weave left for the via-site tests to measure: they pin 0 explicitly, independent of the default.
+fn main_cap() -> (&'static str, serde_json::Value) {
+    ("oblique_price", serde_json::json!(0.0))
+}
+
+/// Item 4 on (`[capacity] oblique_price` 1, opt-in since 2026-11-28).
+fn oblique_on() -> (&'static str, serde_json::Value) {
+    ("oblique_price", serde_json::json!(1.0))
+}
+
 fn plan(r: &RouteResult) -> serde_json::Value {
     serde_json::from_str(r.plan.as_deref().expect("plan")).expect("json")
 }
@@ -249,7 +262,7 @@ fn thick_dive_grouping_predicts_what_it_draws() {
 fn thick_dive_grouping_lane_sites() {
     let m = thick_dive_grouping();
     let sites = |on: bool| {
-        let r = route(&m, &[("via_site_planned", serde_json::json!(on)), ("via_site_lanes", serde_json::json!(on)), ("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_slack", serde_json::json!(0.0))]);
+        let r = route(&m, &[main_cap(), ("via_site_planned", serde_json::json!(on)), ("via_site_lanes", serde_json::json!(on)), ("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_slack", serde_json::json!(0.0))]);
         let p = plan(&r);
         let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
         w["vias"].as_array().unwrap().iter().map(|v| (v["site"].as_bool().unwrap(), v["deficit"].as_f64().unwrap())).collect::<Vec<_>>()
@@ -266,8 +279,10 @@ fn thick_dive_grouping_lane_sites() {
 
 /// S2 (M1, `[vias] priority_weight`): with ω ([1, 0.5]: P's vias weigh 1 + 4 + 0.5 = 5.5)
 /// the layering keeps P on one layer and lets the thin crossers on that layer dive (2 small vias
-/// each, ω 1): P 0 vias, 0 drawn violations. With ω 1 for every via (main) P weaves with 3 vias,
-/// two of them in 1 mm gaps (the S1 items).
+/// each, ω 1): P 0 vias, 0 drawn violations. With ω 1 for every via and main's capacity model
+/// (oblique price 0) P weaves with 3 vias, two of them in 1 mm gaps (the S1 items). bundle-turn
+/// r2: with the oblique price on (opt-in, pinned) ω 1 already gives the fixture's optimum (P 1 via
+/// near x 6.85, F3 / F4 jog over B1) instead of the weave.
 #[test]
 fn thick_dive_grouping_wide_keeps_its_layer() {
     let m = thick_dive_grouping();
@@ -275,8 +290,10 @@ fn thick_dive_grouping_wide_keeps_its_layer() {
     let pn = per_net(&r);
     assert_eq!(pn[&1].0, 0, "P keeps its layer: {pn:?}");
     assert_eq!(r.violations.len(), 0, "{:?}", r.violations);
-    let r0 = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
-    assert_eq!(per_net(&r0)[&1].0, 3, "ω 1: P weaves (main): {:?}", per_net(&r0));
+    let r0 = route(&m, &[main_cap(), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+    assert_eq!(per_net(&r0)[&1].0, 3, "ω 1, oblique price 0: P weaves (main): {:?}", per_net(&r0));
+    let rd = route(&m, &[oblique_on(), ("via_priority_weight", serde_json::json!([0.0, 0.0]))]);
+    assert!(per_net(&rd)[&1].0 <= 1 && rd.violations.is_empty(), "ω 1, oblique price on: P at the optimum (1 via), clean: {:?} {:?}", per_net(&rd), rd.violations);
 }
 
 /// M1: ω = 1 + a_w · max(0, w / w_def − 1) + a_t when wider than the Default width; 1 at or
@@ -308,7 +325,7 @@ fn omega_formula() {
 fn thick_dive_grouping_one_side_move() {
     let m = thick_dive_grouping();
     let left = |hold: f64| {
-        let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_pair_one_side", serde_json::json!(true)), ("via_pair_hold", serde_json::json!(hold))]);
+        let r = route(&m, &[main_cap(), ("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_pair_one_side", serde_json::json!(true)), ("via_pair_hold", serde_json::json!(hold))]);
         let pm = r.warnings.iter().find(|w| w.starts_with("plan metrics:")).expect("plan metrics");
         let v: serde_json::Value = serde_json::from_str(pm.trim_start_matches("plan metrics:").trim()).expect("json");
         let os = &v["loop"]["pair_move_kinds"]["one_side"];
@@ -335,7 +352,7 @@ fn thick_dive_grouping_end_sites_only() {
     // since 2026-11-27): with A1 the control arm shrinks P's forced runs (3 items, 3 shorts).
     let dvn_off = [("via_shift_mm", serde_json::json!(0.0)), ("neck_trim", serde_json::json!(false)), ("pad_tip_anchor", serde_json::json!(false)), ("forced_shrink", serde_json::json!(false))];
     let o = |on: bool, main_draw: bool| {
-        let mut v = vec![("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(on)), ("via_site_slack", serde_json::json!(0.0))];
+        let mut v = vec![main_cap(), ("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(on)), ("via_site_slack", serde_json::json!(0.0))];
         if main_draw {
             v.extend(dvn_off.iter().cloned());
         }
@@ -480,7 +497,7 @@ fn thick_dive_grouping_via_past_taut_crossing() {
 fn thick_dive_grouping_taut_window_keeps_vias_off_the_crossers_path() {
     let m = thick_dive_grouping_with(&[("F1", 3.0, 0), ("F2", 4.0, 0), ("B1", 8.0, 2), ("F3", 9.0, 0), ("F4", 10.6, 0), ("B2", 11.0, 2), ("B3", 11.35, 2)]);
     let xs = |win: &str| {
-        let r = route(&m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!(win))]);
+        let r = route(&m, &[main_cap(), ("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!(win))]);
         let p = plan(&r);
         let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
         w["vias"].as_array().unwrap().iter().map(|v| v["at"][0].as_f64().unwrap()).collect::<Vec<f64>>()
@@ -508,7 +525,7 @@ fn window_fixture() -> BoardModel {
 
 /// The drawn vias and the planned via x of P (both sorted by x), under a window mode.
 fn window_vias(m: &BoardModel, win: &str) -> (Vec<f64>, Vec<f64>) {
-    let r = route(m, &[("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!(win))]);
+    let r = route(m, &[main_cap(), ("via_priority_weight", serde_json::json!([0.0, 0.0])), ("via_site_planned", serde_json::json!(true)), ("via_site_window", serde_json::json!(win))]);
     let p = plan(&r);
     let w = p["wires"].as_array().unwrap().iter().find(|w| w["net_name"] == "P").unwrap().clone();
     let mut planned: Vec<f64> = w["vias"].as_array().unwrap().iter().map(|v| v["at"][0].as_f64().unwrap()).collect();

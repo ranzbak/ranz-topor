@@ -1036,6 +1036,13 @@ pub struct Options {
     /// the two traces locally in the other order (Luzin & Popov 2012; Polubasov 2010), kept when
     /// the plan gets better.
     pub crossing_rules: bool,
+    /// bundle-turn r2 (`[optimize] crossing_split`): a crossing-rules pass the plan's score
+    /// refuses as a whole is split in two and each half is tried again (the first half kept or
+    /// not before the second), down to this many levels (at most 2^levels groups, each one
+    /// layering and one score more). 0 (default, opt-in since bundle-turn r2: at 3 it re-planned
+    /// qmtech's JS_CS / JS_MOSI / FPGA_SD_CLK detours away but drew 44 more DRC errors on qm and
+    /// 11 on wiccon) = the whole pass or nothing.
+    pub crossing_split: usize,
     /// TW7 part B (`[optimize] pattern_moves`, docs/dev/design/tw7-moves.md): the pattern kinds
     /// that, in every cycle of the TopoR loop, become one targeted move each instead of the batch
     /// crossing pass: per found pattern its wires are laid again in the rule's order and the move
@@ -1683,6 +1690,17 @@ pub struct Options {
     /// (length, bends, jog penalty) and legal (StraightenLayer, Staepelaere 1992 ch. 5, p. 15);
     /// an end leg on its pad keeps its pad anchor (r10); false = the staircases of the first draw stay. Default true.
     pub octi_straighten: bool,
+    /// bundle-turn (`[drawing] straighten_passes`): most passes of the straightening over the draw
+    /// order (a work bound; a pass that changes nothing ends it earlier, at its fixpoint; the
+    /// warning line says which). After a wire drawn with violations was drawn again into the room
+    /// the straightening freed (`Drawer::refit_forced`), the straightening runs again, with the
+    /// same bound. Default 4 (qmtech reached the bound still changing: the line says so).
+    pub straighten_passes: usize,
+    /// bundle-turn item 3 (`[drawing] refit_forced`): after the straightening, draw every wire
+    /// with violations (never drop) again against the straightened copper, kept when it has fewer
+    /// violations, then straighten again. Off by default: on qmtech (det s0, 2026-11-27) it took
+    /// ~75 s cpu for 1 fewer DRC error (15 redraws, 3 kept, 0 legal).
+    pub refit_forced: bool,
     /// TW2 (`[drawing] erbs_gap_keep_max_mm`): with realise = "erbs", two bands the joint check
     /// finds too close by a model gap of the ERBS (`RunBand::gap`, no over-full cut predicts it)
     /// are both kept when the overlap is at most this: the gap stays as a clearance violation of
@@ -1818,6 +1836,17 @@ pub struct Options {
     /// 0 at zero overage, no step there) and counts as a predicted violation only from `over >=
     /// ramp`. 0 (default) = the step at zero (every over-full cut a full violation).
     pub via_over_ramp_mm: f64,
+    /// bundle-turn (`[capacity] oblique_price`, docs/dev/design/bundle-turn.md item 4): per-edge
+    /// model, the price (mm per mm) of the room an edge-layer lacks only because its wires cross
+    /// it obliquely along their taut paths. Such an edge-layer is over-full only when its wires do
+    /// not fit at the factors they can reach inside their sleeves (`pack::Taut::sq`: the crossing
+    /// directions from a point of the pass's previous portal to a point of its next one; the cut
+    /// condition, Leiserson & Maley 1985; a wire in a straight oblique sleeve keeps its factor,
+    /// Maley 1987 p. 32); the rest is this graded price (the length the wires spend to cross
+    /// squarer). 0 (default) = the oblique overage counts as over-full. Opt-in (user 2026-11-28):
+    /// the room model under-predicts what the drawing realises (bh26: drawing_loss 21 -> 31, new
+    /// detours); a redesign follows, design note first.
+    pub oblique_price: f64,
     /// tw4-r2 (2b) (`[capacity] via_disc_height`, docs/dev/design/tw4-r2.md (2b)): with via_cuts,
     /// a planned via's disc packs on the two edges its wire crosses round it at the via point's
     /// height off each edge line, not on the line: against a track crossing at sin θ and leaning
@@ -2007,6 +2036,7 @@ impl Default for Options {
             history_fade: 0.5,
             soft_cuts: true,
             crossing_rules: true,
+            crossing_split: 0,
             pattern_moves: Vec::new(),
             pattern_share: 0.25,
             pattern_stuck: 1.0,
@@ -2130,6 +2160,8 @@ impl Default for Options {
             octi_order: "sweep".into(),
             octi_own_portals: true,
             octi_straighten: true,
+            straighten_passes: 4,
+            refit_forced: false,
             erbs_gap_keep_max_mm: 0.15,
             forced_shrink: true,
             band_passes: 0,
@@ -2160,6 +2192,7 @@ impl Default for Options {
             via_cuts: true,
             via_best_point: false,
             via_over_ramp_mm: 0.0,
+            oblique_price: 0.0,
             via_disc_height: false,
             via_site_price: "off".into(),
             via_pair_room: false,

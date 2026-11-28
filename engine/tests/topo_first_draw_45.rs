@@ -229,9 +229,9 @@ fn straightening_reaches_its_fixpoint() {
     let line = r.warnings.iter().find(|w| w.starts_with("octilinear straightening after drawing")).unwrap_or_else(|| panic!("no straightening line: {:?}", r.warnings));
     let passes: usize = line.split("draw order, ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).expect("passes");
     assert!(passes >= 3 && line.contains(", the last without a change)"), "{line}");
-    assert!(straighten_line(3, 0.54, 0, 3, true, 0.1).starts_with("octilinear straightening after drawing (draw order, 3 passes, the last without a change): 3 stretches"));
-    let cut = straighten_line(9, -1.0, 2, 4, false, 0.1);
-    assert!(cut.contains("(draw order, 4 passes, stopped at the bound of 4 passes with changes in the last): 9 stretches") && cut.contains("1.0 mm saved in length; 2 refused by the split guard"), "{cut}");
+    assert!(straighten_line(3, 0.54, 0, 3, 4, true, 0.1).starts_with("octilinear straightening after drawing (draw order, 3 passes, the last without a change): 3 stretches"));
+    let cut = straighten_line(9, -1.0, 2, 4, 4, false, 0.1);
+    assert!(cut.contains("(draw order, 4 passes, stopped at the bound of 4 passes with changes in the last ([drawing] straighten_passes)): 9 stretches") && cut.contains("1.0 mm saved in length; 2 refused by the split guard"), "{cut}");
 }
 
 /// first-draw-45 r7 (`[drawing] bundle_pull_range_mm`, user 2026-11-21: the depth tie broken by

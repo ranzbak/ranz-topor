@@ -563,6 +563,10 @@ struct EvalScratch {
     hi: Vec<f64>,
     req: Vec<f64>,
     rmax: Vec<f64>,
+    /// The items crossing at their reachable factors ([`Packer::oblique_split`]).
+    square: Vec<PackItem>,
+    /// Per item its reachable factor ([`super::pack::Taut::sq`]; 1 for a disc alone).
+    isq: Vec<f64>,
 }
 
 thread_local! {
@@ -588,6 +592,10 @@ pub struct Frame<'a> {
     /// factor of its taut direction), as [`CapModel::items`] makes it; filled at the build
     /// (static for the model's life: the state and the directions are borrowed).
     item0: Vec<PackItem>,
+    /// Per pass of a live wire (as `item0`): the oblique factor it reaches inside its sleeve, from
+    /// its previous portal to its next ([`super::pack::Taut::sq`], bundle-turn `[capacity]
+    /// oblique_price`).
+    isq0: Vec<f64>,
     /// Per wire: the via disc diameter its passes get ([`Packer::via_d`] of its net).
     wire_d: Vec<f64>,
     /// Per pass: its end margins ([`Packer::margin`] of its edge, both ends, every layer, at its
@@ -888,10 +896,14 @@ impl<'a> Frame<'a> {
         }
         let pr = st.proj;
         let mut item0 = vec![PackItem::default(); st.passes.len()];
+        let mut isq0 = vec![1.0; st.passes.len()];
+        let obl = packer.oblique_price > 0.0;
         for (w, wi) in st.wires.iter().enumerate().filter(|&(w, wi)| wi.alive && only.is_none_or(|o| o.get(w).copied().unwrap_or(false))) {
+            let taut = obl.then(|| packer.taut(st, w));
             for (k, &p) in wi.passes.iter().enumerate() {
                 let e = st.passes[p].edge;
                 item0[p] = PackItem { net: wi.net, w: st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, dirs[w][k]), disc: [0.0; 3], lean: lean_dir(pr, e, dirs[w][k]) };
+                isq0[p] = taut.as_ref().and_then(|t| t.sq.get(k).copied()).unwrap_or(item0[p].infl);
             }
         }
         let wire_d: Vec<f64> = st.wires.iter().map(|wi| packer.via_d(wi.net)).collect();
@@ -901,7 +913,7 @@ impl<'a> Frame<'a> {
         let exits = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
         let tracks = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
         let ports = (0..st.wires.len()).map(|_| std::sync::OnceLock::new()).collect();
-        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, wire_d, margins, vbase, vfocus: None, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar, exits, tracks, lane_k: std::sync::Mutex::new(crate::fxhash::map()), ports }
+        Frame { st, packer, dirs, nl, price, bottom, pass_k, item0, isq0, wire_d, margins, vbase, vfocus: None, vgeo: std::sync::Mutex::new(crate::fxhash::map()), nstar, exits, tracks, lane_k: std::sync::Mutex::new(crate::fxhash::map()), ports }
     }
 
     /// The price of one over-full edge-layer (mm).
@@ -1875,18 +1887,20 @@ impl<'a> Frame<'a> {
     fn items_in<M: MemRead + ?Sized>(&self, m: &M, l: usize, order: &[usize], sc: &mut EvalScratch) {
         sc.items.clear();
         sc.ids.clear();
+        sc.isq.clear();
         for &p in order {
             let (pl, d) = (m.layer(p), m.disc(p));
-            let it = if pl == l as i32 {
-                PackItem { disc: d, ..self.item0[p] }
+            let (it, q) = if pl == l as i32 {
+                (PackItem { disc: d, ..self.item0[p] }, self.isq0[p])
             } else if pl >= 0 && d[0].max(d[1]) > 0.0 {
                 let i0 = &self.item0[p];
-                PackItem { net: i0.net, w: 0.0, s: i0.s, infl: 1.0, disc: d, lean: 0.0 }
+                (PackItem { net: i0.net, w: 0.0, s: i0.s, infl: 1.0, disc: d, lean: 0.0 }, 1.0)
             } else {
                 continue;
             };
             sc.ids.push((p, pl == l as i32));
             sc.items.push(it);
+            sc.isq.push(q);
         }
     }
 
@@ -1905,6 +1919,9 @@ impl<'a> Frame<'a> {
         let over = self.packer.worst_into(e, items, &sc.lo, &sc.hi, &mut sc.req, &mut sc.rmax);
         let sq_w = self.packer.via_squeeze;
         let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
+        // bundle-turn item 4: over-full only when it does not fit square, the oblique rest a price.
+        let (over, obl) = self.packer.oblique_split(e, items, &sc.isq, &sc.lo, &sc.hi, over, &mut sc.square, &mut sc.req, &mut sc.rmax);
+        let sq = sq + obl;
         let pitch = (items.iter().map(|i| i.w.max(i.dmax()) + i.s).sum::<f64>() / items.len() as f64).max(1.0);
         (over, sq, pitch)
     }
@@ -1962,13 +1979,13 @@ impl<'a> Frame<'a> {
 
     /// The pack items of edge `e` on layer `l` under the pass layers of `m`, without the wires in
     /// `gone` (the reference of [`Frame::eval`] and [`CapModel::fits_without`]).
-    fn items<M: MemRead + ?Sized>(&self, m: &M, e: usize, l: usize, gone: Option<&std::collections::BTreeSet<WireId>>) -> Vec<PackItem> {
+    fn items<M: MemRead + ?Sized>(&self, m: &M, e: usize, l: usize, gone: Option<&std::collections::BTreeSet<WireId>>) -> (Vec<PackItem>, Vec<f64>) {
         let pr = self.st.proj;
         let order: Vec<usize> = match gone {
             Some(g) => self.st.edge_order[e].iter().copied().filter(|&p| !g.contains(&self.st.passes[p].wire)).collect(),
             None => self.st.edge_order[e].clone(),
         };
-        layer_items(
+        let (ids, items) = layer_items(
             &order,
             l,
             |p| m.layer(p),
@@ -1978,8 +1995,10 @@ impl<'a> Frame<'a> {
                 let wi = &self.st.wires[w];
                 PackItem { net: wi.net, w: self.st.pass_w.get(p).copied().unwrap_or(wi.w), s: wi.s, infl: infl_dir(pr, e, self.dirs[w][self.pass_k[p]]), disc: [0.0; 3], lean: lean_dir(pr, e, self.dirs[w][self.pass_k[p]]) }
             },
-        )
-        .1
+        );
+        // `layer_items` flags a disc alone with `true`: its factor is 1.
+        let isq = ids.iter().map(|&(p, disc_only)| if disc_only { 1.0 } else { self.isq0[p] }).collect();
+        (items, isq)
     }
 }
 
@@ -2283,13 +2302,16 @@ impl<'a> CapModel<'a> {
     #[doc(hidden)]
     pub fn eval_reference(&self, e: usize, l: usize) -> (f64, f64) {
         let fx = &self.fx;
-        let items = fx.items(&self.a, e, l, None);
+        let (items, isq) = fx.items(&self.a, e, l, None);
         if items.is_empty() {
             return (0.0, 0.0);
         }
-        let over = fx.packer.bounds(e, l, &items).worst();
+        let b = fx.packer.bounds(e, l, &items);
+        let over = b.worst();
         let sq_w = fx.packer.via_squeeze;
         let sq = if sq_w > 0.0 { sq_w * items.iter().filter(|i| i.dmax() > 0.0).map(|i| squeeze_amount(-over, i.dmax())).sum::<f64>() } else { 0.0 };
+        let (over, obl) = fx.packer.oblique_split(e, &items, &isq, &b.lo, &b.hi, over, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+        let sq = sq + obl;
         if over <= 1e-6 {
             return (0.0, sq);
         }
@@ -2311,8 +2333,13 @@ impl<'a> CapModel<'a> {
 
     /// Whether the passes on edge `e`, layer `l` fit when the wires in `gone` are taken out.
     pub fn fits_without(&self, e: usize, l: usize, gone: &std::collections::BTreeSet<WireId>) -> bool {
-        let items = self.fx.items(&self.a, e, l, Some(gone));
-        items.is_empty() || self.fx.packer.bounds(e, l, &items).fits()
+        let (items, isq) = self.fx.items(&self.a, e, l, Some(gone));
+        if items.is_empty() {
+            return true;
+        }
+        let b = self.fx.packer.bounds(e, l, &items);
+        // bundle-turn item 4: fits as the model counts it (square, with the oblique price on).
+        b.fits() || self.fx.packer.oblique_split(e, &items, &isq, &b.lo, &b.hi, b.worst(), &mut Vec::new(), &mut Vec::new(), &mut Vec::new()).0 <= 1e-6
     }
 
     /// Total overflow price of the labelling (mm), vias without a site and via squeeze
@@ -2434,7 +2461,9 @@ impl<'a> CapModel<'a> {
                     (!sc.items.is_empty()).then(|| fx.numbers_in(e, l, sc).0)
                 });
                 if let Some(over) = over {
-                    let ob = fx.packer.bounds(e, l, &fx.items(&self.a, e, l, None)).worst();
+                    let (its, isq) = fx.items(&self.a, e, l, None);
+                    let b = fx.packer.bounds(e, l, &its);
+                    let ob = fx.packer.oblique_split(e, &its, &isq, &b.lo, &b.hi, b.worst(), &mut Vec::new(), &mut Vec::new(), &mut Vec::new()).0;
                     if (over - ob).abs() > 1e-6 {
                         bad += 1;
                         if bad <= 5 {

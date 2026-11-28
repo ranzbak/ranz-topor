@@ -487,13 +487,17 @@ fn the_site_keep_judgement_prices_the_detour() {
 /// site price off): a strict detour price (scale 0.001) keeps site moves that shorten their
 /// connections, which the evaluation alone refused (measured: 3 of 7 kept against 0 of 3 without
 /// the price), and names its refusals in the report line; scale 0 = the evaluation alone.
+/// bundle-turn r2: with main's capacity model (`oblique_price` 0, the default; item 4 opt-in since
+/// user 2026-11-28). With the oblique price on no site move on this crop is refused for its detour (0 of 7 kept, 0 refused, and 0
+/// of 12 without the price), so the price has nothing to choose; at oblique price 0 the same code
+/// keeps the measured difference.
 #[test]
 fn a_strict_detour_price_keeps_the_moves_that_shorten() {
     use topor_engine::control::RunControl;
     use topor_engine::route::route_with;
     let m = qmtech_crop();
     let run = |det: &str| {
-        let o = Options::from_json(&format!(r#"{{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 3, "via_cuts": true, "seed": 0, "opt_site_move": true, "opt_branch_move": true, "opt_site_move_detour": {det}}}"#)).expect("options parse");
+        let o = Options::from_json(&format!(r#"{{"wall_clock_s": 86400.0, "opt_loop": "topor", "initial": "once", "search_length": "taut", "topo_rounds": 3, "via_cuts": true, "seed": 0, "opt_site_move": true, "opt_branch_move": true, "opt_site_move_detour": {det}, "oblique_price": 0.0}}"#)).expect("options parse");
         let ctl = RunControl::new();
         ctl.limit.init(o.wall_clock_s);
         let r = route_with(&m, &o, &ctl);
